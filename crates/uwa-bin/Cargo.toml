@@ -20,3 +20,4 @@ tracing-subscriber = { workspace = true }
 clap = { version = "4", features = ["derive", "env"] }
 async-trait = { workspace = true }
 axum = { workspace = true }
+uwa-mcp = { workspace = true }

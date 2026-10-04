@@ -7,24 +7,29 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 use uwa_core::{Result, SiteProvider, Transport, UwaError};
 
+/// Type alias for the provider lookup function type.
+pub type ProviderLookupFn = Arc<dyn Fn(&str) -> Option<Arc<dyn SiteProvider>> + Send + Sync>;
+
 /// `web_chat(provider, message)` — one-shot ask to a web-UI LLM.
 pub struct WebChatHandler {
-    providers: Arc<dyn Fn(&str) -> Option<Arc<dyn SiteProvider>> + Send + Sync>,
+    providers: ProviderLookupFn,
     transport: Arc<dyn Transport>,
 }
 
 impl WebChatHandler {
-    pub fn new(
-        providers: Arc<dyn Fn(&str) -> Option<Arc<dyn SiteProvider>> + Send + Sync>,
-        transport: Arc<dyn Transport>,
-    ) -> Self {
-        Self { providers, transport }
+    pub fn new(providers: ProviderLookupFn, transport: Arc<dyn Transport>) -> Self {
+        Self {
+            providers,
+            transport,
+        }
     }
 }
 
 #[async_trait]
 impl McpHandler for WebChatHandler {
-    fn namespace(&self) -> &str { "web" }
+    fn namespace(&self) -> &str {
+        "web"
+    }
 
     fn tools(&self) -> Vec<McpTool> {
         vec![McpTool {
@@ -45,19 +50,31 @@ impl McpHandler for WebChatHandler {
         if tool != "chat" {
             return Err(UwaError::BadRequest(format!("unknown tool `web__{tool}`")));
         }
-        let provider_name = args.get("provider").and_then(Value::as_str)
+        let provider_name = args
+            .get("provider")
+            .and_then(Value::as_str)
             .ok_or_else(|| UwaError::BadRequest("missing `provider`".into()))?;
-        let message = args.get("message").and_then(Value::as_str)
+        let message = args
+            .get("message")
+            .and_then(Value::as_str)
             .ok_or_else(|| UwaError::BadRequest("missing `message`".into()))?;
 
         let site = (self.providers)(provider_name)
             .ok_or_else(|| UwaError::UnknownModel(provider_name.into()))?;
-        let tab = self.transport.list_tabs().await?.into_iter().next()
+        let tab = self
+            .transport
+            .list_tabs()
+            .await?
+            .into_iter()
+            .next()
             .ok_or_else(|| UwaError::Unavailable("no tabs".into()))?;
         let page = self.transport.page(&tab).await?;
         site.send_message(page.as_ref(), message).await?;
         let answer = site.wait_response(page.as_ref()).await?;
-        Ok(CallToolResult { content: vec![McpContent::Text { text: answer }], is_error: false })
+        Ok(CallToolResult {
+            content: vec![McpContent::Text { text: answer }],
+            is_error: false,
+        })
     }
 }
 
@@ -67,12 +84,16 @@ pub struct WebTabsHandler {
 }
 
 impl WebTabsHandler {
-    pub fn new(transport: Arc<dyn Transport>) -> Self { Self { transport } }
+    pub fn new(transport: Arc<dyn Transport>) -> Self {
+        Self { transport }
+    }
 }
 
 #[async_trait]
 impl McpHandler for WebTabsHandler {
-    fn namespace(&self) -> &str { "web" }
+    fn namespace(&self) -> &str {
+        "web"
+    }
 
     fn tools(&self) -> Vec<McpTool> {
         vec![McpTool {

@@ -36,3 +36,16 @@ capabilities = { streams = true, tool_calls = false, vision = true, max_context_
 name = "deepseek"
 url_patterns = ["https://chat.deepseek.com/*"]
 capabilities = { streams = true, tool_calls = true, vision = false, max_context_tokens = 64000 }
+
+[mcp_server]
+enabled = true
+
+[[mcp_clients]]
+name = "fs"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+
+[[mcp_clients]]
+name = "git"
+command = "uvx"
+args = ["mcp-server-git", "--repository", "."]

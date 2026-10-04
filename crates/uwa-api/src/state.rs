@@ -4,12 +4,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use uwa_config::Config;
 use uwa_core::{Result, SiteProvider, Transport, UwaError};
+use uwa_mcp::ToolRouter;
 
 #[derive(Clone)]
 pub struct AppState {
     pub config: Arc<Config>,
     pub providers: Arc<ProviderRegistry>,
     pub transport: Arc<dyn Transport>,
+    pub tool_router: Option<Arc<ToolRouter>>,
 }
 
 #[derive(Default)]

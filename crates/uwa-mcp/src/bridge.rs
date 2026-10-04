@@ -6,7 +6,8 @@ use crate::protocol::McpTool;
 use async_trait::async_trait;
 use serde_json::Value;
 use std::sync::Arc;
-use uwa_core::{Result, ToolProvider, ToolSpec, UwaError};
+use uwa_core::traits::{ToolProvider, ToolSpec};
+use uwa_core::{Result, UwaError};
 
 pub struct McpClientProvider {
     client: Arc<dyn McpClient>,
@@ -22,7 +23,9 @@ impl McpClientProvider {
 
 #[async_trait]
 impl ToolProvider for McpClientProvider {
-    fn namespace(&self) -> &str { &self.namespace }
+    fn namespace(&self) -> &str {
+        &self.namespace
+    }
 
     async fn list_tools(&self) -> Result<Vec<ToolSpec>> {
         let tools: Vec<McpTool> = self.client.list_tools().await?;
@@ -39,7 +42,10 @@ impl ToolProvider for McpClientProvider {
     async fn call_tool(&self, name: &str, args: Value) -> Result<String> {
         let r = self.client.call_tool(name, args).await?;
         if r.is_error {
-            return Err(UwaError::Extraction(format!("MCP tool `{name}` returned error: {}", r.as_text())));
+            return Err(UwaError::Extraction(format!(
+                "MCP tool `{name}` returned error: {}",
+                r.as_text()
+            )));
         }
         Ok(r.as_text())
     }

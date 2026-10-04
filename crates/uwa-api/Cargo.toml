@@ -22,6 +22,7 @@ tracing.workspace = true
 uuid.workspace = true
 futures.workspace = true
 url = { workspace = true }
+uwa-mcp = { workspace = true }
 subtle = "2"  # constant-time compare for api_key
 
 [dev-dependencies]

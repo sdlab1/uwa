@@ -43,8 +43,14 @@ impl StdioClient {
             .spawn()
             .map_err(|e| UwaError::Transport(format!("spawn {cmd}: {e}")))?;
 
-        let stdin = child.stdin.take().ok_or_else(|| UwaError::Transport("no child stdin".into()))?;
-        let stdout = child.stdout.take().ok_or_else(|| UwaError::Transport("no child stdout".into()))?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| UwaError::Transport("no child stdin".into()))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| UwaError::Transport("no child stdout".into()))?;
 
         let pending: Arc<Mutex<HashMap<i64, oneshot::Sender<JsonRpcResponse>>>> =
             Arc::new(Mutex::new(HashMap::new()));
@@ -54,9 +60,13 @@ impl StdioClient {
             let mut lines = BufReader::new(stdout).lines();
             while let Ok(Some(line)) = lines.next_line().await {
                 let line = line.trim();
-                if line.is_empty() { continue; }
+                if line.is_empty() {
+                    continue;
+                }
                 // Server may send notifications (no id) — we currently drop them.
-                let Ok(resp) = serde_json::from_str::<JsonRpcResponse>(line) else { continue };
+                let Ok(resp) = serde_json::from_str::<JsonRpcResponse>(line) else {
+                    continue;
+                };
                 let Some(id) = resp.id.as_i64() else { continue };
                 if let Some(tx) = reader_pending.lock().await.remove(&id) {
                     let _ = tx.send(resp);
@@ -78,9 +88,14 @@ impl StdioClient {
         let params = InitializeParams {
             protocol_version: PROTOCOL_VERSION.into(),
             capabilities: ClientCapabilities::default(),
-            client_info: Implementation { name: "uwa".into(), version: env!("CARGO_PKG_VERSION").into() },
+            client_info: Implementation {
+                name: "uwa".into(),
+                version: env!("CARGO_PKG_VERSION").into(),
+            },
         };
-        let v = self.request("initialize", Some(serde_json::to_value(params).unwrap())).await?;
+        let v = self
+            .request("initialize", Some(serde_json::to_value(params).unwrap()))
+            .await?;
         let res: InitializeResult = serde_json::from_value(v)
             .map_err(|e| UwaError::Transport(format!("bad InitializeResult: {e}")))?;
         self.initialized.store(1, Ordering::SeqCst);
@@ -101,9 +116,13 @@ impl StdioClient {
             .map_err(|_| UwaError::Timeout(std::time::Duration::from_secs(30)))?
             .map_err(|_| UwaError::Transport("client closed".into()))?;
         if let Some(err) = resp.error {
-            return Err(UwaError::Transport(format!("mcp error {}: {}", err.code, err.message)));
+            return Err(UwaError::Transport(format!(
+                "mcp error {}: {}",
+                err.code, err.message
+            )));
         }
-        resp.result.ok_or_else(|| UwaError::Transport("no result and no error".into()))
+        resp.result
+            .ok_or_else(|| UwaError::Transport("no result and no error".into()))
     }
 
     async fn write(&self, req: &JsonRpcRequest) -> Result<()> {
@@ -111,15 +130,21 @@ impl StdioClient {
             .map_err(|e| UwaError::Internal(format!("serialize rpc: {e}")))?;
         line.push(b'\n');
         let mut g = self.stdin.lock().await;
-        g.write_all(&line).await.map_err(|e| UwaError::Transport(format!("write stdin: {e}")))?;
-        g.flush().await.map_err(|e| UwaError::Transport(format!("flush stdin: {e}")))?;
+        g.write_all(&line)
+            .await
+            .map_err(|e| UwaError::Transport(format!("write stdin: {e}")))?;
+        g.flush()
+            .await
+            .map_err(|e| UwaError::Transport(format!("flush stdin: {e}")))?;
         Ok(())
     }
 }
 
 #[async_trait]
 impl McpClient for StdioClient {
-    fn server_name(&self) -> &str { &self.name }
+    fn server_name(&self) -> &str {
+        &self.name
+    }
 
     async fn list_tools(&self) -> Result<Vec<McpTool>> {
         let v = self.request("tools/list", Some(json!({}))).await?;
@@ -129,8 +154,13 @@ impl McpClient for StdioClient {
     }
 
     async fn call_tool(&self, name: &str, args: Value) -> Result<CallToolResult> {
-        let params = CallToolParams { name: name.into(), arguments: args };
-        let v = self.request("tools/call", Some(serde_json::to_value(params).unwrap())).await?;
+        let params = CallToolParams {
+            name: name.into(),
+            arguments: args,
+        };
+        let v = self
+            .request("tools/call", Some(serde_json::to_value(params).unwrap()))
+            .await?;
         let r: CallToolResult = serde_json::from_value(v)
             .map_err(|e| UwaError::Transport(format!("bad CallToolResult: {e}")))?;
         Ok(r)

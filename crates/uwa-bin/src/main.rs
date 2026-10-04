@@ -6,6 +6,10 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use uwa_api::{router, AppState, ProviderRegistry};
 use uwa_config::Config;
+use uwa_mcp::{
+    McpClientProvider, McpServer, ProviderLookupFn, StdioClient, ToolRouter, WebChatHandler,
+    WebTabsHandler,
+};
 
 #[derive(Parser)]
 #[command(version, about = "Universal Web API — Rust bridge")]
@@ -29,13 +33,55 @@ async fn main() -> anyhow::Result<()> {
 
     // NOTE: real transport lands in Фаза 2 (`uwa-browser`). For now — stub
     // so the HTTP surface is testable end-to-end via trait objects.
-    let providers = ProviderRegistry::new();
+    let providers: Arc<ProviderRegistry> = Arc::new(ProviderRegistry::new());
     let transport: Arc<dyn uwa_core::Transport> = Arc::new(StubTransport);
+
+    // --- MCP integration ---
+    // 1. Connect external MCP clients (stdio subprocesses) and register them
+    //    in the tool router before wrapping it in an Arc.
+    let mut tool_router = ToolRouter::new();
+    for mcp_cfg in &config.mcp_clients {
+        let args: Vec<String> = mcp_cfg.args.clone();
+        match StdioClient::spawn(&mcp_cfg.name, &mcp_cfg.command, &args).await {
+            Ok(c) => {
+                let c_arc = Arc::new(c);
+                if let Err(e) = c_arc.initialize().await {
+                    tracing::warn!(server = %mcp_cfg.name, "MCP initialize failed: {e}");
+                } else {
+                    tracing::info!(server = %mcp_cfg.name, "MCP client registered");
+                    tool_router.register(Arc::new(McpClientProvider::new(c_arc)));
+                }
+            }
+            Err(e) => tracing::warn!(server = %mcp_cfg.name, "MCP spawn failed: {e}"),
+        }
+    }
+    let tool_router = Arc::new(tool_router);
+
+    // 2. Optionally expose this bridge itself as an MCP server (stdio).
+    if config.mcp_server.enabled {
+        let providers_arc = providers.clone();
+        let transport_for_server = transport.clone();
+        tokio::spawn(async move {
+            let provider_lookup: ProviderLookupFn =
+                Arc::new(move |name: &str| providers_arc.get(name).ok());
+            let mcp = McpServer::new("uwa")
+                .register(Arc::new(WebChatHandler::new(
+                    provider_lookup,
+                    transport_for_server.clone(),
+                )))
+                .register(Arc::new(WebTabsHandler::new(transport_for_server)));
+            if let Err(e) = mcp.serve_stdio().await {
+                tracing::error!("MCP server exited: {e}");
+            }
+        });
+        tracing::info!("MCP server enabled on stdio");
+    }
 
     let state = AppState {
         config: config.clone(),
-        providers: Arc::new(providers),
+        providers: providers.clone(),
         transport,
+        tool_router: Some(tool_router),
     };
 
     let addr: SocketAddr = format!("{}:{}", config.server.bind, config.server.port)

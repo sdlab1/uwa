@@ -2,14 +2,15 @@
 //! single namespace. Collisions get `<ns>__<tool>` prefix; unique names pass
 //! through unchanged (better for prompt quality).
 
-use dashmap::DashMap;
 use serde_json::Value;
+use std::collections::HashMap;
 use std::sync::Arc;
-use uwa_core::{Result, ToolProvider, ToolSpec, UwaError};
+use uwa_core::traits::{ToolProvider, ToolSpec};
+use uwa_core::{Result, UwaError};
 
 #[derive(Default)]
 pub struct ToolRouter {
-    providers: DashMap<String, Arc<dyn ToolProvider>>,
+    providers: HashMap<String, Arc<dyn ToolProvider>>,
 }
 
 /// A resolved tool: which provider + its original (unprefixed) name.
@@ -19,13 +20,16 @@ struct Resolved {
 }
 
 impl ToolRouter {
-    pub fn new() -> Self { Self::default() }
-
-    pub fn register(&self, provider: Arc<dyn ToolProvider>) {
-        self.providers.insert(provider.namespace().to_string(), provider);
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    pub fn unregister(&self, namespace: &str) {
+    pub fn register(&mut self, provider: Arc<dyn ToolProvider>) {
+        self.providers
+            .insert(provider.namespace().to_string(), provider);
+    }
+
+    pub fn unregister(&mut self, namespace: &str) {
         self.providers.remove(namespace);
     }
 
@@ -34,16 +38,17 @@ impl ToolRouter {
     pub async fn all_definitions(&self) -> Result<Vec<ToolSpec>> {
         // 1. Collect all (namespace, spec) pairs.
         let mut all: Vec<(String, ToolSpec)> = Vec::new();
-        for entry in self.providers.iter() {
-            let ns = entry.key().clone();
-            let provider = entry.value().clone();
+        for (ns, provider) in self.providers.iter() {
+            let provider = provider.clone();
             for spec in provider.list_tools().await? {
                 all.push((ns.clone(), spec));
             }
         }
         // 2. Count bare-name collisions.
         let mut counts: std::collections::HashMap<String, usize> = Default::default();
-        for (_, spec) in &all { *counts.entry(spec.name.clone()).or_default() += 1; }
+        for (_, spec) in &all {
+            *counts.entry(spec.name.clone()).or_default() += 1;
+        }
         // 3. Public name.
         let out = all
             .into_iter()
@@ -67,22 +72,30 @@ impl ToolRouter {
         // Try namespaced first: `ns__tool`.
         if let Some((ns, tool)) = public_name.split_once("__") {
             if let Some(p) = self.providers.get(ns) {
-                return Ok(Resolved { provider: p.clone(), tool: tool.into() });
+                return Ok(Resolved {
+                    provider: p.clone(),
+                    tool: tool.into(),
+                });
             }
         }
         // Then try bare name against each provider.
-        for entry in self.providers.iter() {
-            let provider = entry.value().clone();
+        for provider in self.providers.values() {
+            let provider = provider.clone();
             for spec in provider.list_tools().await? {
                 if spec.name == public_name {
-                    return Ok(Resolved { provider, tool: public_name.into() });
+                    return Ok(Resolved {
+                        provider,
+                        tool: public_name.into(),
+                    });
                 }
             }
         }
-        Err(UwaError::BadRequest(format!("unknown tool `{public_name}`")))
+        Err(UwaError::BadRequest(format!(
+            "unknown tool `{public_name}`"
+        )))
     }
 
     pub fn namespaces(&self) -> Vec<String> {
-        self.providers.iter().map(|e| e.key().clone()).collect()
+        self.providers.keys().cloned().collect()
     }
 }

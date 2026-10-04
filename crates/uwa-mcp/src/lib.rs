@@ -23,7 +23,7 @@ pub mod server;
 
 pub use bridge::McpClientProvider;
 pub use client::{McpClient, StdioClient};
-pub use handlers::{WebChatHandler, WebTabsHandler};
+pub use handlers::{ProviderLookupFn, WebChatHandler, WebTabsHandler};
 pub use protocol::{
     CallToolResult, InitializeParams, InitializeResult, JsonRpcError, JsonRpcRequest,
     JsonRpcResponse, McpContent, McpTool, PROTOCOL_VERSION,

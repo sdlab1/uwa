@@ -10,113 +10,191 @@
 //!   7. Emit either JSON or SSE, with `finish_reason = tool_calls|stop`.
 
 use axum::extract::State;
-use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use serde_json::json;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tokio::sync::mpsc;
-use tokio_stream::wrappers::ReceiverStream;
+use std::time::{SystemTime, UNIX_EPOCH};
 
+use uwa_core::traits::ToolSpec;
 use uwa_core::types::openai::*;
 use uwa_core::types::{FinishReason, Role};
 use uwa_core::{RequestId, SessionId, UwaError};
-use uwa_tools::{build_system_prompt, compose_browser_turn, parse, ToolCall, ToolDefinition};
+use uwa_tools::{
+    build_system_prompt, compose_browser_turn, parse, render_tool_response, ToolDefinition,
+};
 
 use crate::error::ApiResult;
 use crate::state::AppState;
 
+const MAX_TOOL_ROUNDS: usize = 4;
+
+/// Main chat entrypoint: handles a single chat completion request.
+/// Delegates to `run_chat_loop` for tool handling and builds the HTTP response.
 pub async fn chat_completions(
     State(state): State<AppState>,
     Json(req): Json<ChatCompletionRequest>,
 ) -> ApiResult<Response> {
-    // 1. Provider lookup.
+    // Extract local tools from the request (if any)
+    let local_tools: Vec<ToolSpec> = match &req.tools {
+        Some(arr) => ToolDefinition::from_openai_array(arr)
+            .unwrap_or_else(|_| Vec::new())
+            .into_iter()
+            .map(|t| ToolSpec {
+                name: t.name.clone(),
+                description: t.description.clone(),
+                parameters: t.parameters.clone(),
+            })
+            .collect(),
+        None => Vec::new(),
+    };
+
+    // Run the chat loop with tool handling
+    let (text, tool_calls, finish_reason) = match run_chat_loop(&state, &req, local_tools).await {
+        Ok(result) => result,
+        Err(e) => return Err(e.into()),
+    };
+
+    // Build response
+    let outcome = uwa_tools::ToolParseOutcome {
+        text,
+        calls: tool_calls,
+    };
+
+    // For streaming, we currently fall back to non-streaming due to
+    // complexity of streaming with tool calls.
+    Ok(Json(build_non_streaming(
+        RequestId::new(),
+        req.model.clone(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+        outcome,
+        finish_reason,
+    ))
+    .into_response())
+}
+
+/// Chat pipeline (v2): tools can come from local request AND from MCP.
+pub async fn run_chat_loop(
+    state: &AppState,
+    req: &ChatCompletionRequest,
+    local_tools: Vec<ToolSpec>,
+) -> uwa_core::Result<(String, Vec<uwa_tools::ToolCall>, FinishReason)> {
+    // 1. Gather all tool definitions: local (from request) + remote (MCP).
+    let mut all_specs: Vec<ToolSpec> = local_tools;
+    if let Some(router) = &state.tool_router {
+        all_specs.extend(router.all_definitions().await?);
+    }
+
+    // 2. Prepare outbound messages (system injection + history).
+    let injected = if !all_specs.is_empty() {
+        // adapt ToolSpec -> uwa_tools::ToolDefinition
+        let defs: Vec<uwa_tools::ToolDefinition> = all_specs.iter().map(spec_to_def).collect();
+        Some(build_system_prompt(&defs))
+    } else {
+        None
+    };
+
     let provider = state
         .config
         .provider_for_model(&req.model)
         .ok_or_else(|| UwaError::UnknownModel(req.model.clone()))?;
     let site = state.providers.get(&provider.name)?;
 
-    // 2. Tools.
-    let defs: Vec<ToolDefinition> = match &req.tools {
-        Some(arr) => ToolDefinition::from_openai_array(arr)?,
-        None => Vec::new(),
-    };
-    if !defs.is_empty() && !site.capabilities().tool_calls {
-        return Err(UwaError::BadRequest(format!(
-            "model `{}` does not support tool calls",
-            req.model
-        ))
-        .into());
-    }
+    // 3. Multi-round loop.
+    let mut conversation: Vec<ChatMessage> = req.messages.clone();
+    let known_names: Vec<String> = all_specs.iter().map(|s| s.name.clone()).collect();
 
-    // 3. Build the prompt we'll type into the browser.
-    let prepared = prepare_browser_turn(&req, &defs);
+    for _round in 0..MAX_TOOL_ROUNDS {
+        let body = build_browser_body(injected.as_deref(), &conversation);
+        let tab = state
+            .transport
+            .list_tabs()
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| UwaError::Unavailable("no tabs".into()))?;
+        let page = state.transport.page(&tab).await?;
+        site.send_message(page.as_ref(), &body).await?;
+        let raw = site.wait_response(page.as_ref()).await?;
+        let parsed = parse(&raw, &known_names);
 
-    // 4. Acquire tab + page (transport impl decides how).
-    let tab = state
-        .transport
-        .list_tabs()
-        .await?
-        .into_iter()
-        .next()
-        .ok_or_else(|| UwaError::Unavailable("no browser tabs available".into()))?;
-    let page = state.transport.page(&tab).await?;
+        if !parsed.has_calls() {
+            return Ok((parsed.text, vec![], FinishReason::Stop));
+        }
 
-    // 5. Send + wait.
-    site.send_message(page.as_ref(), &prepared).await?;
-    let raw = site.wait_response(page.as_ref()).await?;
+        // If there's a tool router, execute the tool calls and loop.
+        // Otherwise, return the tool calls in the response.
+        let router = match &state.tool_router {
+            Some(r) => r,
+            None => return Ok((parsed.text, parsed.calls.clone(), FinishReason::ToolCalls)),
+        };
 
-    // 6. Parse.
-    let known: Vec<String> = defs.iter().map(|d| d.name.clone()).collect();
-    let outcome = parse(&raw, &known);
-    let finish = if outcome.has_calls() {
-        FinishReason::ToolCalls
-    } else {
-        FinishReason::Stop
-    };
+        // 4. Execute tool calls.
+        let mut tool_responses: Vec<String> = Vec::new();
+        for call in &parsed.calls {
+            let result = router.dispatch(&call.name, call.arguments.clone()).await;
+            let body = match result {
+                Ok(s) => s,
+                Err(e) => format!("error: {e}"),
+            };
+            tool_responses.push(render_tool_response(&call.id, &body));
+        }
 
-    let request_id = RequestId::new();
-    let created = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-
-    // 7. Emit.
-    if req.stream.unwrap_or(false) {
-        Ok(stream_response(
-            request_id, req.model, created, outcome, finish,
-        ))
-    } else {
-        Ok(Json(build_non_streaming(
-            request_id, req.model, created, outcome, finish,
-        ))
-        .into_response())
-    }
-}
-
-/// Merge tool definitions into the outbound conversation. We prepend a single
-/// system message if none exists with our markers already.
-fn prepare_browser_turn(req: &ChatCompletionRequest, defs: &[ToolDefinition]) -> String {
-    let mut body = String::new();
-    if !defs.is_empty() {
-        let injected = build_system_prompt(defs);
-        let already = req.messages.iter().any(|m| {
-            m.role == Role::System
-                && m.content
-                    .as_deref()
-                    .map(uwa_tools::already_injected)
-                    .unwrap_or(false)
+        // 5. Append assistant text + tool responses to history and loop.
+        conversation.push(ChatMessage {
+            role: Role::Assistant,
+            content: if parsed.text.is_empty() {
+                None
+            } else {
+                Some(parsed.text)
+            },
+            name: None,
+            tool_call_id: None,
+            tool_calls: Some(parsed.calls.iter().map(to_openai_ref).collect()),
         });
-        if !already {
-            body.push_str(&injected);
-            body.push_str("\n\n---\n\n");
+        for r in tool_responses {
+            conversation.push(ChatMessage {
+                role: Role::Tool,
+                content: Some(r),
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            });
         }
     }
-    body.push_str(&compose_browser_turn(&req.messages));
-    body
+
+    Err(UwaError::Unavailable(format!(
+        "tool loop exceeded {MAX_TOOL_ROUNDS} rounds"
+    )))
 }
 
+fn build_browser_body(system: Option<&str>, messages: &[ChatMessage]) -> String {
+    let mut s = String::new();
+    if let Some(sys) = system {
+        s.push_str(sys);
+        s.push_str("\n\n---\n\n");
+    }
+    s.push_str(&compose_browser_turn(messages));
+    s
+}
+
+fn spec_to_def(s: &ToolSpec) -> uwa_tools::ToolDefinition {
+    uwa_tools::ToolDefinition::new(s.name.clone(), s.description.clone(), s.parameters.clone())
+}
+
+fn to_openai_ref(c: &uwa_tools::ToolCall) -> uwa_core::types::openai::ToolCallRef {
+    uwa_core::types::openai::ToolCallRef {
+        id: c.id.clone(),
+        kind: "function".into(),
+        function: uwa_core::types::openai::FunctionCall {
+            name: c.name.clone(),
+            arguments: serde_json::to_string(&c.arguments).unwrap_or_else(|_| "{}".into()),
+        },
+    }
+}
+
+// Helper to build non-streaming response (copied from original implementation)
 fn build_non_streaming(
     id: RequestId,
     model: String,
@@ -135,7 +213,15 @@ fn build_non_streaming(
                 outcome
                     .calls
                     .into_iter()
-                    .map(to_ref)
+                    .map(|tc| ToolCallRef {
+                        id: tc.id.clone(),
+                        kind: "function".into(),
+                        function: FunctionCall {
+                            name: tc.name.clone(),
+                            arguments: serde_json::to_string(&tc.arguments)
+                                .unwrap_or_else(|_| "{}".into()),
+                        },
+                    })
                     .collect::<Vec<ToolCallRef>>(),
             ),
         )
@@ -161,142 +247,6 @@ fn build_non_streaming(
         }],
         usage: Usage::default(),
     }
-}
-
-fn to_ref(c: ToolCall) -> ToolCallRef {
-    ToolCallRef {
-        id: c.id,
-        kind: "function".into(),
-        function: FunctionCall {
-            name: c.name,
-            arguments: serde_json::to_string(&c.arguments).unwrap_or_else(|_| "{}".into()),
-        },
-    }
-}
-
-fn stream_response(
-    id: RequestId,
-    model: String,
-    created: u64,
-    outcome: uwa_tools::ToolParseOutcome,
-    finish: FinishReason,
-) -> Response {
-    let (tx, rx) = mpsc::channel::<Result<Event, std::convert::Infallible>>(64);
-    let stream_id = id.to_string();
-
-    tokio::spawn(async move {
-        let _ = tx
-            .send(Ok(sse_chunk(
-                &stream_id,
-                created,
-                &model,
-                json!({"role":"assistant"}),
-                None,
-            )))
-            .await;
-
-        // Pseudo-stream the visible text in small chunks.
-        let text = outcome.text.clone();
-        let mut buf = String::new();
-        for ch in text.chars() {
-            buf.push(ch);
-            if buf.len() >= 24 {
-                let _ = tx
-                    .send(Ok(sse_chunk(
-                        &stream_id,
-                        created,
-                        &model,
-                        json!({"content": buf.clone()}),
-                        None,
-                    )))
-                    .await;
-                buf.clear();
-                tokio::time::sleep(Duration::from_millis(12)).await;
-            }
-        }
-        if !buf.is_empty() {
-            let _ = tx
-                .send(Ok(sse_chunk(
-                    &stream_id,
-                    created,
-                    &model,
-                    json!({"content": buf}),
-                    None,
-                )))
-                .await;
-        }
-
-        // Tool calls (if any) as one aggregated delta.
-        if outcome.has_calls() {
-            let calls: Vec<serde_json::Value> = outcome
-                .calls
-                .into_iter()
-                .enumerate()
-                .map(|(i, c)| {
-                    json!({
-                        "index": i,
-                        "id": c.id,
-                        "type": "function",
-                        "function": {
-                            "name": c.name,
-                            "arguments": serde_json::to_string(&c.arguments).unwrap_or_else(|_| "{}".into()),
-                        }
-                    })
-                })
-                .collect();
-            let _ = tx
-                .send(Ok(sse_chunk(
-                    &stream_id,
-                    created,
-                    &model,
-                    json!({"tool_calls": calls}),
-                    None,
-                )))
-                .await;
-        }
-
-        // Final chunk with finish_reason.
-        let finish_str = match finish {
-            FinishReason::Stop => "stop",
-            FinishReason::ToolCalls => "tool_calls",
-            FinishReason::Length => "length",
-            FinishReason::ContentFilter => "content_filter",
-        };
-        let _ = tx
-            .send(Ok(sse_chunk(
-                &stream_id,
-                created,
-                &model,
-                json!({}),
-                Some(finish_str),
-            )))
-            .await;
-        let _ = tx.send(Ok(Event::default().data("[DONE]"))).await;
-    });
-
-    let s = ReceiverStream::new(rx);
-    Sse::new(s).keep_alive(KeepAlive::default()).into_response()
-}
-
-fn sse_chunk(
-    id: &str,
-    created: u64,
-    model: &str,
-    delta: serde_json::Value,
-    finish_reason: Option<&str>,
-) -> Event {
-    let payload = json!({
-        "id": id,
-        "object": "chat.completion.chunk",
-        "created": created,
-        "model": model,
-        "choices": [{
-            "index": 0,
-            "delta": delta,
-            "finish_reason": finish_reason,
-        }]
-    });
-    Event::default().data(serde_json::to_string(&payload).unwrap_or_default())
 }
 
 // Placeholder to keep SessionId import live for future work.

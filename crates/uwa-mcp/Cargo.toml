@@ -20,7 +20,3 @@ url.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
-
-[[example]]
-name = "uwa-mcp-echo"
-path = "examples/echo_server.rs"
