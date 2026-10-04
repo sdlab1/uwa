@@ -3,9 +3,9 @@
 use async_trait::async_trait;
 use scraper::{Html, Selector};
 use std::time::{Duration, Instant};
-use uwa_core::{Page, Result, UwaError};
+use uwa_core::{Page, UwaError, Result};
 
-/// A selector-driven extractor. All configuration comes from the caller.
+/// A selector-driven extractor. All state comes from the caller (config).
 #[derive(Debug, Clone)]
 pub struct DomExtractor {
     /// Selector for the container of the *last* assistant message.
@@ -24,9 +24,8 @@ impl DomExtractor {
     /// Extract text from a raw HTML document. Pure, no I/O. Testable in isolation.
     pub fn extract_from_html(&self, html: &str) -> Result<String> {
         let doc = Html::parse_document(html);
-        let sel = Selector::parse(&self.assistant_message).map_err(|e| {
-            UwaError::Extraction(format!("bad selector `{}`: {e}", self.assistant_message))
-        })?;
+        let sel = Selector::parse(&self.assistant_message)
+            .map_err(|e| UwaError::Extraction(format!("bad selector `{}`: {e}", self.assistant_message)))?;
         let last = doc
             .select(&sel)
             .last()
@@ -90,7 +89,7 @@ fn hash(s: &str) -> u64 {
     h.finish()
 }
 
-/// Trait object wrapper for dynamic dispatch across crate boundaries.
+/// Only used to seal the trait object across crate boundaries — see `pipeline`.
 #[async_trait]
 pub trait DomLike: Send + Sync {
     async fn wait_and_extract(&self, page: &dyn Page) -> Result<String>;

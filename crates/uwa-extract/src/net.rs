@@ -33,6 +33,7 @@ impl SseParser {
         self.buf.push_str(chunk);
         let mut out = Vec::new();
         loop {
+            // Find a complete line in the buffer.
             let Some(nl) = self.buf.find('\n') else { break };
             let line = self.buf[..nl].trim_end_matches('\r').to_string();
             self.buf.drain(..=nl);
@@ -52,7 +53,7 @@ impl SseParser {
             } else if let Some(rest) = line.strip_prefix("data:") {
                 self.cur_data.push(rest.trim_start().to_string());
             }
-            // Other SSE fields (`id:`, `retry:`, comments) ignored.
+            // Other SSE fields (`id:`, `retry:`, comments) ignored for our use.
         }
         out
     }
@@ -78,10 +79,11 @@ impl SseParser {
 /// Supported syntax:
 /// * `a.b.c` — object traversal
 /// * `a[0].b` — array index (also `a.0.b` works)
-/// * `*` — wildcard, returns all matches joined by `\n`
+/// * `*` — wildcard, returns *all* matches joined by `\n`
 ///
 /// Returns `None` if no match, `Some(s)` if a string/number/bool was found.
-/// Arrays/objects at the target are returned as compact JSON strings.
+/// Arrays/objects at the target are returned as compact JSON strings so the
+/// caller can decide what to do.
 pub fn json_path_str(root: &Value, path: &str) -> Option<String> {
     let segments = parse_path(path)?;
     let mut current: Vec<&Value> = vec![root];
