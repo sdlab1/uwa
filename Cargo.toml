@@ -11,6 +11,7 @@ license      = "MIT"
 [workspace.dependencies]
 
 uwa-core = { path = "uwa-core" }
+uwa-config = { path = "crates/uwa-config" }
 
 # async
 tokio        = { version = "1", features = ["full"] }

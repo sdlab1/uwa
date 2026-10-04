@@ -16,7 +16,6 @@ use crate::transport::CdpConnection;
 ///
 /// Created via `CdpTransport::page(&tab_id)` and returned as `Box<dyn Page>`.
 pub struct CdpPageAdapter {
-    tab_id: TabId,
     conn: Arc<CdpConnection>,
     _guard: TabGuard,
     next_request_id: Arc<std::sync::atomic::AtomicU64>,
@@ -25,10 +24,9 @@ pub struct CdpPageAdapter {
 
 impl CdpPageAdapter {
     /// Create a new page adapter for the given tab.
-    pub fn new(tab_id: TabId, conn: Arc<CdpConnection>, guard: TabGuard) -> Self {
+    pub fn new(_tab_id: TabId, conn: Arc<CdpConnection>, guard: TabGuard) -> Self {
         let (event_tx, _event_rx) = broadcast::channel(16);
         Self {
-            tab_id,
             conn,
             _guard: guard,
             next_request_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
@@ -245,9 +243,6 @@ impl uwa_core::Page for CdpPageAdapter {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use std::sync::Arc;
-
     #[tokio::test]
     #[ignore = "requires running Chromium with --remote-debugging-port=9222"]
     async fn cdp_page_adapter_basic() {

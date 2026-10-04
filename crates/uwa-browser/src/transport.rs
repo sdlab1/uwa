@@ -40,7 +40,7 @@ impl CdpConnection {
     pub async fn send(&self, msg: serde_json::Value) -> Result<()> {
         let text = serde_json::to_string(&msg).map_err(|e| UwaError::Internal(e.to_string()))?;
         self.sender
-            .send(Message::Text(text.into()))
+            .send(Message::Text(text))
             .map_err(|e| UwaError::Transport(e.to_string()))?;
         Ok(())
     }
@@ -156,39 +156,6 @@ impl CdpTransport {
         current
     }
 
-    /// Send a CDP command and wait for the response.
-    async fn send_command(
-        &self,
-        method: &str,
-        params: serde_json::Value,
-        session_id: Option<&str>,
-    ) -> Result<serde_json::Value> {
-        let id = self.next_id().await;
-        let mut msg = serde_json::json!({
-            "id": id,
-            "method": method,
-            "params": params
-        });
-        if let Some(sid) = session_id {
-            msg["sessionId"] = serde_json::json!(sid);
-        }
-
-        // Create a oneshot channel for the response
-        let (tx, _rx) = tokio::sync::oneshot::channel();
-        self.waiters.insert(id, tx);
-
-        // Send the message
-        let _text = serde_json::to_string(&msg).map_err(|e| UwaError::Internal(e.to_string()))?;
-        // We need a way to send to the main connection - for now this is a placeholder
-        // In a full implementation, we'd keep the main connection's sender
-        // For now, we'll create a temporary connection for each command (not efficient but works)
-        // Actually, let's store a main sender
-
-        // Placeholder: return empty result
-        // Real implementation would await rx and handle timeout
-        Ok(serde_json::json!({"result": {}}))
-    }
-
     /// Attach to a target (tab) and register it in the pool.
     /// Returns the TabId for the new session.
     pub async fn attach_tab(&self, target_id: &str) -> Result<TabId> {
@@ -223,7 +190,7 @@ impl CdpTransport {
 
         let attach_text =
             serde_json::to_string(&attach_msg).map_err(|e| UwaError::Internal(e.to_string()))?;
-        tx.send(Message::Text(attach_text.into()))
+        tx.send(Message::Text(attach_text))
             .map_err(|e| UwaError::Transport(e.to_string()))?;
 
         // Wait for attach response to get sessionId
@@ -308,7 +275,7 @@ impl CdpTransport {
         });
         let enable_text =
             serde_json::to_string(&enable_msg).map_err(|e| UwaError::Internal(e.to_string()))?;
-        tx2.send(Message::Text(enable_text.into()))
+        tx2.send(Message::Text(enable_text))
             .map_err(|e| UwaError::Transport(e.to_string()))?;
 
         let enable_msg = serde_json::json!({
@@ -318,7 +285,7 @@ impl CdpTransport {
         });
         let enable_text =
             serde_json::to_string(&enable_msg).map_err(|e| UwaError::Internal(e.to_string()))?;
-        tx2.send(Message::Text(enable_text.into()))
+        tx2.send(Message::Text(enable_text))
             .map_err(|e| UwaError::Transport(e.to_string()))?;
 
         let enable_msg = serde_json::json!({
@@ -328,7 +295,7 @@ impl CdpTransport {
         });
         let enable_text =
             serde_json::to_string(&enable_msg).map_err(|e| UwaError::Internal(e.to_string()))?;
-        tx2.send(Message::Text(enable_text.into()))
+        tx2.send(Message::Text(enable_text))
             .map_err(|e| UwaError::Transport(e.to_string()))?;
 
         let enable_msg = serde_json::json!({
@@ -338,7 +305,7 @@ impl CdpTransport {
         });
         let enable_text =
             serde_json::to_string(&enable_msg).map_err(|e| UwaError::Internal(e.to_string()))?;
-        tx2.send(Message::Text(enable_text.into()))
+        tx2.send(Message::Text(enable_text))
             .map_err(|e| UwaError::Transport(e.to_string()))?;
 
         let tab_id = TabId::new();
@@ -373,7 +340,7 @@ impl CdpTransport {
             .map_err(|e| UwaError::Transport(e.to_string()))?;
         let (mut ws_write, mut ws_read) = ws_stream.split();
         ws_write
-            .send(Message::Text(text.into()))
+            .send(Message::Text(text))
             .await
             .map_err(|e| UwaError::Transport(e.to_string()))?;
 
