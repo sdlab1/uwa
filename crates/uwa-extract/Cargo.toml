@@ -10,15 +10,14 @@ uwa-core.workspace = true
 uwa-config.workspace = true
 async-trait.workspace = true
 tokio = { workspace = true, features = ["sync", "time", "rt", "macros"] }
+tokio-stream.workspace = true
 futures.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
-scraper = "0.20"
+scraper.workspace = true
 url.workspace = true
-tokio-stream = "0.1"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
-tokio-stream = "0.1"

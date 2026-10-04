@@ -10,12 +10,13 @@
 //!
 //! ## Passport (public API)
 //! - [`pipeline::ExtractionPipeline`] — the orchestrator
-//! - [`pipeline::ExtractionOutcome`] — `{text, deltas, source}`
+//! - [`pipeline::ExtractionOutcome`] — `{text, source}`
 //! - [`pipeline::ExtractionSource`] — `Network | Dom`
 //! - [`net::SseParser`] — pure SSE frame parser (no I/O)
 //! - [`net::json_path_str`] — minimal JSON-path extractor for JSON bodies
+//! - [`net::NetExtractor`], [`net::NetDelta`], [`net::NetRules`], [`net::NetDecoder`]
 //! - [`dom::DomExtractor`] — selector-driven text extraction
-//! - [`finisher::Finisher`], [`finisher::FinishSignal`] — deterministic end detection
+//! - [`finisher::Finisher`], [`finisher::FinisherCfg`], [`finisher::FinishSignal`]
 //! - [`fixture`] — snapshot helpers for selector tests
 //!
 //! The crate is transport-agnostic: it consumes [`uwa_core::NetworkEvent`] and
@@ -29,5 +30,5 @@ pub mod pipeline;
 
 pub use dom::DomExtractor;
 pub use finisher::{FinishSignal, Finisher, FinisherCfg};
-pub use net::{json_path_str, SseFrame, SseParser};
-pub use pipeline::{ExtractionOutcome, ExtractionPipeline, ExtractionSource};
+pub use net::{json_path_str, NetDecoder, NetDelta, NetExtractor, NetRules, SseFrame, SseParser};
+pub use pipeline::{ExtractionOutcome, ExtractionPipeline, ExtractionSource, PipelineCfg};

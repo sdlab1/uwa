@@ -27,7 +27,7 @@ impl ScriptedPage {
             net_send: Mutex::new(None),
         }
     }
-    fn with_eval(mut self, v: Value) -> Self {
+    fn with_eval(self, v: Value) -> Self {
         *self.eval_answer.lock().unwrap() = Some(v);
         self
     }

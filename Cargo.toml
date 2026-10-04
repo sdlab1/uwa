@@ -35,3 +35,5 @@ axum         = { version = "0.7", features = ["json", "macros"] }
 uwa-tools    = { path = "crates/uwa-tools" }
 uwa-mcp      = { path = "crates/uwa-mcp" }
 uwa-browser  = { path = "crates/uwa-browser" }
+uwa-extract  = { path = "crates/uwa-extract" }
+scraper      = "0.20"

@@ -5,7 +5,7 @@ use scraper::{Html, Selector};
 use std::time::{Duration, Instant};
 use uwa_core::{Page, Result, UwaError};
 
-/// A selector-driven extractor. All state comes from the caller (config).
+/// A selector-driven extractor. All configuration comes from the caller.
 #[derive(Debug, Clone)]
 pub struct DomExtractor {
     /// Selector for the container of the *last* assistant message.
@@ -29,7 +29,7 @@ impl DomExtractor {
         })?;
         let last = doc
             .select(&sel)
-            .next_back()
+            .last()
             .ok_or_else(|| UwaError::Extraction("assistant message element not found".into()))?;
         Ok(last.text().collect::<Vec<_>>().join("").trim().to_string())
     }
@@ -90,7 +90,7 @@ fn hash(s: &str) -> u64 {
     h.finish()
 }
 
-/// Only used to seal the trait object across crate boundaries — see `pipeline`.
+/// Trait object wrapper for dynamic dispatch across crate boundaries.
 #[async_trait]
 pub trait DomLike: Send + Sync {
     async fn wait_and_extract(&self, page: &dyn Page) -> Result<String>;

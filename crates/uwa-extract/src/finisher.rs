@@ -12,8 +12,7 @@
 
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
-use uwa_core::UwaError;
-use uwa_core::{NetworkEvent, Page, Result};
+use uwa_core::{NetworkEvent, Page, Result, UwaError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FinishSignal {
@@ -118,7 +117,7 @@ impl Finisher {
                 .map_err(|e| UwaError::Transport(format!("html: {e}")))?;
             let h = hash(&html);
             match last_html_hash {
-                Some(p) if p == h => {
+                Some(prev) if prev == h => {
                     let since = stable_since.get_or_insert_with(Instant::now);
                     if since.elapsed() >= self.cfg.dom_stable_for
                         && start.elapsed() >= self.cfg.min_wait
