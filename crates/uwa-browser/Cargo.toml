@@ -1,0 +1,24 @@
+[package]
+name = "uwa-browser"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+uwa-core.workspace = true
+async-trait.workspace = true
+tokio = { workspace = true, features = ["process", "sync", "time", "rt", "net", "io-util"] }
+dashmap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+governor = "0.6"
+url.workspace = true
+futures.workspace = true
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "handshake"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "handshake"] }
