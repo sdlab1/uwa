@@ -15,6 +15,7 @@ uwa-config = { path = "crates/uwa-config" }
 
 # async
 tokio        = { version = "1", features = ["full"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
 async-trait  = "0.1"
 futures      = "0.3"
 # serde
