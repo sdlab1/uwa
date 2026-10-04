@@ -1,0 +1,33 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version      = "0.1.0"
+edition      = "2021"
+rust-version = "1.75"
+license      = "MIT"
+
+[workspace.dependencies]
+
+uwa-core = { path = "uwa-core" }
+
+# async
+tokio        = { version = "1", features = ["full"] }
+async-trait  = "0.1"
+futures      = "0.3"
+# serde
+serde        = { version = "1", features = ["derive"] }
+serde_json   = "1"
+toml         = "0.8"
+serde_path_to_error = "0.1"
+# errors/log
+thiserror    = "1"
+anyhow       = "1"
+tracing      = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+# misc
+url          = "2"
+uuid         = { version = "1", features = ["v4", "serde"] }
+dashmap      = "5"
+axum         = { version = "0.7", features = ["json", "macros"] }

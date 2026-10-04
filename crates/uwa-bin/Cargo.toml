@@ -1,0 +1,22 @@
+[package]
+name = "uwa-bin"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "uwa"
+path = "src/main.rs"
+
+[dependencies]
+uwa-core.workspace = true
+uwa-config = { path = "../uwa-config" }
+uwa-api = { path = "../uwa-api" }
+tokio.workspace = true
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { version = "4", features = ["derive", "env"] }
+async-trait = { workspace = true }
+axum = { workspace = true }

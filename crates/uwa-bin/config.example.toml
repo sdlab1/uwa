@@ -1,0 +1,38 @@
+[server]
+bind = "127.0.0.1"
+port = 8080
+api_key = "change-me"
+request_timeout_ms = 120000
+
+[model_aliases]
+"gpt-4o" = "chatgpt"
+"gpt-4o-mini" = "chatgpt"
+"claude-3-5-sonnet" = "claude"
+"gemini-1.5-pro" = "gemini"
+"deepseek-chat" = "deepseek"
+
+[providers.chatgpt]
+name = "chatgpt"
+url_patterns = ["https://chatgpt.com/*"]
+capabilities = { streams = true, tool_calls = true, vision = false, max_context_tokens = 128000 }
+selectors_version = "2026-01-01"
+[providers.chatgpt.selectors]
+input = "textarea#prompt-textarea"
+send_button = "button[data-testid='send-button']"
+stop_button = "button[data-testid='stop-button']"
+assistant_message = "[data-message-author-role='assistant']"
+
+[providers.claude]
+name = "claude"
+url_patterns = ["https://claude.ai/*"]
+capabilities = { streams = true, tool_calls = true, vision = true, max_context_tokens = 200000 }
+
+[providers.gemini]
+name = "gemini"
+url_patterns = ["https://gemini.google.com/*"]
+capabilities = { streams = true, tool_calls = false, vision = true, max_context_tokens = 1000000 }
+
+[providers.deepseek]
+name = "deepseek"
+url_patterns = ["https://chat.deepseek.com/*"]
+capabilities = { streams = true, tool_calls = true, vision = false, max_context_tokens = 64000 }

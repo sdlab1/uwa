@@ -1,0 +1,30 @@
+[package]
+name = "uwa-api"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+uwa-core.workspace = true
+uwa-config = { path = "../uwa-config" }
+uwa-tools = { path = "../uwa-tools" }
+axum = { version = "0.7", features = ["json", "macros"] }
+tokio.workspace = true
+tokio-stream = { version = "0.1", features = ["sync"] }
+tower = { version = "0.4", features = ["timeout", "limit"] }
+tower-http = { version = "0.5", features = ["cors", "trace", "request-id", "timeout"] }
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+futures.workspace = true
+url = { workspace = true }
+subtle = "2"  # constant-time compare for api_key
+
+[dev-dependencies]
+axum-test = "15"
+wiremock = "0.6"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
