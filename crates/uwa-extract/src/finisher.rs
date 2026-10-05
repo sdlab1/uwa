@@ -117,7 +117,7 @@ impl Finisher {
                 .map_err(|e| UwaError::Transport(format!("html: {e}")))?;
             let h = hash(&html);
             match last_html_hash {
-                Some(prev) if prev == h => {
+                Some(p) if p == h => {
                     let since = stable_since.get_or_insert_with(Instant::now);
                     if since.elapsed() >= self.cfg.dom_stable_for
                         && start.elapsed() >= self.cfg.min_wait

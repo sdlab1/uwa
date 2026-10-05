@@ -1,73 +1,85 @@
 #!/usr/bin/env bash
-# dump.sh — создаёт Markdown‑дамп source‑кода проекта (только Rust).
-# Режимы:
-#   ./dump.sh            → полный дамп всего source (full_dump.md)
-#   ./dump.sh <crate>    → дамп только указанного crate'а (<crate>_dump.md)
-#   ./dump.sh percrate   → отдельный дамп для каждого crate'а
-#   ./dump.sh stats      → показать статистику без создания дампа (по группам)
+# dump.sh - glues project_uwa Rust sources into Markdown dump file(s).
+# Behavior (same as the original dump.sh.bak):
+#   ./dump.sh            -> all three dumps: source_dump.md, tests_dump.md, full_dump.md
+#   ./dump.sh source     -> only source_dump.md + colored stats
+#   ./dump.sh tests      -> only tests_dump.md  + colored stats
+#   ./dump.sh full       -> only full_dump.md   + colored stats
+# Extra modes:
+#   ./dump.sh percrate   -> separate dump for each crate (<crate>_dump.md);
+#                           tests of a crate are included INTO its dump
+#                           (see PERCRATE_TESTS_SEPARATE below to split them)
+#   ./dump.sh stats      -> colored stats only, no dumps
+#   ./dump.sh <crate>    -> dump of a single crate (name or path, e.g. uwa-bin)
 #
-# В дамп включаются только файлы с расширениями *.rs и *.toml (Cargo.toml).
-# Исключаются все артефакты сборки и служебные каталоги:
-#   target, _build, deps, .git, node_modules, playwright-report,
-#   test-results, cover, .pytest_cache, __pycache__ и любые подкаталоги
-#   research/out, bt/bt_dataset, а также *.min.js и *.db (если появятся).
-#
-# Файлы пишутся в текущую директорию (рядом с dump.sh) без timestamp.
-#
-# Требует наличия файла repo.conf с алиасами вида:
-#   MANIFEST=Cargo.toml
-#   CARGO_LOCK=Cargo.lock
-#   UWA_BROWSER_SRC=crates/uwa-browser/src
-#   UWA_BROWSER_TOML=crates/uwa-browser/Cargo.toml
-#   ... и т.д. для всех crate'ов.
-#
-# colors.sh не обязателен — оставлены пустые заглушки для совместимости.
+# Dump files are written next to repo.conf, WITHOUT timestamp in the name.
+# Only sources go into dumps: *.rs *.toml (no *.md - code and configs only).
+# Service dirs (target, .git, node_modules, deps, ...) are always skipped.
+# Colors come from colors.sh (auto-disabled when output is not a terminal).
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
-# Подгружаем алиасы из repo.conf в ассоциативный массив PATHS
+# --- Colors -----------------------------------------------------------
+# Shared muted scheme lives in colors.sh; it auto-disables when stdout
+# is not a terminal. Empty fallback if the file is missing.
+# shellcheck source=colors.sh
+if [[ -f "$SCRIPT_DIR/colors.sh" ]]; then
+  source "$SCRIPT_DIR/colors.sh"
+else
+  C_RESET='' C_DIM='' C_TITLE='' C_HDR='' C_HEADER='' C_EXT='' C_NUM='' C_TOT=''
+  C_OK='' C_WARN='' C_ERR='' C_ACCENT=''
+fi
+
+# --- Per-crate dumps configuration ------------------------------------
+# In percrate mode the tests of each crate are glued INTO its crate dump
+# (<crate>_dump.md) - modular by design: set PERCRATE_TESTS_SEPARATE=1
+# (env var) to emit them as separate <crate>_tests_dump.md files instead.
+PERCRATE_TESTS_SEPARATE="${PERCRATE_TESTS_SEPARATE:-0}"
+
+# --- repo.conf parser (strips inline comments after '=') ---------------
 if [[ ! -f "$SCRIPT_DIR/repo.conf" ]]; then
   echo "Error: repo.conf not found in $SCRIPT_DIR" >&2
   exit 1
 fi
 declare -A PATHS
-while IFS='=' read -r key value; do
-  # Пропускаем пустые строки и комментарии
-  [[ -z "$key" || "$key" =~ ^# ]] && continue
-  # Удаляем ведущие и尾部 пробелы
+while IFS='=' read -r key value || [[ -n "$key" ]]; do
+  [[ -z "$key" || "$key" == \#* ]] && continue
   key=$(echo "$key" | xargs)
   value=$(echo "$value" | xargs)
-  # Удаляем inline-комментарии после '#'
   value="${value%%#*}"
   value=$(echo "$value" | xargs)
   [[ -z "$value" ]] && continue
   PATHS[$key]="$value"
 done < "$SCRIPT_DIR/repo.conf"
 
-# Пустые заглушки для переменных цветов (оставляем для совместимости)
-C_TITLE="" C_RESET="" C_DIM="" C_HDR="" C_EXT="" C_NUM="" C_TOT=""
+# --- Alias groups -----------------------------------------------------
+# SOURCE_GROUP - application source: src/ of every crate + crates'
+#               Cargo.toml + uwa-bin config template + root Cargo.toml.
+#               (*.lock is NOT included - the dump is source only.)
+# TESTS_GROUP  - integration tests (tests/) of every crate.
+# NOTE: ALL_SRCS/ALL_TOMLS/ALL_TESTS are group aliases from repo.conf
+# (space-separated alias lists); collect_files expands them recursively.
+SOURCE_GROUP=(ALL_SRCS ALL_TOMLS UWA_BIN_CONFIG MANIFEST)
+TESTS_GROUP=(ALL_TESTS)
 
-# Расширения, которые хотим включать в дамп
+# Only source files are collected
 EXTENSIONS=( -name '*.rs' -o -name '*.toml' )
 
-# Каталоги и пути, которые всегда исключаем
+# Service dirs - build artifacts and VCS, always skipped
 EXCLUDE_DIRS=( -name target -o -name _build -o -name deps -o -name .git \
                -o -name node_modules -o -name playwright-report \
                -o -name test-results -o -name cover \
                -o -name .pytest_cache -o -name __pycache__ )
 
-EXCLUDE_PATHS=( -path '*/research/out/*' -o -path '*/bt/*' \
-                -o -name '*.min.js' -o -name '*.db' )
-
-# Сборка списка файлов из одного алиаса (может быть файлом или каталогом)
-collect_from_alias() {
-  local alias_name="$1"
-  local path="${PATHS[$alias_name]:-}"
-  [[ -z "$path" ]] && return
-  [[ -e "$path" ]] || return
+# --- collect_single_alias: files of one alias (file or dir) -----------
+collect_single_alias() {
+  local alias="$1"
+  local path="${PATHS[$alias]:-}"
+  [[ -z "$path" ]] && return 0
+  [[ -e "$path" ]] || return 0
 
   if [[ -f "$path" ]]; then
     echo "$path"
@@ -75,94 +87,150 @@ collect_from_alias() {
     find "$path" \
       -type d \( "${EXCLUDE_DIRS[@]}" \) -prune -o \
       -type f \( "${EXTENSIONS[@]}" \) \
-      -not \( "${EXCLUDE_PATHS[@]}" \) \
       -print
   fi
 }
 
-# Сборка файлов для группы (переименованный алиас, содержащий список имён других алиасов)
-collect_group() {
-  local -n group_ref="$1"
-  local result=()
+# --- collect_files: collects files for an alias group ------------------
+# The group is the NAME of a bash array holding alias names. An element
+# is either a leaf alias (single path) or a group alias from repo.conf
+# (space-separated alias list) - the latter is expanded recursively.
+collect_files() {
+  local -n group_ref=$1
+  local alias sub path
   for alias in "${group_ref[@]}"; do
-    local path="${PATHS[$alias]:-}"
-    [[ -n "$path" ]] || continue
-    while IFS= read -r line; do
-      [[ -n "$line" ]] && result+=("$line")
-    done < <(collect_from_alias "$alias")
-  done
-  printf '%s\n' "${result[@]}" | sort -u
+    path="${PATHS[$alias]:-}"
+    if [[ -n "$path" && "$path" == *\ * ]]; then
+      # nested group alias from repo.conf - expand into leaf aliases
+      for sub in $path; do
+        collect_single_alias "$sub"
+      done
+    else
+      collect_single_alias "$alias"
+    fi
+  done | sort -u
 }
 
-# Формируем анкор (id) для заголовка в markdown из пути
+# --- make_anchor: HTML anchor from a path ------------------------------
 make_anchor() {
   printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9._-' '-'
 }
 
-# Вывод статистики по группе файлов
-print_stats() {
-  local title="$1" shift
-  local files=("$@")
-  if [[ ${#files[@]} -eq 0 ]]; then
-    echo "  Нет файлов для группы '$title'"
-    return
-  fi
-  declare -A ext_files ext_lines ext_bytes
-  local total_lines=0 total_bytes=0
-  for f in "${files[@]}"; do
+# --- print_group_stats <TITLE> <GROUP_NAME> ----------------------------
+# Aggregates group files by extension: files / lines / KB.
+print_group_stats() {
+  local title="$1" group="$2"
+  local tmp; tmp="$(mktemp)"
+
+  collect_files "$group" | while IFS= read -r f; do
+    ext="${f##*.}"
     [[ -f "$f" ]] || continue
-    local ext="${f##*.}"
-    local lines bytes
-    lines=$(wc -l < "$f")
-    bytes=$(wc -c < "$f")
-    ((ext_files[".$ext"]++))
-    ((ext_lines[".$ext"]+=lines))
-    ((ext_bytes[".$ext"]+=bytes))
-    ((total_lines+=lines))
-    ((total_bytes+=bytes))
-  done
-  local rule
-  printf -v rule '%*s' 62 ''; rule="${rule// /─}"
+    lines="$(wc -l < "$f")"
+    bytes="$(wc -c < "$f")"
+    printf '%s\t%s\t%s\n' "$ext" "$lines" "$bytes"
+  done |
+  awk -F'\t' '
+    { files[$1]++; lines[$1]+=$2; kb[$1]+=$3 }
+    END { for (e in files) printf "%s\t%d\t%d\t%.1f\n", e, files[e], lines[e], kb[e]/1024 }
+  ' | sort -t$'\t' -k3 -rn > "$tmp"
+
+  local tf tl tkb
+  tf="$(awk -F'\t' '{s+=$2} END{print s+0}' "$tmp")"
+  tl="$(awk -F'\t' '{s+=$3} END{print s+0}' "$tmp")"
+  tkb="$(awk -F'\t' '{s+=$4} END{printf "%.1f", s}' "$tmp")"
+
+  local rule; printf -v rule '%*s' 62 ''; rule="${rule// /-}"
+
   echo
   echo "  ${C_TITLE}${title}${C_RESET}"
   echo "  ${C_DIM}${rule}${C_RESET}"
   printf '  %s%-12s %8s %10s %12s%s\n' "$C_HDR" 'ext' 'files' 'lines' 'KB' "$C_RESET"
-  for ext in "${!ext_files[@]}"; do
+  while IFS=$'\t' read -r ext nf nl kb; do
     printf '  %s%-12s%s %s%8d %10d %12s%s\n' \
-      "$C_EXT" "$ext" "$C_RESET" "$C_NUM" "${ext_files[$ext]}" "${ext_lines[$ext]}" "$(awk "BEGIN {printf \"%.1f\", ${ext_bytes[$ext]/1024}}")" "$C_RESET"
-  done < <(printf '%s\n' "${!ext_files[@]}" | sort)
+      "$C_EXT" ".$ext" "$C_RESET" "$C_NUM" "$nf" "$nl" "$kb" "$C_RESET"
+  done < "$tmp"
   echo "  ${C_DIM}${rule}${C_RESET}"
-  printf '  %s%-12s %8d %10d %12s%s\n' "$C_TOT" 'TOTAL' "$total_lines" "$total_bytes" "$(awk "BEGIN {printf \"%.1f\", $total_bytes/1024}")" "$C_RESET"
+  printf '  %s%-12s %8d %10d %12s%s\n' "$C_TOT" 'TOTAL' "$tf" "$tl" "$tkb" "$C_RESET"
+
+  print_top10_largest "$group"
+
+  rm -f "$tmp"
 }
 
-# Создание одного дампа файла
-create_dump() {
-  local dump_name="$1"   # без расширения _dump.md
-  local -n files_ref="$2" # массив с путями
-  local dump_file="$SCRIPT_DIR/${dump_name}_dump.md"
+# --- print_top10_largest <GROUP_NAME> ----------------------------------
+# Top-10 largest files of a group: path + size.
+print_top10_largest() {
+  local group="$1"
+  local all; all="$(mktemp)"
+  local tmp; tmp="$(mktemp)"
+  local rule; printf -v rule '%*s' 62 ''; rule="${rule// /-}"
+
+  collect_files "$group" | while IFS= read -r f; do
+    [[ -f "$f" ]] || continue
+    bytes="$(wc -c < "$f")"
+    printf '%s\t%s\n' "$bytes" "$f"
+  done | sort -t$'\t' -k1 -rn > "$all"
+  # NOTE: head reads from a file, not from the pipe - otherwise sort
+  # catches SIGPIPE (code 141) and `set -euo pipefail` kills the script.
+  head -n 10 "$all" > "$tmp"
+  rm -f "$all"
+
+  if [[ -s "$tmp" ]]; then
+    echo
+    echo "  ${C_TITLE}TOP 10 LARGEST FILES${C_RESET}"
+    echo "  ${C_DIM}${rule}${C_RESET}"
+    while IFS=$'\t' read -r bytes file; do
+      kb=$(awk "BEGIN {printf \"%.1f\", $bytes/1024}")
+      printf '  %s%-5s KB%s  %s\n' "$C_NUM" "$kb" "$C_RESET" "$file"
+    done < "$tmp"
+    echo "  ${C_DIM}${rule}${C_RESET}"
+  fi
+
+  rm -f "$tmp"
+}
+
+print_source_stats() { print_group_stats "SOURCE - src / Cargo.toml / config / manifest" SOURCE_GROUP; }
+print_tests_stats()  { print_group_stats "TESTS - integration tests (tests/)"                   TESTS_GROUP; }
+
+# --- build_dump <name> <title> <GROUP_NAME>... -------------------------
+# Builds one dump: TOC + per-file code blocks + Stats section.
+build_dump() {
+  local mode="$1"     # dump file name without the _dump.md suffix
+  local title="$2"    # H1 title inside the dump
+  shift 2
+  local groups=("$@")
+
+  local ALL_FILES=()
+  local g f
+  for g in "${groups[@]}"; do
+    while IFS= read -r f; do
+      [[ -n "$f" ]] && ALL_FILES+=("$f")
+    done < <(collect_files "$g")
+  done
+
+  local DUMP_FILE="$SCRIPT_DIR/${mode}_dump.md"
   {
-    echo "# ${dump_name^} Dump"
+    echo "# ${title}"
     echo ""
     echo "_Generated: $(date -u +%Y-%m-%dT%H:%M:%SZ)_"
     echo ""
     echo "## Table of Contents"
     echo ""
-  } > "$dump_file"
+  } > "$DUMP_FILE"
 
-  local total_lines=0 total_bytes=0 files_count=0
-  declare -A ext_lines ext_bytes ext_files
-  for p in "${files_ref[@]}"; do
-    [[ -f "$p" ]] || continue
-    local anchor
+  local p anchor
+  for p in "${ALL_FILES[@]}"; do
     anchor=$(make_anchor "$p")
-    echo "- [$p](#$anchor)" >> "$dump_file"
+    echo "- [$p](#$anchor)" >> "$DUMP_FILE"
   done
-  echo "" >> "$dump_file"
+  echo "" >> "$DUMP_FILE"
 
-  for p in "${files_ref[@]}"; do
+  local total_lines=0 total_bytes=0 files_dumped=0
+  declare -A ext_lines ext_bytes ext_files
+  for p in "${ALL_FILES[@]}"; do
     [[ -f "$p" ]] || continue
-    local anchor ext lang
     anchor=$(make_anchor "$p")
+    local ext lang
     ext="${p##*.}"
     case "$ext" in
       rs)   lang="rust" ;;
@@ -177,23 +245,23 @@ create_dump() {
       cat "$p"
       echo "\`\`\`"
       echo ""
-    } >> "$dump_file"
+    } >> "$DUMP_FILE"
 
     local nlines nbytes
     nlines=$(wc -l < "$p")
     nbytes=$(wc -c < "$p")
-    ((files_count++))
-    ((total_lines+=nlines))
-    ((total_bytes+=nbytes))
-    ext_files[".$ext"]=$(( ${ext_files[".$ext"]:-0} + 1 ))
-    ext_lines[".$ext"]=$(( ${ext_lines[".$ext"]:-0} + nlines ))
-    ext_bytes[".$ext"]=$(( ${ext_bytes[".$ext"]:-0} + nbytes ))
+    files_dumped=$((files_dumped + 1))
+    total_lines=$((total_lines + nlines))
+    total_bytes=$((total_bytes + nbytes))
+    ext_files[$ext]=$(( ${ext_files[$ext]:-0} + 1 ))
+    ext_lines[$ext]=$(( ${ext_lines[$ext]:-0} + nlines ))
+    ext_bytes[$ext]=$(( ${ext_bytes[$ext]:-0} + nbytes ))
   done
 
   {
     echo "## Stats"
     echo ""
-    echo "- Files: $files_count"
+    echo "- Files: $files_dumped"
     echo "- Lines: $total_lines"
     echo "- Bytes: $total_bytes"
     echo ""
@@ -201,123 +269,93 @@ create_dump() {
     echo ""
     echo "| Ext | Files | Lines | Bytes |"
     echo "|---|---|---|---|"
-    for ext in "${!ext_files[@]}"; do
-      printf '| .%s | %s | %s | %s |\n' "${ext#.}" "${ext_files[$ext]}" "${ext_lines[$ext]}" "${ext_bytes[$ext]}"
-    done | sort
-  } >> "$dump_file"
+    local ext
+    for ext in $(printf '%s\n' "${!ext_files[@]}" | sort); do
+      echo "| .$ext | ${ext_files[$ext]} | ${ext_lines[$ext]} | ${ext_bytes[$ext]} |"
+    done
+  } >> "$DUMP_FILE"
 
-  echo "=== $dump_name dump created: $dump_file ($files_count files) ==="
+  echo "${C_OK}=== $mode dump created: $DUMP_FILE ($files_dumped files) ===${C_RESET}"
 }
 
-# ---------------------- Основная логика ----------------------
-MODE="${1:-}"
-case "$MODE" in
-  ""|all|full)
-    # Полный дамп всех источников + всех Cargo.toml + корневых файлов
-    ALL_FILES=()
-    # собрать src
-    SRC_VARS=(UWA_BROWSER_SRC UWA_BIN_SRC UWA_CONFIG_SRC UWA_MCP_SRC UWA_API_SRC UWA_TOOLS_SRC UWA_EXTRACT_SRC)
-echo "SRC_VARS: ${SRC_VARS[*]}"
-    while IFS= read -r line; do
-      [[ -n "$line" ]] && ALL_FILES+=("$line")
-    done < <(collect_group SRC_VARS)
-    # собрать toml
-    TOML_VARS=(UWA_BROWSER_TOML UWA_BIN_TOML UWA_CONFIG_TOML UWA_MCP_TOML UWA_API_TOML UWA_TOOLS_TOML UWA_EXTRACT_TOML)
-    while IFS= read -r line; do
-      [[ -n "$line" ]] && ALL_FILES+=("$line")
-    done < <(collect_group TOML_VARS)
-    # корневые файлы
-    for alias in MANIFEST CARGO_LOCK; do
-      path="${PATHS[$alias]:-}"
-      [[ -n "$path" ]] && ALL_FILES+=("$path")
-    done
-    # Убираем дупликаты и сортируем
-    IFS=$'\n' ALL_FILES=($(sort -u <<<"${ALL_FILES[*]}"))
-    unset IFS
-    create_dump "full" ALL_FILES
-    ;;
+# --- build_percrate_dumps ----------------------------------------------
+# Separate dump for each crate. Modular layout:
+#   crate dump group = [crate]_SRC + [crate]_TOML (+ config template)
+#                      + [crate]_TESTS        <-- tests glued together
+# To split tests into their own <crate>_tests_dump.md, set
+# PERCRATE_TESTS_SEPARATE=1 (or: PERCRATE_TESTS_SEPARATE=1 ./dump.sh percrate).
+build_percrate_dumps() {
+  local base crate_name
+  for base in UWA_CORE UWA_BROWSER UWA_BIN UWA_CONFIG UWA_MCP UWA_API UWA_TOOLS UWA_EXTRACT; do
+    crate_name="${base,,}"
 
-  percrate)
-echo "Entering percrate case"
-    # Дамп для каждого crate отдельно
-    # Список src переменных
-    SRC_VARS=(UWA_BROWSER_SRC UWA_BIN_SRC UWA_CONFIG_SRC UWA_MCP_SRC UWA_API_SRC UWA_TOOLS_SRC UWA_EXTRACT_SRC)
-echo "SRC_VARS: ${SRC_VARS[*]}"
-    for src_var in "${SRC_VARS[@]}"; do
-      # Убираем суффикс _SRC, чтобы получить базовое имя alias (в верхнем регистре)
-      base_name="${src_var%_SRC}"
-      # Имя для файла дампа в нижнем регистре
-      crate_name="${base_name,,}"
-      files=
-      while IFS= read -r line; do
-        [[ -n "$line" ]] && files+=("$line")
-      done < <(collect_from_alias "$src_var")
-      # Соответствующая переменная для Cargo.toml: base_name + _TOML
-      toml_var="${base_name}_TOML"
-      toml_path="${PATHS[$toml_var]:-}"
-      if [[ -n "$toml_path" ]]; then
-        while IFS= read -r line; do
-          [[ -n "$line" ]] && files+=("$line")
-        done < <(collect_from_alias "$toml_var")
-      fi
-      IFS=$'\n' files=($(sort -u <<<"${files[*]}"))
-      unset IFS
-      create_dump "$crate_name" files
-    done
-    ;;
+    # modular part 1: crate code + manifests (+ config template)
+    CRATE_GROUP=()
+    [[ -n "${PATHS[${base}_SRC]:-}"  ]] && CRATE_GROUP+=("${base}_SRC")
+    [[ -n "${PATHS[${base}_TOML]:-}" ]] && CRATE_GROUP+=("${base}_TOML")
+    if [[ "$base" == "UWA_BIN" && -n "${PATHS[UWA_BIN_CONFIG]:-}" ]]; then
+      CRATE_GROUP+=("UWA_BIN_CONFIG")
+    fi
 
-  stats)
-    # Показать статистику по группам без создания дампа
-    SRC_VARS=(UWA_BROWSER_SRC UWA_BIN_SRC UWA_CONFIG_SRC UWA_MCP_SRC UWA_API_SRC UWA_TOOLS_SRC UWA_EXTRACT_SRC)
-echo "SRC_VARS: ${SRC_VARS[*]}"
-    SRC_FILES=()
-    while IFS= read -r line; do
-      [[ -n "$line" ]] && SRC_FILES+=("$line")
-    done < <(collect_group SRC_VARS)
-    TOML_VARS=(UWA_BROWSER_TOML UWA_BIN_TOML UWA_CONFIG_TOML UWA_MCP_TOML UWA_API_TOML UWA_TOOLS_TOML UWA_EXTRACT_TOML)
-    TOML_FILES=()
-    while IFS= read -r line; do
-      [[ -n "$line" ]] && TOML_FILES+=("$line")
-    done < <(collect_group TOML_VARS)
-    ROOT_FILES=()
-    for alias in MANIFEST CARGO_LOCK; do
-      path="${PATHS[$alias]:-}"
-      [[ -n "$path" ]] && ROOT_FILES+=("$path")
-    done
-    print_stats "SOURCE (src файлы)" "${SRC_FILES[@]}"
-    print_stats "CONFIG (Cargo.toml crate'ов)" "${TOML_FILES[@]}"
-    print_stats "ROOT (MANIFEST, CARGO_LOCK)" "${ROOT_FILES[@]}"
-    ;;
-
-  *)
-    # Если аргумент не совпал со специальными режимами, трактуем как имя crate
-    crate_arg="$MODE"
-    # Попробуем найти алиас вида <crate>_SRC
-    src_alias="${crate_arg^^}_SRC"
-    toml_alias="${crate_arg^^}_TOML"
-    files=
-    src_path="${PATHS[$src_alias]:-}"
-    if [[ -n "$src_path" ]]; then
-      while IFS= read -r line; do
-        [[ -n "$line" ]] && files+=("$line")
-      done < <(collect_from_alias "$src_alias")
-      toml_path="${PATHS[$toml_alias]:-}"
-      if [[ -n "$toml_path" ]]; then
-        while IFS= read -r line; do
-          [[ -n "$line" ]] && files+=("$line")
-        done < <(collect_from_alias "$toml_alias")
+    if [[ "$PERCRATE_TESTS_SEPARATE" == "1" ]]; then
+      # modular split: tests of the crate as a separate dump
+      build_dump "$crate_name" "UWA ${crate_name//_/-} Dump" CRATE_GROUP
+      if [[ -n "${PATHS[${base}_TESTS]:-}" ]]; then
+        CRATE_TESTS_GROUP=("${base}_TESTS")
+        build_dump "${crate_name}_tests" "UWA ${crate_name//_/-} Tests Dump" CRATE_TESTS_GROUP
       fi
     else
-      # Если алиаса нет, считаем, что аргумент — прямой путь
-      if [[ -e "$crate_arg" ]]; then
-        files=("$crate_arg")
-      else
-        echo "Error: unknown mode or crate '$crate_arg'. Valid modes: all, full, percrate, stats, или имя crate (например, uwa-browser)." >&2
-        exit 2
-      fi
+      # modular part 2: tests of the crate glued into the same dump
+      [[ -n "${PATHS[${base}_TESTS]:-}" ]] && CRATE_GROUP+=("${base}_TESTS")
+      build_dump "$crate_name" "UWA ${crate_name//_/-} Dump" CRATE_GROUP
     fi
-    IFS=$'\n' files=($(sort -u <<<"${files[*]}"))
-    unset IFS
-    create_dump "$crate_arg" files
-    ;;
+  done
+}
+
+# --- build_crate_dump <crate-or-path> ----------------------------------
+# Dump of a single crate: [crate]_SRC + _TOML + _TESTS (+ config template).
+# If no aliases match, the argument is used as a direct file/dir path.
+build_crate_dump() {
+  local crate_arg="$1"
+  local stem
+  stem="${crate_arg^^}"; stem="${stem//-/_}"
+
+  if [[ -n "${PATHS[${stem}_SRC]:-}" ]]; then
+    CRATE_GROUP=("${stem}_SRC")
+    [[ -n "${PATHS[${stem}_TOML]:-}"  ]] && CRATE_GROUP+=("${stem}_TOML")
+    [[ -n "${PATHS[${stem}_TESTS]:-}" ]] && CRATE_GROUP+=("${stem}_TESTS")
+    if [[ "$stem" == "UWA_BIN" && -n "${PATHS[UWA_BIN_CONFIG]:-}" ]]; then
+      CRATE_GROUP+=("UWA_BIN_CONFIG")
+    fi
+  elif [[ -e "$crate_arg" ]]; then
+    # alias not found - register the path temporarily as an alias so the
+    # same collection code handles it (file or dir)
+    PATHS["__ARG_PATH__"]="$crate_arg"
+    CRATE_GROUP=("__ARG_PATH__")
+  else
+    echo "Usage: $0 [all|tests|source|full|percrate|stats|<crate>] (default: all)" >&2
+    exit 2
+  fi
+
+  # dump file name: lowercase, underscores (uwa-bin -> uwa_bin_dump.md)
+  local dump_name="${crate_arg,,}"
+  dump_name="${dump_name//-/_}"; dump_name="${dump_name//\//_}"
+  build_dump "$dump_name" "UWA $crate_arg Dump" CRATE_GROUP
+}
+
+# --- What to generate ---------------------------------------------------
+# Default (no args) - all three dumps, same as the original dump.sh.bak:
+# source_dump.md, tests_dump.md, full_dump.md
+MODE="${1:-all}"
+case "$MODE" in
+  all)      build_dump "source" "UWA Source Dump" SOURCE_GROUP; print_source_stats
+            build_dump "tests"  "UWA Tests Dump"  TESTS_GROUP;  print_tests_stats
+            build_dump "full"   "UWA Full Dump"   SOURCE_GROUP TESTS_GROUP ;;
+  tests)    build_dump "tests"  "UWA Tests Dump"  TESTS_GROUP;  print_tests_stats ;;
+  source)   build_dump "source" "UWA Source Dump" SOURCE_GROUP; print_source_stats ;;
+  full)     build_dump "full"   "UWA Full Dump"   SOURCE_GROUP TESTS_GROUP
+            print_source_stats; print_tests_stats ;;
+  percrate) build_percrate_dumps ;;
+  stats)    print_source_stats; print_tests_stats ;;
+  *)        build_crate_dump "$MODE" ;;
 esac

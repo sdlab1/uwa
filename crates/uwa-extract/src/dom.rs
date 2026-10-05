@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use scraper::{Html, Selector};
 use std::time::{Duration, Instant};
-use uwa_core::{Page, UwaError, Result};
+use uwa_core::{Page, Result, UwaError};
 
 /// A selector-driven extractor. All state comes from the caller (config).
 #[derive(Debug, Clone)]
@@ -24,11 +24,12 @@ impl DomExtractor {
     /// Extract text from a raw HTML document. Pure, no I/O. Testable in isolation.
     pub fn extract_from_html(&self, html: &str) -> Result<String> {
         let doc = Html::parse_document(html);
-        let sel = Selector::parse(&self.assistant_message)
-            .map_err(|e| UwaError::Extraction(format!("bad selector `{}`: {e}", self.assistant_message)))?;
+        let sel = Selector::parse(&self.assistant_message).map_err(|e| {
+            UwaError::Extraction(format!("bad selector `{}`: {e}", self.assistant_message))
+        })?;
         let last = doc
             .select(&sel)
-            .last()
+            .next_back()
             .ok_or_else(|| UwaError::Extraction("assistant message element not found".into()))?;
         Ok(last.text().collect::<Vec<_>>().join("").trim().to_string())
     }

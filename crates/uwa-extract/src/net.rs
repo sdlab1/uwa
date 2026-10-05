@@ -32,9 +32,7 @@ impl SseParser {
     pub fn feed(&mut self, chunk: &str) -> Vec<SseFrame> {
         self.buf.push_str(chunk);
         let mut out = Vec::new();
-        loop {
-            // Find a complete line in the buffer.
-            let Some(nl) = self.buf.find('\n') else { break };
+        while let Some(nl) = self.buf.find('\n') {
             let line = self.buf[..nl].trim_end_matches('\r').to_string();
             self.buf.drain(..=nl);
             if line.is_empty() {
@@ -59,8 +57,22 @@ impl SseParser {
     }
 
     /// Flush any pending frame at end-of-stream (some servers omit the final
-    /// blank line).
+    /// blank line). Also processes any data still buffered without a newline
+    /// terminator.
     pub fn finish(&mut self) -> Option<SseFrame> {
+        // Process any remaining line in the buffer (without trailing newline).
+        if !self.buf.is_empty() {
+            let line = self.buf.trim_end_matches('\r').to_string();
+            self.buf.clear();
+            if !line.is_empty() {
+                if let Some(rest) = line.strip_prefix("event:") {
+                    self.cur_event = Some(rest.trim_start().to_string());
+                } else if let Some(rest) = line.strip_prefix("data:") {
+                    self.cur_data.push(rest.trim_start().to_string());
+                }
+            }
+        }
+
         if self.cur_event.is_some() || !self.cur_data.is_empty() {
             let f = SseFrame {
                 event: self.cur_event.take(),
@@ -199,6 +211,172 @@ fn make_seg(s: &str) -> Segment {
     }
 }
 
+// Net-side extractor: subscribes to `NetworkEvent`s, matches URL patterns,
+// decodes SSE or JSON bodies, and produces an async stream of deltas.
+
+use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
+use std::time::Duration;
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
+use uwa_core::{NetworkEvent, Result};
+
+/// TOML-configurable rules for matching a response and pulling text out of it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NetRules {
+    /// Substring patterns to match against `response.url`. All must match.
+    pub url_contains: Vec<String>,
+    /// MIME must contain one of these (e.g. `text/event-stream`, `application/json`).
+    pub mime_contains: Vec<String>,
+    /// How to decode the body.
+    pub decoder: NetDecoder,
+    /// Stop reading after this long without a new chunk.
+    #[serde(default = "default_idle")]
+    pub idle_timeout_ms: u64,
+}
+
+fn default_idle() -> u64 {
+    30_000
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum NetDecoder {
+    /// Parse body as SSE; extract text at `json_path` from each frame's data.
+    /// Special path `__raw__` means: use frame data verbatim.
+    Sse { json_path: String },
+    /// Parse body as a single JSON document; extract at `json_path`.
+    Json { json_path: String },
+}
+
+impl NetRules {
+    pub fn matches(&self, url: &str, mime: &str) -> bool {
+        self.url_contains.iter().all(|p| url.contains(p.as_str()))
+            && self.mime_contains.iter().any(|p| mime.contains(p.as_str()))
+    }
+}
+
+/// Stream item: an incremental piece of text.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NetDelta(pub String);
+
+#[async_trait]
+pub trait NetExtractor: Send + Sync {
+    /// Subscribe to `NetworkEvent`s from the given page and produce deltas.
+    /// The stream ends when the extractor considers the response finished
+    /// (idle timeout, `[DONE]`, or explicit `Finished` for the same request).
+    async fn deltas(
+        &self,
+        page: &dyn uwa_core::Page,
+        rules: &NetRules,
+    ) -> Result<ReceiverStream<NetDelta>>;
+}
+
+/// The default implementation. Stateless; safe to share.
+pub struct DefaultNetExtractor;
+
+#[async_trait]
+impl NetExtractor for DefaultNetExtractor {
+    async fn deltas(
+        &self,
+        page: &dyn uwa_core::Page,
+        rules: &NetRules,
+    ) -> Result<ReceiverStream<NetDelta>> {
+        let mut rx = page.network_events().await?;
+        let rules = rules.clone();
+        let (tx, out_rx) = mpsc::channel::<NetDelta>(64);
+
+        tokio::spawn(async move {
+            let idle = Duration::from_millis(rules.idle_timeout_ms);
+            let mut sse = SseParser::new();
+            let mut active_url: Option<String> = None;
+
+            loop {
+                let ev = match tokio::time::timeout(idle, rx.recv()).await {
+                    Ok(Ok(ev)) => ev,
+                    Ok(Err(_)) => break, // channel closed
+                    Err(_) => break,     // idle
+                };
+                match ev {
+                    NetworkEvent::ResponseBody { url, body, mime } => {
+                        if !rules.matches(&url, &mime) {
+                            continue;
+                        }
+                        active_url = Some(url.clone());
+                        if mime.contains("event-stream") {
+                            for frame in sse.feed(&body) {
+                                if let Some(s) = decode_sse_frame(&frame.data, &rules.decoder) {
+                                    if !s.is_empty() && tx.send(NetDelta(s)).await.is_err() {
+                                        return;
+                                    }
+                                }
+                                if frame.data.trim() == "[DONE]" {
+                                    let _ = tx.send(NetDelta(String::new())).await;
+                                    return;
+                                }
+                            }
+                        } else {
+                            if let Some(s) = decode_json(&body, &rules.decoder) {
+                                if !s.is_empty() && tx.send(NetDelta(s)).await.is_err() {
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                    NetworkEvent::Finished { request_id: _ } => {
+                        if active_url.is_some() {
+                            if let Some(tail) = sse.finish() {
+                                if let Some(s) = decode_sse_frame(&tail.data, &rules.decoder) {
+                                    if !s.is_empty() {
+                                        let _ = tx.send(NetDelta(s)).await;
+                                    }
+                                }
+                            }
+                            return;
+                        }
+                    }
+                }
+            }
+        });
+
+        Ok(ReceiverStream::new(out_rx))
+    }
+}
+
+fn decode_sse_frame(data: &str, decoder: &NetDecoder) -> Option<String> {
+    match decoder {
+        NetDecoder::Sse { json_path } => {
+            if json_path == "__raw__" {
+                return Some(data.to_string());
+            }
+            let v: Value = serde_json::from_str(data).ok()?;
+            json_path_str(&v, json_path)
+        }
+        NetDecoder::Json { json_path } => {
+            let v: Value = serde_json::from_str(data).ok()?;
+            json_path_str(&v, json_path)
+        }
+    }
+}
+
+fn decode_json(body: &str, decoder: &NetDecoder) -> Option<String> {
+    let path = match decoder {
+        NetDecoder::Sse { json_path } | NetDecoder::Json { json_path } => json_path,
+    };
+    let v: Value = serde_json::from_str(body).ok()?;
+    json_path_str(&v, path)
+}
+
+/// A reusable helper: collect a `ReceiverStream<NetDelta>` into a single String.
+pub async fn collect_deltas(mut stream: ReceiverStream<NetDelta>) -> String {
+    use tokio_stream::StreamExt;
+    let mut out = String::new();
+    while let Some(NetDelta(s)) = stream.next().await {
+        out.push_str(&s);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -289,5 +467,64 @@ mod tests {
     fn json_path_empty_is_none() {
         let v = json!({});
         assert!(json_path_str(&v, "").is_none());
+    }
+
+    #[test]
+    fn rules_match_url_and_mime() {
+        let r = NetRules {
+            url_contains: vec!["/backend-api/conversation".into()],
+            mime_contains: vec!["text/event-stream".into()],
+            decoder: NetDecoder::Sse {
+                json_path: "__raw__".into(),
+            },
+            idle_timeout_ms: 1000,
+        };
+        assert!(r.matches(
+            "https://chatgpt.com/backend-api/conversation/xyz",
+            "text/event-stream"
+        ));
+        assert!(!r.matches(
+            "https://chatgpt.com/backend-api/conversation/xyz",
+            "application/json"
+        ));
+        assert!(!r.matches("https://chatgpt.com/other", "text/event-stream"));
+    }
+
+    #[test]
+    fn sse_json_path_extracts_content() {
+        let frame = r#"{"delta":{"content":"hello"}}"#;
+        let d = NetDecoder::Sse {
+            json_path: "delta.content".into(),
+        };
+        assert_eq!(decode_sse_frame(frame, &d).as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn sse_raw_passthrough() {
+        let frame = "plain text chunk";
+        let d = NetDecoder::Sse {
+            json_path: "__raw__".into(),
+        };
+        assert_eq!(
+            decode_sse_frame(frame, &d).as_deref(),
+            Some("plain text chunk")
+        );
+    }
+
+    #[test]
+    fn json_body_extraction() {
+        let body = serde_json::to_string(&json!({"answer":{"text":"42"}})).unwrap();
+        let d = NetDecoder::Json {
+            json_path: "answer.text".into(),
+        };
+        assert_eq!(decode_json(&body, &d).as_deref(), Some("42"));
+    }
+
+    #[test]
+    fn decode_bad_json_is_none() {
+        let d = NetDecoder::Json {
+            json_path: "a".into(),
+        };
+        assert!(decode_json("not json", &d).is_none());
     }
 }

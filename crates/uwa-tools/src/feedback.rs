@@ -26,7 +26,7 @@ pub fn compose_browser_turn(messages: &[ChatMessage]) -> String {
                 if !out.is_empty() {
                     out.push_str("\n\n");
                 }
-                out.push_str(m.content.as_deref().unwrap_or(""));
+                out.push_str(&m.content_text());
             }
             Role::Tool => {
                 if !out.is_empty() {
@@ -34,7 +34,7 @@ pub fn compose_browser_turn(messages: &[ChatMessage]) -> String {
                 }
                 out.push_str(&render_tool_response(
                     m.tool_call_id.as_deref().unwrap_or(""),
-                    m.content.as_deref().unwrap_or(""),
+                    &m.content_text(),
                 ));
             }
             _ => {}

@@ -147,20 +147,14 @@ pub async fn run_chat_loop(
             content: if parsed.text.is_empty() {
                 None
             } else {
-                Some(parsed.text)
+                Some(MessageContent::Text(parsed.text))
             },
             name: None,
             tool_call_id: None,
             tool_calls: Some(parsed.calls.iter().map(to_openai_ref).collect()),
         });
         for r in tool_responses {
-            conversation.push(ChatMessage {
-                role: Role::Tool,
-                content: Some(r),
-                name: None,
-                tool_call_id: None,
-                tool_calls: None,
-            });
+            conversation.push(ChatMessage::text(Role::Tool, r));
         }
     }
 
@@ -207,7 +201,7 @@ fn build_non_streaming(
             if outcome.text.is_empty() {
                 None
             } else {
-                Some(outcome.text)
+                Some(MessageContent::Text(outcome.text))
             },
             Some(
                 outcome
@@ -226,7 +220,7 @@ fn build_non_streaming(
             ),
         )
     } else {
-        (Some(outcome.text), None)
+        (Some(MessageContent::Text(outcome.text)), None)
     };
     let message = ChatMessage {
         role: Role::Assistant,

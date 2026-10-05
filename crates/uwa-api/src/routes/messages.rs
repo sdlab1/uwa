@@ -7,7 +7,7 @@ use axum::Json;
 use serde_json::json;
 
 use uwa_core::types::anthropic::MessagesRequest;
-use uwa_core::types::openai::{ChatCompletionRequest, ChatMessage};
+use uwa_core::types::openai::{ChatCompletionRequest, ChatMessage, MessageContent};
 use uwa_core::types::Role;
 
 use crate::error::ApiResult;
@@ -20,24 +20,18 @@ pub async fn messages(
     // Convert Anthropic -> OpenAI.
     let mut messages = Vec::new();
     if let Some(s) = req.system {
-        messages.push(ChatMessage {
-            role: Role::System,
-            content: Some(s),
-            name: None,
-            tool_call_id: None,
-            tool_calls: None,
-        });
+        messages.push(ChatMessage::text(Role::System, s));
     }
     for m in req.messages {
         let content = match m.content {
-            serde_json::Value::String(s) => Some(s),
-            serde_json::Value::Array(blocks) => Some(
+            serde_json::Value::String(s) => Some(MessageContent::Text(s)),
+            serde_json::Value::Array(blocks) => Some(MessageContent::Text(
                 blocks
                     .into_iter()
                     .filter_map(|b| b.get("text").and_then(|t| t.as_str()).map(str::to_string))
                     .collect::<Vec<_>>()
                     .join("\n"),
-            ),
+            )),
             _ => None,
         };
         messages.push(ChatMessage {

@@ -24,6 +24,11 @@ pub trait Page: Send + Sync {
     async fn type_text(&self, selector: &str, text: &str) -> Result<()>;
     /// Subscribe to CDP network events (SSE/JSON bodies).
     async fn network_events(&self) -> Result<tokio::sync::broadcast::Receiver<NetworkEvent>>;
+    /// Register a script that runs on every navigation *before* page JS.
+    /// Default: no-op (test mocks don't need stealth).
+    async fn eval_early(&self, _js: &str) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// A network event relevant to response extraction.
