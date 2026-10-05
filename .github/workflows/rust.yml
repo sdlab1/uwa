@@ -10,13 +10,58 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
-
+  lint:
     runs-on: ubuntu-latest
-
     steps:
-    - uses: actions/checkout@v4
-    - name: Build
-      run: cargo build --verbose
-    - name: Run tests
-      run: cargo test --verbose
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: rustfmt
+        run: cargo fmt --all -- --check
+      - name: clippy (default features)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: clippy (all features)
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: no dead code escapes
+        run: "! grep -rn 'allow(dead_code)' --include='*.rs' . --exclude-dir=target"
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: default
+            args: ""
+          - name: snapshot
+            args: "--features uwa-providers/snapshot"
+          - name: mcp-http
+            args: "--features uwa-mcp/mcp-http"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --workspace --all-targets ${{ matrix.args }}
+      - name: Test
+        run: cargo test --workspace --all-targets ${{ matrix.args }}
+      - name: Doc tests
+        run: cargo test --workspace --doc
+
+  cdp-integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - id: chrome
+        uses: browser-actions/setup-chrome@v1
+      - name: Live Chromium tests
+        env:
+          UWA_CHROMIUM: "1"
+          UWA_CHROME_BIN: ${{ steps.chrome.outputs.chrome-path }}
+        # Live CDP talks to a real browser: serialize them so two scenarios
+        # never fight over the same profile or debugging port.
+        run: cargo test -p uwa-browser -- --include-ignored --test-threads=1

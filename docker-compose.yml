@@ -1,0 +1,38 @@
+services:
+  # Chromium started exactly like the daemon expects: headless, debugging
+  # port open to the compose network, no keyring (which would block it).
+  chromium:
+    build: .
+    entrypoint: ["/usr/bin/chromium"]
+    command:
+      - --headless=new
+      - --no-sandbox
+      - --disable-gpu
+      - --disable-dev-shm-usage
+      - --password-store=basic
+      - --remote-debugging-address=0.0.0.0
+      - --remote-debugging-port=9222
+      - --user-data-dir=/data
+      - about:blank
+    volumes: [chromium-data:/data]
+    networks: [uwa]
+
+  uwa:
+    build: .
+    depends_on: [chromium]
+    ports:
+      - "8080:8080"
+      - "8081:8081"   # MCP over HTTP+SSE (port + 1), feature mcp-http
+    environment:
+      # `CdpTransport` resolves this http endpoint through `/json/version`.
+      UWA_CHROMIUM_WS: http://chromium:9222
+      RUST_LOG: info,uwa=debug
+    volumes:
+      - ./crates/uwa-bin/config.example.toml:/etc/uwa/uwa.toml:ro
+    networks: [uwa]
+
+volumes:
+  chromium-data: {}
+
+networks:
+  uwa: {}
