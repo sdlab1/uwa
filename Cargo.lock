@@ -2701,6 +2701,9 @@ dependencies = [
  "uwa-api",
  "uwa-config",
  "uwa-core",
+ "uwa-mcp",
+ "uwa-resilience",
+ "uwa-session",
 ]
 
 [[package]]

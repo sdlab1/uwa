@@ -1,77 +1,173 @@
-//! Test-server helpers: one canned [`Config`] and an `axum_test` server
-//! over [`uwa_api::router`].
+//! Fluent builder for `AppState` + an `axum_test::TestServer`.
 
 use std::sync::Arc;
+use uwa_api::{router, AppState, ProviderRegistry};
 use uwa_config::Config;
+use uwa_core::{SiteProvider, Transport};
+use uwa_mcp::ToolRouter;
+use uwa_resilience::semaphore::ProviderSemaphores;
+use uwa_session::SessionManager;
 
-/// Wrap an [`AppState`](uwa_api::AppState) in an [`axum_test::TestServer`].
+use crate::config::{config_with_key, default_config, TEST_AUTH_HEADER};
+use crate::transport::MockTransport;
+
+/// Wrap an [`AppState`] in an [`axum_test::TestServer`].
 ///
 /// Panics if the router itself cannot be built — that is a wiring bug, not
 /// a test outcome.
-pub fn test_server(state: uwa_api::AppState) -> axum_test::TestServer {
-    axum_test::TestServer::new(uwa_api::router(state)).expect("router builds")
+pub fn test_server(state: AppState) -> axum_test::TestServer {
+    axum_test::TestServer::new(router(state)).expect("router builds")
 }
 
-/// Config with a single `chatgpt` provider and no API key.
-pub fn default_config() -> Arc<Config> {
-    Arc::new(
-        Config::load_from_str(
-            r##"
-            [server]
-            bind = "127.0.0.1"
-            port = 8080
+/// Builds an [`AppState`] out of pieces; every `with_*` is optional.
+///
+/// Defaults are deliberately usable: a `chatgpt` config, one healthy tab
+/// (the pipeline needs a tab to type into) and default runtime services.
+pub struct AppBuilder {
+    config: Arc<Config>,
+    providers: Vec<Arc<dyn SiteProvider>>,
+    transport: Arc<dyn Transport>,
+    tool_router: Option<Arc<ToolRouter>>,
+    sessions: Option<Arc<SessionManager>>,
+    semaphores: Option<Arc<ProviderSemaphores>>,
+    keyed: bool,
+}
 
-            [model_aliases]
-            "gpt-4o" = "chatgpt"
+impl AppBuilder {
+    pub fn new() -> Self {
+        Self {
+            config: default_config(),
+            providers: Vec::new(),
+            transport: Arc::new(MockTransport::with_n_tabs(1)),
+            tool_router: None,
+            sessions: None,
+            semaphores: None,
+            keyed: false,
+        }
+    }
 
-            [providers.chatgpt]
-            name = "chatgpt"
-            url_patterns = ["https://chatgpt.com/*"]
-            capabilities = { streams = true, tool_calls = true, vision = false }
-            [providers.chatgpt.selectors]
-            input = "#prompt"
-            send_button = "button.send"
-            stop_button = "button.stop"
-            assistant_message = "[data-role=assistant]"
-            "##,
-        )
-        .expect("default test config must parse"),
-    )
+    /// Swap in [`config_with_key`] (or any config that needs a header).
+    pub fn with_key_auth(mut self) -> Self {
+        self.keyed = true;
+        self
+    }
+
+    pub fn with_config(mut self, c: Arc<Config>) -> Self {
+        self.config = c;
+        self
+    }
+
+    pub fn with_transport(mut self, t: Arc<dyn Transport>) -> Self {
+        self.transport = t;
+        self
+    }
+
+    pub fn with_provider(mut self, p: Arc<dyn SiteProvider>) -> Self {
+        self.providers.push(p);
+        self
+    }
+
+    pub fn with_tool_router(mut self, tr: Arc<ToolRouter>) -> Self {
+        self.tool_router = Some(tr);
+        self
+    }
+
+    pub fn with_sessions(mut self, sm: Arc<SessionManager>) -> Self {
+        self.sessions = Some(sm);
+        self
+    }
+
+    pub fn with_semaphores(mut self, s: Arc<ProviderSemaphores>) -> Self {
+        self.semaphores = Some(s);
+        self
+    }
+
+    pub fn build_state(self) -> AppState {
+        let config = if self.keyed {
+            config_with_key()
+        } else {
+            self.config
+        };
+        let mut registry = ProviderRegistry::new();
+        for p in self.providers {
+            registry.register(p);
+        }
+        let mut state = AppState::minimal(config, Arc::new(registry), self.transport);
+        if let Some(tr) = self.tool_router {
+            state = state.with_tool_router(tr);
+        }
+        if let Some(sm) = self.sessions {
+            state = state.with_sessions(sm);
+        }
+        if let Some(s) = self.semaphores {
+            state = state.with_semaphores(s);
+        }
+        state
+    }
+
+    pub fn build(self) -> TestApp {
+        let state = self.build_state();
+        let server = test_server(state.clone());
+        TestApp { server, state }
+    }
+}
+
+impl Default for AppBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// A running app: the HTTP server plus the state it was built from.
+pub struct TestApp {
+    pub server: axum_test::TestServer,
+    pub state: AppState,
+}
+
+impl TestApp {
+    /// `("Authorization", "Bearer k")` for configs built with [`config_with_key`].
+    pub fn auth(&self) -> (&'static str, &'static str) {
+        ("Authorization", TEST_AUTH_HEADER)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::provider::MockProvider;
-    use crate::transport::MockTransport;
-    use uwa_api::{AppState, ProviderRegistry};
-
-    fn default_state() -> AppState {
-        let mut registry = ProviderRegistry::new();
-        registry.register(Arc::new(MockProvider::new("chatgpt").with_answer("hi")));
-        AppState::minimal(
-            default_config(),
-            Arc::new(registry),
-            Arc::new(MockTransport::with_n_tabs(1)),
-        )
-    }
-
-    #[test]
-    fn default_config_parses_with_the_chatgpt_provider() {
-        let cfg = default_config();
-        assert!(cfg.providers.contains_key("chatgpt"));
-        assert_eq!(cfg.server.port, 8080);
-        assert!(cfg.server.api_key.is_none());
-    }
+    use serde_json::json;
 
     #[tokio::test]
     async fn test_server_answers_health_and_models() {
-        let server = test_server(default_state());
-        server.get("/healthz").await.assert_status_ok();
-        let resp = server.get("/v1/models").await;
+        let app = AppBuilder::new()
+            .with_provider(Arc::new(MockProvider::new("chatgpt").with_answer("hi")))
+            .build();
+        app.server.get("/healthz").await.assert_status_ok();
+        let resp = app.server.get("/v1/models").await;
         resp.assert_status_ok();
         let models: serde_json::Value = resp.json();
         assert_eq!(models["data"][0]["id"].as_str(), Some("gpt-4o"));
         assert_eq!(models["data"][0]["owned_by"].as_str(), Some("chatgpt"));
+    }
+
+    #[tokio::test]
+    async fn keyed_config_rejects_anonymous_requests() {
+        let app = AppBuilder::new()
+            .with_key_auth()
+            .with_provider(Arc::new(MockProvider::new("chatgpt").with_answer("hi")))
+            .build();
+        let anon = app
+            .server
+            .post("/v1/chat/completions")
+            .json(&json!({"model": "gpt-4o", "messages": []}));
+        assert_eq!(anon.await.status_code(), 401);
+
+        let (name, value) = app.auth();
+        let ok = app
+            .server
+            .post("/v1/chat/completions")
+            .add_header(name, value)
+            .json(&json!({"model": "gpt-4o", "messages": [{"role": "user", "content": "x"}]}));
+        ok.await.assert_status_ok();
     }
 }
