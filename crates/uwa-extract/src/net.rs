@@ -1,10 +1,20 @@
 //! Network-side extraction primitives.
 //!
 //! `SseParser` is a *pure* incremental parser: feed it bytes, get frames.
-//! It doesn't know about CDP, HTTP or async — that's what makes it easy to
+//! It knows nothing about CDP, HTTP or async — that's what makes it easy to
 //! test and reuse.
+//!
+//! [`NetRules`] and [`NetDecoder`] live in `uwa_core::net`; we re-export
+//! them so downstream crates have a single import path.
 
+use async_trait::async_trait;
 use serde_json::Value;
+use std::time::Duration;
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
+use uwa_core::{NetworkEvent, Result};
+
+pub use uwa_core::net::{NetDecoder, NetRules};
 
 /// One parsed SSE frame.
 #[derive(Debug, Clone, PartialEq)]
@@ -213,16 +223,6 @@ fn make_seg(s: &str) -> Segment {
 
 // Net-side extractor: subscribes to `NetworkEvent`s, matches URL patterns,
 // decodes SSE or JSON bodies, and produces an async stream of deltas.
-
-use async_trait::async_trait;
-use std::time::Duration;
-use tokio::sync::mpsc;
-use tokio_stream::wrappers::ReceiverStream;
-use uwa_core::{NetworkEvent, Result};
-
-// `NetRules` / `NetDecoder` are pure config shared with uwa-config and
-// uwa-providers; they live in uwa-core so every crate sees the same shape.
-pub use uwa_core::net::{NetDecoder, NetRules};
 
 /// Stream item: an incremental piece of text.
 #[derive(Debug, Clone, PartialEq)]

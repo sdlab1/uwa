@@ -7,7 +7,6 @@ license.workspace = true
 
 [dependencies]
 uwa-core.workspace = true
-uwa-config.workspace = true
 async-trait.workspace = true
 tokio = { workspace = true, features = ["sync", "time", "rt", "macros"] }
 tokio-stream.workspace = true

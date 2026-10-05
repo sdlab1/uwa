@@ -2601,7 +2601,6 @@ dependencies = [
  "tokio-stream",
  "tracing",
  "url",
- "uwa-config",
  "uwa-core",
 ]
 

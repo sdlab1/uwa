@@ -15,8 +15,7 @@ use crate::net::{DefaultNetExtractor, NetDelta, NetExtractor, NetRules};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio_stream::StreamExt;
-use uwa_config::ExtractionStrategy;
-use uwa_core::{Page, Result};
+use uwa_core::{ExtractionStrategy, Page, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
