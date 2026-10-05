@@ -2694,10 +2694,11 @@ name = "uwa-testkit"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "futures",
+ "axum-test",
  "serde_json",
  "tokio",
  "url",
+ "uwa-api",
  "uwa-config",
  "uwa-core",
 ]
