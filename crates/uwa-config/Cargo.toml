@@ -5,6 +5,12 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[features]
+default = []
+# Lets dependents build a [`ProviderCfg`] without repeating its fields;
+# see `ProviderCfg::default_for_test`.
+test-helpers = []
+
 [dependencies]
 uwa-core.workspace = true
 serde.workspace = true

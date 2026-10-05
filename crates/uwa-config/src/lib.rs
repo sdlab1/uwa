@@ -90,6 +90,30 @@ pub struct ProviderCfg {
     pub selectors_version: Option<String>,
 }
 
+impl ProviderCfg {
+    /// Test-only constructor: a plausible provider config for `name`, so
+    /// tests do not repeat eleven fields. Available in-crate (`test`) and
+    /// to dependents through the `test-helpers` feature.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn default_for_test(name: &str) -> Self {
+        Self {
+            name: name.into(),
+            url_patterns: vec![format!("https://{name}.com/*")],
+            capabilities: Capabilities {
+                streams: true,
+                tool_calls: true,
+                vision: false,
+                max_context_tokens: None,
+            },
+            selectors: Selectors::default(),
+            extraction: ExtractionStrategy::DomOnly,
+            net: None,
+            finisher: uwa_core::FinisherTuning::default(),
+            selectors_version: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Selectors {
     pub input: Option<String>,
@@ -224,6 +248,17 @@ mod tests {
             cfg.server.pid_file.as_deref(),
             Some(std::path::Path::new("run/uwa.pid"))
         );
+    }
+
+    #[test]
+    fn default_for_test_is_a_usable_provider() {
+        let p = ProviderCfg::default_for_test("chatgpt");
+        assert_eq!(p.name, "chatgpt");
+        assert_eq!(p.url_patterns, vec!["https://chatgpt.com/*".to_string()]);
+        assert!(p.capabilities.streams);
+        assert_eq!(p.extraction, ExtractionStrategy::DomOnly);
+        assert!(p.net.is_none());
+        assert_eq!(p.finisher, uwa_core::FinisherTuning::default());
     }
 
     #[test]

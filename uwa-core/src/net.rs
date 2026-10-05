@@ -1,4 +1,10 @@
-//! Pure network/extraction config shared by uwa-config, uwa-extract, uwa-providers.
+//! Pure network/extraction config types shared by `uwa-config`,
+//! `uwa-extract`, `uwa-providers`.
+//!
+//! No I/O, no async, no dependencies beyond `serde`. This is the single
+//! source of truth for [`ExtractionStrategy`], [`NetRules`], [`NetDecoder`]
+//! and [`FinisherTuning`].
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -11,7 +17,9 @@ pub enum ExtractionStrategy {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct NetRules {
+    /// Substring patterns to match against `response.url`. All must match.
     pub url_contains: Vec<String>,
+    /// MIME must contain one of these (e.g. `text/event-stream`).
     pub mime_contains: Vec<String>,
     pub decoder: NetDecoder,
     #[serde(default = "default_idle")]
@@ -25,7 +33,10 @@ fn default_idle() -> u64 {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum NetDecoder {
+    /// Parse body as SSE; `json_path` extracts text from each frame's `data`.
+    /// `__raw__` means: use frame data verbatim.
     Sse { json_path: String },
+    /// Parse body as one JSON doc; `json_path` extracts text.
     Json { json_path: String },
 }
 
@@ -36,6 +47,7 @@ impl NetRules {
     }
 }
 
+/// Per-provider finisher knobs. All values in milliseconds.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct FinisherTuning {
     #[serde(default = "d_stable")]
@@ -85,6 +97,14 @@ mod tests {
             },
             idle_timeout_ms: 1_000,
         }
+    }
+
+    #[test]
+    fn finisher_defaults_round_trip() {
+        let t = FinisherTuning::default();
+        let toml = toml_edit::ser::to_string(&t).expect("serialize");
+        let back: FinisherTuning = toml_edit::de::from_str(&toml).expect("deserialize");
+        assert_eq!(t, back);
     }
 
     #[test]

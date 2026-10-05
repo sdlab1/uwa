@@ -17,3 +17,4 @@ tokio.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
+toml_edit = "0.22"
