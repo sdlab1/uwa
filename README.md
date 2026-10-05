@@ -124,4 +124,4 @@ UWA_CHROMIUM=1 cargo test -p uwa-browser -- --include-ignored --test-threads=1
 
 Shared test doubles — `MockPage`, `MockTransport`, `MockProvider`,
 `MockToolProvider`, `test_server` — live in `crates/uwa-testkit`.
-CI runs the same commands (see [`.github/workflows/rust.yml`](.github/workflows/rust.yml)).
+CI runs the same commands (see [`.github/workflows/ci.yml`](.github/workflows/ci.yml)).

@@ -1,4 +1,4 @@
-name: Rust
+name: ci
 
 on:
   push:
@@ -65,3 +65,18 @@ jobs:
         # Live CDP talks to a real browser: serialize them so two scenarios
         # never fight over the same profile or debugging port.
         run: cargo test -p uwa-browser -- --include-ignored --test-threads=1
+
+  proptest:
+    # Only on push to main: 5000 cases per property is too slow for a PR.
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Parser properties (long)
+        env:
+          PROPTEST_CASES: "5000"
+        run: |
+          cargo test -p uwa-tools --test proptest_parser
+          cargo test -p uwa-extract --test proptest_net
