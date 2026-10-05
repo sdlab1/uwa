@@ -26,7 +26,9 @@ pub mod http;
 
 pub use bridge::McpClientProvider;
 pub use client::{McpClient, StdioClient};
-pub use handlers::{DispatcherFn, WebChatHandler, WebPromptHandler, WebTabsHandler, TABS_URI};
+pub use handlers::{
+    DispatcherFn, ProvidersFn, WebChatHandler, WebPromptHandler, WebTabsHandler, TABS_URI,
+};
 pub use protocol::{
     CallToolResult, GetPromptParams, GetPromptResult, InitializeParams, InitializeResult,
     JsonRpcError, JsonRpcRequest, JsonRpcResponse, ListPromptsResult, ListResourcesResult,

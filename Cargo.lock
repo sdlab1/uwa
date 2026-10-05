@@ -2528,9 +2528,15 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uwa-api",
+ "uwa-browser",
  "uwa-config",
  "uwa-core",
+ "uwa-lifecycle",
  "uwa-mcp",
+ "uwa-providers",
+ "uwa-resilience",
+ "uwa-session",
+ "uwa-stealth",
 ]
 
 [[package]]

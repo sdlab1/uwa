@@ -15,3 +15,8 @@ pub fn circuit_state(provider: &str, state: &'static str) {
     };
     gauge!("uwa_circuit_state", "provider" => provider.to_string()).set(v);
 }
+
+/// Publish how many conversations the session manager is holding.
+pub fn active_sessions(n: usize) {
+    gauge!("uwa_active_sessions").set(n as f64);
+}

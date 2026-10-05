@@ -9,10 +9,20 @@ license.workspace = true
 name = "uwa"
 path = "src/main.rs"
 
+[features]
+# Serve the MCP server over HTTP+SSE on `port + 1`.
+mcp-http = ["uwa-mcp/mcp-http"]
+
 [dependencies]
 uwa-core.workspace = true
 uwa-config = { path = "../uwa-config" }
 uwa-api = { path = "../uwa-api" }
+uwa-lifecycle = { path = "../uwa-lifecycle" }
+uwa-providers = { path = "../uwa-providers" }
+uwa-browser = { path = "../uwa-browser" }
+uwa-stealth = { path = "../uwa-stealth" }
+uwa-session = { path = "../uwa-session" }
+uwa-resilience = { path = "../uwa-resilience" }
 tokio.workspace = true
 anyhow = { workspace = true }
 tracing = { workspace = true }

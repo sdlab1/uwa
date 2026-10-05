@@ -3,6 +3,8 @@ bind = "127.0.0.1"
 port = 8080
 api_key = "change-me"
 request_timeout_ms = 120000
+# Single-instance guard. Omit to use `uwa.pid` in the working directory.
+# pid_file = "uwa.pid"
 
 [model_aliases]
 "gpt-4o" = "chatgpt"

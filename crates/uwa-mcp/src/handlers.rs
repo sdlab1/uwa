@@ -139,9 +139,20 @@ impl WebTabsHandler {
     }
 }
 
+/// Providers the daemon knows about, for prompt descriptions and validation.
+pub type ProvidersFn = Arc<dyn Fn() -> Vec<String> + Send + Sync>;
+
 /// Prompt `ask` — the client renders it into a user message and sends it
 /// itself; no browser round trip happens here.
-pub struct WebPromptHandler;
+pub struct WebPromptHandler {
+    providers: ProvidersFn,
+}
+
+impl WebPromptHandler {
+    pub fn new(providers: ProvidersFn) -> Self {
+        Self { providers }
+    }
+}
 
 #[async_trait]
 impl McpHandler for WebPromptHandler {
@@ -150,14 +161,30 @@ impl McpHandler for WebPromptHandler {
     }
 
     fn prompts(&self) -> Vec<McpPrompt> {
+        let names = (self.providers)();
+        let description = if names.is_empty() {
+            "Ask a web LLM a question.".to_string()
+        } else {
+            format!(
+                "Ask one of the configured web LLMs ({}) a question.",
+                names.join(", ")
+            )
+        };
         vec![McpPrompt {
             name: "ask".into(),
-            description: Some("Ask the connected web LLM a question.".into()),
-            arguments: vec![McpPromptArgument {
-                name: "question".into(),
-                description: Some("Question to ask.".into()),
-                required: Some(true),
-            }],
+            description: Some(description),
+            arguments: vec![
+                McpPromptArgument {
+                    name: "question".into(),
+                    description: Some("Question to ask.".into()),
+                    required: Some(true),
+                },
+                McpPromptArgument {
+                    name: "provider".into(),
+                    description: Some("Provider name; defaults to the only configured one.".into()),
+                    required: Some(false),
+                },
+            ],
         }]
     }
 
@@ -170,6 +197,14 @@ impl McpHandler for WebPromptHandler {
             .and_then(Value::as_str)
             .filter(|q| !q.is_empty())
             .ok_or_else(|| UwaError::BadRequest("missing `question`".into()))?;
+        if let Some(provider) = args.get("provider").and_then(Value::as_str) {
+            let known = (self.providers)();
+            if !known.iter().any(|p| p == provider) {
+                return Err(UwaError::BadRequest(format!(
+                    "unknown provider `{provider}`"
+                )));
+            }
+        }
         Ok(GetPromptResult {
             description: Some(question.to_string()),
             messages: vec![PromptMessage {
@@ -214,14 +249,33 @@ mod tests {
 
     #[tokio::test]
     async fn ask_prompt_renders_the_question() {
-        let h = WebPromptHandler;
-        assert_eq!(h.prompts()[0].name, "ask");
+        let h = WebPromptHandler::new(Arc::new(|| vec!["chatgpt".into(), "claude".into()]));
+        let prompt = &h.prompts()[0];
+        assert_eq!(prompt.name, "ask");
+        assert!(
+            prompt
+                .description
+                .as_deref()
+                .is_some_and(|d| d.contains("chatgpt, claude")),
+            "description: {:?}",
+            prompt.description
+        );
+
         let r = h
             .get_prompt("ask", json!({"question": "what now?"}))
             .await
             .unwrap();
         assert_eq!(r.messages.len(), 1);
         assert_eq!(r.messages[0].role, "user");
+
+        let ok = h
+            .get_prompt("ask", json!({"question": "hi", "provider": "chatgpt"}))
+            .await;
+        assert!(ok.is_ok());
+        let unknown = h
+            .get_prompt("ask", json!({"question": "hi", "provider": "nope"}))
+            .await;
+        assert!(unknown.is_err());
         assert!(h.get_prompt("ask", json!({})).await.is_err());
         assert!(h
             .get_prompt("nope", json!({"question": "x"}))

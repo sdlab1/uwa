@@ -24,8 +24,6 @@ target
 # rustc will dump stack traces when hitting an internal compiler error to PWD
 rustc-ice-*.txt
 Cargo.lock
-00.md
-01.md
-02.md
-03.md
+
+# todo folder with todo docs
 todo/

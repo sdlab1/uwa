@@ -13,7 +13,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use url::Url;
 use uwa_core::{Capabilities, UwaError};
 
@@ -62,6 +62,9 @@ pub struct ServerCfg {
     pub api_key: Option<String>,
     #[serde(default = "default_request_timeout_ms")]
     pub request_timeout_ms: u64,
+    /// Single-instance pid file. Defaults to `uwa.pid` when omitted.
+    #[serde(default)]
+    pub pid_file: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -203,6 +206,24 @@ mod tests {
         assert_eq!(cfg.server.port, 8080);
         assert!(cfg.provider_for_model("gpt-4o").is_some());
         assert!(cfg.provider_for_model("unknown").is_none());
+    }
+
+    #[test]
+    fn existing_config_without_pid_file_parses() {
+        // No `pid_file` key at all: the field defaults to `None`.
+        let cfg = Config::load_from_str(SAMPLE).unwrap();
+        assert_eq!(cfg.server.pid_file, None);
+
+        // Keys before the next table header still belong to `[server]`.
+        let text = SAMPLE.replace(
+            "[model_aliases]",
+            "pid_file = \"run/uwa.pid\"\n\n[model_aliases]",
+        );
+        let cfg = Config::load_from_str(&text).unwrap();
+        assert_eq!(
+            cfg.server.pid_file.as_deref(),
+            Some(std::path::Path::new("run/uwa.pid"))
+        );
     }
 
     #[test]
