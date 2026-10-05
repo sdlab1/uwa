@@ -2492,7 +2492,9 @@ dependencies = [
  "async-trait",
  "axum",
  "axum-test",
+ "dashmap",
  "futures",
+ "metrics",
  "serde",
  "serde_json",
  "subtle",
@@ -2507,6 +2509,8 @@ dependencies = [
  "uwa-config",
  "uwa-core",
  "uwa-mcp",
+ "uwa-resilience",
+ "uwa-session",
  "uwa-tools",
  "wiremock",
 ]

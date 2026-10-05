@@ -23,7 +23,7 @@ use uwa_core::RequestId;
 use uwa_tools::ToolCall;
 
 use crate::error::ApiResult;
-use crate::routes::chat::run_chat_loop_with;
+use crate::routes::chat::run_pipeline_with;
 use crate::state::AppState;
 
 pub async fn messages(
@@ -40,7 +40,7 @@ pub async fn messages(
         .unwrap_or(true);
 
     let (text, calls, finish) =
-        run_chat_loop_with(&state, &oa_req, local_tools, include_remote).await?;
+        run_pipeline_with(&state, &oa_req, local_tools, include_remote).await?;
     let out = to_anthropic_response(&req, text, &calls, finish);
 
     if req.stream.unwrap_or(false) {

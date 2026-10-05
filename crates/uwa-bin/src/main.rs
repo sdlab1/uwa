@@ -77,12 +77,8 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("MCP server enabled on stdio");
     }
 
-    let state = AppState {
-        config: config.clone(),
-        providers: providers.clone(),
-        transport,
-        tool_router: Some(tool_router),
-    };
+    let state = AppState::minimal(config.clone(), providers.clone(), transport)
+        .with_tool_router(tool_router);
 
     let addr: SocketAddr = format!("{}:{}", config.server.bind, config.server.port)
         .parse()

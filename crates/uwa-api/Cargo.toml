@@ -23,6 +23,10 @@ uuid.workspace = true
 futures.workspace = true
 url = { workspace = true }
 uwa-mcp = { workspace = true }
+uwa-resilience = { path = "../uwa-resilience" }
+uwa-session = { path = "../uwa-session" }
+dashmap.workspace = true
+metrics = "0.23"
 subtle = "2"  # constant-time compare for api_key
 
 [dev-dependencies]

@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use axum::http::StatusCode;
 use axum_test::TestServer;
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
@@ -6,8 +7,13 @@ use url::Url;
 use uwa_api::{router, AppState, ProviderRegistry};
 use uwa_config::Config;
 use uwa_core::traits::{ToolProvider, ToolSpec};
-use uwa_core::{Capabilities, NetworkEvent, Page, Result, SiteProvider, TabId, Transport};
+use uwa_core::{
+    Capabilities, NetworkEvent, Page, Result, SiteProvider, TabId, Transport, UwaError,
+};
 use uwa_mcp::ToolRouter;
+use uwa_resilience::circuit::CircuitState;
+use uwa_resilience::semaphore::ProviderSemaphores;
+use uwa_session::{SessionCfg, SessionManager};
 
 // --- Fakes ---
 
@@ -121,18 +127,51 @@ fn server_with(
     tool_router: Option<ToolRouter>,
 ) -> (TestServer, Arc<Mutex<Vec<String>>>) {
     let sent = Arc::new(Mutex::new(Vec::new()));
+    let h = harness(
+        Arc::new(FakeProvider {
+            answer: answer.into(),
+            sent: sent.clone(),
+        }),
+        sent.clone(),
+        with_key,
+        tool_router,
+        None,
+    );
+    (h.server, h.sent)
+}
+
+/// A running server plus the handles a test may need afterwards.
+struct Harness {
+    server: TestServer,
+    sent: Arc<Mutex<Vec<String>>>,
+    state: AppState,
+}
+
+fn harness(
+    provider: Arc<dyn SiteProvider>,
+    sent: Arc<Mutex<Vec<String>>>,
+    with_key: bool,
+    tool_router: Option<ToolRouter>,
+    sessions: Option<Arc<SessionManager>>,
+) -> Harness {
     let mut reg = ProviderRegistry::new();
-    reg.register(Arc::new(FakeProvider {
-        answer: answer.into(),
-        sent: sent.clone(),
-    }));
-    let state = AppState {
-        config: Arc::new(cfg(with_key)),
-        providers: Arc::new(reg),
-        transport: Arc::new(FakeTransport),
-        tool_router: tool_router.map(Arc::new),
-    };
-    (TestServer::new(router(state)).unwrap(), sent)
+    reg.register(provider);
+    let mut state = AppState::minimal(
+        Arc::new(cfg(with_key)),
+        Arc::new(reg),
+        Arc::new(FakeTransport),
+    );
+    if let Some(r) = tool_router {
+        state = state.with_tool_router(Arc::new(r));
+    }
+    if let Some(s) = sessions {
+        state = state.with_sessions(s);
+    }
+    Harness {
+        server: TestServer::new(router(state.clone())).unwrap(),
+        sent,
+        state,
+    }
 }
 
 // --- Tests ---
@@ -227,8 +266,8 @@ async fn chat_rejects_tools_when_provider_lacks_capability() {
 
 #[tokio::test]
 async fn streaming_ends_with_done_and_finish_reason() {
-    // Note: streaming is currently served as a regular JSON response.
-    // This test verifies that the tool_calls path works under stream=true.
+    // `stream: true` answers with chat.completion.chunk events instead of a
+    // single JSON body, and closes with `data: [DONE]`.
     let answer =
         "hi <tool_call>{\"name\":\"get_weather\",\"arguments\":{\"city\":\"X\"}}</tool_call>";
     let s = server(answer, true);
@@ -242,10 +281,37 @@ async fn streaming_ends_with_done_and_finish_reason() {
         }))
         .await;
     r.assert_status_ok();
-    let v: serde_json::Value = r.json();
-    assert_eq!(v["choices"][0]["finish_reason"], "tool_calls");
-    assert!(v["choices"][0]["message"]["tool_calls"].is_array());
-    assert!(v["choices"][0]["message"]["tool_calls"][0]["function"]["name"] == "get_weather");
+    let ct = r
+        .headers()
+        .get("content-type")
+        .expect("content-type")
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(ct.contains("text/event-stream"), "content-type: {ct}");
+
+    let body = r.text();
+    let frames: Vec<&str> = body.split("data: ").skip(1).collect();
+    assert!(frames.len() > 2, "too few chunks: {body}");
+    assert_eq!(frames.last().unwrap().trim(), "[DONE]");
+
+    // The frame before [DONE] carries the finish reason.
+    let last: serde_json::Value =
+        serde_json::from_str(frames[frames.len() - 2].trim()).expect("finish frame");
+    assert_eq!(last["choices"][0]["finish_reason"], "tool_calls");
+
+    // Tool name arrives first, then the arguments are streamed in chunks.
+    let mut args = String::new();
+    for frame in &frames[..frames.len() - 2] {
+        let ev: serde_json::Value = serde_json::from_str(frame.trim()).expect("chunk frame");
+        if let Some(calls) = ev["choices"][0]["delta"]["tool_calls"].as_array() {
+            args.push_str(calls[0]["function"]["name"].as_str().unwrap_or(""));
+            args.push_str(calls[0]["function"]["arguments"].as_str().unwrap_or(""));
+        }
+    }
+    assert_eq!(&args[..11], "get_weather");
+    let parsed: serde_json::Value = serde_json::from_str(&args[11..]).expect("arguments json");
+    assert_eq!(parsed, json!({"city": "X"}));
 }
 
 // --- /v1/messages (Anthropic adapter) ---
@@ -457,4 +523,139 @@ async fn messages_tool_choice_none_drops_mcp_tools() {
         "tool_choice=none must not inject MCP tools: {}",
         last_body(&sent)
     );
+}
+
+// --- Phase 10: breaker, sessions and runtime wiring ---
+
+struct FailingProvider;
+
+#[async_trait]
+impl SiteProvider for FailingProvider {
+    fn name(&self) -> &str {
+        "chatgpt"
+    }
+    fn matches(&self, _: &Url) -> bool {
+        true
+    }
+    async fn send_message(&self, _: &dyn Page, _: &str) -> Result<()> {
+        Ok(())
+    }
+    async fn wait_response(&self, _: &dyn Page) -> Result<String> {
+        Err(UwaError::Unavailable("provider exploded".into()))
+    }
+    async fn cancel(&self, _: &dyn Page) -> Result<()> {
+        Ok(())
+    }
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            streams: true,
+            tool_calls: true,
+            vision: false,
+            max_context_tokens: Some(1000),
+        }
+    }
+}
+
+async fn chat(s: &TestServer, payload: Value) -> axum_test::TestResponse {
+    s.post("/v1/chat/completions")
+        .add_header("Authorization", "Bearer k")
+        .json(&payload)
+        .await
+}
+
+#[tokio::test]
+async fn circuit_opens_after_repeated_provider_failures() {
+    let h = harness(
+        Arc::new(FailingProvider),
+        Arc::new(Mutex::new(Vec::new())),
+        true,
+        None,
+        None,
+    );
+    let payload = json!({"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]});
+
+    for round in 0..5 {
+        let r = chat(&h.server, payload.clone()).await;
+        r.assert_status(StatusCode::SERVICE_UNAVAILABLE);
+        let v: Value = r.json();
+        assert!(
+            v["error"]["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("provider exploded")),
+            "round {round}: {v}"
+        );
+    }
+    assert_eq!(h.state.breaker("chatgpt").state(), CircuitState::Open);
+
+    // The breaker now rejects before the provider is even called.
+    let r = chat(&h.server, payload).await;
+    r.assert_status(StatusCode::SERVICE_UNAVAILABLE);
+    let v: Value = r.json();
+    assert!(
+        v["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("circuit `chatgpt` open")),
+        "{v}"
+    );
+}
+
+#[tokio::test]
+async fn sessions_pin_a_conversation_to_one_entry() {
+    let sm = Arc::new(SessionManager::new(SessionCfg::default()));
+    let sent = Arc::new(Mutex::new(Vec::new()));
+    let h = harness(
+        Arc::new(FakeProvider {
+            answer: "hi".into(),
+            sent: sent.clone(),
+        }),
+        sent,
+        true,
+        None,
+        Some(sm.clone()),
+    );
+
+    let same = json!({"model": "gpt-4o", "messages": [{"role": "user", "content": "same"}]});
+    for _ in 0..2 {
+        chat(&h.server, same.clone()).await.assert_status_ok();
+    }
+    assert_eq!(sm.len(), 1, "identical history must reuse one session");
+
+    let other = json!({"model": "gpt-4o", "messages": [{"role": "user", "content": "other"}]});
+    chat(&h.server, other).await.assert_status_ok();
+    assert_eq!(sm.len(), 2, "a new conversation gets its own entry");
+}
+
+#[tokio::test]
+async fn runtime_services_defaults_and_overrides() {
+    let h = harness(
+        Arc::new(FakeProvider {
+            answer: "hi".into(),
+            sent: Arc::new(Mutex::new(Vec::new())),
+        }),
+        Arc::new(Mutex::new(Vec::new())),
+        true,
+        None,
+        None,
+    );
+    let state = h.state;
+
+    assert_eq!(state.runtime.semaphores.default_limit(), 4);
+    assert!(state.runtime.tool_router.is_none());
+    assert!(state.runtime.sessions.is_none());
+
+    // One breaker per provider, shared between clones.
+    assert!(Arc::ptr_eq(&state.breaker("a"), &state.breaker("a")));
+    assert!(!Arc::ptr_eq(&state.breaker("a"), &state.breaker("b")));
+
+    // Builders replace the runtime instead of mutating it.
+    let tuned = state
+        .clone()
+        .with_semaphores(Arc::new(ProviderSemaphores::new(1)));
+    assert_eq!(tuned.runtime.semaphores.default_limit(), 1);
+    assert_eq!(
+        state.runtime.semaphores.default_limit(),
+        4,
+        "the original state must be untouched"
+    );
+    assert!(Arc::ptr_eq(&state.breaker("c"), &tuned.breaker("c")));
 }

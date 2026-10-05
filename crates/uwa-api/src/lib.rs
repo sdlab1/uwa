@@ -8,6 +8,7 @@
 //! - [`ApiError`] — the OpenAI-shaped error at the HTTP edge
 
 pub mod error;
+pub mod metrics;
 pub mod middleware;
 pub mod routes;
 pub mod state;

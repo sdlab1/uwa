@@ -7,8 +7,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// Characters per pseudo-streaming delta (Phase 9.3).
-pub const STREAM_CHUNK_CHARS: usize = 24;
+pub use super::{stream_chunks, STREAM_CHUNK_CHARS};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MessagesRequest {
@@ -237,15 +236,6 @@ impl StreamEvent {
             Self::MessageStop => "message_stop",
         }
     }
-}
-
-/// Split `s` into pseudo-streaming chunks of at most [`STREAM_CHUNK_CHARS`].
-pub fn stream_chunks(s: &str) -> Vec<String> {
-    s.chars()
-        .collect::<Vec<_>>()
-        .chunks(STREAM_CHUNK_CHARS)
-        .map(|c| c.iter().collect())
-        .collect()
 }
 
 #[cfg(test)]

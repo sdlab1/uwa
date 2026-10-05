@@ -20,3 +20,16 @@ pub enum FinishReason {
     ToolCalls,
     ContentFilter,
 }
+
+/// Characters per pseudo-streaming delta, shared by the OpenAI and Anthropic
+/// streams.
+pub const STREAM_CHUNK_CHARS: usize = 24;
+
+/// Split `s` into pseudo-streaming chunks of at most [`STREAM_CHUNK_CHARS`].
+pub fn stream_chunks(s: &str) -> Vec<String> {
+    s.chars()
+        .collect::<Vec<_>>()
+        .chunks(STREAM_CHUNK_CHARS)
+        .map(|c| c.iter().collect())
+        .collect()
+}
