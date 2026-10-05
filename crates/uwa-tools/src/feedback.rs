@@ -22,6 +22,18 @@ pub fn compose_browser_turn(messages: &[ChatMessage]) -> String {
     let mut out = String::new();
     for m in messages {
         match m.role {
+            // A system message is part of the turn: without this it would be
+            // silently dropped on its way to the browser.
+            Role::System => {
+                let text = m.content_text();
+                if text.is_empty() {
+                    continue;
+                }
+                if !out.is_empty() {
+                    out.push_str("\n\n");
+                }
+                out.push_str(&text);
+            }
             Role::User => {
                 if !out.is_empty() {
                     out.push_str("\n\n");
@@ -53,5 +65,14 @@ mod tests {
         assert!(s.contains("<tool_response>"));
         assert!(s.contains("call_abc"));
         assert!(s.contains("22C"));
+    }
+
+    #[test]
+    fn system_messages_reach_the_turn() {
+        let msgs = vec![
+            ChatMessage::text(Role::System, "be terse"),
+            ChatMessage::text(Role::User, "hi"),
+        ];
+        assert_eq!(compose_browser_turn(&msgs), "be terse\n\nhi");
     }
 }

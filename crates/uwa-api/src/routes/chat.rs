@@ -80,10 +80,24 @@ pub async fn run_chat_loop(
     req: &ChatCompletionRequest,
     local_tools: Vec<ToolSpec>,
 ) -> uwa_core::Result<(String, Vec<uwa_tools::ToolCall>, FinishReason)> {
+    run_chat_loop_with(state, req, local_tools, true).await
+}
+
+/// Same as [`run_chat_loop`], but `include_remote` gates the MCP tools.
+/// `tool_choice: "none"` on `/v1/messages` runs with `false`, so no MCP tool
+/// ever reaches the model for that request.
+pub async fn run_chat_loop_with(
+    state: &AppState,
+    req: &ChatCompletionRequest,
+    local_tools: Vec<ToolSpec>,
+    include_remote: bool,
+) -> uwa_core::Result<(String, Vec<uwa_tools::ToolCall>, FinishReason)> {
     // 1. Gather all tool definitions: local (from request) + remote (MCP).
     let mut all_specs: Vec<ToolSpec> = local_tools;
-    if let Some(router) = &state.tool_router {
-        all_specs.extend(router.all_definitions().await?);
+    if include_remote {
+        if let Some(router) = &state.tool_router {
+            all_specs.extend(router.all_definitions().await?);
+        }
     }
 
     // 2. Prepare outbound messages (system injection + history).
