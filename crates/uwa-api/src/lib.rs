@@ -27,6 +27,11 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/models", get(routes::models::list_models))
         .route("/v1/chat/completions", post(routes::chat::chat_completions))
         .route("/v1/messages", post(routes::messages::messages))
+        .route(
+            "/v1/messages/count_tokens",
+            post(routes::messages::count_tokens),
+        )
+        .route("/v1/responses", post(routes::responses::create))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             middleware::require_api_key,

@@ -12,8 +12,9 @@ use serde_json::Value;
 
 use uwa_core::traits::ToolSpec;
 use uwa_core::types::anthropic::{
-    content_text, stream_chunks, AnthropicMessage, AnthropicUsage, ContentBlock, Delta,
-    MessageDelta, MessagesRequest, MessagesResponse, StopReason, StreamEvent, ToolChoice,
+    content_text, stream_chunks, AnthropicMessage, AnthropicUsage, ContentBlock,
+    CountTokensRequest, CountTokensResponse, Delta, MessageDelta, MessagesRequest,
+    MessagesResponse, StopReason, StreamEvent, ToolChoice,
 };
 use uwa_core::types::openai::{
     ChatCompletionRequest, ChatMessage, FunctionCall, MessageContent, ToolCallRef,
@@ -300,9 +301,116 @@ fn stream_events(out: &MessagesResponse) -> Vec<StreamEvent> {
     evs
 }
 
+/// `POST /v1/messages/count_tokens` — approximate the prompt size.
+///
+/// Deliberately **not** a tokenizer: clients (the Claude SDK among them)
+/// call this to pre-check the context window, so ±20% is fine and a real
+/// BPE would only add a dependency. ASCII counts at four characters per
+/// token, anything else at two (CJK, emoji), and every message costs a few
+/// tokens for its role and separators.
+pub async fn count_tokens(
+    Json(req): Json<CountTokensRequest>,
+) -> ApiResult<Json<CountTokensResponse>> {
+    Ok(Json(estimate_tokens(&req)))
+}
+
+/// The estimate itself, split out so the arithmetic can be tested without
+/// an HTTP round-trip.
+pub fn estimate_tokens(req: &CountTokensRequest) -> CountTokensResponse {
+    const CHARS_PER_ASCII_TOKEN: usize = 4;
+    const CHARS_PER_WIDE_TOKEN: usize = 2;
+    const TOKENS_PER_MESSAGE: u64 = 4;
+
+    let (mut ascii, mut wide) = (0usize, 0usize);
+    let mut add = |s: &str| {
+        for ch in s.chars() {
+            if ch.is_ascii() {
+                ascii += 1;
+            } else {
+                wide += 1;
+            }
+        }
+    };
+
+    if let Some(system) = &req.system {
+        add(&system.as_text());
+    }
+    for m in &req.messages {
+        add(&content_text(Some(&m.content)));
+    }
+    if let Some(tools) = &req.tools {
+        // Tool schemas are prompt too: count them by their JSON footprint.
+        if let Ok(json) = serde_json::to_string(tools) {
+            add(&json);
+        }
+    }
+
+    let tokens = ascii / CHARS_PER_ASCII_TOKEN + wide / CHARS_PER_WIDE_TOKEN;
+    let total = tokens as u64 + req.messages.len() as u64 * TOKENS_PER_MESSAGE;
+    CountTokensResponse {
+        input_tokens: total.min(u32::MAX as u64) as u32,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn count_req(body: serde_json::Value) -> CountTokensRequest {
+        serde_json::from_value(body).expect("request decodes")
+    }
+
+    #[test]
+    fn count_tokens_counts_ascii_at_four_chars_per_token() {
+        let r = count_req(json!({
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "01234567"}],
+        }));
+        // 8 ascii chars / 4 + 4 tokens of per-message overhead.
+        assert_eq!(estimate_tokens(&r).input_tokens, 6);
+    }
+
+    #[test]
+    fn count_tokens_counts_wide_chars_at_two_per_token() {
+        let r = count_req(json!({
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "你好世界"}],
+        }));
+        // 4 wide chars / 2 + 4.
+        assert_eq!(estimate_tokens(&r).input_tokens, 6);
+    }
+
+    #[test]
+    fn count_tokens_includes_system_and_tools() {
+        let bare = count_req(json!({
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "hi"}],
+        }));
+        let loaded = count_req(json!({
+            "model": "gpt-4o",
+            "system": "You are a helpful assistant.",
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [{"name": "get_weather", "input_schema": {"type": "object"}}],
+        }));
+        let (bare, loaded) = (estimate_tokens(&bare), estimate_tokens(&loaded));
+        assert!(loaded.input_tokens > bare.input_tokens);
+    }
+
+    #[test]
+    fn count_tokens_grows_with_the_prompt() {
+        let short =
+            count_req(json!({"model": "gpt-4o", "messages": [{"role": "user", "content": "a"}]}));
+        let long = count_req(
+            json!({"model": "gpt-4o", "messages": [{"role": "user", "content": "a".repeat(400)}]}),
+        );
+        assert!(estimate_tokens(&long).input_tokens > estimate_tokens(&short).input_tokens);
+    }
+
+    #[test]
+    fn count_tokens_of_nothing_is_zero() {
+        let r = count_req(json!({"model": "gpt-4o"}));
+        assert_eq!(estimate_tokens(&r).input_tokens, 0);
+    }
     use serde_json::json;
     use uwa_core::types::anthropic::{SystemBlock, SystemField};
 

@@ -56,7 +56,7 @@ pub async fn chat_completions(
 
 /// Tools declared by the request itself; MCP tools are merged by
 /// [`run_pipeline_with`].
-fn local_tools(req: &ChatCompletionRequest) -> Vec<ToolSpec> {
+pub(crate) fn local_tools(req: &ChatCompletionRequest) -> Vec<ToolSpec> {
     match &req.tools {
         Some(arr) => ToolDefinition::from_openai_array(arr)
             .unwrap_or_default()

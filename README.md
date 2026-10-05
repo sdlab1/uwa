@@ -101,7 +101,9 @@ Logs go to **stderr** so stdout stays free for the MCP stdio transport.
 | `GET /healthz`, `GET /readyz` | liveness / readiness |
 | `GET /v1/models` | configured model aliases + capabilities |
 | `POST /v1/chat/completions` | OpenAI-shaped, streaming via SSE (`data: …`, `data: [DONE]`) |
-| `POST /v1/messages` | Anthropic-shaped adapter (`/v1/messages/count_tokens` in `todo/02.md`) |
+| `POST /v1/messages` | Anthropic-shaped adapter |
+| `POST /v1/messages/count_tokens` | approximate prompt size for the Claude SDK's context check |
+| `POST /v1/responses` | OpenAI Responses API shape, non-streaming |
 | `POST /mcp`, `GET /mcp/sse` | MCP over HTTP+SSE, needs `--features uwa-bin/mcp-http` |
 
 Start-up order (and the graceful shutdown it reverses) lives in

@@ -138,6 +138,25 @@ pub struct AnthropicTool {
     pub input_schema: Value,
 }
 
+/// Request for `POST /v1/messages/count_tokens`. The same shape as
+/// [`MessagesRequest`] minus `max_tokens`, which the Claude SDK omits here.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CountTokensRequest {
+    pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system: Option<SystemField>,
+    #[serde(default)]
+    pub messages: Vec<AnthropicMessage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<AnthropicTool>>,
+}
+
+/// Response for `POST /v1/messages/count_tokens`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CountTokensResponse {
+    pub input_tokens: u32,
+}
+
 /// `tool_choice`. `"none"` means: do not expose any tool to the model.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
