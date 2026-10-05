@@ -19,6 +19,7 @@ scraper.workspace = true
 url.workspace = true
 
 [dev-dependencies]
+uwa-testkit = { path = "../uwa-testkit" }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 insta = { version = "1", features = ["yaml"] }
 proptest = "1"

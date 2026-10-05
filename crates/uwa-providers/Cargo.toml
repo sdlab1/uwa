@@ -21,6 +21,7 @@ uwa-browser = { path = "../uwa-browser", optional = true }
 uwa-stealth = { path = "../uwa-stealth", optional = true }
 
 [dev-dependencies]
+uwa-testkit = { path = "../uwa-testkit" }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 insta = { version = "1", features = ["yaml"] }
 

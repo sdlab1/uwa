@@ -32,3 +32,6 @@ async-trait = { workspace = true }
 axum = { workspace = true }
 uwa-mcp = { workspace = true }
 serde_json = { workspace = true }
+
+[dev-dependencies]
+uwa-testkit = { path = "../uwa-testkit" }

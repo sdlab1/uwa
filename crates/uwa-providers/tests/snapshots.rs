@@ -4,56 +4,18 @@
 //! expected text (`tests/snapshots/`).
 
 use std::sync::Arc;
-use std::time::Duration;
 
-use async_trait::async_trait;
-use serde_json::Value;
-use url::Url;
 use uwa_config::{ExtractionStrategy, ProviderCfg, Selectors};
-use uwa_core::{Capabilities, Page, Result, SiteProvider, UwaError};
+use uwa_core::{Capabilities, SiteProvider};
 use uwa_extract::ExtractionPipeline;
 use uwa_providers::GenericProvider;
+use uwa_testkit::MockPage;
 
 fn fixture(name: &str) -> String {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures")
         .join(name);
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
-}
-
-/// A page whose DOM never changes: extraction must finish on stability alone.
-struct HtmlPage {
-    html: String,
-}
-
-#[async_trait]
-impl Page for HtmlPage {
-    async fn goto(&self, _: &Url) -> Result<()> {
-        Ok(())
-    }
-    async fn url(&self) -> Result<Url> {
-        Ok("https://demo.test/chat".parse().expect("static url"))
-    }
-    async fn eval(&self, _: &str) -> Result<Value> {
-        Ok(Value::Null)
-    }
-    async fn wait_for_selector(&self, _: &str, _: Duration) -> Result<()> {
-        Ok(())
-    }
-    async fn html(&self) -> Result<String> {
-        Ok(self.html.clone())
-    }
-    async fn click(&self, _: &str) -> Result<()> {
-        Ok(())
-    }
-    async fn type_text(&self, _: &str, _: &str) -> Result<()> {
-        Ok(())
-    }
-    async fn network_events(
-        &self,
-    ) -> Result<tokio::sync::broadcast::Receiver<uwa_core::NetworkEvent>> {
-        Err(UwaError::Unavailable("no network in this mock".into()))
-    }
 }
 
 fn provider() -> GenericProvider {
@@ -82,9 +44,9 @@ fn provider() -> GenericProvider {
 }
 
 async fn extract(fixture_name: &str) -> String {
-    let page = HtmlPage {
-        html: fixture(fixture_name),
-    };
+    let page = MockPage::new()
+        .with_url("https://demo.test/chat")
+        .with_html(&fixture(fixture_name));
     provider()
         .wait_response(&page)
         .await

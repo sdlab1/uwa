@@ -220,30 +220,17 @@ impl McpHandler for WebPromptHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use uwa_core::{Page, Result as CoreResult, TabId, Transport};
-
-    struct OneTab;
-
-    #[async_trait]
-    impl Transport for OneTab {
-        async fn page(&self, _tab: &TabId) -> CoreResult<Box<dyn Page>> {
-            Err(UwaError::Unavailable("no page in tests".into()))
-        }
-        async fn list_tabs(&self) -> CoreResult<Vec<TabId>> {
-            Ok(vec![TabId::from_raw("tab-1")])
-        }
-        async fn health(&self, _tab: &TabId) -> CoreResult<()> {
-            Ok(())
-        }
-    }
+    use uwa_testkit::MockTransport;
 
     #[tokio::test]
     async fn tabs_handler_reads_the_tabs_resource() {
-        let h = WebTabsHandler::new(Arc::new(OneTab));
+        let tabs = MockTransport::with_n_tabs(1);
+        let id = tabs.tab_ids()[0].to_string();
+        let h = WebTabsHandler::new(Arc::new(tabs));
         assert_eq!(h.resources()[0].uri, TABS_URI);
         let r = h.read_resource(TABS_URI).await.unwrap();
         assert_eq!(r.contents[0].mime_type.as_deref(), Some("application/json"));
-        assert!(r.contents[0].text.contains("tab-1"));
+        assert!(r.contents[0].text.contains(&id), "missing {id}");
         assert!(h.read_resource("uwa://nope").await.is_err());
     }
 

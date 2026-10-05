@@ -26,5 +26,6 @@ tower-http = { version = "0.5", features = ["trace"], optional = true }
 tokio-stream = { workspace = true, optional = true }
 
 [dev-dependencies]
+uwa-testkit = { path = "../uwa-testkit" }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 axum-test = "15.7"

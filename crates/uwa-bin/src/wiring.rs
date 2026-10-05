@@ -245,23 +245,8 @@ fn chat_dispatcher(state: AppState) -> DispatcherFn {
 mod tests {
     use super::*;
     use serde_json::{json, Value};
-    use uwa_core::{Page, Result, TabId, UwaError};
     use uwa_mcp::JsonRpcRequest;
-
-    struct NoTabs;
-
-    #[async_trait::async_trait]
-    impl Transport for NoTabs {
-        async fn page(&self, _tab: &TabId) -> Result<Box<dyn Page>> {
-            Err(UwaError::Unavailable("no page in tests".into()))
-        }
-        async fn list_tabs(&self) -> Result<Vec<TabId>> {
-            Ok(vec![])
-        }
-        async fn health(&self, _tab: &TabId) -> Result<()> {
-            Ok(())
-        }
-    }
+    use uwa_testkit::MockTransport;
 
     fn state_without_browser() -> AppState {
         let config: Arc<Config> = Arc::new(
@@ -274,7 +259,11 @@ mod tests {
             )
             .unwrap(),
         );
-        AppState::minimal(config, Arc::new(ProviderRegistry::new()), Arc::new(NoTabs))
+        AppState::minimal(
+            config,
+            Arc::new(ProviderRegistry::new()),
+            Arc::new(MockTransport::new()),
+        )
     }
 
     async fn call(server: &McpServer, method: &str) -> Value {

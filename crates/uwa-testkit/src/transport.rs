@@ -2,6 +2,7 @@
 
 use async_trait::async_trait;
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use uwa_core::{Page, Result, TabId, Transport, UwaError};
 
@@ -12,6 +13,10 @@ pub struct MockTransport {
     tabs: Vec<TabId>,
     healthy: Mutex<HashSet<TabId>>,
     pages: HashMap<TabId, Arc<MockPage>>,
+    /// Rotate `list_tabs` on every call, like a tab pool handing out the
+    /// next free tab.
+    round_robin: bool,
+    rr: AtomicUsize,
 }
 
 impl MockTransport {
@@ -20,7 +25,15 @@ impl MockTransport {
             tabs: Vec::new(),
             healthy: Mutex::new(HashSet::new()),
             pages: HashMap::new(),
+            round_robin: false,
+            rr: AtomicUsize::new(0),
         }
+    }
+
+    /// Hand tabs out in rotation instead of a fixed order.
+    pub fn with_round_robin(mut self) -> Self {
+        self.round_robin = true;
+        self
     }
 
     /// Convenience: `n` healthy tabs with default pages.
@@ -96,7 +109,14 @@ impl Transport for MockTransport {
     }
 
     async fn list_tabs(&self) -> Result<Vec<TabId>> {
-        Ok(self.tabs.clone())
+        if !self.round_robin || self.tabs.is_empty() {
+            return Ok(self.tabs.clone());
+        }
+        let start = self.rr.fetch_add(1, Ordering::SeqCst) % self.tabs.len();
+        let mut out = Vec::with_capacity(self.tabs.len());
+        out.extend(self.tabs[start..].iter().cloned());
+        out.extend(self.tabs[..start].iter().cloned());
+        Ok(out)
     }
 
     async fn health(&self, tab: &TabId) -> Result<()> {
@@ -131,6 +151,22 @@ mod tests {
         let got = t.page(&id).await.expect("known tab");
         assert_eq!(got.html().await.expect("html"), "<b>hi</b>");
         assert_eq!(t.list_tabs().await.expect("tabs"), vec![id]);
+    }
+
+    #[tokio::test]
+    async fn round_robin_rotates_the_first_tab() {
+        let t = MockTransport::with_n_tabs(3).with_round_robin();
+        let first: Vec<TabId> = vec![
+            t.list_tabs().await.expect("1")[0].clone(),
+            t.list_tabs().await.expect("2")[0].clone(),
+            t.list_tabs().await.expect("3")[0].clone(),
+        ];
+        let distinct: std::collections::HashSet<_> = first.iter().collect();
+        assert_eq!(
+            distinct.len(),
+            3,
+            "each call must lead with a new tab: {first:?}"
+        );
     }
 
     #[tokio::test]

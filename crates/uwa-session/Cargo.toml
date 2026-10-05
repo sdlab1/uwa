@@ -14,4 +14,5 @@ serde.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+uwa-testkit = { path = "../uwa-testkit" }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "sync"] }

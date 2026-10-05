@@ -30,6 +30,7 @@ metrics = "0.23"
 subtle = "2"  # constant-time compare for api_key
 
 [dev-dependencies]
+uwa-testkit = { path = "../uwa-testkit" }
 axum-test = "15"
 wiremock = "0.6"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

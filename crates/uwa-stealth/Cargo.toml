@@ -11,6 +11,7 @@ serde.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
+uwa-testkit = { path = "../uwa-testkit" }
 async-trait.workspace = true
 tokio = { workspace = true, features = ["macros", "rt"] }
 url.workspace = true

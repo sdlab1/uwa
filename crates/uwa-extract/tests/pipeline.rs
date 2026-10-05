@@ -1,56 +1,13 @@
 use async_trait::async_trait;
-use serde_json::Value;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::broadcast;
 use tokio_stream::wrappers::ReceiverStream;
-use url::Url;
-use uwa_core::{ExtractionStrategy, NetworkEvent, Page, Result};
+use uwa_core::{ExtractionStrategy, Page, Result};
 use uwa_extract::dom::DomExtractor;
 use uwa_extract::finisher::FinisherCfg;
 use uwa_extract::net::{NetDecoder, NetDelta, NetExtractor, NetRules};
 use uwa_extract::pipeline::{ExtractionPipeline, ExtractionSource, PipelineCfg};
-
-// ---- Page that replays a fixed list of network events, then stays quiet. ----
-
-struct PageWithNet {
-    net: Mutex<Option<Vec<NetworkEvent>>>,
-    html: String,
-}
-
-#[async_trait]
-impl Page for PageWithNet {
-    async fn goto(&self, _: &Url) -> Result<()> {
-        Ok(())
-    }
-    async fn url(&self) -> Result<Url> {
-        Ok("https://x/".parse().unwrap())
-    }
-    async fn eval(&self, _: &str) -> Result<Value> {
-        Ok(Value::Bool(false))
-    }
-    async fn wait_for_selector(&self, _: &str, _: Duration) -> Result<()> {
-        Ok(())
-    }
-    async fn html(&self) -> Result<String> {
-        Ok(self.html.clone())
-    }
-    async fn click(&self, _: &str) -> Result<()> {
-        Ok(())
-    }
-    async fn type_text(&self, _: &str, _: &str) -> Result<()> {
-        Ok(())
-    }
-    async fn network_events(&self) -> Result<broadcast::Receiver<NetworkEvent>> {
-        let (tx, rx) = broadcast::channel(64);
-        if let Some(evs) = self.net.lock().unwrap().take() {
-            for e in evs {
-                let _ = tx.send(e);
-            }
-        }
-        Ok(rx)
-    }
-}
+use uwa_testkit::MockPage;
 
 // ---- Fake NetExtractor that just emits deltas directly. ----
 
@@ -105,10 +62,7 @@ fn base_cfg(strategy: ExtractionStrategy) -> PipelineCfg {
 
 #[tokio::test]
 async fn network_first_uses_net_stream() {
-    let page = PageWithNet {
-        net: Mutex::new(None),
-        html: "<html></html>".into(),
-    };
+    let page = MockPage::new().with_html("<html></html>");
     let pipe = ExtractionPipeline::with_net(Arc::new(FakeNet(vec!["Hel", "lo, ", "world"])));
     let out = pipe
         .run(&page, &base_cfg(ExtractionStrategy::NetworkFirst))
@@ -123,10 +77,7 @@ async fn empty_network_falls_back_to_dom() {
     let html = r#"<html><body>
         <div data-message-author-role="assistant">from dom</div>
     </body></html>"#;
-    let page = PageWithNet {
-        net: Mutex::new(None),
-        html: html.into(),
-    };
+    let page = MockPage::new().with_html(html);
     let pipe = ExtractionPipeline::with_net(Arc::new(FakeNet(vec![])));
     let out = pipe
         .run(&page, &base_cfg(ExtractionStrategy::NetworkFirst))
@@ -141,10 +92,7 @@ async fn dom_only_skips_network() {
     let html = r#"<html><body>
         <div data-message-author-role="assistant">dom says hi</div>
     </body></html>"#;
-    let page = PageWithNet {
-        net: Mutex::new(None),
-        html: html.into(),
-    };
+    let page = MockPage::new().with_html(html);
     // FakeNet would emit, but DomOnly path never asks it.
     let pipe = ExtractionPipeline::with_net(Arc::new(FakeNet(vec!["NEVER"])));
     let out = pipe

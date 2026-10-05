@@ -31,59 +31,11 @@ pub fn wrapped_scripts(pack: &StealthPack) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use async_trait::async_trait;
-    use serde_json::Value;
-    use std::sync::Mutex;
-    use std::time::Duration;
-    use url::Url;
-    use uwa_core::UwaError;
-
-    struct RecordingPage {
-        early: Mutex<Vec<String>>,
-        live: Mutex<Vec<String>>,
-    }
-
-    #[async_trait]
-    impl Page for RecordingPage {
-        async fn goto(&self, _url: &Url) -> Result<()> {
-            Ok(())
-        }
-        async fn url(&self) -> Result<Url> {
-            Ok(Url::parse("https://example.com").unwrap())
-        }
-        async fn eval(&self, js: &str) -> Result<Value> {
-            self.live.lock().unwrap().push(js.to_string());
-            Ok(Value::Null)
-        }
-        async fn wait_for_selector(&self, _selector: &str, _timeout: Duration) -> Result<()> {
-            Ok(())
-        }
-        async fn html(&self) -> Result<String> {
-            Ok(String::new())
-        }
-        async fn click(&self, _selector: &str) -> Result<()> {
-            Ok(())
-        }
-        async fn type_text(&self, _selector: &str, _text: &str) -> Result<()> {
-            Ok(())
-        }
-        async fn eval_early(&self, js: &str) -> Result<()> {
-            self.early.lock().unwrap().push(js.to_string());
-            Ok(())
-        }
-        async fn network_events(
-            &self,
-        ) -> Result<tokio::sync::broadcast::Receiver<uwa_core::NetworkEvent>> {
-            Err(UwaError::Internal("no network".into()))
-        }
-    }
+    use uwa_testkit::MockPage;
 
     #[tokio::test]
     async fn apply_uses_eval_early_for_before_load_scripts() {
-        let page = RecordingPage {
-            early: Mutex::new(Vec::new()),
-            live: Mutex::new(Vec::new()),
-        };
+        let page = MockPage::new();
         let pack = crate::StealthPack::new()
             .with_script(crate::StealthScript {
                 name: "early".into(),
@@ -96,8 +48,18 @@ mod tests {
                 apply_before_load: false,
             });
         apply_pack(&page, &pack).await.unwrap();
-        assert_eq!(page.early.lock().unwrap().len(), 1);
-        assert_eq!(page.live.lock().unwrap().len(), 1);
-        assert!(page.early.lock().unwrap()[0].contains("try{a}"));
+        let early: Vec<String> = page
+            .log()
+            .into_iter()
+            .filter(|e| e.starts_with("early:"))
+            .collect();
+        let live: Vec<String> = page
+            .log()
+            .into_iter()
+            .filter(|e| !e.starts_with("early:"))
+            .collect();
+        assert_eq!(early.len(), 1, "{early:?}");
+        assert_eq!(live.len(), 1, "{live:?}");
+        assert!(early[0].contains("try{a}"), "{:?}", early[0]);
     }
 }

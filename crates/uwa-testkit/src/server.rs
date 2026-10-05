@@ -30,7 +30,6 @@ pub struct AppBuilder {
     tool_router: Option<Arc<ToolRouter>>,
     sessions: Option<Arc<SessionManager>>,
     semaphores: Option<Arc<ProviderSemaphores>>,
-    keyed: bool,
 }
 
 impl AppBuilder {
@@ -42,13 +41,13 @@ impl AppBuilder {
             tool_router: None,
             sessions: None,
             semaphores: None,
-            keyed: false,
         }
     }
 
-    /// Swap in [`config_with_key`] (or any config that needs a header).
+    /// Use [`config_with_key`]: requests must then carry `Authorization:
+    /// Bearer k` (see [`TestApp::auth`]).
     pub fn with_key_auth(mut self) -> Self {
-        self.keyed = true;
+        self.config = config_with_key();
         self
     }
 
@@ -83,16 +82,11 @@ impl AppBuilder {
     }
 
     pub fn build_state(self) -> AppState {
-        let config = if self.keyed {
-            config_with_key()
-        } else {
-            self.config
-        };
         let mut registry = ProviderRegistry::new();
         for p in self.providers {
             registry.register(p);
         }
-        let mut state = AppState::minimal(config, Arc::new(registry), self.transport);
+        let mut state = AppState::minimal(self.config, Arc::new(registry), self.transport);
         if let Some(tr) = self.tool_router {
             state = state.with_tool_router(tr);
         }

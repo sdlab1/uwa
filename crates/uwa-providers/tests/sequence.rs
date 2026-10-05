@@ -2,113 +2,26 @@
 //! exact call sequence of `send_message` / `cancel` is asserted without a
 //! browser.
 
-use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::sync::Arc;
 
-use async_trait::async_trait;
 use serde_json::{json, Value};
-use url::Url;
 use uwa_config::{ExtractionStrategy, ProviderCfg, Selectors};
-use uwa_core::{Capabilities, Page, Result, SiteProvider, UwaError};
+use uwa_core::{Capabilities, SiteProvider, UwaError};
 use uwa_extract::ExtractionPipeline;
 use uwa_providers::GenericProvider;
+use uwa_testkit::MockPage;
 
-/// `(needle, replies)`: the first rule whose needle occurs in the JS wins.
-/// A rule with several replies pops one per call and then repeats the last.
-struct Rule {
-    needle: String,
-    replies: VecDeque<Value>,
-    last: Value,
+/// The `eval` calls a page saw, in order — `click:`/`type:` entries are not
+/// script traffic.
+fn evals(page: &MockPage) -> Vec<String> {
+    page.log()
+        .into_iter()
+        .filter(|e| !e.starts_with("click:") && !e.starts_with("type:"))
+        .collect()
 }
 
-/// A [`Page`] that records every `eval` and answers from [`Rule`]s.
-struct ScriptedPage {
-    rules: Mutex<Vec<Rule>>,
-    evals: Mutex<Vec<String>>,
-    html: Mutex<String>,
-}
-
-impl ScriptedPage {
-    fn new() -> Self {
-        Self {
-            rules: Mutex::new(Vec::new()),
-            evals: Mutex::new(Vec::new()),
-            html: Mutex::new(String::new()),
-        }
-    }
-
-    fn on(mut self, needle: &str, replies: &[Value]) -> Self {
-        let replies: VecDeque<Value> = replies.iter().cloned().collect();
-        let last = replies.back().cloned().unwrap_or(Value::Null);
-        self.rules
-            .get_mut()
-            .expect("script is built before any concurrency")
-            .push(Rule {
-                needle: needle.to_string(),
-                replies,
-                last,
-            });
-        self
-    }
-
-    fn evals(&self) -> Vec<String> {
-        self.evals.lock().unwrap().clone()
-    }
-
-    fn evals_containing(&self, needle: &str) -> usize {
-        self.evals().iter().filter(|e| e.contains(needle)).count()
-    }
-}
-
-#[async_trait]
-impl Page for ScriptedPage {
-    async fn goto(&self, url: &Url) -> Result<()> {
-        *self.html.lock().unwrap() = format!("<html><body>{url}</body></html>");
-        Ok(())
-    }
-
-    async fn url(&self) -> Result<Url> {
-        Ok("https://demo.test/chat".parse().expect("static url"))
-    }
-
-    async fn eval(&self, js: &str) -> Result<Value> {
-        self.evals.lock().unwrap().push(js.to_string());
-        let mut rules = self.rules.lock().unwrap();
-        for rule in rules.iter_mut() {
-            if js.contains(&rule.needle) {
-                let reply = if rule.replies.len() > 1 {
-                    rule.replies.pop_front().unwrap_or(Value::Null)
-                } else {
-                    rule.last.clone()
-                };
-                return Ok(reply);
-            }
-        }
-        Ok(Value::Null)
-    }
-
-    async fn wait_for_selector(&self, _: &str, _: Duration) -> Result<()> {
-        Ok(())
-    }
-
-    async fn html(&self) -> Result<String> {
-        Ok(self.html.lock().unwrap().clone())
-    }
-
-    async fn click(&self, _: &str) -> Result<()> {
-        Ok(())
-    }
-
-    async fn type_text(&self, _: &str, _: &str) -> Result<()> {
-        Ok(())
-    }
-
-    async fn network_events(
-        &self,
-    ) -> Result<tokio::sync::broadcast::Receiver<uwa_core::NetworkEvent>> {
-        Err(UwaError::Unavailable("no network in this mock".into()))
-    }
+fn evals_containing(page: &MockPage, needle: &str) -> usize {
+    evals(page).iter().filter(|e| e.contains(needle)).count()
 }
 
 fn provider_cfg() -> ProviderCfg {
@@ -140,13 +53,14 @@ fn provider(cfg: ProviderCfg) -> GenericProvider {
 }
 
 /// Everything the happy path needs: composer found, filled, send enabled.
-fn happy_page() -> ScriptedPage {
-    ScriptedPage::new()
-        .on("!!document.querySelector", &[json!(true)])
-        .on("el.focus()", &[json!({ "ok": true })])
-        .on("el.disabled", &[json!(true)])
-        .on("el.click()", &[json!(true)])
-        .on("el.value !== undefined", &[json!(true)])
+fn happy_page() -> MockPage {
+    MockPage::new()
+        .expect_default(Value::Null)
+        .expect_seq("!!document.querySelector", vec![json!(true)])
+        .expect_seq("el.focus()", vec![json!({ "ok": true })])
+        .expect_seq("el.disabled", vec![json!(true)])
+        .expect_seq("el.click()", vec![json!(true)])
+        .expect_seq("el.value !== undefined", vec![json!(true)])
 }
 
 #[tokio::test]
@@ -157,33 +71,34 @@ async fn send_message_runs_the_full_sequence() {
         .await
         .expect("send succeeds");
 
-    let evals = page.evals();
-    let inject = evals
+    let seen = evals(&page);
+    let inject = seen
         .iter()
         .position(|e| e.contains("el.focus()"))
         .expect("the composer was filled");
-    let click = evals
+    let click = seen
         .iter()
         .position(|e| e.contains("el.click()"))
         .expect("the send button was clicked");
-    assert!(inject < click, "fill must precede click: {evals:?}");
+    assert!(inject < click, "fill must precede click: {seen:?}");
     assert!(
-        evals.iter().any(|e| e.contains("hello world")),
-        "the text reached the page: {evals:?}"
+        seen.iter().any(|e| e.contains("hello world")),
+        "the text reached the page: {seen:?}"
     );
     assert!(
-        evals.iter().any(|e| e.contains("#stop")),
-        "generation start was probed via the stop button: {evals:?}"
+        seen.iter().any(|e| e.contains("#stop")),
+        "generation start was probed via the stop button: {seen:?}"
     );
 }
 
 #[tokio::test]
 async fn send_message_fails_when_the_composer_is_gone() {
-    let page = ScriptedPage::new()
-        .on("!!document.querySelector", &[json!(true)])
-        .on(
+    let page = MockPage::new()
+        .expect_default(Value::Null)
+        .expect_seq("!!document.querySelector", vec![json!(true)])
+        .expect_seq(
             "el.focus()",
-            &[json!({ "ok": false, "reason": "no-element" })],
+            vec![json!({ "ok": false, "reason": "no-element" })],
         );
     let err = provider(provider_cfg())
         .send_message(&page, "hi")
@@ -194,18 +109,19 @@ async fn send_message_fails_when_the_composer_is_gone() {
 
 #[tokio::test]
 async fn send_message_waits_for_the_send_button_to_enable() {
-    let page = ScriptedPage::new()
-        .on("!!document.querySelector", &[json!(true)])
-        .on("el.focus()", &[json!({ "ok": true })])
-        .on("el.disabled", &[json!(false), json!(true)])
-        .on("el.click()", &[json!(true)])
-        .on("el.value !== undefined", &[json!(true)]);
+    let page = MockPage::new()
+        .expect_default(Value::Null)
+        .expect_seq("!!document.querySelector", vec![json!(true)])
+        .expect_seq("el.focus()", vec![json!({ "ok": true })])
+        .expect_seq("el.disabled", vec![json!(false), json!(true)])
+        .expect_seq("el.click()", vec![json!(true)])
+        .expect_seq("el.value !== undefined", vec![json!(true)]);
     provider(provider_cfg())
         .send_message(&page, "hi")
         .await
         .expect("button enables on the second probe");
     assert!(
-        page.evals_containing("el.disabled") >= 2,
+        evals_containing(&page, "el.disabled") >= 2,
         "the disabled button was polled more than once"
     );
 }
@@ -214,26 +130,28 @@ async fn send_message_waits_for_the_send_button_to_enable() {
 async fn send_message_requires_the_configured_selectors() {
     let mut cfg = provider_cfg();
     cfg.selectors.input = None;
-    let page = ScriptedPage::new();
+    let page = MockPage::new();
     let err = provider(cfg)
         .send_message(&page, "hi")
         .await
         .expect_err("a missing selector is a config error");
     assert!(matches!(err, UwaError::Config(_)), "{err:?}");
-    assert!(page.evals().is_empty(), "no page traffic before validation");
+    assert!(evals(&page).is_empty(), "no page traffic before validation");
 }
 
 #[tokio::test]
 async fn cancel_clicks_the_stop_button() {
-    let page = ScriptedPage::new().on("el.click()", &[json!(true)]);
+    let page = MockPage::new()
+        .expect_default(Value::Null)
+        .expect_seq("el.click()", vec![json!(true)]);
     provider(provider_cfg())
         .cancel(&page)
         .await
         .expect("cancel is best-effort");
-    assert_eq!(page.evals_containing("el.click()"), 1);
+    assert_eq!(evals_containing(&page, "el.click()"), 1);
     assert!(
-        page.evals().iter().any(|e| e.contains("#stop")),
+        evals(&page).iter().any(|e| e.contains("#stop")),
         "the stop selector was clicked: {:?}",
-        page.evals()
+        evals(&page)
     );
 }

@@ -26,7 +26,7 @@ pub struct MockPage {
 struct Inner {
     url: Mutex<Url>,
     html: Mutex<Html>,
-    script: Mutex<Vec<(String, Value)>>,
+    script: Mutex<Vec<ScriptRule>>,
     default: Mutex<Value>,
     wait_selector: Mutex<Result<(), String>>,
     net_tx: broadcast::Sender<NetworkEvent>,
@@ -39,6 +39,16 @@ struct Inner {
 enum Html {
     Fixed(String),
     Sequence(VecDeque<String>),
+}
+
+/// One `eval` rule: the JS substring it matches and what to answer.
+struct ScriptRule {
+    pattern: String,
+    values: VecDeque<Value>,
+    /// Keep answering the last value forever instead of falling through to
+    /// the default. Single-shot rules (`expect`) stop after their answers
+    /// run out.
+    repeat: bool,
 }
 
 impl MockPage {
@@ -82,12 +92,28 @@ impl MockPage {
 
     /// On `eval(js)`, if `js` contains `pattern`, return `value` (once).
     pub fn expect(self, pattern: &str, value: Value) -> Self {
+        self.push_rule(pattern, vec![value], false);
+        self
+    }
+
+    /// Like [`expect`](Self::expect), but answers in order and then keeps
+    /// repeating the last value — what a page that only ever reports one
+    /// state looks like.
+    pub fn expect_seq<S: Into<Value>>(self, pattern: &str, values: Vec<S>) -> Self {
+        self.push_rule(pattern, values.into_iter().map(Into::into).collect(), true);
+        self
+    }
+
+    fn push_rule(&self, pattern: &str, values: Vec<Value>, repeat: bool) {
         self.inner
             .script
             .lock()
             .expect("script lock")
-            .push((pattern.into(), value));
-        self
+            .push(ScriptRule {
+                pattern: pattern.into(),
+                values: values.into(),
+                repeat,
+            });
     }
 
     /// Answer for `eval` when no [`expect`](Self::expect) matches.
@@ -150,11 +176,28 @@ impl Page for MockPage {
             .expect("log lock")
             .push(js.to_string());
         let mut script = self.inner.script.lock().expect("script lock");
-        if let Some(idx) = script.iter().position(|(pat, _)| js.contains(pat.as_str())) {
-            let (_, v) = script.remove(idx);
+        if let Some(idx) = script.iter().position(|r| js.contains(r.pattern.as_str())) {
+            let rule = &mut script[idx];
+            let v = rule.values.front().cloned().unwrap_or(Value::Null);
+            if rule.values.len() > 1 {
+                rule.values.pop_front();
+            } else if !rule.repeat {
+                script.remove(idx);
+            }
             return Ok(v);
         }
         Ok(self.inner.default.lock().expect("default lock").clone())
+    }
+
+    /// The stealth pack registers pre-load scripts here; recorded as
+    /// `early:<js>` so tests can tell them apart from [`eval`](Page::eval).
+    async fn eval_early(&self, js: &str) -> Result<()> {
+        self.inner
+            .log
+            .lock()
+            .expect("log lock")
+            .push(format!("early:{js}"));
+        Ok(())
     }
 
     async fn wait_for_selector(&self, _sel: &str, timeout: Duration) -> Result<()> {
@@ -216,6 +259,25 @@ mod tests {
         let js = "!!document.querySelector(\"#x\")";
         assert_eq!(p.eval(js).await.expect("first hit"), json!(true));
         assert_eq!(p.eval(js).await.expect("fallback"), json!(false));
+    }
+
+    #[tokio::test]
+    async fn expect_seq_repeats_the_last_value() {
+        let p = MockPage::new().expect_seq("query", vec![json!(true), json!(false)]);
+        assert_eq!(p.eval("query here").await.expect("first"), json!(true));
+        assert_eq!(p.eval("query here").await.expect("second"), json!(false));
+        assert_eq!(p.eval("query here").await.expect("repeats"), json!(false));
+    }
+
+    #[tokio::test]
+    async fn eval_early_is_recorded_separately() {
+        let p = MockPage::new();
+        p.eval_early("stealth-a").await.expect("early");
+        p.eval("live-a").await.expect("live");
+        assert_eq!(
+            p.log(),
+            vec!["early:stealth-a".to_string(), "live-a".to_string()]
+        );
     }
 
     #[tokio::test]
