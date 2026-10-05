@@ -129,6 +129,10 @@ pub struct ClientCapabilities {/* extend later */}
 pub struct ServerCapabilities {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools: Option<Value>, // {"listChanged": bool}
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resources: Option<Value>, // {"subscribe": bool, "listChanged": bool}
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompts: Option<Value>, // {"listChanged": bool}
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -224,6 +228,86 @@ impl CallToolResult {
         }
         out
     }
+}
+
+// --- resources ---
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct McpResource {
+    pub uri: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(rename = "mimeType", default, skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ListResourcesResult {
+    pub resources: Vec<McpResource>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ReadResourceParams {
+    pub uri: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ResourceContents {
+    pub uri: String,
+    #[serde(rename = "mimeType", default, skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ReadResourceResult {
+    pub contents: Vec<ResourceContents>,
+}
+
+// --- prompts ---
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct McpPromptArgument {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct McpPrompt {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub arguments: Vec<McpPromptArgument>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ListPromptsResult {
+    pub prompts: Vec<McpPrompt>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct GetPromptParams {
+    pub name: String,
+    #[serde(default)]
+    pub arguments: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PromptMessage {
+    pub role: String,
+    pub content: McpContent,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct GetPromptResult {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub messages: Vec<PromptMessage>,
 }
 
 #[cfg(test)]

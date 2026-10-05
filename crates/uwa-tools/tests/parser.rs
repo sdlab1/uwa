@@ -119,3 +119,15 @@ fn overlap_between_strategies_does_not_duplicate() {
     let out = parse(text, &known());
     assert_eq!(out.calls.len(), 1);
 }
+
+#[test]
+fn tool_calls_serialize_and_deserialize() {
+    let call = uwa_tools::ToolCall {
+        id: "call_1".into(),
+        name: "weather".into(),
+        arguments: serde_json::json!({"city": "X"}),
+    };
+    let s = serde_json::to_string(&call).unwrap();
+    let back: uwa_tools::ToolCall = serde_json::from_str(&s).unwrap();
+    assert_eq!(back, call);
+}

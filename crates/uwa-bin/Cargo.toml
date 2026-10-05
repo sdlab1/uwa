@@ -21,3 +21,4 @@ clap = { version = "4", features = ["derive", "env"] }
 async-trait = { workspace = true }
 axum = { workspace = true }
 uwa-mcp = { workspace = true }
+serde_json = { workspace = true }

@@ -1,27 +1,30 @@
 //! Built-in MCP handlers exposing the bridge itself.
 
-use crate::protocol::{CallToolResult, McpContent, McpTool};
+use crate::protocol::{
+    CallToolResult, GetPromptResult, McpContent, McpPrompt, McpPromptArgument, McpResource,
+    McpTool, PromptMessage, ReadResourceResult, ResourceContents,
+};
 use crate::server::McpHandler;
 use async_trait::async_trait;
+use futures::future::BoxFuture;
 use serde_json::{json, Value};
 use std::sync::Arc;
-use uwa_core::{Result, SiteProvider, Transport, UwaError};
+use uwa_core::{Result, Transport, UwaError};
 
-/// Type alias for the provider lookup function type.
-pub type ProviderLookupFn = Arc<dyn Fn(&str) -> Option<Arc<dyn SiteProvider>> + Send + Sync>;
+/// A chat call is `dispatch(provider, message) -> reply`. The closure owns
+/// whatever it needs (state, sessions, breaker), which keeps `uwa-mcp` free of
+/// any dependency on `uwa-api`.
+pub type DispatcherFn =
+    Arc<dyn Fn(String, String) -> BoxFuture<'static, Result<String>> + Send + Sync>;
 
 /// `web_chat(provider, message)` — one-shot ask to a web-UI LLM.
 pub struct WebChatHandler {
-    providers: ProviderLookupFn,
-    transport: Arc<dyn Transport>,
+    dispatch: DispatcherFn,
 }
 
 impl WebChatHandler {
-    pub fn new(providers: ProviderLookupFn, transport: Arc<dyn Transport>) -> Self {
-        Self {
-            providers,
-            transport,
-        }
+    pub fn new(dispatch: DispatcherFn) -> Self {
+        Self { dispatch }
     }
 }
 
@@ -59,18 +62,7 @@ impl McpHandler for WebChatHandler {
             .and_then(Value::as_str)
             .ok_or_else(|| UwaError::BadRequest("missing `message`".into()))?;
 
-        let site = (self.providers)(provider_name)
-            .ok_or_else(|| UwaError::UnknownModel(provider_name.into()))?;
-        let tab = self
-            .transport
-            .list_tabs()
-            .await?
-            .into_iter()
-            .next()
-            .ok_or_else(|| UwaError::Unavailable("no tabs".into()))?;
-        let page = self.transport.page(&tab).await?;
-        site.send_message(page.as_ref(), message).await?;
-        let answer = site.wait_response(page.as_ref()).await?;
+        let answer = (self.dispatch)(provider_name.to_string(), message.to_string()).await?;
         Ok(CallToolResult {
             content: vec![McpContent::Text { text: answer }],
             is_error: false,
@@ -78,7 +70,10 @@ impl McpHandler for WebChatHandler {
     }
 }
 
-/// `web_tabs_list()` — health/status.
+/// Resource listing of the connected tabs.
+pub const TABS_URI: &str = "uwa://web/tabs";
+
+/// `web_tabs_list()` + `uwa://web/tabs` — health/status.
 pub struct WebTabsHandler {
     transport: Arc<dyn Transport>,
 }
@@ -107,9 +102,168 @@ impl McpHandler for WebTabsHandler {
         if tool != "list_tabs" {
             return Err(UwaError::BadRequest(format!("unknown tool `web__{tool}`")));
         }
-        let tabs = self.transport.list_tabs().await?;
-        let text = serde_json::to_string(&tabs.iter().map(|t| t.as_str()).collect::<Vec<_>>())
-            .unwrap_or_else(|_| "[]".into());
+        let text = self.tabs_json().await?;
         Ok(CallToolResult::text(text))
+    }
+
+    fn resources(&self) -> Vec<McpResource> {
+        vec![McpResource {
+            uri: TABS_URI.into(),
+            name: "tabs".into(),
+            description: Some("Currently connected browser tabs as a JSON array.".into()),
+            mime_type: Some("application/json".into()),
+        }]
+    }
+
+    async fn read_resource(&self, uri: &str) -> Result<ReadResourceResult> {
+        if uri != TABS_URI {
+            return Err(UwaError::BadRequest(format!("resource `{uri}` not found")));
+        }
+        Ok(ReadResourceResult {
+            contents: vec![ResourceContents {
+                uri: TABS_URI.into(),
+                mime_type: Some("application/json".into()),
+                text: self.tabs_json().await?,
+            }],
+        })
+    }
+}
+
+impl WebTabsHandler {
+    async fn tabs_json(&self) -> Result<String> {
+        let tabs = self.transport.list_tabs().await?;
+        Ok(
+            serde_json::to_string(&tabs.iter().map(|t| t.as_str()).collect::<Vec<_>>())
+                .unwrap_or_else(|_| "[]".into()),
+        )
+    }
+}
+
+/// Prompt `ask` — the client renders it into a user message and sends it
+/// itself; no browser round trip happens here.
+pub struct WebPromptHandler;
+
+#[async_trait]
+impl McpHandler for WebPromptHandler {
+    fn namespace(&self) -> &str {
+        "web"
+    }
+
+    fn prompts(&self) -> Vec<McpPrompt> {
+        vec![McpPrompt {
+            name: "ask".into(),
+            description: Some("Ask the connected web LLM a question.".into()),
+            arguments: vec![McpPromptArgument {
+                name: "question".into(),
+                description: Some("Question to ask.".into()),
+                required: Some(true),
+            }],
+        }]
+    }
+
+    async fn get_prompt(&self, name: &str, args: Value) -> Result<GetPromptResult> {
+        if name != "ask" {
+            return Err(UwaError::BadRequest(format!("prompt `{name}` not found")));
+        }
+        let question = args
+            .get("question")
+            .and_then(Value::as_str)
+            .filter(|q| !q.is_empty())
+            .ok_or_else(|| UwaError::BadRequest("missing `question`".into()))?;
+        Ok(GetPromptResult {
+            description: Some(question.to_string()),
+            messages: vec![PromptMessage {
+                role: "user".into(),
+                content: McpContent::Text {
+                    text: question.to_string(),
+                },
+            }],
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use uwa_core::{Page, Result as CoreResult, TabId, Transport};
+
+    struct OneTab;
+
+    #[async_trait]
+    impl Transport for OneTab {
+        async fn page(&self, _tab: &TabId) -> CoreResult<Box<dyn Page>> {
+            Err(UwaError::Unavailable("no page in tests".into()))
+        }
+        async fn list_tabs(&self) -> CoreResult<Vec<TabId>> {
+            Ok(vec![TabId::from_raw("tab-1")])
+        }
+        async fn health(&self, _tab: &TabId) -> CoreResult<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn tabs_handler_reads_the_tabs_resource() {
+        let h = WebTabsHandler::new(Arc::new(OneTab));
+        assert_eq!(h.resources()[0].uri, TABS_URI);
+        let r = h.read_resource(TABS_URI).await.unwrap();
+        assert_eq!(r.contents[0].mime_type.as_deref(), Some("application/json"));
+        assert!(r.contents[0].text.contains("tab-1"));
+        assert!(h.read_resource("uwa://nope").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn ask_prompt_renders_the_question() {
+        let h = WebPromptHandler;
+        assert_eq!(h.prompts()[0].name, "ask");
+        let r = h
+            .get_prompt("ask", json!({"question": "what now?"}))
+            .await
+            .unwrap();
+        assert_eq!(r.messages.len(), 1);
+        assert_eq!(r.messages[0].role, "user");
+        assert!(h.get_prompt("ask", json!({})).await.is_err());
+        assert!(h
+            .get_prompt("nope", json!({"question": "x"}))
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn chat_handler_delegates_to_the_dispatcher() {
+        let seen: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(vec![]));
+        let seen2 = seen.clone();
+        let handler = WebChatHandler::new(Arc::new(move |provider, message| {
+            let seen = seen2.clone();
+            Box::pin(async move {
+                seen.lock().unwrap().push(format!("{provider}:{message}"));
+                Ok(format!("echo {message}"))
+            })
+        }));
+        let out = handler
+            .call("chat", json!({"provider": "chatgpt", "message": "hi"}))
+            .await
+            .unwrap();
+        assert_eq!(out.as_text(), "echo hi");
+        assert_eq!(&seen.lock().unwrap()[..], &["chatgpt:hi".to_string()]);
+        assert!(handler.call("other", json!({})).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn handlers_may_implement_only_part_of_the_surface() {
+        struct Minimal;
+        #[async_trait]
+        impl McpHandler for Minimal {
+            fn namespace(&self) -> &str {
+                "min"
+            }
+        }
+        let h = Minimal;
+        assert!(h.tools().is_empty());
+        assert!(h.resources().is_empty());
+        assert!(h.prompts().is_empty());
+        assert!(h.call("x", json!({})).await.is_err());
+        assert!(h.read_resource("uwa://x").await.is_err());
+        assert!(h.get_prompt("x", json!({})).await.is_err());
     }
 }

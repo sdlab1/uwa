@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use uwa_core::traits::ToolSpec;
 use uwa_core::UwaError;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -54,5 +55,43 @@ impl ToolDefinition {
             });
         }
         Ok(out)
+    }
+}
+
+impl From<ToolDefinition> for ToolSpec {
+    fn from(d: ToolDefinition) -> Self {
+        Self {
+            name: d.name,
+            description: d.description,
+            parameters: d.parameters,
+        }
+    }
+}
+
+impl From<&ToolDefinition> for ToolSpec {
+    fn from(d: &ToolDefinition) -> Self {
+        Self {
+            name: d.name.clone(),
+            description: d.description.clone(),
+            parameters: d.parameters.clone(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn definitions_convert_into_specs() {
+        let d = ToolDefinition::new("weather", "look outside", json!({"type": "object"}));
+        let owned: ToolSpec = d.clone().into();
+        assert_eq!(owned.name, "weather");
+        assert_eq!(owned.description, "look outside");
+        assert_eq!(owned.parameters, json!({"type": "object"}));
+
+        let borrowed: ToolSpec = (&d).into();
+        assert_eq!(borrowed, owned);
     }
 }

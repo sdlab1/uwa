@@ -6,9 +6,11 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use uwa_api::{router, AppState, ProviderRegistry};
 use uwa_config::Config;
+use uwa_core::types::openai::{ChatCompletionRequest, ChatMessage};
+use uwa_core::types::Role;
 use uwa_mcp::{
-    McpClientProvider, McpServer, ProviderLookupFn, StdioClient, ToolRouter, WebChatHandler,
-    WebTabsHandler,
+    DispatcherFn, McpClientProvider, McpServer, StdioClient, ToolRouter, WebChatHandler,
+    WebPromptHandler, WebTabsHandler,
 };
 
 #[derive(Parser)]
@@ -24,6 +26,8 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .with_target(false)
+        // stdout belongs to the MCP stdio transport; logs go to stderr.
+        .with_writer(std::io::stderr)
         .init();
 
     let cli = Cli::parse();
@@ -57,28 +61,26 @@ async fn main() -> anyhow::Result<()> {
     }
     let tool_router = Arc::new(tool_router);
 
-    // 2. Optionally expose this bridge itself as an MCP server (stdio).
+    // 2. HTTP state — built after the MCP clients so the chat pipeline can
+    //    offer their tools.
+    let state = AppState::minimal(config.clone(), providers.clone(), transport.clone())
+        .with_tool_router(tool_router);
+
+    // 3. Optionally expose this bridge itself as an MCP server (stdio).
     if config.mcp_server.enabled {
-        let providers_arc = providers.clone();
         let transport_for_server = transport.clone();
+        let chat = chat_dispatcher(state.clone());
         tokio::spawn(async move {
-            let provider_lookup: ProviderLookupFn =
-                Arc::new(move |name: &str| providers_arc.get(name).ok());
             let mcp = McpServer::new("uwa")
-                .register(Arc::new(WebChatHandler::new(
-                    provider_lookup,
-                    transport_for_server.clone(),
-                )))
-                .register(Arc::new(WebTabsHandler::new(transport_for_server)));
-            if let Err(e) = mcp.serve_stdio().await {
+                .register(Arc::new(WebChatHandler::new(chat)))
+                .register(Arc::new(WebTabsHandler::new(transport_for_server)))
+                .register(Arc::new(WebPromptHandler));
+            if let Err(e) = Arc::new(mcp).serve_stdio().await {
                 tracing::error!("MCP server exited: {e}");
             }
         });
         tracing::info!("MCP server enabled on stdio");
     }
-
-    let state = AppState::minimal(config.clone(), providers.clone(), transport)
-        .with_tool_router(tool_router);
 
     let addr: SocketAddr = format!("{}:{}", config.server.bind, config.server.port)
         .parse()
@@ -91,6 +93,28 @@ async fn main() -> anyhow::Result<()> {
         .with_graceful_shutdown(shutdown_signal())
         .await?;
     Ok(())
+}
+
+/// `web__chat(provider, message)` — an MCP client asks the pipeline for one
+/// answer, with no local or remote tools in play.
+fn chat_dispatcher(state: AppState) -> DispatcherFn {
+    Arc::new(move |provider, message| {
+        let st = state.clone();
+        Box::pin(async move {
+            let req = ChatCompletionRequest {
+                model: provider,
+                messages: vec![ChatMessage::text(Role::User, message)],
+                stream: Some(false),
+                temperature: None,
+                max_tokens: None,
+                tools: None,
+                tool_choice: Some(serde_json::json!("none")),
+                user: None,
+            };
+            let (text, _, _) = uwa_api::routes::chat::run_pipeline(&st, &req, &[]).await?;
+            Ok(text)
+        })
+    })
 }
 
 async fn shutdown_signal() {

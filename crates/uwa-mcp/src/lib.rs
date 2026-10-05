@@ -12,7 +12,7 @@
 //! - [`server::{McpServer, McpHandler}`]
 //! - [`bridge::McpClientProvider`]
 //! - [`router::ToolRouter`]
-//! - [`handlers::{WebChatHandler, WebTabsHandler}`]
+//! - [`handlers::{DispatcherFn, WebChatHandler, WebTabsHandler, WebPromptHandler}`]
 
 pub mod bridge;
 pub mod client;
@@ -21,12 +21,17 @@ pub mod protocol;
 pub mod router;
 pub mod server;
 
+#[cfg(feature = "mcp-http")]
+pub mod http;
+
 pub use bridge::McpClientProvider;
 pub use client::{McpClient, StdioClient};
-pub use handlers::{ProviderLookupFn, WebChatHandler, WebTabsHandler};
+pub use handlers::{DispatcherFn, WebChatHandler, WebPromptHandler, WebTabsHandler, TABS_URI};
 pub use protocol::{
-    CallToolResult, InitializeParams, InitializeResult, JsonRpcError, JsonRpcRequest,
-    JsonRpcResponse, McpContent, McpTool, PROTOCOL_VERSION,
+    CallToolResult, GetPromptParams, GetPromptResult, InitializeParams, InitializeResult,
+    JsonRpcError, JsonRpcRequest, JsonRpcResponse, ListPromptsResult, ListResourcesResult,
+    ListToolsResult, McpContent, McpPrompt, McpPromptArgument, McpResource, McpTool, PromptMessage,
+    ReadResourceParams, ReadResourceResult, ResourceContents, ServerCapabilities, PROTOCOL_VERSION,
 };
 pub use router::ToolRouter;
 pub use server::{McpHandler, McpServer};

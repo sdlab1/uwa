@@ -29,8 +29,7 @@ impl McpHandler for Echo {
 
 #[tokio::main]
 async fn main() {
-    McpServer::new("uwa-mcp-echo")
-        .register(Arc::new(Echo))
+    Arc::new(McpServer::new("uwa-mcp-echo").register(Arc::new(Echo)))
         .serve_stdio()
         .await
         .unwrap();

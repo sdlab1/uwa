@@ -5,6 +5,10 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[features]
+# HTTP + SSE transport for the MCP server (`uwa_mcp::http::router`).
+mcp-http = ["dep:axum", "dep:tower-http", "dep:tokio-stream"]
+
 [dependencies]
 uwa-core.workspace = true
 uwa-tools.workspace = true
@@ -17,6 +21,10 @@ tracing.workspace = true
 dashmap.workspace = true
 futures.workspace = true
 url.workspace = true
+axum = { workspace = true, optional = true }
+tower-http = { version = "0.5", features = ["trace"], optional = true }
+tokio-stream = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+axum-test = "15.7"
