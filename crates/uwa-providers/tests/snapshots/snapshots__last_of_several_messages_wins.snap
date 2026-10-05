@@ -1,0 +1,5 @@
+---
+source: crates/uwa-providers/tests/snapshots.rs
+expression: "extract(\"claude_multi.html\").await"
+---
+cargo test --workspace

@@ -215,46 +215,14 @@ fn make_seg(s: &str) -> Segment {
 // decodes SSE or JSON bodies, and produces an async stream of deltas.
 
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use uwa_core::{NetworkEvent, Result};
 
-/// TOML-configurable rules for matching a response and pulling text out of it.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NetRules {
-    /// Substring patterns to match against `response.url`. All must match.
-    pub url_contains: Vec<String>,
-    /// MIME must contain one of these (e.g. `text/event-stream`, `application/json`).
-    pub mime_contains: Vec<String>,
-    /// How to decode the body.
-    pub decoder: NetDecoder,
-    /// Stop reading after this long without a new chunk.
-    #[serde(default = "default_idle")]
-    pub idle_timeout_ms: u64,
-}
-
-fn default_idle() -> u64 {
-    30_000
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum NetDecoder {
-    /// Parse body as SSE; extract text at `json_path` from each frame's data.
-    /// Special path `__raw__` means: use frame data verbatim.
-    Sse { json_path: String },
-    /// Parse body as a single JSON document; extract at `json_path`.
-    Json { json_path: String },
-}
-
-impl NetRules {
-    pub fn matches(&self, url: &str, mime: &str) -> bool {
-        self.url_contains.iter().all(|p| url.contains(p.as_str()))
-            && self.mime_contains.iter().any(|p| mime.contains(p.as_str()))
-    }
-}
+// `NetRules` / `NetDecoder` are pure config shared with uwa-config and
+// uwa-providers; they live in uwa-core so every crate sees the same shape.
+pub use uwa_core::net::{NetDecoder, NetRules};
 
 /// Stream item: an incremental piece of text.
 #[derive(Debug, Clone, PartialEq)]
@@ -467,27 +435,6 @@ mod tests {
     fn json_path_empty_is_none() {
         let v = json!({});
         assert!(json_path_str(&v, "").is_none());
-    }
-
-    #[test]
-    fn rules_match_url_and_mime() {
-        let r = NetRules {
-            url_contains: vec!["/backend-api/conversation".into()],
-            mime_contains: vec!["text/event-stream".into()],
-            decoder: NetDecoder::Sse {
-                json_path: "__raw__".into(),
-            },
-            idle_timeout_ms: 1000,
-        };
-        assert!(r.matches(
-            "https://chatgpt.com/backend-api/conversation/xyz",
-            "text/event-stream"
-        ));
-        assert!(!r.matches(
-            "https://chatgpt.com/backend-api/conversation/xyz",
-            "application/json"
-        ));
-        assert!(!r.matches("https://chatgpt.com/other", "text/event-stream"));
     }
 
     #[test]

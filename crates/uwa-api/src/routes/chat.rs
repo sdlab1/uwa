@@ -17,7 +17,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use uwa_core::traits::ToolSpec;
 use uwa_core::types::openai::*;
 use uwa_core::types::{FinishReason, Role};
-use uwa_core::{RequestId, SessionId, UwaError};
+use uwa_core::{RequestId, UwaError};
 use uwa_tools::{
     build_system_prompt, compose_browser_turn, parse, render_tool_response, ToolDefinition,
 };
@@ -242,7 +242,3 @@ fn build_non_streaming(
         usage: Usage::default(),
     }
 }
-
-// Placeholder to keep SessionId import live for future work.
-#[allow(dead_code)]
-fn _unused(_s: SessionId) {}

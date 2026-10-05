@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use serde_json::Value;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::time::Duration;
 use tokio::sync::broadcast;
 use url::Url;
@@ -163,6 +163,3 @@ async fn min_wait_blocks_early_stable() {
     let _ = f.wait(&p).await.unwrap();
     assert!(start.elapsed() >= Duration::from_millis(80));
 }
-
-#[allow(dead_code)]
-fn _keep(_: Arc<()>) {}

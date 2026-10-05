@@ -1,0 +1,5 @@
+---
+source: crates/uwa-extract/tests/dom_snapshots.rs
+expression: out
+---
+latest

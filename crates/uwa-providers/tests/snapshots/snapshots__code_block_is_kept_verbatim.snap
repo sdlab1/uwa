@@ -1,0 +1,7 @@
+---
+source: crates/uwa-providers/tests/snapshots.rs
+expression: "extract(\"gemini_code.html\").await"
+---
+Add a guard clause, then simplify:if input.is_empty() {
+    return Ok(());
+}That keeps the happy path unindented.

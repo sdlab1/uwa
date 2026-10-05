@@ -7,18 +7,22 @@ license.workspace = true
 
 [dependencies]
 uwa-core.workspace = true
+uwa-stealth = { path = "../uwa-stealth" }
 async-trait.workspace = true
-tokio = { workspace = true, features = ["process", "sync", "time", "rt", "net", "io-util"] }
+tokio.workspace = true
 dashmap.workspace = true
-serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
-thiserror.workspace = true
-governor = "0.6"
 url.workspace = true
 futures.workspace = true
-tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "handshake"] }
+base64 = "0.21"
+chromiumoxide = { version = "0.7.0", default-features = false, features = [
+    "tokio-runtime",
+    "bytes",
+] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
-tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "handshake"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+libc = "0.2"

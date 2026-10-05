@@ -1,0 +1,7 @@
+---
+source: crates/uwa-providers/tests/snapshots.rs
+expression: "extract(\"claude_simple.html\").await"
+---
+It guarantees that no reference outlives the data it points at, and
+        that at any moment there is either one mutable reference or any number
+        of shared references.

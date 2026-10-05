@@ -14,10 +14,9 @@ use crate::finisher::{FinishSignal, Finisher};
 use crate::net::{DefaultNetExtractor, NetDelta, NetExtractor, NetRules};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use std::time::Duration;
 use tokio_stream::StreamExt;
 use uwa_config::ExtractionStrategy;
-use uwa_core::{Page, Result, UwaError};
+use uwa_core::{Page, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -75,14 +74,17 @@ impl ExtractionPipeline {
             });
         }
 
-        // 2. Network-first: race the net stream against a DOM-stability finisher.
+        // 2. Network-first: race the net stream against a wall-clock bound.
         let rules = cfg.net.as_ref().unwrap();
         let mut stream = self.net.deltas(page, rules).await?;
         let finisher = Finisher::new(cfg.finisher.clone());
 
-        // Drain the network stream until it idles/ends.
+        // Drain the network stream until it idles/ends. `select!` (not
+        // `timeout`) so the stream future is dropped — and its borrow of
+        // `text` released — as soon as either branch completes.
         let mut text = String::new();
         let mut got_any = false;
+        let max_wait = cfg.finisher.max_wait;
         let net_fut = async {
             while let Some(NetDelta(s)) = stream.next().await {
                 if !s.is_empty() {
@@ -91,13 +93,16 @@ impl ExtractionPipeline {
                 }
             }
         };
+        let timed_out = tokio::select! {
+            _ = net_fut => false,
+            _ = tokio::time::sleep(max_wait) => {
+                tracing::warn!("network stream idle timeout");
+                true
+            }
+        };
 
-        // We bound the network path by the finisher max_wait too.
-        let net_timeout = Duration::from_millis(cfg.finisher.max_wait.as_millis() as u64);
-        let net_result = tokio::time::timeout(net_timeout, net_fut).await;
-
-        // 3. If network produced nothing → DOM fallback.
-        if !got_any || net_result.is_err() {
+        // 3. If network produced nothing (or we hit the bound) → DOM fallback.
+        if !got_any || timed_out {
             let finish = finisher.wait(page).await.unwrap_or(FinishSignal::Timeout);
             let dom_text = cfg.dom.wait_and_extract(page).await?;
             if dom_text.is_empty() && got_any {
@@ -123,6 +128,3 @@ impl ExtractionPipeline {
         })
     }
 }
-
-#[allow(dead_code)]
-fn _seal(_: UwaError) {}

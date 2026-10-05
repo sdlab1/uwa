@@ -15,7 +15,18 @@ request_timeout_ms = 120000
 name = "chatgpt"
 url_patterns = ["https://chatgpt.com/*"]
 capabilities = { streams = true, tool_calls = true, vision = false, max_context_tokens = 128000 }
+extraction = "network_first"
 selectors_version = "2026-01-01"
+[providers.chatgpt.net]
+url_contains = ["/backend-api/conversation"]
+mime_contains = ["text/event-stream"]
+decoder = { kind = "sse", json_path = "v" }
+idle_timeout_ms = 30000
+[providers.chatgpt.finisher]
+dom_stable_ms = 700
+poll_ms = 150
+min_wait_ms = 500
+max_wait_ms = 120000
 [providers.chatgpt.selectors]
 input = "textarea#prompt-textarea"
 send_button = "button[data-testid='send-button']"
@@ -26,16 +37,35 @@ assistant_message = "[data-message-author-role='assistant']"
 name = "claude"
 url_patterns = ["https://claude.ai/*"]
 capabilities = { streams = true, tool_calls = true, vision = true, max_context_tokens = 200000 }
+selectors_version = "2026-01-01"
+[providers.claude.selectors]
+input = "div[contenteditable='true'].ProseMirror"
+send_button = "button[aria-label='Send Message']"
+stop_button = "button[aria-label='Stop Response']"
+assistant_message = ".font-claude-message"
+conversation_root = "div[class*='conversation']"
 
 [providers.gemini]
 name = "gemini"
 url_patterns = ["https://gemini.google.com/*"]
 capabilities = { streams = true, tool_calls = false, vision = true, max_context_tokens = 1000000 }
+selectors_version = "2026-01-01"
+[providers.gemini.selectors]
+input = "rich-textarea .ql-editor"
+send_button = "button.send-button"
+stop_button = "button[aria-label='Stop response']"
+assistant_message = "model-response .markdown"
 
 [providers.deepseek]
 name = "deepseek"
 url_patterns = ["https://chat.deepseek.com/*"]
 capabilities = { streams = true, tool_calls = true, vision = false, max_context_tokens = 64000 }
+selectors_version = "2026-01-01"
+[providers.deepseek.selectors]
+input = "textarea"
+send_button = "div[data-testid='send-button']"
+stop_button = "button[aria-label='Stop']"
+assistant_message = "div[data-testid='assistant-message']"
 
 [mcp_server]
 enabled = true

@@ -7,6 +7,7 @@
 //! - [`Config::load_from_path`], [`Config::load_from_str`]
 //! - [`Config::provider_for_model`], [`Config::provider_for_url`]
 //! - [`ProviderCfg`] – per-provider settings (selectors, caps, TOML)
+//! - [`url_matches`] – the `*`-glob used by `url_patterns`
 //!
 //! Environment overrides use the prefix `UWA__`, e.g. `UWA__SERVER__PORT=9090`.
 
@@ -75,6 +76,12 @@ pub struct ProviderCfg {
     /// Extraction strategy preference.
     #[serde(default)]
     pub extraction: ExtractionStrategy,
+    /// Network extraction rules; `None` forces the DOM fallback path.
+    #[serde(default)]
+    pub net: Option<uwa_core::NetRules>,
+    /// Finisher tuning for `GenericProvider::wait_response`.
+    #[serde(default)]
+    pub finisher: uwa_core::FinisherTuning,
     /// Free-form version tag for the selectors. Shown in /readyz.
     #[serde(default)]
     pub selectors_version: Option<String>,
@@ -89,13 +96,9 @@ pub struct Selectors {
     pub conversation_root: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ExtractionStrategy {
-    #[default]
-    NetworkFirst,
-    DomOnly,
-}
+/// Canonical strategy type; `uwa-config` re-exports it so config and the
+/// extraction pipeline never disagree on the wire format.
+pub use uwa_core::ExtractionStrategy;
 
 fn default_bind() -> String {
     "127.0.0.1".into()
@@ -157,7 +160,7 @@ impl Config {
 
 /// Tiny glob matcher: only `*` is special and matches any suffix/prefix.
 /// Good enough for `https://chatgpt.com/*` and `https://gemini.google.com/*`.
-fn url_matches(pattern: &str, url: &Url) -> bool {
+pub fn url_matches(pattern: &str, url: &Url) -> bool {
     let u = url.as_str();
     match pattern.split_once('*') {
         None => pattern == u,

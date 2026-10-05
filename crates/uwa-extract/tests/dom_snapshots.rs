@@ -1,12 +1,9 @@
-//! Snapshot tests for selector-driven extraction.
+//! Snapshot tests for selector-driven extraction (`insta`).
 //!
-//! First run creates `<fixtures>/<name>.html` and `<name>.txt`; subsequent runs
-//! diff against them. Run `UWA_FIXTURES=$PWD/tests/fixtures cargo test` to pin
-//! snapshots to the repo.
+//! Run `cargo insta review` after an intentional extraction change.
 
 use std::time::Duration;
 use uwa_extract::dom::DomExtractor;
-use uwa_extract::fixture::assert_snapshot;
 
 fn ex() -> DomExtractor {
     DomExtractor {
@@ -20,41 +17,21 @@ fn ex() -> DomExtractor {
 
 #[test]
 fn chatgpt_simple() {
-    let html = r#"
-        <html><body>
-          <div data-message-author-role="user">ping</div>
-          <div data-message-author-role="assistant">
-            <div class="markdown">pong</div>
-          </div>
-        </body></html>
-    "#;
-    assert_snapshot("chatgpt_simple", html, |h| {
-        ex().extract_from_html(h).unwrap()
-    });
+    let html = include_str!("fixtures/chatgpt_simple.html");
+    let out = ex().extract_from_html(html).unwrap();
+    insta::assert_snapshot!(out);
 }
 
 #[test]
 fn chatgpt_multiple_messages() {
-    let html = r#"
-        <html><body>
-          <div data-message-author-role="assistant">older</div>
-          <div data-message-author-role="user">new</div>
-          <div data-message-author-role="assistant">latest</div>
-        </body></html>
-    "#;
-    assert_snapshot("chatgpt_multiple", html, |h| {
-        ex().extract_from_html(h).unwrap()
-    });
+    let html = include_str!("fixtures/chatgpt_multiple.html");
+    let out = ex().extract_from_html(html).unwrap();
+    insta::assert_snapshot!(out);
 }
 
 #[test]
 fn whitespace_is_trimmed() {
-    let html = r#"
-        <html><body>
-          <div data-message-author-role="assistant">   hello   </div>
-        </body></html>
-    "#;
-    assert_snapshot("whitespace_trim", html, |h| {
-        ex().extract_from_html(h).unwrap()
-    });
+    let html = include_str!("fixtures/whitespace_trim.html");
+    let out = ex().extract_from_html(html).unwrap();
+    insta::assert_snapshot!(out);
 }

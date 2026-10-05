@@ -1,0 +1,6 @@
+---
+source: crates/uwa-providers/tests/snapshots.rs
+expression: "extract(\"deepseek_whitespace.html\").await"
+---
+Spaced    out   message.
+        With a trailing line.

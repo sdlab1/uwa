@@ -21,3 +21,5 @@ url.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+insta = { version = "1", features = ["yaml"] }
+proptest = "1"

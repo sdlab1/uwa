@@ -17,14 +17,12 @@
 //! - [`net::NetExtractor`], [`net::NetDelta`], [`net::NetRules`], [`net::NetDecoder`]
 //! - [`dom::DomExtractor`] — selector-driven text extraction
 //! - [`finisher::Finisher`], [`finisher::FinisherCfg`], [`finisher::FinishSignal`]
-//! - [`fixture`] — snapshot helpers for selector tests
 //!
 //! The crate is transport-agnostic: it consumes [`uwa_core::NetworkEvent`] and
 //! drives a `&dyn uwa_core::Page`. No CDP, no Chromium, no HTTP deps.
 
 pub mod dom;
 pub mod finisher;
-pub mod fixture;
 pub mod net;
 pub mod pipeline;
 

@@ -1,410 +1,373 @@
-//! CDP transport: connect to a running Chromium over WebSocket and provide
-//! `uwa_core::Transport` implementation backed by CDP.
+//! CDP transport: connect to a running Chromium and expose it as
+//! `uwa_core::Transport` backed by `chromiumoxide`.
 
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use dashmap::DashMap;
-use futures::{SinkExt, StreamExt};
+use base64::Engine as _;
+use chromiumoxide::cdp::browser_protocol::network::{
+    EventLoadingFinished, EventResponseReceived, GetResponseBodyParams, GetResponseBodyReturns,
+};
+use chromiumoxide::cdp::browser_protocol::page::EventFrameAttached;
+use chromiumoxide::cdp::browser_protocol::target::{
+    EventTargetCreated, EventTargetDestroyed, TargetId as CdpTargetId,
+};
+use chromiumoxide::cdp::js_protocol::runtime::EvaluateParams;
+use chromiumoxide::js::Evaluation;
+use chromiumoxide::{Browser, Page as CdpPage};
+use futures::StreamExt;
 use tokio::sync::Mutex;
-use tokio_tungstenite::{connect_async, tungstenite::Message};
+use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
-use url::Url;
-use uwa_core::{Result, TabId, UwaError};
+use uwa_core::{NetworkEvent, Result, TabId, UwaError};
+use uwa_stealth::StealthPack;
 
+use crate::attach::attach_stealth;
+use crate::bus::NetBus;
+use crate::frame::FrameMap;
+use crate::page::CdpPageAdapter;
+use crate::tab_id::{tab_id_from_target, target_id_from_tab};
 use crate::tabpool::TabPool;
 
-/// Internal: a live CDP connection to one browser tab.
-/// Public so that `page.rs` can use it.
-pub struct CdpConnection {
-    pub session_id: String,
-    #[allow(dead_code)]
-    pub target_id: String,
-    sender: tokio::sync::mpsc::UnboundedSender<Message>,
+/// Transport backed by a Chromium instance reachable over CDP.
+pub struct CdpTransport {
+    browser: Arc<Browser>,
+    pool: Arc<TabPool>,
+    bus: NetBus,
+    target_ids: Arc<Mutex<HashMap<TabId, String>>>,
+    tasks: Vec<JoinHandle<()>>,
 }
 
-impl CdpConnection {
-    pub fn new(
-        session_id: String,
-        target_id: String,
-        sender: tokio::sync::mpsc::UnboundedSender<Message>,
-    ) -> Self {
-        Self {
-            session_id,
-            target_id,
-            sender,
+impl Drop for CdpTransport {
+    fn drop(&mut self) {
+        for task in &self.tasks {
+            task.abort();
         }
     }
-
-    pub async fn send(&self, msg: serde_json::Value) -> Result<()> {
-        let text = serde_json::to_string(&msg).map_err(|e| UwaError::Internal(e.to_string()))?;
-        self.sender
-            .send(Message::Text(text))
-            .map_err(|e| UwaError::Transport(e.to_string()))?;
-        Ok(())
-    }
-}
-
-/// Transport that speaks CDP over WebSocket to a running Chromium.
-///
-/// Usage:
-/// ```ignore
-/// let transport = CdpTransport::connect("ws://127.0.0.1:9222", Duration::from_secs(60)).await?;
-/// let pool = transport.pool();
-/// pool.add(TabId::from_raw("tab_1"));
-/// let page = transport.page(&TabId::from_raw("tab_1")).await?;
-/// page.goto(&"https://example.com".parse()?).await?;
-/// ```
-pub struct CdpTransport {
-    ws_url: Url,
-    pool: Arc<TabPool>,
-    connections: Arc<DashMap<TabId, Arc<CdpConnection>>>,
-    next_request_id: Arc<Mutex<u64>>,
-    // Response waiters: request_id -> oneshot::Sender<Value>
-    waiters: Arc<DashMap<u64, tokio::sync::oneshot::Sender<serde_json::Value>>>,
 }
 
 impl CdpTransport {
-    /// Connect to a Chromium instance exposing CDP at `ws_url` (e.g. `ws://127.0.0.1:9222`).
-    ///
-    /// `idle_ttl` configures how long tabs can sit idle before the background
-    /// eviction task may drop them. Call `pool().evict_idle()` periodically.
-    pub async fn connect(ws_url: impl AsRef<str>, idle_ttl: Duration) -> Result<Self> {
-        let ws_url = Url::parse(ws_url.as_ref()).map_err(|e| UwaError::Config(e.to_string()))?;
-
-        let (ws_stream, _) = connect_async(ws_url.as_str())
+    /// Connect to a Chromium exposing CDP. `ws_url` may be an `http(s)` URL
+    /// (resolved via `/json/version`) or a direct `ws://` debugger URL.
+    pub async fn connect(
+        ws_url: &str,
+        idle_ttl: Duration,
+        stealth: Option<StealthPack>,
+    ) -> Result<Self> {
+        let (browser, mut handler) = Browser::connect(ws_url.to_string())
             .await
-            .map_err(|e| UwaError::Transport(e.to_string()))?;
-
-        let (ws_write, mut ws_read) = ws_stream.split();
-
+            .map_err(|e| UwaError::Transport(format!("connect {ws_url}: {e}")))?;
+        let bus = NetBus::new();
         let pool = Arc::new(TabPool::new(idle_ttl));
-        let connections = Arc::new(DashMap::new());
-        let next_request_id = Arc::new(Mutex::new(1u64));
-        let waiters: Arc<DashMap<u64, tokio::sync::oneshot::Sender<serde_json::Value>>> =
-            Arc::new(DashMap::new());
+        let target_ids = Arc::new(Mutex::new(HashMap::new()));
+        let pumped = Arc::new(Mutex::new(HashSet::new()));
 
-        // Spawn reader task that routes CDP responses to waiters
-        let waiters_read = waiters.clone();
-        tokio::spawn(async move {
-            while let Some(msg) = ws_read.next().await {
-                match msg {
-                    Ok(Message::Text(text)) => {
-                        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&text) {
-                            // Check if it's a response to a request
-                            if let Some(id) = val.get("id").and_then(|v| v.as_u64()) {
-                                if let Some(waiter) = waiters_read.remove(&id) {
-                                    let _ = waiter.1.send(val);
-                                }
-                            }
-                            // Check if it's an event with sessionId
-                            else if let Some(_session_id) =
-                                val.get("sessionId").and_then(|v| v.as_str())
-                            {
-                                // Find connection by session_id and forward
-                                // Note: we can't easily access connections here without a reference
-                                // This is a simplified implementation
-                            }
+        // The handler must be polled: it drives the websocket, the commands
+        // and every event listener installed below.
+        let handler_task = tokio::spawn(async move {
+            while let Some(res) = handler.next().await {
+                if let Err(e) = res {
+                    debug!("cdp handler: {e}");
+                }
+            }
+        });
+        let mut tasks: Vec<JoinHandle<()>> = vec![handler_task];
+
+        // Listeners go in before the page enumeration so a target created in
+        // between is registered exactly once (see `pumped`).
+        let created = browser
+            .event_listener::<EventTargetCreated>()
+            .await
+            .map_err(|e| UwaError::Transport(format!("listen targets: {e}")))?;
+        let destroyed = browser
+            .event_listener::<EventTargetDestroyed>()
+            .await
+            .map_err(|e| UwaError::Transport(format!("listen target destroy: {e}")))?;
+
+        // `Target.setDiscoverTargets` announces existing and new tabs, so
+        // `fetch_targets()` is deliberately NOT used here: it issues a second
+        // `Target.attachToTarget` for every target that the target state
+        // machine already attaches to, which splits one page over two CDP
+        // sessions and stalls navigation.
+        let browser = Arc::new(browser);
+
+        let created_task = {
+            let browser = browser.clone();
+            let pool = pool.clone();
+            let bus = bus.clone();
+            let target_ids = target_ids.clone();
+            let pumped = pumped.clone();
+            let stealth = stealth.clone();
+            tokio::spawn(async move {
+                let mut created = created;
+                while let Some(ev) = created.next().await {
+                    if ev.target_info.r#type != "page" {
+                        continue;
+                    }
+                    let tid = ev.target_info.target_id.inner().clone();
+                    match get_page_retry(&browser, &tid).await {
+                        Ok(page) => {
+                            register_target(page, &pool, &bus, &target_ids, &pumped, &stealth)
+                                .await
                         }
+                        Err(e) => warn!(target = %tid, "get_page: {e}"),
                     }
-                    Ok(Message::Close(_)) => {
-                        info!("CDP WebSocket closed");
-                        break;
-                    }
-                    Err(e) => {
-                        warn!("CDP read error: {}", e);
-                        break;
-                    }
-                    _ => {}
                 }
-            }
-        });
-
-        // Spawn writer task
-        let (_tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Message>();
-        tokio::spawn(async move {
-            let mut ws_write = ws_write;
-            while let Some(msg) = rx.recv().await {
-                if let Err(e) = ws_write.send(msg).await {
-                    warn!("CDP write error: {}", e);
-                    break;
+            })
+        };
+        let destroyed_task = {
+            let pool = pool.clone();
+            let bus = bus.clone();
+            let target_ids = target_ids.clone();
+            tokio::spawn(async move {
+                let mut destroyed = destroyed;
+                while let Some(ev) = destroyed.next().await {
+                    let tid = ev.target_id.inner().clone();
+                    let tab = tab_id_from_target(&tid);
+                    target_ids.lock().await.remove(&tab);
+                    pool.remove(&tab);
+                    bus.remove(&tid).await;
+                    debug!(target = %tid, tab = %tab, "target destroyed");
                 }
+            })
+        };
+        tasks.push(created_task);
+        tasks.push(destroyed_task);
+
+        // `Target.getTargets` is answered asynchronously on the first request,
+        // so `pages()` reports the pre-existing tabs only after a moment.
+        let mut pages = Vec::new();
+        for _ in 0..50 {
+            pages = browser
+                .pages()
+                .await
+                .map_err(|e| UwaError::Transport(format!("pages: {e}")))?;
+            if !pages.is_empty() {
+                break;
             }
-        });
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        debug!(count = pages.len(), "enumerated pages");
+        if pages.is_empty() {
+            warn!("connected to {ws_url} but it exposes no pages");
+        }
+        for page in pages {
+            register_target(page, &pool, &bus, &target_ids, &pumped, &stealth).await;
+        }
 
-        info!("Connected to Chromium CDP at {}", ws_url);
-
+        info!("cdp connected to {ws_url}");
         Ok(Self {
-            ws_url,
+            browser,
             pool,
-            connections,
-            next_request_id,
-            waiters,
+            bus,
+            target_ids,
+            tasks,
         })
     }
 
-    /// Return the shared `TabPool` for external management (adding tabs, eviction, etc.).
     pub fn pool(&self) -> Arc<TabPool> {
         self.pool.clone()
     }
 
-    async fn next_id(&self) -> u64 {
-        let mut id = self.next_request_id.lock().await;
-        let current = *id;
-        *id += 1;
-        current
+    pub fn bus(&self) -> NetBus {
+        self.bus.clone()
     }
 
-    /// Attach to a target (tab) and register it in the pool.
-    /// Returns the TabId for the new session.
-    pub async fn attach_tab(&self, target_id: &str) -> Result<TabId> {
-        // For the initial attach, we use a temporary connection to the main target
-        let (ws_stream, _) = connect_async(self.ws_url.as_str())
-            .await
-            .map_err(|e| UwaError::Transport(e.to_string()))?;
+    /// Resolve a logical tab to its CDP target id (for bus subscriptions).
+    pub async fn target_id(&self, tab: &TabId) -> Result<String> {
+        self.resolve_target(tab).await
+    }
 
-        let (ws_write, mut ws_read) = ws_stream.split();
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Message>();
-
-        // Writer task for this connection
-        let mut ws_write = ws_write;
-        tokio::spawn(async move {
-            while let Some(msg) = rx.recv().await {
-                if let Err(e) = ws_write.send(msg).await {
-                    warn!("CDP write error: {}", e);
-                    break;
-                }
-            }
-        });
-
-        let attach_id = self.next_id().await;
-        let attach_msg = serde_json::json!({
-            "id": attach_id,
-            "method": "Target.attachToTarget",
-            "params": {
-                "targetId": target_id,
-                "flatten": true
-            }
-        });
-
-        let attach_text =
-            serde_json::to_string(&attach_msg).map_err(|e| UwaError::Internal(e.to_string()))?;
-        tx.send(Message::Text(attach_text))
-            .map_err(|e| UwaError::Transport(e.to_string()))?;
-
-        // Wait for attach response to get sessionId
-        let mut session_id = None;
-        while let Some(msg) = ws_read.next().await {
-            match msg {
-                Ok(Message::Text(text)) => {
-                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&text) {
-                        if val.get("id").and_then(|v| v.as_u64()) == Some(attach_id) {
-                            if let Some(result) = val.get("result") {
-                                session_id = result
-                                    .get("sessionId")
-                                    .and_then(|v| v.as_str())
-                                    .map(|s| s.to_string());
-                            }
-                            break;
-                        }
-                    }
-                }
-                Ok(Message::Close(_)) => break,
-                Err(e) => {
-                    warn!("CDP read error: {}", e);
-                    break;
-                }
-                _ => {}
-            }
+    async fn resolve_target(&self, tab: &TabId) -> Result<String> {
+        if let Some(t) = self.target_ids.lock().await.get(tab) {
+            return Ok(t.clone());
         }
-
-        let session_id =
-            session_id.ok_or_else(|| UwaError::Transport("failed to attach to target".into()))?;
-
-        // Create a dedicated connection for this tab
-        let (ws_stream2, _) = connect_async(self.ws_url.as_str())
-            .await
-            .map_err(|e| UwaError::Transport(e.to_string()))?;
-
-        let (ws_write2, mut ws_read2) = ws_stream2.split();
-        let (tx2, mut rx2) = tokio::sync::mpsc::unbounded_channel::<Message>();
-
-        let _session_id_clone = session_id.clone();
-        let waiters_clone = self.waiters.clone();
-
-        // Writer task for this tab's connection
-        tokio::spawn(async move {
-            let mut ws_write2 = ws_write2;
-            while let Some(msg) = rx2.recv().await {
-                if let Err(e) = ws_write2.send(msg).await {
-                    warn!("CDP write error: {}", e);
-                    break;
-                }
-            }
-        });
-
-        // Reader task for this tab's connection - routes responses to waiters
-        tokio::spawn(async move {
-            while let Some(msg) = ws_read2.next().await {
-                match msg {
-                    Ok(Message::Text(text)) => {
-                        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&text) {
-                            if let Some(id) = val.get("id").and_then(|v| v.as_u64()) {
-                                if let Some(waiter) = waiters_clone.remove(&id) {
-                                    let _ = waiter.1.send(val);
-                                }
-                            }
-                        }
-                    }
-                    Ok(Message::Close(_)) => break,
-                    Err(e) => {
-                        warn!("CDP read error: {}", e);
-                        break;
-                    }
-                    _ => {}
-                }
-            }
-        });
-
-        // Enable domains
-        let enable_msg = serde_json::json!({
-            "id": self.next_id().await,
-            "method": "Runtime.enable",
-            "sessionId": session_id
-        });
-        let enable_text =
-            serde_json::to_string(&enable_msg).map_err(|e| UwaError::Internal(e.to_string()))?;
-        tx2.send(Message::Text(enable_text))
-            .map_err(|e| UwaError::Transport(e.to_string()))?;
-
-        let enable_msg = serde_json::json!({
-            "id": self.next_id().await,
-            "method": "Network.enable",
-            "sessionId": session_id
-        });
-        let enable_text =
-            serde_json::to_string(&enable_msg).map_err(|e| UwaError::Internal(e.to_string()))?;
-        tx2.send(Message::Text(enable_text))
-            .map_err(|e| UwaError::Transport(e.to_string()))?;
-
-        let enable_msg = serde_json::json!({
-            "id": self.next_id().await,
-            "method": "Page.enable",
-            "sessionId": session_id
-        });
-        let enable_text =
-            serde_json::to_string(&enable_msg).map_err(|e| UwaError::Internal(e.to_string()))?;
-        tx2.send(Message::Text(enable_text))
-            .map_err(|e| UwaError::Transport(e.to_string()))?;
-
-        let enable_msg = serde_json::json!({
-            "id": self.next_id().await,
-            "method": "DOM.enable",
-            "sessionId": session_id
-        });
-        let enable_text =
-            serde_json::to_string(&enable_msg).map_err(|e| UwaError::Internal(e.to_string()))?;
-        tx2.send(Message::Text(enable_text))
-            .map_err(|e| UwaError::Transport(e.to_string()))?;
-
-        let tab_id = TabId::new();
-        let conn = Arc::new(CdpConnection::new(
-            session_id.clone(),
-            target_id.to_string(),
-            tx2,
-        ));
-        self.connections.insert(tab_id.clone(), conn);
-        self.pool.add(tab_id.clone());
-
-        debug!(
-            "Attached tab {} to target {} (session {})",
-            tab_id, target_id, session_id
-        );
-
-        Ok(tab_id)
-    }
-
-    /// List available targets (tabs/pages) from Chromium.
-    pub async fn list_targets(&self) -> Result<Vec<serde_json::Value>> {
-        let id = self.next_id().await;
-        let msg = serde_json::json!({
-            "id": id,
-            "method": "Target.getTargets"
-        });
-        let text = serde_json::to_string(&msg).map_err(|e| UwaError::Internal(e.to_string()))?;
-
-        // Send on a temporary connection
-        let (ws_stream, _) = connect_async(self.ws_url.as_str())
-            .await
-            .map_err(|e| UwaError::Transport(e.to_string()))?;
-        let (mut ws_write, mut ws_read) = ws_stream.split();
-        ws_write
-            .send(Message::Text(text))
-            .await
-            .map_err(|e| UwaError::Transport(e.to_string()))?;
-
-        while let Some(msg) = ws_read.next().await {
-            match msg {
-                Ok(Message::Text(text)) => {
-                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&text) {
-                        if val.get("id").and_then(|v| v.as_u64()) == Some(id) {
-                            if let Some(result) = val.get("result") {
-                                if let Some(targets) =
-                                    result.get("targetInfos").and_then(|v| v.as_array())
-                                {
-                                    return Ok(targets.clone());
-                                }
-                            }
-                            break;
-                        }
-                    }
-                }
-                Ok(Message::Close(_)) => break,
-                Err(e) => {
-                    warn!("CDP read error: {}", e);
-                    break;
-                }
-                _ => {}
-            }
-        }
-
-        Ok(vec![])
-    }
-
-    /// Get a reference to the connection for a tab.
-    pub fn connection(&self, tab: &TabId) -> Option<Arc<CdpConnection>> {
-        self.connections.get(tab).map(|e| e.clone())
+        target_id_from_tab(tab)
+            .map(String::from)
+            .ok_or_else(|| UwaError::TabNotFound(tab.to_string()))
     }
 }
 
 #[async_trait]
 impl uwa_core::Transport for CdpTransport {
     async fn page(&self, tab: &TabId) -> Result<Box<dyn uwa_core::Page>> {
-        // Acquire tab from pool
+        let target_id = self.resolve_target(tab).await?;
+        let page = get_page_retry(&self.browser, &target_id).await?;
+        if !self.pool.exists(tab) {
+            self.pool.add(tab.clone());
+        }
         let guard = self.pool.acquire_specific(tab).await?;
-
-        // Get the CDP connection
-        let conn = self
-            .connection(tab)
-            .ok_or_else(|| UwaError::TabNotFound(tab.to_string()))?;
-
-        // Create a CdpPageAdapter from the page module
-        let page = crate::page::CdpPageAdapter::new(tab.clone(), conn, guard);
-
-        Ok(Box::new(page))
+        Ok(Box::new(CdpPageAdapter::new(
+            page,
+            target_id,
+            self.bus.clone(),
+            guard,
+        )))
     }
 
     async fn list_tabs(&self) -> Result<Vec<TabId>> {
         Ok(self.pool.list())
     }
 
+    /// Health probe that never takes the per-tab lease; otherwise a busy tab
+    /// would look dead to the session sweeper.
     async fn health(&self, tab: &TabId) -> Result<()> {
-        if self.connections.contains_key(tab) {
-            Ok(())
-        } else {
-            Err(UwaError::TabNotFound(tab.to_string()))
+        let target_id = self.resolve_target(tab).await?;
+        let page = get_page_retry(&self.browser, &target_id).await?;
+        eval_on(&page, "1").await?;
+        Ok(())
+    }
+}
+
+/// Ask the handler for a page, retrying while the target is still attaching.
+async fn get_page_retry(browser: &Browser, target_id: &str) -> Result<CdpPage> {
+    let tid = CdpTargetId::new(target_id);
+    let mut last = String::from("unavailable");
+    for _ in 0..10 {
+        match browser.get_page(tid.clone()).await {
+            Ok(page) => return Ok(page),
+            Err(e) => {
+                last = e.to_string();
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
         }
+    }
+    Err(UwaError::TabNotFound(format!("{target_id}: {last}")))
+}
+
+async fn eval_on(page: &CdpPage, js: &str) -> Result<serde_json::Value> {
+    let params = EvaluateParams::builder()
+        .expression(js.to_string())
+        .return_by_value(true)
+        .await_promise(true)
+        .build()
+        .map_err(UwaError::Internal)?;
+    let res = page
+        .evaluate(Evaluation::Expression(params))
+        .await
+        .map_err(|e| UwaError::Transport(format!("evaluate: {e}")))?;
+    Ok(res.value().cloned().unwrap_or(serde_json::Value::Null))
+}
+
+/// Register a target in the pool/bus and start its network pump.
+///
+/// Returns immediately if the target already has a pump, so the initial page
+/// enumeration and `Target.targetCreated` never double-subscribe.
+async fn register_target(
+    page: CdpPage,
+    pool: &Arc<TabPool>,
+    bus: &NetBus,
+    target_ids: &Arc<Mutex<HashMap<TabId, String>>>,
+    pumped: &Arc<Mutex<HashSet<String>>>,
+    stealth: &Option<StealthPack>,
+) {
+    let tid = page.target_id().inner().clone();
+    if !pumped.lock().await.insert(tid.clone()) {
+        debug!(target = %tid, "already registered");
+        return;
+    }
+
+    // Publish the tab *before* anything that awaits CDP (stealth scripts queue
+    // behind target init and would otherwise leave the pool empty).
+    let tab = tab_id_from_target(&tid);
+    bus.sender_for(tid.clone()).await;
+    target_ids.lock().await.insert(tab.clone(), tid.clone());
+    if !pool.exists(&tab) {
+        pool.add(tab.clone());
+    }
+    debug!(target = %tid, tab = %tab, pool = pool.list().len(), "registered target");
+
+    if let Some(pack) = stealth {
+        if let Err(e) = attach_stealth(&page, pack).await {
+            warn!(target = %tid, "stealth: {e}");
+        }
+    }
+    tokio::spawn(pump_page(page, bus.clone(), tid));
+}
+
+/// Per-page network pump: attributes responses to frames, pulls the body once
+/// the request finishes and republishes it on the target's [`NetBus`] channel.
+async fn pump_page(page: CdpPage, bus: NetBus, target_id: String) {
+    let mut frames = match page.event_listener::<EventFrameAttached>().await {
+        Ok(s) => s,
+        Err(e) => {
+            warn!(target = %target_id, "frame listener: {e}");
+            return;
+        }
+    };
+    let mut responses = match page.event_listener::<EventResponseReceived>().await {
+        Ok(s) => s,
+        Err(e) => {
+            warn!(target = %target_id, "response listener: {e}");
+            return;
+        }
+    };
+    let mut finished = match page.event_listener::<EventLoadingFinished>().await {
+        Ok(s) => s,
+        Err(e) => {
+            warn!(target = %target_id, "loading listener: {e}");
+            return;
+        }
+    };
+
+    let mut frame_map = FrameMap::for_target(target_id.clone());
+    let mut inflight: HashMap<String, (String, String, String)> = HashMap::new();
+
+    loop {
+        tokio::select! {
+            ev = frames.next() => {
+                let Some(ev) = ev else { break };
+                let fid = ev.frame_id.inner().clone();
+                let parent = Some(ev.parent_frame_id.inner().clone());
+                frame_map.attach(&fid, parent.as_deref());
+            }
+            ev = responses.next() => {
+                let Some(ev) = ev else { break };
+                let req = ev.request_id.inner().clone();
+                let owner = ev
+                    .frame_id
+                    .as_ref()
+                    .and_then(|f| frame_map.target_for(f.inner()).map(str::to_string))
+                    .unwrap_or_else(|| target_id.clone());
+                inflight.insert(
+                    req,
+                    (ev.response.url.clone(), ev.response.mime_type.clone(), owner),
+                );
+            }
+            ev = finished.next() => {
+                let Some(ev) = ev else { break };
+                let req = ev.request_id.inner().clone();
+                let Some((url, mime, owner)) = inflight.remove(&req) else {
+                    continue;
+                };
+                let body = match page.execute(GetResponseBodyParams::new(req.clone())).await {
+                    Ok(resp) => decode_body(&resp.result),
+                    Err(e) => {
+                        debug!("get_response_body {req}: {e}");
+                        String::new()
+                    }
+                };
+                let tx = bus.sender_for(owner).await;
+                let _ = tx.send(NetworkEvent::ResponseBody { url, body, mime });
+                let _ = tx.send(NetworkEvent::Finished {
+                    request_id: req.clone(),
+                });
+            }
+        }
+    }
+    debug!(target = %target_id, "network pump stopped");
+}
+
+fn decode_body(returns: &GetResponseBodyReturns) -> String {
+    if returns.base64_encoded {
+        base64::engine::general_purpose::STANDARD
+            .decode(returns.body.as_bytes())
+            .map(|b| String::from_utf8_lossy(&b).into_owned())
+            .unwrap_or_else(|_| returns.body.clone())
+    } else {
+        returns.body.clone()
     }
 }
 
@@ -412,13 +375,14 @@ impl uwa_core::Transport for CdpTransport {
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    #[ignore = "requires running Chromium with --remote-debugging-port=9222"]
-    async fn connect_and_list_targets() {
-        let transport = CdpTransport::connect("ws://127.0.0.1:9222", Duration::from_secs(60))
-            .await
-            .unwrap();
-        let targets = transport.list_targets().await.unwrap();
-        assert!(!targets.is_empty());
+    #[test]
+    fn decode_body_handles_plain_and_base64() {
+        let plain = GetResponseBodyReturns::new("hello", false);
+        assert_eq!(decode_body(&plain), "hello");
+        let b64 = GetResponseBodyReturns::new(
+            base64::engine::general_purpose::STANDARD.encode("hi"),
+            true,
+        );
+        assert_eq!(decode_body(&b64), "hi");
     }
 }
