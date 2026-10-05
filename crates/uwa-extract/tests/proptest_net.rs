@@ -60,13 +60,15 @@ proptest! {
     }
 
     #[test]
-    fn json_path_never_panics(path in "(?s).{0,80}") {
+    fn json_path_never_panics(path in "(?s).{0,80}", text in "[a-zA-Z0-9 ]{0,32}") {
         let v = json!({
-            "a": {"b": [1, 2, {"c": "d"}]},
+            "a": {"b": [1, 2, {"c": text}]},
             "n": 1,
             "flag": true,
             "nil": null,
-            "list": ["x", 2],
+            "list": [text, 2],
+            "key.with.dots": text,
+            "arr": [[[text]]],
         });
         let _ = json_path_str(&v, &path);
     }
