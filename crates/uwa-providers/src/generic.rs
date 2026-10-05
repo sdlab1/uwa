@@ -37,18 +37,19 @@ impl GenericProvider {
     }
 
     fn selector<'a>(&self, sel: Option<&'a String>) -> Result<&'a str> {
-        sel.map(String::as_str).ok_or_else(|| {
-            UwaError::Config(format!("{}: missing selector", self.cfg.name))
-        })
+        sel.map(String::as_str)
+            .ok_or_else(|| UwaError::Config(format!("{}: missing selector", self.cfg.name)))
     }
 
     fn dom_extractor(&self) -> Result<DomExtractor> {
-        let assistant = self.cfg.selectors.assistant_message.as_ref().ok_or_else(|| {
-            UwaError::Config(format!(
-                "{}: no assistant_message selector",
-                self.cfg.name
-            ))
-        })?;
+        let assistant = self
+            .cfg
+            .selectors
+            .assistant_message
+            .as_ref()
+            .ok_or_else(|| {
+                UwaError::Config(format!("{}: no assistant_message selector", self.cfg.name))
+            })?;
         let t = &self.cfg.finisher;
         Ok(DomExtractor {
             assistant_message: assistant.clone(),
@@ -109,10 +110,7 @@ impl SiteProvider for GenericProvider {
     }
 
     fn matches(&self, url: &Url) -> bool {
-        self.cfg
-            .url_patterns
-            .iter()
-            .any(|p| url_matches(p, url))
+        self.cfg.url_patterns.iter().any(|p| url_matches(p, url))
     }
 
     async fn send_message(&self, page: &dyn Page, text: &str) -> Result<()> {

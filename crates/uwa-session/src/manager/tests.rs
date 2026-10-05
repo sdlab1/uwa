@@ -17,7 +17,9 @@ struct MockTransport {
 impl MockTransport {
     fn with_tabs(n: usize) -> Self {
         Self {
-            tabs: (0..n).map(|i| TabId::from_raw(format!("tab_{i}"))).collect(),
+            tabs: (0..n)
+                .map(|i| TabId::from_raw(format!("tab_{i}")))
+                .collect(),
             ..Default::default()
         }
     }
@@ -195,7 +197,10 @@ async fn eviction_does_not_hang_under_contention() {
     let t = Arc::new(MockTransport::with_tabs(4));
 
     for i in 0..16 {
-        let h = sm.acquire(&cid(&format!("c{i}")), t.as_ref()).await.unwrap();
+        let h = sm
+            .acquire(&cid(&format!("c{i}")), t.as_ref())
+            .await
+            .unwrap();
         drop(h);
     }
 

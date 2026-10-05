@@ -109,8 +109,7 @@ impl CdpTransport {
                     let tid = ev.target_info.target_id.inner().clone();
                     match get_page_retry(&browser, &tid).await {
                         Ok(page) => {
-                            register_target(page, &pool, &bus, &target_ids, &pumped, &stealth)
-                                .await
+                            register_target(page, &pool, &bus, &target_ids, &pumped, &stealth).await
                         }
                         Err(e) => warn!(target = %tid, "get_page: {e}"),
                     }
@@ -314,6 +313,11 @@ async fn pump_page(page: CdpPage, bus: NetBus, target_id: String) {
 
     let mut frame_map = FrameMap::for_target(target_id.clone());
     let mut inflight: HashMap<String, (String, String, String)> = HashMap::new();
+    // `tokio::select!` picks a ready branch at random, so `loadingFinished` is
+    // regularly handled before the `responseReceived` that precedes it on the
+    // wire. Remember those ids and publish as soon as the response lands —
+    // dropping the pair silently loses the body.
+    let mut finished_first: HashSet<String> = HashSet::new();
 
     loop {
         tokio::select! {
@@ -331,33 +335,56 @@ async fn pump_page(page: CdpPage, bus: NetBus, target_id: String) {
                     .as_ref()
                     .and_then(|f| frame_map.target_for(f.inner()).map(str::to_string))
                     .unwrap_or_else(|| target_id.clone());
+                debug!(target = %target_id, req = %req, url = %ev.response.url, "response");
                 inflight.insert(
-                    req,
+                    req.clone(),
                     (ev.response.url.clone(), ev.response.mime_type.clone(), owner),
                 );
+                if finished_first.remove(&req) {
+                    debug!(target = %target_id, req = %req, "response caught up with its finish");
+                    resolve_body(&page, &bus, &req, &mut inflight).await;
+                }
             }
             ev = finished.next() => {
                 let Some(ev) = ev else { break };
                 let req = ev.request_id.inner().clone();
-                let Some((url, mime, owner)) = inflight.remove(&req) else {
-                    continue;
-                };
-                let body = match page.execute(GetResponseBodyParams::new(req.clone())).await {
-                    Ok(resp) => decode_body(&resp.result),
-                    Err(e) => {
-                        debug!("get_response_body {req}: {e}");
-                        String::new()
-                    }
-                };
-                let tx = bus.sender_for(owner).await;
-                let _ = tx.send(NetworkEvent::ResponseBody { url, body, mime });
-                let _ = tx.send(NetworkEvent::Finished {
-                    request_id: req.clone(),
-                });
+                if inflight.contains_key(&req) {
+                    resolve_body(&page, &bus, &req, &mut inflight).await;
+                } else if finished_first.len() < 4096 {
+                    debug!(target = %target_id, req = %req, "finish precedes its response");
+                    finished_first.insert(req);
+                }
             }
         }
     }
     debug!(target = %target_id, "network pump stopped");
+}
+
+/// Fetch the body of a finished request and publish it on the target's bus.
+async fn resolve_body(
+    page: &CdpPage,
+    bus: &NetBus,
+    req: &str,
+    inflight: &mut HashMap<String, (String, String, String)>,
+) {
+    let Some((url, mime, owner)) = inflight.remove(req) else {
+        return;
+    };
+    let body = match page
+        .execute(GetResponseBodyParams::new(req.to_string()))
+        .await
+    {
+        Ok(resp) => decode_body(&resp.result),
+        Err(e) => {
+            debug!("get_response_body {req}: {e}");
+            String::new()
+        }
+    };
+    let tx = bus.sender_for(owner).await;
+    let _ = tx.send(NetworkEvent::ResponseBody { url, body, mime });
+    let _ = tx.send(NetworkEvent::Finished {
+        request_id: req.to_string(),
+    });
 }
 
 fn decode_body(returns: &GetResponseBodyReturns) -> String {

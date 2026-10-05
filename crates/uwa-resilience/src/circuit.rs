@@ -132,11 +132,7 @@ impl CircuitBreaker {
             let cutoff = now
                 .checked_sub(self.cfg.rolling_window)
                 .unwrap_or_else(Instant::now);
-            while inner
-                .failures
-                .front()
-                .is_some_and(|t| *t < cutoff)
-            {
+            while inner.failures.front().is_some_and(|t| *t < cutoff) {
                 inner.failures.pop_front();
             }
             if inner.failures.len() >= self.cfg.failure_threshold {

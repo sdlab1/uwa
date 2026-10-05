@@ -49,8 +49,9 @@ impl Page for HtmlPage {
     async fn type_text(&self, _: &str, _: &str) -> Result<()> {
         Ok(())
     }
-    async fn network_events(&self) -> Result<tokio::sync::broadcast::Receiver<uwa_core::NetworkEvent>>
-    {
+    async fn network_events(
+        &self,
+    ) -> Result<tokio::sync::broadcast::Receiver<uwa_core::NetworkEvent>> {
         Err(UwaError::Unavailable("no network in this mock".into()))
     }
 }

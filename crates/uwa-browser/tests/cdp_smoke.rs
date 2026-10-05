@@ -36,7 +36,9 @@ fn enabled() -> bool {
 
 /// Minimal HTTP/1.1 server: `/index.html` fetches `/data.json`.
 async fn serve(port: u16) {
-    let listener = TcpListener::bind(("127.0.0.1", port)).await.expect("bind site");
+    let listener = TcpListener::bind(("127.0.0.1", port))
+        .await
+        .expect("bind site");
     eprintln!("[site] listening on 127.0.0.1:{port}");
     loop {
         let (mut sock, peer) = match listener.accept().await {
@@ -146,28 +148,43 @@ struct ChromeGuard {
     profile: PathBuf,
 }
 
+/// Canonical Chromium flags for every test in this file.
+///
+/// `--password-store=basic` is not cosmetic: with the default (GNOME keyring)
+/// store, Chrome blocks forever in `Secret.Service.Unlock` when the default
+/// collection is locked, the network service stops pumping its message loop,
+/// and every request that carries cookies hangs until navigation times out.
+fn chrome_args(profile: &std::path::Path, port: u16) -> Vec<String> {
+    vec![
+        format!("--remote-debugging-port={port}"),
+        "--headless=new".into(),
+        "--no-sandbox".into(),
+        "--disable-gpu".into(),
+        "--disable-dev-shm-usage".into(),
+        "--no-first-run".into(),
+        "--no-default-browser-check".into(),
+        "--password-store=basic".into(),
+        format!("--user-data-dir={}", profile.display()),
+        "about:blank".into(),
+    ]
+}
+
+fn chrome_bin() -> Option<String> {
+    if let Ok(b) = std::env::var("UWA_CHROME_BIN") {
+        return Some(b);
+    }
+    CHROME_CANDIDATES
+        .iter()
+        .find(|p| std::path::Path::new(p).exists())
+        .map(|p| p.to_string())
+}
+
 impl ChromeGuard {
     fn spawn(port: u16) -> Option<Self> {
-        let bin = if let Ok(b) = std::env::var("UWA_CHROME_BIN") {
-            b
-        } else {
-            CHROME_CANDIDATES
-                .iter()
-                .find(|p| std::path::Path::new(p).exists())
-                .map(|p| p.to_string())?
-        };
+        let bin = chrome_bin()?;
         let profile = std::env::temp_dir().join(format!("uwa-cdp-smoke-{port}"));
         let child = Command::new(&bin)
-            .arg(format!("--remote-debugging-port={port}"))
-            .arg("--headless=new")
-            .arg("--no-sandbox")
-            .arg("--disable-gpu")
-            .arg("--disable-dev-shm-usage")
-            .arg("--no-first-run")
-            .arg("--no-default-browser-check")
-            .arg("--password-store=basic")
-            .arg(format!("--user-data-dir={}", profile.display()))
-            .arg("about:blank")
+            .args(chrome_args(&profile, port))
             .process_group(0)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -181,6 +198,14 @@ impl ChromeGuard {
 
     fn debug_url(&self, port: u16) -> String {
         format!("http://127.0.0.1:{port}")
+    }
+
+    fn pid(&self) -> Option<u32> {
+        self.child.as_ref().and_then(Child::id)
+    }
+
+    fn profile(&self) -> &std::path::Path {
+        &self.profile
     }
 }
 
@@ -218,7 +243,11 @@ async fn cdp_http_ready(url: &str) -> bool {
     let (host, port) = match rest.split_once(':') {
         Some((h, p)) => (
             h.to_string(),
-            p.split('/').next().unwrap_or("9222").parse().unwrap_or(9222),
+            p.split('/')
+                .next()
+                .unwrap_or("9222")
+                .parse()
+                .unwrap_or(9222),
         ),
         None => (rest.to_string(), 9222),
     };
@@ -300,8 +329,7 @@ async fn live_cdp_navigation_and_network_events() {
     let (debug_url, chrome) = if let Ok(u) = std::env::var("UWA_CDP_URL") {
         (u, None)
     } else {
-        let guard =
-            ChromeGuard::spawn(chrome_port).expect("no chromium found; set UWA_CHROME_BIN");
+        let guard = ChromeGuard::spawn(chrome_port).expect("no chromium found; set UWA_CHROME_BIN");
         let url = guard.debug_url(chrome_port);
         (url, Some(guard))
     };
@@ -337,30 +365,49 @@ async fn live_cdp_navigation_and_network_events() {
         // Subscribe before navigating: the page fetches data.json during load.
         let target_id = transport.target_id(&tab).await.expect("target id");
         let mut rx = transport.bus().subscribe(&target_id).await;
-        let site =
-            url::Url::parse(&format!("http://127.0.0.1:{site_port}/index.html")).unwrap();
+        let site = url::Url::parse(&format!("http://127.0.0.1:{site_port}/index.html")).unwrap();
         page.goto(&site).await.expect("goto");
         eprintln!("[smoke] navigated");
 
         let deadline = Instant::now() + Duration::from_secs(20);
         let mut got_json = false;
+        let mut seen: Vec<String> = Vec::new();
+        let mut end = String::from("deadline");
         while Instant::now() < deadline {
             let remaining = deadline.saturating_duration_since(Instant::now());
             match tokio::time::timeout(remaining, rx.recv()).await {
-                Ok(Ok(NetworkEvent::ResponseBody { url, body, mime })) => {
-                    if url.contains("data.json") {
-                        assert!(body.contains("smoke-body"), "body = {body:?}");
-                        assert!(mime.contains("json"), "mime = {mime}");
-                        got_json = true;
-                        break;
+                Ok(Ok(ev)) => {
+                    let desc = match &ev {
+                        NetworkEvent::ResponseBody { url, body, mime } => {
+                            format!("body {url} ({mime}) {} bytes", body.len())
+                        }
+                        NetworkEvent::Finished { request_id } => {
+                            format!("finished {request_id}")
+                        }
+                    };
+                    seen.push(desc);
+                    if let NetworkEvent::ResponseBody { url, body, mime } = ev {
+                        if url.contains("data.json") {
+                            assert!(body.contains("smoke-body"), "body = {body:?}");
+                            assert!(mime.contains("json"), "mime = {mime}");
+                            got_json = true;
+                            break;
+                        }
                     }
                 }
-                Ok(Ok(_)) => {}
-                Ok(Err(_)) => break,
-                Err(_) => break,
+                Ok(Err(e)) => {
+                    end = format!("channel: {e}");
+                    break;
+                }
+                Err(_) => end = String::from("deadline"),
             }
         }
-        assert!(got_json, "never observed the data.json response body");
+        assert!(
+            got_json,
+            "never observed the data.json response body (end={end}, seen={seen:?}, \
+             target={target_id}, bus={:?})",
+            transport.bus().targets().await
+        );
         eprintln!("[smoke] network body observed");
 
         // The DOM path must also see the rendered text.
@@ -373,7 +420,10 @@ async fn live_cdp_navigation_and_network_events() {
             }
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
-        assert!(html.contains("smoke-body"), "dom never rendered the payload");
+        assert!(
+            html.contains("smoke-body"),
+            "dom never rendered the payload"
+        );
 
         drop(page);
         assert_eq!(transport.list_tabs().await.unwrap(), vec![tab]);
@@ -386,4 +436,268 @@ async fn live_cdp_navigation_and_network_events() {
     // Drop the guard: kills Chromium and removes its temp profile.
     drop(chrome);
     drop(python_site);
+}
+
+// ---------------------------------------------------------------------------
+// Environment guarantees. Everything below is the distilled result of the
+// Chromium hang investigation, kept as tests so the findings cannot silently
+// disappear: the flag that unblocks Chrome, the keyring state that needs it,
+// and the promise that a test never leaves a browser behind.
+// ---------------------------------------------------------------------------
+
+/// `Some(locked?)` when the Secret Service answered and we could read the
+/// `Locked` flag of the default collection; `None` when there is no session
+/// bus, no secret service, `dbus-send` is missing, or it did not answer in
+/// time. `None` is the healthy case: nothing can block Chrome on a prompt.
+fn default_keyring_locked() -> Option<bool> {
+    use std::io::Read;
+
+    fn dbus(args: &[&str]) -> Option<String> {
+        let mut child = std::process::Command::new("dbus-send")
+            .args(args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .ok()?;
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    if !status.success() {
+                        return None;
+                    }
+                    let mut out = String::new();
+                    child.stdout.as_mut()?.read_to_string(&mut out).ok()?;
+                    return Some(out);
+                }
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(50))
+                }
+                Ok(None) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+                Err(_) => return None,
+            }
+        }
+    }
+
+    let alias = dbus(&[
+        "--print-reply",
+        "--dest=org.freedesktop.Secret.Service",
+        "/org/freedesktop/secrets",
+        "org.freedesktop.Secret.Service.ReadAlias",
+        "string:default",
+    ])?;
+    let path: String = alias.lines().find_map(|l| l.split('"').nth(1))?.into();
+    let locked = dbus(&[
+        "--print-reply",
+        "--dest=org.freedesktop.Secret.Service",
+        &path,
+        "org.freedesktop.DBus.Properties.Get",
+        "string:org.freedesktop.Secret.Collection",
+        "string:Locked",
+    ])?;
+    if locked.contains("boolean true") {
+        Some(true)
+    } else if locked.contains("boolean false") {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+fn port_free(port: u16) -> bool {
+    std::net::TcpListener::bind(("127.0.0.1", port)).is_ok()
+}
+
+/// The exact flags `ChromeGuard` passes — if this test fails, the guard is
+/// about to hang on a locked keyring again.
+#[test]
+fn launch_args_carry_the_keyring_workaround() {
+    let profile = std::path::Path::new("/tmp/uwa-args-probe");
+    let args = chrome_args(profile, 38210);
+    let has = |flag: &str| args.iter().any(|a| a == flag);
+    let has_prefix = |flag: &str| args.iter().any(|a| a.starts_with(flag));
+
+    assert!(
+        has("--password-store=basic"),
+        "Chrome blocks forever on a locked keyring without it: {args:?}"
+    );
+    assert!(has("--headless=new"), "{args:?}");
+    assert!(has("--no-sandbox"), "{args:?}");
+    assert!(has("--disable-dev-shm-usage"), "{args:?}");
+    assert!(has("--no-first-run"), "{args:?}");
+    assert!(has_prefix("--remote-debugging-port="), "{args:?}");
+    assert!(
+        has_prefix(&format!("--user-data-dir={}", profile.display())),
+        "{args:?}"
+    );
+    assert!(
+        !args.iter().any(|a| a.starts_with("--password-store=gnome")
+            || a.starts_with("--password-store=kwallet")),
+        "an interactive password store must never be used headless: {args:?}"
+    );
+}
+
+/// If this machine's default keyring collection is locked, the launcher must
+/// carry the workaround — that combination is exactly what made navigation
+/// hang (`Secret.Service.Unlock` -> unanswered prompt -> stalled network
+/// service -> every cookie-bearing request blocked).
+#[test]
+fn locked_keyring_is_covered_by_the_launch_args() {
+    let args = chrome_args(std::path::Path::new("/tmp/uwa-args-probe"), 38210);
+    match default_keyring_locked() {
+        Some(true) => {
+            eprintln!("[env] default keyring collection is LOCKED");
+            assert!(
+                args.iter().any(|a| a == "--password-store=basic"),
+                "the default keyring is locked, but the launcher does not pass \
+                 --password-store=basic — navigation will hang: {args:?}"
+            );
+        }
+        Some(false) => eprintln!("[env] default keyring collection is unlocked"),
+        None => eprintln!("[env] no secret service available — Chrome cannot block on it"),
+    }
+}
+
+/// `Drop` is the only thing standing between a failed run and a leaked
+/// browser, so assert it directly: process gone, profile gone, port free.
+#[tokio::test]
+#[ignore = "needs a Chromium binary; run with UWA_CHROMIUM=1 cargo test -p uwa-browser -- --ignored"]
+async fn guard_leaves_no_browser_profile_or_port() {
+    if !enabled() {
+        eprintln!("skipped: set UWA_CHROMIUM=1 to run the cleanup check");
+        return;
+    }
+    let port = 38212u16;
+    let guard = ChromeGuard::spawn(port).expect("no chromium found; set UWA_CHROME_BIN");
+    let pid = guard.pid().expect("spawned child has a pid");
+    let profile = guard.profile().to_path_buf();
+    assert!(
+        wait_for_ws(&guard.debug_url(port), Duration::from_secs(30)).await,
+        "CDP endpoint never became reachable"
+    );
+    assert!(profile.exists(), "profile was not created: {profile:?}");
+    assert!(
+        !port_free(port),
+        "the debug port must be bound while Chrome runs"
+    );
+
+    drop(guard);
+
+    for _ in 0..100 {
+        let gone = !std::path::Path::new(&format!("/proc/{pid}")).exists() && !profile.exists();
+        if gone {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        !std::path::Path::new(&format!("/proc/{pid}")).exists(),
+        "browser pid {pid} survived Drop"
+    );
+    assert!(
+        !profile.exists(),
+        "profile {} survived Drop",
+        profile.display()
+    );
+    assert!(port_free(port), "debug port {port} still bound after Drop");
+    eprintln!("[env] guard reaped pid {pid} and removed the profile");
+}
+
+/// Chromium health check that does not go through `chromiumoxide`: if this
+/// fails but the CDP smoke passes (or vice versa), the breakage is in the
+/// browser itself rather than in our transport.
+#[tokio::test]
+#[ignore = "needs a Chromium binary; run with UWA_CHROMIUM=1 cargo test -p uwa-browser -- --ignored"]
+async fn chrome_renders_a_local_page_without_cdp() {
+    if !enabled() {
+        eprintln!("skipped: set UWA_CHROMIUM=1 to run the Chromium health check");
+        return;
+    }
+    let site_port = 38213u16;
+    tokio::spawn(serve(site_port));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    self_check(site_port).await;
+
+    let bin = chrome_bin().expect("no chromium found; set UWA_CHROME_BIN");
+    let profile = std::env::temp_dir().join(format!("uwa-dumpdom-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&profile);
+    let mut args: Vec<String> = chrome_args(&profile, 38214)
+        .into_iter()
+        .filter(|a| !a.starts_with("--remote-debugging-port=") && a != "about:blank")
+        .collect();
+    args.push("--virtual-time-budget=5000".into());
+    args.push("--dump-dom".into());
+    args.push(format!("http://127.0.0.1:{site_port}/index.html"));
+
+    let mut child = Command::new(&bin)
+        .args(&args)
+        .process_group(0)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn chromium for --dump-dom");
+    let pid = child.id().expect("child pid");
+
+    let deadline = Instant::now() + Duration::from_secs(45);
+    let mut status = None;
+    while Instant::now() < deadline {
+        match child.try_wait() {
+            Ok(Some(s)) => {
+                status = Some(s);
+                break;
+            }
+            Ok(None) => tokio::time::sleep(Duration::from_millis(100)).await,
+            Err(e) => {
+                eprintln!("[dump] try_wait: {e}");
+                break;
+            }
+        }
+    }
+    let mut out = Vec::new();
+    if let Some(stdout) = child.stdout.as_mut() {
+        let _ = stdout.read_to_end(&mut out).await;
+    }
+    if status.is_none() {
+        eprintln!("[dump] chromium did not exit in time — killing pid {pid}");
+        unsafe { libc::killpg(pid as libc::pid_t, libc::SIGKILL) };
+        let _ = child.start_kill();
+    }
+    let _ = child.wait().await;
+
+    let mut profile_removed = false;
+    for _ in 0..20 {
+        if std::fs::remove_dir_all(&profile).is_ok() {
+            profile_removed = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    for _ in 0..50 {
+        if !std::path::Path::new(&format!("/proc/{pid}")).exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    let html = String::from_utf8_lossy(&out).to_string();
+    assert!(
+        status.is_some_and(|s| s.success()),
+        "chromium did not finish cleanly (status {status:?})"
+    );
+    assert!(
+        !std::path::Path::new(&format!("/proc/{pid}")).exists(),
+        "chromium pid {pid} is still running"
+    );
+    assert!(profile_removed, "profile {} survived", profile.display());
+    assert!(
+        html.contains("smoke-body"),
+        "the page never rendered the fetched payload ({} bytes): {}",
+        html.len(),
+        &html[..html.len().min(600)]
+    );
+    eprintln!("[dump] {} bytes, payload rendered", html.len());
 }

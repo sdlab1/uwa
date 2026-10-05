@@ -42,19 +42,14 @@ pub async fn inject_text(page: &dyn Page, selector: &str, text: &str) -> Result<
     );
     let v = page.eval(&js).await?;
     if v.get("ok").and_then(|b| b.as_bool()) != Some(true) {
-        return Err(UwaError::Transport(format!(
-            "inject `{selector}`: {v:?}"
-        )));
+        return Err(UwaError::Transport(format!("inject `{selector}`: {v:?}")));
     }
     Ok(())
 }
 
 /// Does `selector` match at least one element?
 pub async fn exists(page: &dyn Page, selector: &str) -> Result<bool> {
-    let js = format!(
-        r#"!!document.querySelector({sel})"#,
-        sel = quoted(selector)
-    );
+    let js = format!(r#"!!document.querySelector({sel})"#, sel = quoted(selector));
     Ok(page.eval(&js).await?.as_bool().unwrap_or(false))
 }
 

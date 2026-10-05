@@ -31,12 +31,12 @@ pub fn wrapped_scripts(pack: &StealthPack) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use uwa_core::UwaError;
     use async_trait::async_trait;
     use serde_json::Value;
     use std::sync::Mutex;
     use std::time::Duration;
     use url::Url;
+    use uwa_core::UwaError;
 
     struct RecordingPage {
         early: Mutex<Vec<String>>,
@@ -55,11 +55,7 @@ mod tests {
             self.live.lock().unwrap().push(js.to_string());
             Ok(Value::Null)
         }
-        async fn wait_for_selector(
-            &self,
-            _selector: &str,
-            _timeout: Duration,
-        ) -> Result<()> {
+        async fn wait_for_selector(&self, _selector: &str, _timeout: Duration) -> Result<()> {
             Ok(())
         }
         async fn html(&self) -> Result<String> {
@@ -75,7 +71,9 @@ mod tests {
             self.early.lock().unwrap().push(js.to_string());
             Ok(())
         }
-        async fn network_events(&self) -> Result<tokio::sync::broadcast::Receiver<uwa_core::NetworkEvent>> {
+        async fn network_events(
+            &self,
+        ) -> Result<tokio::sync::broadcast::Receiver<uwa_core::NetworkEvent>> {
             Err(UwaError::Internal("no network".into()))
         }
     }

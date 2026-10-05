@@ -15,9 +15,9 @@ pub async fn attach_stealth(page: &CdpPage, pack: &StealthPack) -> Result<()> {
             continue;
         }
         let params = AddScriptToEvaluateOnNewDocumentParams::new(wrap(&script.js));
-        page.execute(params).await.map_err(|e| {
-            UwaError::Transport(format!("add_init_script `{}`: {e}", script.name))
-        })?;
+        page.execute(params)
+            .await
+            .map_err(|e| UwaError::Transport(format!("add_init_script `{}`: {e}", script.name)))?;
     }
     Ok(())
 }

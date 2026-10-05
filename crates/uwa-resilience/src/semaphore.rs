@@ -53,7 +53,10 @@ mod tests {
         let sems = ProviderSemaphores::new(1);
         assert_eq!(sems.default_limit(), 1);
         let a = sems.acquire("chatgpt").await.unwrap();
-        assert_eq!(sems.map.get("chatgpt").map(|e| e.available_permits()), Some(0));
+        assert_eq!(
+            sems.map.get("chatgpt").map(|e| e.available_permits()),
+            Some(0)
+        );
         drop(a);
         let b = sems.acquire("chatgpt").await.unwrap();
         drop(b);

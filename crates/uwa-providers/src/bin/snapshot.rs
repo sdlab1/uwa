@@ -32,8 +32,8 @@ fn fail(what: &str, err: impl std::fmt::Display) -> ! {
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let mut cdp = std::env::var("UWA_CDP_URL")
-        .unwrap_or_else(|_| "http://127.0.0.1:9222".to_string());
+    let mut cdp =
+        std::env::var("UWA_CDP_URL").unwrap_or_else(|_| "http://127.0.0.1:9222".to_string());
     let mut url: Option<String> = None;
     let mut selector: Option<String> = None;
     let mut out: Option<PathBuf> = None;
@@ -66,10 +66,13 @@ async fn main() {
     let url = url.unwrap_or_else(|| usage());
     let target = url::Url::parse(&url).unwrap_or_else(|e| fail("bad --url", e));
 
-    let transport =
-        CdpTransport::connect(&cdp, Duration::from_secs(30), Some(uwa_stealth::default_pack()))
-            .await
-            .unwrap_or_else(|e| fail(&format!("connect {cdp}"), e));
+    let transport = CdpTransport::connect(
+        &cdp,
+        Duration::from_secs(30),
+        Some(uwa_stealth::default_pack()),
+    )
+    .await
+    .unwrap_or_else(|e| fail(&format!("connect {cdp}"), e));
 
     let tabs = transport
         .list_tabs()
@@ -96,8 +99,13 @@ async fn main() {
 
     match out {
         Some(path) => {
-            std::fs::write(&path, &html).unwrap_or_else(|e| fail(&format!("write {}", path.display()), e));
-            eprintln!("uwa-snapshot: wrote {} ({} bytes)", path.display(), html.len());
+            std::fs::write(&path, &html)
+                .unwrap_or_else(|e| fail(&format!("write {}", path.display()), e));
+            eprintln!(
+                "uwa-snapshot: wrote {} ({} bytes)",
+                path.display(),
+                html.len()
+            );
         }
         None => print!("{html}"),
     }

@@ -64,10 +64,9 @@ fn validates_provider_tables() {
 
 #[test]
 fn example_config_builds_every_provider() {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../uwa-bin/config.example.toml");
-    let cfg = Config::load_from_path(&path)
-        .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../uwa-bin/config.example.toml");
+    let cfg = Config::load_from_path(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
     let providers = build_providers(&cfg).expect("the shipped example is valid");
     assert_eq!(providers.len(), 4);
     for name in ["chatgpt", "claude", "gemini", "deepseek"] {

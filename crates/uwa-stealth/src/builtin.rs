@@ -15,8 +15,7 @@ const WEBDRIVER: &str = r#"Object.defineProperty(navigator,'webdriver',{get:()=>
 const CHROME_RUNTIME: &str = r#"if(!window.chrome){window.chrome={};}
 if(!window.chrome.runtime){window.chrome.runtime={};}"#;
 
-const LANGUAGES: &str =
-    r#"Object.defineProperty(navigator,'languages',{get:()=>['en-US','en']});"#;
+const LANGUAGES: &str = r#"Object.defineProperty(navigator,'languages',{get:()=>['en-US','en']});"#;
 
 const PERMISSIONS: &str = r#"const _p=navigator.permissions;
 if(_p && !_p.query){navigator.permissions={query:(d)=>Promise.resolve({state:'prompt'})};}"#;

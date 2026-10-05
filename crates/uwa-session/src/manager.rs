@@ -152,8 +152,7 @@ impl SessionManager {
         let stale: Vec<ConversationId> = candidates
             .into_iter()
             .filter(|(_, entry, last)| {
-                now.duration_since(*last) > self.cfg.idle_ttl
-                    && Arc::strong_count(entry) <= 2
+                now.duration_since(*last) > self.cfg.idle_ttl && Arc::strong_count(entry) <= 2
             })
             .map(|(cid, _, _)| cid)
             .collect();

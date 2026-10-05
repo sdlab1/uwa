@@ -45,10 +45,10 @@ impl ScriptedPage {
             .get_mut()
             .expect("script is built before any concurrency")
             .push(Rule {
-            needle: needle.to_string(),
-            replies,
-            last,
-        });
+                needle: needle.to_string(),
+                replies,
+                last,
+            });
         self
     }
 
@@ -104,8 +104,9 @@ impl Page for ScriptedPage {
         Ok(())
     }
 
-    async fn network_events(&self) -> Result<tokio::sync::broadcast::Receiver<uwa_core::NetworkEvent>>
-    {
+    async fn network_events(
+        &self,
+    ) -> Result<tokio::sync::broadcast::Receiver<uwa_core::NetworkEvent>> {
         Err(UwaError::Unavailable("no network in this mock".into()))
     }
 }
@@ -180,7 +181,10 @@ async fn send_message_runs_the_full_sequence() {
 async fn send_message_fails_when_the_composer_is_gone() {
     let page = ScriptedPage::new()
         .on("!!document.querySelector", &[json!(true)])
-        .on("el.focus()", &[json!({ "ok": false, "reason": "no-element" })]);
+        .on(
+            "el.focus()",
+            &[json!({ "ok": false, "reason": "no-element" })],
+        );
     let err = provider(provider_cfg())
         .send_message(&page, "hi")
         .await
