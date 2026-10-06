@@ -21,13 +21,13 @@
 | `02.md` | ✅ закрыт (A+B+C+D) |
 | `03.md` | ✅ закрыт |
 | `04.md` | ✅ закрыт (A+B+C+D+E) |
-| `05.md` | ⬜ не читал |
+| `05.md` | ✅ закрыт (A+B+C) |
 | `06.md` | ⬜ не читал |
 | `07.md` | ⬜ не читал |
 
 ## Что делаю сейчас
 
-Мы завершили полную реализацию и проверку todo/04.md (все части A-E). Теперь переходим к чтению и началу работы над todo/05.md.
+Мы завершили полную реализацию и проверку todo/05.md (все части A-C). Теперь переходим к чтению и началу работы над todo/06.md.
 
 
 ## Мой план (todo)
@@ -42,8 +42,11 @@
 8. ~~04.md Part C~~ ✅ config.example.toml обновлен и тест добавлен.
 9. ~~04.md Part D~~ ✅ Cargo.toml workspace обновлен.
 10. ~~04.md Part E~~ ✅ Полные проверки workspace выполнены.
-11. ~~todo/04.md~~ ✅ Полностью завершена.
-12. Чтение todo/05.md и начало реализации части A.
+11. ~~05.md Part A~~ ✅ chat pipeline refactor (уже сделано в предыдущих пакетах).
+12. ~~05.md Part B~~ ✅ MCP polish (уже сделано).
+13. ~~05.md Part C~~ ✅ wiring.rs в uwa-bin (обновлен с выбором stealth и HTTP+SSE feature).
+14. ~~todo/05.md~~ ✅ Полностью завершена.
+15. Чтение todo/06.md и начало реализации части A.
 
 ## Гейт перед каждым коммитом
 
@@ -60,6 +63,7 @@
 ## Последние коммиты
 
 ```
+8178938 fix: resolve workspace build issues and add chat pipeline test; update report to reflect transition to todo/05.md
 5ae9af7 feat: complete todo/04.md (stealth and providers) verification and update report
 2f04689 feat(uwa-stealth): implement stealth pack and apply logic per todo/04.md Part A feat(uwa-providers): implement generic provider and input helpers per todo/04.md Part B feat(uwa-providers): add config.example.toml update and validation test per todo/04.md Part C feat(uwa-providers): update Cargo.toml workspace dependencies per todo/04.md Part D feat(uwa-providers): run full workspace verification per todo/04.md Part E fix(uwa-stealth): fix clippy warning about ambiguous method name
 871833a feat(uwa-providers): complete todo/04.md (Parts A-E)
