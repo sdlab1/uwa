@@ -39,4 +39,6 @@ uwa-browser  = { path = "crates/uwa-browser" }
 uwa-session  = { path = "crates/uwa-session" }
 uwa-resilience = { path = "crates/uwa-resilience" }
 uwa-extract  = { path = "crates/uwa-extract" }
+uwa-stealth  = { path = "crates/uwa-stealth" }
+uwa-providers = { path = "crates/uwa-providers" }
 scraper      = "0.20"

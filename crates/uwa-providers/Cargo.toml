@@ -17,16 +17,33 @@ tokio = { workspace = true, features = ["time", "macros"] }
 tracing.workspace = true
 url.workspace = true
 metrics = "0.23"
-uwa-browser = { path = "../uwa-browser", optional = true }
-uwa-stealth = { path = "../uwa-stealth", optional = true }
+
+[dependencies.uwa-browser]
+path = "../uwa-browser"
+optional = true
+
+[dependencies.uwa-stealth]
+path = "../uwa-stealth"
+optional = true
+
+[dependencies.clap]
+version = "4"
+features = ["derive"]
+optional = true
+
+[dependencies.anyhow]
+workspace = true
+optional = true
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+uwa-config = { workspace = true, features = ["test-helpers"] }
 uwa-testkit = { path = "../uwa-testkit" }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 insta = { version = "1", features = ["yaml"] }
 
 [features]
-snapshot = ["dep:uwa-browser", "dep:uwa-stealth"]
+default = []
+snapshot = ["dep:uwa-browser", "dep:uwa-stealth", "dep:clap", "dep:anyhow"]
 
 [[bin]]
 name = "uwa-snapshot"
