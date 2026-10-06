@@ -49,6 +49,7 @@ where
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU32, Ordering};
+    use std::time::Instant;
 
     #[tokio::test]
     async fn retries_until_success() {
@@ -92,5 +93,125 @@ mod tests {
         .await
         .unwrap_err();
         assert!(err.to_string().contains("nope"));
+    }
+
+    #[tokio::test]
+    async fn success_on_first_attempt_no_sleep() {
+        let n = AtomicU32::new(0);
+        let cfg = RetryCfg {
+            attempts: 5,
+            base: Duration::from_millis(100),
+            max: Duration::from_millis(500),
+        };
+        let start = Instant::now();
+        let v = retry(&cfg, || {
+            let n = &n;
+            async move {
+                let i = n.fetch_add(1, Ordering::SeqCst);
+                Ok(i)
+            }
+        })
+        .await
+        .unwrap();
+        let elapsed = start.elapsed();
+        // Should return quickly, certainly less than 20ms (no sleep)
+        assert!(elapsed < Duration::from_millis(20));
+        assert_eq!(v, 0);
+    }
+
+    /// Virtual time: the runtime auto-advances to each timer deadline, so the
+    /// backoff schedule is checked exactly, not by wall clock.
+    #[tokio::test(start_paused = true)]
+    async fn backs_off_between_attempts_only() {
+        let cfg = RetryCfg {
+            attempts: 3,
+            base: Duration::from_millis(100),
+            max: Duration::from_millis(100),
+        };
+        let start = tokio::time::Instant::now();
+        let err = retry(&cfg, || async {
+            Err::<(), _>(uwa_core::UwaError::Unavailable("x".into()))
+        })
+        .await
+        .unwrap_err();
+        let elapsed = start.elapsed();
+        assert!(err.to_string().contains('x'));
+        // Two backoffs of 100ms, each plus up to 30% jitter: [200ms, 260ms).
+        // A third sleep after the final attempt would push this past 300ms.
+        assert!(
+            elapsed >= Duration::from_millis(200),
+            "two backoffs expected: {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_millis(290),
+            "no backoff after the final attempt: {elapsed:?}"
+        );
+    }
+
+    /// The delay doubles per attempt until `max`; with `base` 50ms and
+    /// `max` 1s four attempts cannot possibly reach the cap, so a total under
+    /// 1s proves the growth starts at `base`.
+    #[tokio::test(start_paused = true)]
+    async fn backoff_grows_exponentially_from_base() {
+        let cfg = RetryCfg {
+            attempts: 4,
+            base: Duration::from_millis(50),
+            max: Duration::from_secs(1),
+        };
+        let start = tokio::time::Instant::now();
+        let _ = retry(&cfg, || async {
+            Err::<(), _>(uwa_core::UwaError::Unavailable("x".into()))
+        })
+        .await;
+        // 50 + 100 + 200, each plus up to 30% jitter: [350ms, 455ms).
+        assert!(start.elapsed() < Duration::from_secs(1));
+    }
+
+    /// `attempts` is a floor of one: a zero must still call the closure once
+    /// (returning its error), never zero times and never a panic.
+    #[tokio::test(start_paused = true)]
+    async fn attempts_below_one_still_call_once() {
+        for attempts in [0, 1] {
+            let cfg = RetryCfg {
+                attempts,
+                base: Duration::from_millis(1),
+                max: Duration::from_millis(1),
+            };
+            let calls = AtomicU32::new(0);
+            let err = retry(&cfg, || {
+                let calls = &calls;
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Err::<(), _>(uwa_core::UwaError::Unavailable("x".into()))
+                }
+            })
+            .await
+            .unwrap_err();
+            assert_eq!(calls.load(Ordering::SeqCst), 1, "attempts={attempts}");
+            assert!(err.to_string().contains('x'));
+        }
+    }
+
+    /// `base` 100ms doubling to 800ms, but `max` clamps every delay after the
+    /// first: 100 + 150*3, not 100 + 200 + 400 + 800.
+    #[tokio::test(start_paused = true)]
+    async fn backoff_is_capped_at_max() {
+        let cfg = RetryCfg {
+            attempts: 5,
+            base: Duration::from_millis(100),
+            max: Duration::from_millis(150),
+        };
+        let start = tokio::time::Instant::now();
+        let _ = retry(&cfg, || async {
+            Err::<(), _>(uwa_core::UwaError::Unavailable("x".into()))
+        })
+        .await;
+        let elapsed = start.elapsed();
+        // 550ms of sleeping, plus up to 30% jitter per delay: [550ms, 715ms).
+        assert!(elapsed >= Duration::from_millis(500), "{elapsed:?}");
+        assert!(
+            elapsed < Duration::from_millis(800),
+            "uncapped: {elapsed:?}"
+        );
     }
 }

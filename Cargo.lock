@@ -2642,7 +2642,9 @@ dependencies = [
 name = "uwa-providers"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "async-trait",
+ "clap",
  "insta",
  "metrics",
  "serde",
@@ -2691,6 +2693,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tracing",
  "url",
  "uwa-core",
  "uwa-testkit",

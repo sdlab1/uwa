@@ -214,4 +214,89 @@ mod tests {
         assert_eq!(cb.state(), CircuitState::Open);
         assert!(cb.allow().is_err());
     }
+
+    #[tokio::test]
+    async fn initial_state_is_closed() {
+        let cb = CircuitBreaker::new("test", CircuitCfg::default());
+        assert_eq!(cb.state(), CircuitState::Closed);
+        assert!(cb.allow().is_ok());
+    }
+    #[tokio::test]
+    async fn record_success_resets_the_failure_count() {
+        let cb = CircuitBreaker::new(
+            "test",
+            CircuitCfg {
+                failure_threshold: 3,
+                rolling_window: Duration::from_secs(60),
+                cooldown: Duration::from_secs(60),
+                half_open_max_calls: 1,
+            },
+        );
+        cb.record_failure();
+        cb.record_failure();
+        assert_eq!(cb.state(), CircuitState::Closed);
+
+        // A success wipes the slate: two more failures must not be enough to trip.
+        cb.record_success();
+        cb.record_failure();
+        cb.record_failure();
+        assert_eq!(cb.state(), CircuitState::Closed);
+        cb.record_failure();
+        assert_eq!(cb.state(), CircuitState::Open);
+    }
+
+    /// Failures older than `rolling_window` must not count towards the
+    /// threshold: two stale ones plus two fresh ones stay below three.
+    /// Real time, not virtual: the breaker stamps failures with
+    /// `std::time::Instant`.
+    #[tokio::test]
+    async fn old_failures_leave_the_rolling_window() {
+        let cb = CircuitBreaker::new(
+            "test",
+            CircuitCfg {
+                failure_threshold: 3,
+                rolling_window: Duration::from_millis(50),
+                cooldown: Duration::from_secs(30),
+                half_open_max_calls: 1,
+            },
+        );
+        cb.record_failure();
+        cb.record_failure();
+        tokio::time::sleep(Duration::from_millis(90)).await;
+        cb.record_failure();
+        cb.record_failure();
+        assert_eq!(cb.state(), CircuitState::Closed);
+        cb.record_failure();
+        assert_eq!(cb.state(), CircuitState::Open);
+    }
+
+    #[tokio::test]
+    async fn half_open_allows_multiple_probes_when_configured() {
+        let cb = CircuitBreaker::new(
+            "test",
+            CircuitCfg {
+                failure_threshold: 2,
+                rolling_window: Duration::from_secs(10),
+                cooldown: Duration::from_millis(50),
+                half_open_max_calls: 3,
+            },
+        );
+        // Trip the breaker
+        cb.record_failure();
+        cb.record_failure();
+        assert_eq!(cb.state(), CircuitState::Open);
+        // Wait cooldown
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        assert_eq!(cb.state(), CircuitState::HalfOpen);
+        // Allow three probes
+        assert!(cb.allow().is_ok());
+        assert!(cb.allow().is_ok());
+        assert!(cb.allow().is_ok());
+        // Fourth should fail
+        assert!(cb.allow().is_err());
+        // Success on one of them closes the breaker
+        cb.record_success();
+        assert_eq!(cb.state(), CircuitState::Closed);
+        assert!(cb.allow().is_ok());
+    }
 }

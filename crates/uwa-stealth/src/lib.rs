@@ -74,6 +74,7 @@ impl StealthPack {
         Self::default()
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn add(mut self, script: StealthScript) -> Self {
         self.scripts.push(script);
         self

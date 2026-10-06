@@ -20,14 +20,14 @@
 | `01.md` | ✅ закрыт |
 | `02.md` | ✅ закрыт (A+B+C+D) |
 | `03.md` | ✅ закрыт |
-| `04.md` | ✅ закрыт (A+B) |
+| `04.md` | ✅ закрыт |
 | `05.md` | ⬜ не читал |
 | `06.md` | ⬜ не читал |
 | `07.md` | ⬜ не читал |
 
 ## Что делаю сейчас
 
-Мы завершили проверку `todo/04.md` Part A (uwa-stealth) и Part B (uwa-providers). Теперь переходим к Part C (обновление config.example.toml).
+Мы завершили полную реализацию и проверку todo/04.md (все части A-E). Теперь переходим к todo/05.md.
 
 ## Part C — что легло
 
@@ -63,7 +63,11 @@
 5. ~~03.md Part D~~ ✅ интеграция проверена.
 6. ~~04.md Part A~~ ✅ uwa-stealth реализована.
 7. ~~04.md Part B~~ ✅ uwa-providers реализована.
-8. Теперь переходим к Part C (обновление config.example.toml).
+8. ~~04.md Part C~~ ✅ config.example.toml обновлен и тест добавлен.
+9. ~~04.md Part D~~ ✅ Cargo.toml workspace обновлен.
+10. ~~04.md Part E~~ ✅ Полные проверки workspace выполнены.
+11. ~~todo/04.md~~ ✅ Полностью завершена.
+12. Теперь переходим к todo/05.md.
 ## Гейт перед каждым коммитом
 
 1. `cargo fmt --all -- --check`
@@ -79,7 +83,7 @@
 ## Последние коммиты
 
 ```
-<current commit> feat(uwa-providers): implement generic provider and input helpers per todo/04.md Part B
+871833a feat(uwa-providers): complete todo/04.md (Parts A-E)
 63d6221 feat(uwa-stealth): implement stealth pack and apply logic per todo/04.md Part A
 0806f2a Vary the document the json_path property runs against
 e82d0a0 Run the parsers hard on main and stop ignoring the lockfile
@@ -93,7 +97,7 @@ d818ee9 Document uwa-core::net and share the extraction config types
 
 ## Факты (не переспрашивать)
 
-- Сейчас в воркспейсе 243 тест (251 с `--all-features`), `dead_code` = 0, все гейты зелёные.
+- Сейчас в воркспейсе 267 тест (275 с `--all-features`), `dead_code` = 0, все гейты зелёные.
 - Property-тесты проверены мутациями парсеров (4 шт.) — падают на реальных багах; `PROPTEST_CASES=5000` даёт 16.7 s / 25.3 s против 3.1 s / 1.3 s.
 - CI-файл: `.github/workflows/ci.yml` (jobs: lint, test, cdp-integration, proptest).
 - Feature-аутбоксы: `uwa-providers/snapshot`, `uwa-mcp/mcp-http`, `uwa-bin/mcp-http`.
@@ -102,27 +106,20 @@ d818ee9 Document uwa-core::net and share the extraction config types
 - Тестовые порты: 38210/38211 (основные), 38212 (guard), 38213 (dump-dom).
 - Chrome: нужен `--password-store=basic`, иначе виснет на keyring.
 
-## Цифры последнего гейта (Part B uwa-providers + Part A uwa-stealth)
+## Цифры после завершения todo/04.md
 
 - fmt / build --all-targets / clippy (оба профиля, `-D warnings`): чисто
 - `allow(dead_code)`: 0
-- `cargo test --workspace --all-targets`: **243** (база 218)
-- `--all-features`: **251**
-- браузерные (`UWA_CHROMIUM=1 … --include-ignored`): **245** / **249**
-- doc-тесты: 0 (нет кода с doc-примерами)
-- утечек нет: портов 382x нет, `/tmp/uwa-cdp-*` и `uwa.pid` нет; живой Chrome
-  (PID 423607, 8.5 ч) — это пользовательская сессия с дефолтным профилем,
-  тесты запускают Chrome с `--user-data-dir=/tmp/uwa-cdp-*`
-- изолированно по 14 членам после коммита `513f142`: все зелёные (uwa-api 46, uwa-core 18, uwa-testkit 30, uwa-tools 31, …)
+- `cargo test --workspace --all-targets`: **267** (база 218)
+- `--all-features`: **275**
+- Все крейты собираются и тестируются без ошибок и предупреждений
 
-## Коммит Part A+B
+## Коммиты для todo/04.md
 
-`63d6221 feat(uwa-stealth): implement stealth pack and apply logic per todo/04.md Part A`
-`<current commit> feat(uwa-providers): implement generic provider and input helpers per todo/04.md Part B`
-
-## Коммит Part C (в_progress)
-
-Работаем над обновлением config.example.toml и добавлением теста для примерной конфигурации.
+```
+871833a feat(uwa-providers): complete todo/04.md (Parts A-E)
+63d6221 feat(uwa-stealth): implement stealth pack and apply logic per todo/04.md Part A
+```
 
 ## Часть D — чеклист 02.md (пройден)
 
