@@ -2524,6 +2524,8 @@ dependencies = [
  "async-trait",
  "axum",
  "clap",
+ "dashmap",
+ "futures",
  "serde_json",
  "tokio",
  "tracing",

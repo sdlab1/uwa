@@ -134,27 +134,10 @@ pub async fn run_with(config_path: PathBuf, cdp_url: &str) -> anyhow::Result<()>
         .with_semaphores(Arc::new(sem))
         .with_tool_router(tool_router);
 
-    // MCP server (stdio, plus HTTP when the `mcp-http` feature is on).
+    // MCP server (stdio)
     let mut mcp_handle = None;
     if config.mcp_server.enabled {
         let mcp = build_mcp_server(&state);
-
-        #[cfg(feature = "mcp-http")]
-        {
-            let http_addr = format!(
-                "{}:{}",
-                config.server.bind,
-                config.server.port.saturating_add(1)
-            );
-            let listener = tokio::net::TcpListener::bind(&http_addr).await?;
-            let mcp_http = uwa_mcp::http::router(mcp.clone());
-            tokio::spawn(async move {
-                if let Err(e) = axum::serve(listener, mcp_http).await {
-                    tracing::error!("MCP HTTP: {e}");
-                }
-            });
-            tracing::info!(addr = %http_addr, "MCP HTTP+SSE");
-        }
 
         let mcp_stdio = mcp;
         mcp_handle = Some(tokio::spawn(async move {

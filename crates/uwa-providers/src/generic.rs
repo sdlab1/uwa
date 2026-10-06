@@ -28,12 +28,12 @@ use async_trait::async_trait;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing;
+use url::Url;
 use uwa_config::ProviderCfg;
 use uwa_core::{Capabilities, Page, Result, SiteProvider, UwaError};
 use uwa_extract::dom::DomExtractor;
 use uwa_extract::finisher::FinisherCfg;
 use uwa_extract::pipeline::{ExtractionOutcome, ExtractionPipeline, PipelineCfg};
-use url::Url;
 
 use crate::input;
 
@@ -54,21 +54,18 @@ impl GenericProvider {
     // -------- selector accessors --------
 
     fn input_selector(&self) -> Result<&str> {
-        self.cfg
-            .selectors
-            .input
-            .as_deref()
-            .ok_or_else(|| UwaError::Config(format!("provider `{}`: no `input` selector", self.cfg.name)))
+        self.cfg.selectors.input.as_deref().ok_or_else(|| {
+            UwaError::Config(format!("provider `{}`: no `input` selector", self.cfg.name))
+        })
     }
 
     fn send_selector(&self) -> Result<&str> {
-        self.cfg
-            .selectors
-            .send_button
-            .as_deref()
-            .ok_or_else(|| {
-                UwaError::Config(format!("provider `{}`: no `send_button` selector", self.cfg.name))
-            })
+        self.cfg.selectors.send_button.as_deref().ok_or_else(|| {
+            UwaError::Config(format!(
+                "provider `{}`: no `send_button` selector",
+                self.cfg.name
+            ))
+        })
     }
 
     // -------- pipeline helpers --------
@@ -124,7 +121,12 @@ impl GenericProvider {
         let start = std::time::Instant::now();
         let deadline = Duration::from_secs(20);
         let stop = self.cfg.selectors.stop_button.clone();
-        let assistant = self.cfg.selectors.assistant_message.clone().unwrap_or_default();
+        let assistant = self
+            .cfg
+            .selectors
+            .assistant_message
+            .clone()
+            .unwrap_or_default();
 
         loop {
             if let Some(sel) = &stop {
@@ -242,4 +244,3 @@ fn url_matches(pattern: &str, url: &Url) -> bool {
         Some((head, tail)) => u.starts_with(head) && (tail.is_empty() || u.ends_with(tail)),
     }
 }
-

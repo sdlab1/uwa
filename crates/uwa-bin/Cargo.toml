@@ -10,28 +10,33 @@ name = "uwa"
 path = "src/main.rs"
 
 [features]
-# Serve the MCP server over HTTP+SSE on `port + 1`.
-mcp-http = ["uwa-mcp/mcp-http"]
+default = []
+metrics = ["uwa-api/metrics"]
 
 [dependencies]
-uwa-core.workspace = true
+uwa-core = { path = "../../uwa-core" }
 uwa-config = { path = "../uwa-config" }
 uwa-api = { path = "../uwa-api" }
-uwa-lifecycle = { path = "../uwa-lifecycle" }
-uwa-providers = { path = "../uwa-providers" }
+uwa-mcp = { path = "../uwa-mcp" }
 uwa-browser = { path = "../uwa-browser" }
+uwa-providers = { path = "../uwa-providers" }
 uwa-stealth = { path = "../uwa-stealth" }
 uwa-session = { path = "../uwa-session" }
 uwa-resilience = { path = "../uwa-resilience" }
+uwa-lifecycle = { path = "../uwa-lifecycle" }
+
 tokio.workspace = true
-anyhow = { workspace = true }
-tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
 clap = { version = "4", features = ["derive", "env"] }
-async-trait = { workspace = true }
-axum = { workspace = true }
-uwa-mcp = { workspace = true }
-serde_json = { workspace = true }
+async-trait.workspace = true
+axum.workspace = true
+serde_json.workspace = true
+futures.workspace = true
+dashmap.workspace = true
+
 
 [dev-dependencies]
 uwa-testkit = { path = "../uwa-testkit" }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

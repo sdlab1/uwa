@@ -34,7 +34,6 @@ use uwa_core::{ToolSpec, UwaError};
 use uwa_tools::{ToolCall, ToolDefinition};
 
 use crate::error::ApiResult;
-use crate::routes::chat;
 use crate::state::AppState;
 
 // ---------- top-level handler ----------

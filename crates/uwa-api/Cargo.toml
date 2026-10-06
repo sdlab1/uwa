@@ -5,6 +5,10 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[features]
+default = []
+metrics = []
+
 [dependencies]
 uwa-core.workspace = true
 uwa-config = { path = "../uwa-config" }
