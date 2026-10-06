@@ -57,12 +57,13 @@ done < "$SCRIPT_DIR/repo.conf"
 
 # --- Alias groups -----------------------------------------------------
 # SOURCE_GROUP - application source: src/ of every crate + crates'
-#               Cargo.toml + uwa-bin config template + root Cargo.toml.
+#               Cargo.toml + uwa-bin config template + root configs
+#               (Cargo.toml, rust-toolchain.toml, cargo_dependencies2.toml).
 #               (*.lock is NOT included - the dump is source only.)
 # TESTS_GROUP  - integration tests (tests/) of every crate.
 # NOTE: ALL_SRCS/ALL_TOMLS/ALL_TESTS are group aliases from repo.conf
 # (space-separated alias lists); collect_files expands them recursively.
-SOURCE_GROUP=(ALL_SRCS ALL_TOMLS UWA_BIN_CONFIG MANIFEST)
+SOURCE_GROUP=(ALL_SRCS ALL_TOMLS UWA_BIN_CONFIG MANIFEST RUST_TOOLCHAIN CARGO_DEPS2)
 TESTS_GROUP=(ALL_TESTS)
 
 # Only source files are collected
@@ -278,6 +279,25 @@ build_dump() {
   echo "${C_OK}=== $mode dump created: $DUMP_FILE ($files_dumped files) ===${C_RESET}"
 }
 
+# --- expand_group_aliases: repo.conf group -> leaf alias NAMES --------
+# Expands a group alias (space-separated alias list) into the names of
+# its leaf aliases. Used to derive the crate list from ALL_SRCS, so
+# adding a crate only requires a repo.conf edit - no script changes.
+expand_group_aliases() {
+  local group="$1"
+  local value="${PATHS[$group]:-}"
+  [[ -z "$value" ]] && return 0
+  local item sub
+  for item in $value; do
+    sub="${PATHS[$item]:-}"
+    if [[ -n "$sub" && "$sub" == *\ * ]]; then
+      expand_group_aliases "$item"
+    else
+      echo "$item"
+    fi
+  done
+}
+
 # --- build_percrate_dumps ----------------------------------------------
 # Separate dump for each crate. Modular layout:
 #   crate dump group = [crate]_SRC + [crate]_TOML (+ config template)
@@ -285,8 +305,11 @@ build_dump() {
 # To split tests into their own <crate>_tests_dump.md, set
 # PERCRATE_TESTS_SEPARATE=1 (or: PERCRATE_TESTS_SEPARATE=1 ./dump.sh percrate).
 build_percrate_dumps() {
-  local base crate_name
-  for base in UWA_CORE UWA_BROWSER UWA_BIN UWA_CONFIG UWA_MCP UWA_API UWA_TOOLS UWA_EXTRACT; do
+  local alias base crate_name
+  # Crate list is derived from the ALL_SRCS group alias of repo.conf -
+  # a new crate is picked up automatically from repo.conf alone.
+  for alias in $(expand_group_aliases ALL_SRCS); do
+    base="${alias%_SRC}"
     crate_name="${base,,}"
 
     # modular part 1: crate code + manifests (+ config template)
