@@ -18,10 +18,8 @@ use uwa_core::{RequestId, ToolSpec, UwaError};
 use uwa_tools::{ToolCall, ToolDefinition};
 
 use crate::error::ApiResult;
-use crate::routing::{HintExtractor, RoutingHint};
 use crate::state::AppState;
 
-use crate::routes::chat::pipeline::run_pipeline_with_hint;
 pub use pipeline::run_pipeline;
 
 /// Extract ToolSpecs from the request's tools field.
@@ -61,22 +59,13 @@ pub async fn run_pipeline_with(
 /// HTTP handler.
 pub async fn chat_completions(
     State(state): State<AppState>,
-    crate::routing::HintExtractor(hint): crate::routing::HintExtractor,
     Json(req): Json<ChatCompletionRequest>,
 ) -> ApiResult<Response> {
-    let hint = crate::routing::resolve_hint(&state, &hint).await?;
-
-    // Resolve provider: hint first, then model_aliases.
-    let provider_name = match hint.provider.as_deref() {
-        Some(p) => p.to_string(),
-        None => state
-            .config
-            .provider_for_model(&req.model)
-            .ok_or_else(|| UwaError::UnknownModel(req.model.clone()))?
-            .name
-            .clone(),
-    };
-    let site = state.providers.get(&provider_name)?;
+    let provider_cfg = state
+        .config
+        .provider_for_model(&req.model)
+        .ok_or_else(|| UwaError::UnknownModel(req.model.clone()))?;
+    let site = state.providers.get(&provider_cfg.name)?;
 
     let tool_choice_disabled = matches!(
         req.tool_choice.as_ref().and_then(Value::as_str),
@@ -105,7 +94,7 @@ pub async fn chat_completions(
         .into());
     }
 
-    let (text, calls, finish) = run_pipeline_with_hint(&state, &req, &all_specs, &hint).await?;
+    let (text, calls, finish) = run_pipeline(&state, &req, &all_specs).await?;
 
     let request_id = RequestId::new();
     let created = std::time::SystemTime::now()
