@@ -9,9 +9,11 @@ license.workspace = true
 uwa-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 uwa-testkit = { path = "../uwa-testkit" }
 async-trait.workspace = true
-tokio = { workspace = true, features = ["macros", "rt"] }
+tokio = { workspace = true, features = ["macros", "rt", "time", "sync"] }
 url.workspace = true
+serde_json.workspace = true

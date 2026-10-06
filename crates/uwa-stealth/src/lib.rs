@@ -1,31 +1,67 @@
 //! # uwa-stealth
 //!
-//! Anti-detection scripts injected into every page before site JS runs.
+//! Deterministic JS patches applied *before* any page script runs.
+//!
+//! ## Design
+//!
+//! We deliberately do **not** vendor fingerprint dictionaries. Any string
+//! that could be validated against a real Chrome install (WebGL vendor,
+//! plugin list, screen size, timezone) is user-provided via
+//! `[stealth] user_scripts_dir` in config. Our built-ins are the *safe*
+//! baseline that works on all Chromium builds and doesn't break sites.
 //!
 //! ## Passport (public API)
-//! - [`StealthPack`], [`StealthScript`]
-//! - [`builtin::default_pack`], [`builtin::full_pack`]
-//! - [`apply::apply_pack`]
+//! - [`StealthScript`] — name + JS body; `apply_before_load` flag
+//! - [`StealthPack`] — ordered collection
+//! - [`builtin::default_pack`] — safe baseline (`webdriver`, `chrome.runtime`,
+//!   `languages`)
+//! - [`builtin::full_pack`] — adds `permissions` normalization; opt-in
+//! - [`apply::apply_pack`] — pushes scripts through `uwa_core::Page::eval_early`
+//!
+//! Everything is pure: `apply_pack` takes `&dyn Page` and returns
+//! `Result<()>`; no globals, no side channels.
 
 pub mod apply;
 pub mod builtin;
 
-pub use apply::apply_pack;
-pub use builtin::{default_pack, full_pack};
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct StealthScript {
     pub name: String,
+    /// JS source. Wrapped in an IIFE + try/catch at injection time.
     pub js: String,
-    #[serde(default = "yes")]
+    /// If `true`, applied via `Page::eval_early` so it runs on every
+    /// navigation *before* any page script.
+    /// If `false`, evaluated immediately in the current document.
+    #[serde(default = "default_apply_before_load")]
     pub apply_before_load: bool,
 }
 
-fn yes() -> bool {
+fn default_apply_before_load() -> bool {
     true
 }
 
-#[derive(Debug, Clone, Default)]
+impl StealthScript {
+    pub fn new(name: impl Into<String>, js: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            js: js.into(),
+            apply_before_load: true,
+        }
+    }
+
+    /// Construct a script evaluated *now*, not on each navigation.
+    pub fn current_document(name: impl Into<String>, js: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            js: js.into(),
+            apply_before_load: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct StealthPack {
     scripts: Vec<StealthScript>,
 }
@@ -35,8 +71,13 @@ impl StealthPack {
         Self::default()
     }
 
-    pub fn with_script(mut self, s: StealthScript) -> Self {
-        self.scripts.push(s);
+    pub fn add(mut self, script: StealthScript) -> Self {
+        self.scripts.push(script);
+        self
+    }
+
+    pub fn extend(mut self, other: StealthPack) -> Self {
+        self.scripts.extend(other.scripts);
         self
     }
 
@@ -44,12 +85,12 @@ impl StealthPack {
         &self.scripts
     }
 
-    pub fn len(&self) -> usize {
-        self.scripts.len()
-    }
-
     pub fn is_empty(&self) -> bool {
         self.scripts.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.scripts.len()
     }
 }
 
@@ -57,42 +98,40 @@ impl StealthPack {
 mod tests {
     use super::*;
 
-    fn script(name: &str, before: bool) -> StealthScript {
-        StealthScript {
-            name: name.into(),
-            js: format!("/* {name} */"),
-            apply_before_load: before,
-        }
+    #[test]
+    fn empty_pack() {
+        let p = StealthPack::new();
+        assert!(p.is_empty());
+        assert_eq!(p.len(), 0);
     }
 
     #[test]
-    fn pack_accumulates() {
+    fn pack_accumulates_in_order() {
         let p = StealthPack::new()
-            .with_script(script("a", true))
-            .with_script(script("b", false));
+            .add(StealthScript::new("a", "1"))
+            .add(StealthScript::new("b", "2"));
         assert_eq!(p.len(), 2);
-        assert!(!p.is_empty());
         assert_eq!(p.scripts()[0].name, "a");
+        assert_eq!(p.scripts()[1].name, "b");
     }
 
     #[test]
-    fn default_pack_has_core_scripts() {
-        let p = default_pack();
-        assert!(!p.is_empty());
-        assert!(p.scripts().iter().all(|s| s.apply_before_load));
+    fn extend_keeps_both() {
+        let a = StealthPack::new().add(StealthScript::new("a", "1"));
+        let b = StealthPack::new().add(StealthScript::new("b", "2"));
+        let p = a.extend(b);
+        assert_eq!(p.len(), 2);
     }
 
     #[test]
-    fn full_pack_is_superset_of_default() {
-        let d = default_pack();
-        let f = full_pack();
-        assert!(f.len() > d.len());
-        for s in d.scripts() {
-            assert!(
-                f.scripts().iter().any(|x| x.name == s.name),
-                "missing {}",
-                s.name
-            );
-        }
+    fn current_document_flag_is_false() {
+        let s = StealthScript::current_document("x", "1");
+        assert!(!s.apply_before_load);
+    }
+
+    #[test]
+    fn new_defaults_to_before_load() {
+        let s = StealthScript::new("x", "1");
+        assert!(s.apply_before_load);
     }
 }
