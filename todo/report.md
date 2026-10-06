@@ -27,32 +27,8 @@
 
 ## Что делаю сейчас
 
-Мы завершили полную реализацию и проверку todo/04.md (все части A-E). Теперь переходим к todo/05.md.
+Мы завершили полную реализацию и проверку todo/06.md (все части A-D). Теперь переходим к todo/07.md.
 
-## Part C — что легло
-
-- `/v1/messages/count_tokens`: `CountTokensRequest`/`CountTokensResponse` в
-  `uwa-core/src/types/anthropic.rs`, `count_tokens` + `estimate_tokens` в
-  `routes/messages.rs`. Оценка: ASCII — 4 симв./токен, non-ASCII — 2,
-  +4 токена на сообщение, system и tools — по их тексту/JSON. Переиспользует
-  `SystemField::as_text` и `content_text`.
-- `/v1/responses`: новый `routes/responses.rs`. `to_chat_request` (instructions
-  → system, строка или массив content-parts, `stream` всегда false),
-  `reshape` (message-item + function_call items, `usage`, `output_text`).
-- Отклонение от плана: ответ не «переигрывается» байтами через axum — handler
-  зовёт типизированный `chat::run_pipeline_with` + `chat::nonstream::build_non_streaming`
-  и решейпит уже сериализованный `Value`. `chat::local_tools` стал
-  `pub(crate)`.
-- Выкинул `or_else(input_text/output_text)` в `content_text`: реальные части
-  API (`input_text`, `output_text`, `refusal`) несут текст в поле `text`, и
-  мутация показала, что эти ветки никем не проверяются.
-- README: таблица эндпоинтов дополнена двумя строками.
-- Тесты: 8 unit (responses) + 5 unit (арифметика count_tokens) + 6 + 5
-  интеграционных через `AppBuilder` — всего +24 (база на HEAD была 218).
-- Мутации (все Killed): не читать `text` у part; instructions → user; без
-  префикса `resp_`; пустой `output_text`; выкинуть `tool_calls`; пустой input
-  принять; count_tokens всегда 0 / без system+tools / без контента; `stream:
-  true` начал отдавать SSE.
 
 ## Мой план (todo)
 
@@ -106,31 +82,4 @@ d818ee9 Document uwa-core::net and share the extraction config types
 - Тестовые порты: 38210/38211 (основные), 38212 (guard), 38213 (dump-dom).
 - Chrome: нужен `--password-store=basic`, иначе виснет на keyring.
 
-## Цифры после завершения todo/04.md
 
-- fmt / build --all-targets / clippy (оба профиля, `-D warnings`): чисто
-- `allow(dead_code)`: 0
-- `cargo test --workspace --all-targets`: **267** (база 218)
-- `--all-features`: **275**
-- Все крейты собираются и тестируются без ошибок и предупреждений
-
-## Коммиты для todo/04.md
-
-```
-871833a feat(uwa-providers): complete todo/04.md (Parts A-E)
-63d6221 feat(uwa-stealth): implement stealth pack and apply logic per todo/04.md Part A
-```
-
-## Часть D — чеклист 02.md (пройден)
-
-| Проверка плана | Ожидание | Факт |
-|---|---|---|
-| `cargo build --workspace --all-features` | зелёный | ✅ |
-| `cargo test --workspace` | ≈60+ | ✅ **242** (0 failed) |
-| `cargo test -p uwa-tools --test proptest_parser` | 6 свойств × 256 | ✅ **10 свойств**, 2688 кейсов (2×512, 5×256, 3×128) |
-| `cargo test -p uwa-extract --test proptest_net` | 4 свойства × 128 | ✅ **10 свойств**, 1664 кейса (3×256, 7×128) |
-| `cargo test -p uwa-api --test messages_count_tokens` | 3 теста | ✅ 5 (+5 unit) |
-| `cargo test -p uwa-api --test responses` | 4 теста | ✅ 6 (+8 unit) |
-| `cargo clippy --workspace --all-targets --all-features -- -D warnings` | зелёный | ✅ |
-| `cargo fmt --all -- --check` | зелёный | ✅ |
-| CI cdp-integration (Chromium) | ✅ | ✅ локально 245/249 |

@@ -21,12 +21,16 @@ pub trait McpHandler: Send + Sync {
         let _ = (tool, args);
         Err(UwaError::BadRequest("tools not implemented".into()))
     }
+
+    // ---- resources ----
     fn resources(&self) -> Vec<McpResource> {
         vec![]
     }
     async fn read_resource(&self, uri: &str) -> Result<ReadResourceResult> {
         Err(UwaError::BadRequest(format!("resource `{uri}` not found")))
     }
+
+    // ---- prompts ----
     fn prompts(&self) -> Vec<McpPrompt> {
         vec![]
     }

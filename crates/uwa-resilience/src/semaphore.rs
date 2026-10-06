@@ -28,6 +28,13 @@ impl ProviderSemaphores {
         self.default_limit
     }
 
+    pub fn available(&self, provider: &str) -> usize {
+        self.map
+            .get(provider)
+            .map(|e| e.available_permits())
+            .unwrap_or(self.default_limit)
+    }
+
     pub async fn acquire(&self, provider: &str) -> Result<OwnedSemaphorePermit> {
         let sem: Arc<Semaphore> = {
             let entry = self

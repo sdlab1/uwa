@@ -33,6 +33,30 @@ pub struct Config {
     /// Expose this bridge itself via stdio as an MCP server.
     #[serde(default)]
     pub mcp_server: McpServerConfig,
+    /// Stealth configuration.
+    #[serde(default)]
+    pub stealth: StealthCfg,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StealthCfg {
+    #[serde(default = "default_stealth_pack")]
+    pub pack: String,
+    #[serde(default)]
+    pub user_scripts_dir: Option<std::path::PathBuf>,
+}
+
+fn default_stealth_pack() -> String {
+    "default".into()
+}
+
+impl Default for StealthCfg {
+    fn default() -> Self {
+        Self {
+            pack: default_stealth_pack(),
+            user_scripts_dir: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -290,5 +314,19 @@ mod tests {
         let url: Url = "https://chatgpt.com/c/abc".parse().unwrap();
         assert!(url_matches("https://chatgpt.com/*", &url));
         assert!(!url_matches("https://gemini.google.com/*", &url));
+    }
+
+    #[test]
+    fn stealth_defaults() {
+        let cfg = Config::load_from_str(
+            r#"
+            [server]
+            bind = "127.0.0.1"
+            port = 8080
+        "#,
+        )
+        .unwrap();
+        assert_eq!(cfg.stealth.pack, "default");
+        assert!(cfg.stealth.user_scripts_dir.is_none());
     }
 }

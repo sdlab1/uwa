@@ -1,227 +1,327 @@
-//! POST /v1/messages — Anthropic-shaped request in, Anthropic-shaped answer out.
+//! `POST /v1/messages` — Anthropic Messages API.
 //!
-//! Flow: Anthropic DTOs → OpenAI DTOs → the shared browser pipeline → back to
-//! Anthropic. Streaming (9.3) is emulated: the pipeline always runs to
-//! completion and the answer is replayed as SSE in 24-character chunks.
+//! ## Conversion rules
+//!
+//! | Anthropic                | OpenAI                                       |
+//! |--------------------------|----------------------------------------------|
+//! | `system: String`         | `role:"system", content:"..."`               |
+//! | `system: [blocks]`       | concatenated into one system message         |
+//! | `user` w/ `text` block   | `role:"user"`                                |
+//! | `user` w/ `tool_result`  | `role:"tool", tool_call_id=...`              |
+//! | `assistant` w/ `tool_use`| `role:"assistant", tool_calls=[...]`         |
+//! | `tools[].input_schema`   | `tools[].function.parameters`                |
+//!
+//! ## Streaming
+//!
+//! Pseudo-streaming: chunked `content_block_delta` events. Real token
+//! streaming requires network-first extraction and is out of scope for MVP.
 
-use axum::body::Body;
 use axum::extract::State;
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use serde_json::Value;
+use serde_json::{json, Value};
+use std::time::Duration;
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
 
-use uwa_core::traits::ToolSpec;
-use uwa_core::types::anthropic::{
-    content_text, stream_chunks, AnthropicMessage, AnthropicUsage, ContentBlock,
-    CountTokensRequest, CountTokensResponse, Delta, MessageDelta, MessagesRequest,
-    MessagesResponse, StopReason, StreamEvent, ToolChoice,
-};
+use uwa_core::types::anthropic::*;
 use uwa_core::types::openai::{
     ChatCompletionRequest, ChatMessage, FunctionCall, MessageContent, ToolCallRef,
 };
 use uwa_core::types::{FinishReason, Role};
-use uwa_core::RequestId;
-use uwa_tools::ToolCall;
+use uwa_core::{ToolSpec, UwaError};
+use uwa_tools::{ToolCall, ToolDefinition};
 
 use crate::error::ApiResult;
-use crate::routes::chat::run_pipeline_with;
+use crate::routes::chat;
 use crate::state::AppState;
+
+// ---------- top-level handler ----------
 
 pub async fn messages(
     State(state): State<AppState>,
     Json(req): Json<MessagesRequest>,
 ) -> ApiResult<Response> {
-    let local_tools = local_specs(&req);
-    let oa_req = to_openai_request(&req);
-    // `tool_choice: none` must keep MCP tools out of the prompt entirely.
-    let include_remote = req
-        .tool_choice
-        .as_ref()
-        .map(ToolChoice::allows_tools)
-        .unwrap_or(true);
+    // Validate model early.
+    let provider_cfg = state
+        .config
+        .provider_for_model(&req.model)
+        .ok_or_else(|| UwaError::UnknownModel(req.model.clone()))?;
+    let site = state.providers.get(&provider_cfg.name)?;
 
-    let (text, calls, finish) =
-        run_pipeline_with(&state, &oa_req, local_tools, include_remote).await?;
-    let out = to_anthropic_response(&req, text, &calls, finish);
-
-    if req.stream.unwrap_or(false) {
-        Ok(sse(&out))
-    } else {
-        Ok(Json(out).into_response())
-    }
-}
-
-/// Anthropic request → OpenAI request. `system` becomes a leading system
-/// message, `messages` are converted block by block.
-fn to_openai_request(req: &MessagesRequest) -> ChatCompletionRequest {
-    let mut messages = Vec::with_capacity(req.messages.len() + 1);
-    if let Some(system) = &req.system {
-        messages.push(ChatMessage::text(Role::System, system.as_text()));
-    }
-    messages.extend(to_openai_messages(&req.messages));
-    ChatCompletionRequest {
-        model: req.model.clone(),
-        messages,
-        // Tools travel as `ToolSpec`s and the pipeline never streams itself.
-        stream: None,
-        temperature: req.temperature,
-        max_tokens: Some(req.max_tokens),
-        tools: None,
-        tool_choice: None,
-        user: None,
-    }
-}
-
-/// Anthropic tool declarations → the specs the pipeline injects.
-fn local_specs(req: &MessagesRequest) -> Vec<ToolSpec> {
-    match &req.tools {
-        None => Vec::new(),
-        Some(tools) => tools
-            .iter()
-            .map(|t| ToolSpec {
-                name: t.name.clone(),
-                description: t.description.clone().unwrap_or_default(),
-                parameters: t.input_schema.clone(),
-            })
-            .collect(),
-    }
-}
-
-/// Convert Anthropic messages into OpenAI ones:
-/// `tool_result` blocks become `role:"tool"` messages, `tool_use` blocks
-/// become `tool_calls` on the assistant message.
-fn to_openai_messages(msgs: &[AnthropicMessage]) -> Vec<ChatMessage> {
-    let mut out = Vec::with_capacity(msgs.len());
-    for m in msgs {
-        let role = if m.role == "assistant" {
-            Role::Assistant
-        } else {
-            Role::User
-        };
-        match &m.content {
-            Value::String(s) => out.push(ChatMessage::text(role, s.clone())),
-            Value::Array(blocks) => {
-                let mut text: Vec<String> = Vec::new();
-                let mut tool_calls: Vec<ToolCallRef> = Vec::new();
-                let mut tool_results: Vec<ChatMessage> = Vec::new();
-                for raw in blocks {
-                    match serde_json::from_value::<ContentBlock>(raw.clone()) {
-                        Ok(ContentBlock::Text { text: t }) => text.push(t),
-                        Ok(ContentBlock::ToolUse { id, name, input }) => {
-                            tool_calls.push(ToolCallRef {
-                                id,
-                                kind: "function".into(),
-                                function: FunctionCall {
-                                    name,
-                                    arguments: input.to_string(),
-                                },
-                            })
-                        }
-                        Ok(ContentBlock::ToolResult {
-                            tool_use_id,
-                            content,
-                        }) => tool_results.push(ChatMessage {
-                            role: Role::Tool,
-                            content: Some(MessageContent::Text(content_text(content.as_ref()))),
-                            name: None,
-                            tool_call_id: Some(tool_use_id),
-                            tool_calls: None,
-                        }),
-                        // Unknown or malformed blocks are dropped: the pipeline
-                        // cannot act on them anyway.
-                        _ => {}
-                    }
-                }
-                if role == Role::Assistant {
-                    out.push(ChatMessage {
-                        role,
-                        content: non_empty(text.join("\n")),
-                        name: None,
-                        tool_call_id: None,
-                        tool_calls: non_empty_tool_calls(tool_calls),
-                    });
-                } else {
-                    // Tool results precede any user text in the same message.
-                    let had_results = !tool_results.is_empty();
-                    out.extend(tool_results);
-                    if !text.is_empty() || !had_results {
-                        out.push(ChatMessage::text(Role::User, text.join("\n")));
-                    }
-                }
+    let tool_choice_disabled = match &req.tool_choice {
+        Some(choice) => {
+            if let Some(s) = choice.as_str() {
+                s == "none"
+            } else if let Some(obj) = choice.as_object() {
+                obj.get("type").and_then(Value::as_str) == Some("none")
+            } else {
+                false
             }
-            // Null/odd content: keep the turn with an empty message.
-            _ => out.push(ChatMessage::text(role, String::new())),
+        }
+        None => false,
+    };
+
+    // Convert to OpenAI.
+    let oa_req = to_openai_request(&req, tool_choice_disabled)?;
+
+    // Collect tool specs — same logic as chat.rs.
+    let mut all_specs: Vec<ToolSpec> = match &oa_req.tools {
+        Some(arr) if !tool_choice_disabled => ToolDefinition::from_openai_array(arr)?
+            .into_iter()
+            .map(ToolSpec::from)
+            .collect(),
+        _ => Vec::new(),
+    };
+    if !tool_choice_disabled {
+        if let Some(router) = &state.runtime.tool_router {
+            all_specs.extend(router.all_definitions().await?);
         }
     }
-    out
-}
+    if !all_specs.is_empty() && !site.capabilities().tool_calls {
+        return Err(UwaError::BadRequest(format!(
+            "model `{}` does not support tool calls",
+            req.model
+        ))
+        .into());
+    }
 
-fn non_empty(s: String) -> Option<MessageContent> {
-    if s.is_empty() {
-        None
+    // Run pipeline.
+    let (text, calls, finish) =
+        crate::routes::chat::pipeline::run_pipeline(&state, &oa_req, &all_specs).await?;
+
+    let msg_id = format!("msg_{}", uuid::Uuid::new_v4().simple());
+
+    if req.stream.unwrap_or(false) {
+        Ok(stream_anthropic(msg_id, req.model, text, calls, finish))
     } else {
-        Some(MessageContent::Text(s))
+        Ok(Json(build_response(
+            &req,
+            msg_id,
+            req.model.clone(),
+            text,
+            calls,
+            finish,
+        ))
+        .into_response())
     }
 }
 
-fn non_empty_tool_calls(calls: Vec<ToolCallRef>) -> Option<Vec<ToolCallRef>> {
-    if calls.is_empty() {
-        None
-    } else {
-        Some(calls)
+// ---------- count_tokens ----------
+
+pub async fn count_tokens(
+    Json(req): Json<CountTokensRequest>,
+) -> ApiResult<Json<CountTokensResponse>> {
+    // Approximation: ASCII 4 chars/token, non-ASCII 2 chars/token.
+    let mut ascii = 0usize;
+    let mut non_ascii = 0usize;
+    let mut add = |s: &str| {
+        for ch in s.chars() {
+            if ch.is_ascii() {
+                ascii += 1;
+            } else {
+                non_ascii += 1;
+            }
+        }
+    };
+
+    if let Some(sys) = &req.system {
+        add(&sys.as_text());
     }
+    for m in &req.messages {
+        add(&stringify_anthropic_content(&m.content));
+    }
+    if let Some(tools) = &req.tools {
+        if let Ok(s) = serde_json::to_string(tools) {
+            add(&s);
+        }
+    }
+    let overhead = req.messages.len() as u64 * 4;
+    let total =
+        ((ascii / 4) as u64 + (non_ascii / 2) as u64 + overhead).min(u32::MAX as u64) as u32;
+    Ok(Json(CountTokensResponse {
+        input_tokens: total,
+    }))
 }
 
-/// Pipeline result → Anthropic response body.
-fn to_anthropic_response(
+// ---------- request conversion ----------
+
+fn to_openai_request(
     req: &MessagesRequest,
-    text: String,
-    calls: &[ToolCall],
-    finish: FinishReason,
-) -> MessagesResponse {
-    let mut content = Vec::with_capacity(calls.len() + 1);
-    if !text.is_empty() {
-        content.push(ContentBlock::Text { text: text.clone() });
+    tool_choice_disabled: bool,
+) -> Result<ChatCompletionRequest, UwaError> {
+    let mut messages: Vec<ChatMessage> = Vec::new();
+
+    if let Some(sys) = &req.system {
+        let text = sys.as_text();
+        if !text.is_empty() {
+            messages.push(ChatMessage {
+                role: Role::System,
+                content: Some(MessageContent::Text(text)),
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            });
+        }
     }
-    for c in calls {
-        content.push(ContentBlock::ToolUse {
-            id: c.id.clone(),
-            name: c.name.clone(),
-            input: c.arguments.clone(),
-        });
+
+    for m in &req.messages {
+        messages.push(convert_message(m));
     }
-    if content.is_empty() {
-        // Anthropic always answers with at least one content block.
-        content.push(ContentBlock::Text {
-            text: String::new(),
-        });
-    }
-    let rid = RequestId::new();
-    let id = format!("msg_{}", rid.as_str().trim_start_matches("req_"));
-    MessagesResponse {
-        id,
-        kind: "message".into(),
-        role: "assistant".into(),
+
+    let tools = match (&req.tools, tool_choice_disabled) {
+        (Some(ts), false) => Some(
+            ts.iter()
+                .map(|t| {
+                    json!({
+                        "type": "function",
+                        "function": {
+                            "name": t.name,
+                            "description": t.description,
+                            "parameters": t.input_schema
+                        }
+                    })
+                })
+                .collect::<Vec<Value>>(),
+        ),
+        _ => None,
+    };
+
+    Ok(ChatCompletionRequest {
         model: req.model.clone(),
-        stop_reason: Some(match finish {
-            FinishReason::ToolCalls => StopReason::ToolUse,
-            FinishReason::Length => StopReason::MaxTokens,
-            _ => StopReason::EndTurn,
-        }),
-        usage: estimate_usage(req, &text, calls),
-        content,
+        messages,
+        stream: req.stream,
+        temperature: req.temperature,
+        max_tokens: Some(req.max_tokens),
+        tools,
+        tool_choice: req.tool_choice.clone(),
+        user: None,
+    })
+}
+
+/// Convert one Anthropic message into one or more OpenAI messages.
+///
+/// We may need to emit *multiple* OpenAI messages for one Anthropic message:
+// e.g. `user` containing both `text` and `tool_result` blocks becomes
+//   `role:user` + `role:tool`.
+fn convert_message(m: &AnthropicMessage) -> ChatMessage {
+    // Simple string content.
+    if let Value::String(s) = &m.content {
+        return ChatMessage {
+            role: match m.role.as_str() {
+                "assistant" => Role::Assistant,
+                "system" => Role::System,
+                _ => Role::User,
+            },
+            content: Some(MessageContent::Text(s.clone())),
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+        };
+    }
+
+    let blocks = m.content.as_array().cloned().unwrap_or_default();
+    let mut text_parts: Vec<String> = Vec::new();
+    let mut tool_calls: Vec<ToolCallRef> = Vec::new();
+    let mut tool_call_id: Option<String> = None;
+
+    for b in &blocks {
+        match b.get("type").and_then(Value::as_str) {
+            Some("text") => {
+                if let Some(t) = b.get("text").and_then(Value::as_str) {
+                    text_parts.push(t.to_string());
+                }
+            }
+            Some("tool_use") => {
+                let id = b
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                let name = b
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                let input = b.get("input").cloned().unwrap_or(Value::Null);
+                tool_calls.push(ToolCallRef {
+                    id,
+                    kind: "function".into(),
+                    function: FunctionCall {
+                        name,
+                        arguments: serde_json::to_string(&input).unwrap_or_else(|_| "{}".into()),
+                    },
+                });
+            }
+            Some("tool_result") => {
+                tool_call_id = b
+                    .get("tool_use_id")
+                    .and_then(Value::as_str)
+                    .map(String::from);
+                match b.get("content") {
+                    Some(Value::String(s)) => text_parts.push(s.clone()),
+                    Some(Value::Array(inner)) => {
+                        for x in inner {
+                            if let Some(t) = x.get("text").and_then(Value::as_str) {
+                                text_parts.push(t.to_string());
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Decide role: pure tool_result → OpenAI tool message.
+    let role = if tool_call_id.is_some() && tool_calls.is_empty() {
+        Role::Tool
+    } else {
+        match m.role.as_str() {
+            "assistant" => Role::Assistant,
+            "system" => Role::System,
+            _ => Role::User,
+        }
+    };
+
+    ChatMessage {
+        role,
+        content: if text_parts.is_empty() {
+            None
+        } else {
+            Some(MessageContent::Text(text_parts.join("\n")))
+        },
+        name: None,
+        tool_call_id,
+        tool_calls: if tool_calls.is_empty() {
+            None
+        } else {
+            Some(tool_calls)
+        },
     }
 }
 
-/// The browser pipeline reports no token counts, so estimate them the usual
-/// way: about four characters per token.
+fn stringify_anthropic_content(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        Value::Array(parts) => parts
+            .iter()
+            .filter_map(|p| p.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
+    }
+}
+
 fn estimate_usage(req: &MessagesRequest, text: &str, calls: &[ToolCall]) -> AnthropicUsage {
     let mut input = req.model.len() + text.len();
     if let Some(system) = &req.system {
         input += system.as_text().len();
     }
     for m in &req.messages {
-        input += m.content.to_string().len();
+        input += stringify_anthropic_content(&m.content).len();
     }
     let mut output = text.len();
     for c in calls {
@@ -233,321 +333,337 @@ fn estimate_usage(req: &MessagesRequest, text: &str, calls: &[ToolCall]) -> Anth
     }
 }
 
-/// Replay a finished answer as Anthropic SSE events.
-fn sse(out: &MessagesResponse) -> Response {
-    let mut body = String::new();
-    for ev in stream_events(out) {
-        body.push_str("event: ");
-        body.push_str(ev.name());
-        body.push_str("\ndata: ");
-        body.push_str(&serde_json::to_string(&ev).unwrap_or_default());
-        body.push_str("\n\n");
-    }
-    Response::builder()
-        .header("content-type", "text/event-stream; charset=utf-8")
-        .header("cache-control", "no-cache")
-        .body(Body::from(body))
-        .expect("static header values")
-}
+// ---------- non-streaming response ----------
 
-/// The full event sequence for one answer (9.3: chunks of 24 characters).
-fn stream_events(out: &MessagesResponse) -> Vec<StreamEvent> {
-    let mut evs = vec![StreamEvent::MessageStart {
-        message: MessagesResponse {
-            content: Vec::new(),
-            stop_reason: None,
-            usage: AnthropicUsage {
-                input_tokens: out.usage.input_tokens,
-                output_tokens: 0,
-            },
-            ..out.clone()
-        },
-    }];
-    for (index, block) in out.content.iter().enumerate() {
-        evs.push(StreamEvent::ContentBlockStart {
-            index,
-            content_block: block.started(),
+fn build_response(
+    req: &MessagesRequest,
+    id: String,
+    model: String,
+    text: String,
+    calls: Vec<ToolCall>,
+    finish: FinishReason,
+) -> MessagesResponse {
+    let mut content = Vec::new();
+    if !text.is_empty() {
+        content.push(ContentBlock::Text { text: text.clone() });
+    }
+    for c in &calls {
+        content.push(ContentBlock::ToolUse {
+            id: c.id.clone(),
+            name: c.name.clone(),
+            input: c.arguments.clone(),
         });
-        match block {
-            ContentBlock::Text { text } => {
-                for chunk in stream_chunks(text) {
-                    evs.push(StreamEvent::ContentBlockDelta {
-                        index,
-                        delta: Delta::TextDelta { text: chunk },
-                    });
-                }
-            }
-            ContentBlock::ToolUse { input, .. } => {
-                for chunk in stream_chunks(&input.to_string()) {
-                    evs.push(StreamEvent::ContentBlockDelta {
-                        index,
-                        delta: Delta::InputJsonDelta {
-                            partial_json: chunk,
-                        },
-                    });
-                }
-            }
-            _ => {}
-        }
-        evs.push(StreamEvent::ContentBlockStop { index });
     }
-    evs.push(StreamEvent::MessageDelta {
-        delta: MessageDelta {
-            stop_reason: out.stop_reason,
-        },
-        usage: out.usage,
-    });
-    evs.push(StreamEvent::MessageStop);
-    evs
-}
 
-/// `POST /v1/messages/count_tokens` — approximate the prompt size.
-///
-/// Deliberately **not** a tokenizer: clients (the Claude SDK among them)
-/// call this to pre-check the context window, so ±20% is fine and a real
-/// BPE would only add a dependency. ASCII counts at four characters per
-/// token, anything else at two (CJK, emoji), and every message costs a few
-/// tokens for its role and separators.
-pub async fn count_tokens(
-    Json(req): Json<CountTokensRequest>,
-) -> ApiResult<Json<CountTokensResponse>> {
-    Ok(Json(estimate_tokens(&req)))
-}
-
-/// The estimate itself, split out so the arithmetic can be tested without
-/// an HTTP round-trip.
-pub fn estimate_tokens(req: &CountTokensRequest) -> CountTokensResponse {
-    const CHARS_PER_ASCII_TOKEN: usize = 4;
-    const CHARS_PER_WIDE_TOKEN: usize = 2;
-    const TOKENS_PER_MESSAGE: u64 = 4;
-
-    let (mut ascii, mut wide) = (0usize, 0usize);
-    let mut add = |s: &str| {
-        for ch in s.chars() {
-            if ch.is_ascii() {
-                ascii += 1;
-            } else {
-                wide += 1;
-            }
-        }
+    let stop_reason = match finish {
+        FinishReason::Stop => "end_turn",
+        FinishReason::ToolCalls => "tool_use",
+        FinishReason::Length => "max_tokens",
+        FinishReason::ContentFilter => "end_turn",
     };
 
-    if let Some(system) = &req.system {
-        add(&system.as_text());
-    }
-    for m in &req.messages {
-        add(&content_text(Some(&m.content)));
-    }
-    if let Some(tools) = &req.tools {
-        // Tool schemas are prompt too: count them by their JSON footprint.
-        if let Ok(json) = serde_json::to_string(tools) {
-            add(&json);
-        }
-    }
-
-    let tokens = ascii / CHARS_PER_ASCII_TOKEN + wide / CHARS_PER_WIDE_TOKEN;
-    let total = tokens as u64 + req.messages.len() as u64 * TOKENS_PER_MESSAGE;
-    CountTokensResponse {
-        input_tokens: total.min(u32::MAX as u64) as u32,
+    MessagesResponse {
+        id,
+        kind: "message".into(),
+        role: "assistant".into(),
+        model,
+        content,
+        stop_reason: Some(stop_reason.into()),
+        stop_sequence: None,
+        usage: estimate_usage(req, &text, &calls),
     }
 }
+
+// ---------- streaming ----------
+
+fn stream_anthropic(
+    id: String,
+    model: String,
+    text: String,
+    calls: Vec<ToolCall>,
+    finish: FinishReason,
+) -> Response {
+    let (tx, rx) = mpsc::channel::<Result<Event, std::convert::Infallible>>(64);
+
+    tokio::spawn(async move {
+        // message_start
+        let initial = MessagesResponse {
+            id: id.clone(),
+            kind: "message".into(),
+            role: "assistant".into(),
+            model: model.clone(),
+            content: vec![],
+            stop_reason: None,
+            stop_sequence: None,
+            usage: AnthropicUsage::default(),
+        };
+        let _ = tx
+            .send(Ok(sse_event(
+                "message_start",
+                json!({
+                    "type": "message_start",
+                    "message": initial
+                }),
+            )))
+            .await;
+
+        let mut index: u32 = 0;
+
+        // Text block
+        if !text.is_empty() {
+            let _ = tx
+                .send(Ok(sse_event(
+                    "content_block_start",
+                    json!({
+                        "type": "content_block_start",
+                        "index": index,
+                        "content_block": {"type": "text", "text": ""}
+                    }),
+                )))
+                .await;
+
+            let mut buf = String::new();
+            for ch in text.chars() {
+                buf.push(ch);
+                if buf.chars().count() >= 24 {
+                    let _ = tx
+                        .send(Ok(sse_event(
+                            "content_block_delta",
+                            json!({
+                                                "type": "content_block_delta",
+                                "index": index,
+                                "delta": {"type": "text_delta", "text": buf.clone()}
+                            }),
+                        )))
+                        .await;
+                    buf.clear();
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }
+            if !buf.is_empty() {
+                let _ = tx
+                    .send(Ok(sse_event(
+                        "content_block_delta",
+                        json!({
+                            "type": "content_block_delta",
+                            "index": index,
+                            "delta": {"type": "text_delta", "text": buf}
+                        }),
+                    )))
+                    .await;
+            }
+            let _ = tx
+                .send(Ok(sse_event(
+                    "content_block_stop",
+                    json!({
+                        "type": "content_block_stop",
+                        "index": index
+                    }),
+                )))
+                .await;
+            index += 1;
+        }
+
+        // Tool-use blocks
+        for c in &calls {
+            let _ = tx
+                .send(Ok(sse_event(
+                    "content_block_start",
+                    json!({
+                        "type": "content_block_start",
+                        "index": index,
+                        "content_block": {
+                            "type": "tool_use",
+                            "id": c.id,
+                            "name": c.name,
+                            "input": {}
+                        }
+                    }),
+                )))
+                .await;
+
+            let partial = serde_json::to_string(&c.arguments).unwrap_or_else(|_| "{}".into());
+            let _ = tx
+                .send(Ok(sse_event(
+                    "content_block_delta",
+                    json!({
+                        "type": "content_block_delta",
+                        "index": index,
+                        "delta": {"type": "input_json_delta", "partial_json": partial}
+                    }),
+                )))
+                .await;
+
+            let _ = tx
+                .send(Ok(sse_event(
+                    "content_block_stop",
+                    json!({
+                        "type": "content_block_stop",
+                        "index": index
+                    }),
+                )))
+                .await;
+            index += 1;
+        }
+
+        // message_delta + message_stop
+        let stop_reason = match finish {
+            FinishReason::Stop => "end_turn",
+            FinishReason::ToolCalls => "tool_use",
+            FinishReason::Length => "max_tokens",
+            FinishReason::ContentFilter => "end_turn",
+        };
+        let _ = tx
+            .send(Ok(sse_event(
+                "message_delta",
+                json!({
+                    "type": "message_delta",
+                    "delta": {"stop_reason": stop_reason, "stop_sequence": null},
+                    "usage": {"output_tokens": 0}
+                }),
+            )))
+            .await;
+        let _ = tx
+            .send(Ok(sse_event(
+                "message_stop",
+                json!({
+                    "type": "message_stop"
+                }),
+            )))
+            .await;
+    });
+
+    Sse::new(ReceiverStream::new(rx))
+        .keep_alive(KeepAlive::default())
+        .into_response()
+}
+
+fn sse_event(name: &str, payload: Value) -> Event {
+    Event::default()
+        .event(name)
+        .data(serde_json::to_string(&payload).unwrap_or_default())
+}
+
+// ---------- tests ----------
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn count_req(body: serde_json::Value) -> CountTokensRequest {
-        serde_json::from_value(body).expect("request decodes")
-    }
-
-    #[test]
-    fn count_tokens_counts_ascii_at_four_chars_per_token() {
-        let r = count_req(json!({
-            "model": "gpt-4o",
-            "messages": [{"role": "user", "content": "01234567"}],
-        }));
-        // 8 ascii chars / 4 + 4 tokens of per-message overhead.
-        assert_eq!(estimate_tokens(&r).input_tokens, 6);
-    }
-
-    #[test]
-    fn count_tokens_counts_wide_chars_at_two_per_token() {
-        let r = count_req(json!({
-            "model": "gpt-4o",
-            "messages": [{"role": "user", "content": "你好世界"}],
-        }));
-        // 4 wide chars / 2 + 4.
-        assert_eq!(estimate_tokens(&r).input_tokens, 6);
-    }
-
-    #[test]
-    fn count_tokens_includes_system_and_tools() {
-        let bare = count_req(json!({
-            "model": "gpt-4o",
-            "messages": [{"role": "user", "content": "hi"}],
-        }));
-        let loaded = count_req(json!({
-            "model": "gpt-4o",
-            "system": "You are a helpful assistant.",
-            "messages": [{"role": "user", "content": "hi"}],
-            "tools": [{"name": "get_weather", "input_schema": {"type": "object"}}],
-        }));
-        let (bare, loaded) = (estimate_tokens(&bare), estimate_tokens(&loaded));
-        assert!(loaded.input_tokens > bare.input_tokens);
-    }
-
-    #[test]
-    fn count_tokens_grows_with_the_prompt() {
-        let short =
-            count_req(json!({"model": "gpt-4o", "messages": [{"role": "user", "content": "a"}]}));
-        let long = count_req(
-            json!({"model": "gpt-4o", "messages": [{"role": "user", "content": "a".repeat(400)}]}),
-        );
-        assert!(estimate_tokens(&long).input_tokens > estimate_tokens(&short).input_tokens);
-    }
-
-    #[test]
-    fn count_tokens_of_nothing_is_zero() {
-        let r = count_req(json!({"model": "gpt-4o"}));
-        assert_eq!(estimate_tokens(&r).input_tokens, 0);
-    }
     use serde_json::json;
-    use uwa_core::types::anthropic::{SystemBlock, SystemField};
 
-    fn anthropic_message(role: &str, content: Value) -> AnthropicMessage {
-        AnthropicMessage {
-            role: role.into(),
-            content,
-        }
+    #[test]
+    fn string_content_becomes_user_message() {
+        let m = AnthropicMessage {
+            role: "user".into(),
+            content: json!("hello"),
+        };
+        let oa = convert_message(&m);
+        assert_eq!(oa.role, Role::User);
+        assert!(matches!(oa.content, Some(MessageContent::Text(ref s)) if s == "hello"));
     }
 
     #[test]
-    fn tool_use_blocks_become_tool_calls() {
-        let msgs = vec![anthropic_message(
-            "assistant",
-            json!([
+    fn tool_use_block_becomes_tool_calls() {
+        let m = AnthropicMessage {
+            role: "assistant".into(),
+            content: json!([
                 {"type": "text", "text": "checking"},
-                {"type": "tool_use", "id": "toolu_1", "name": "get_weather",
-                 "input": {"city": "NYC"}}
+                {"type": "tool_use", "id": "toolu_1", "name": "w", "input": {"city": "NYC"}}
             ]),
-        )];
-        let out = to_openai_messages(&msgs);
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].role, Role::Assistant);
-        assert_eq!(out[0].content_text(), "checking");
-        let calls = out[0].tool_calls.as_ref().expect("tool_calls");
-        assert_eq!(calls[0].id, "toolu_1");
-        assert_eq!(calls[0].function.name, "get_weather");
-        assert_eq!(
-            serde_json::from_str::<Value>(&calls[0].function.arguments).unwrap(),
-            json!({"city": "NYC"})
-        );
+        };
+        let oa = convert_message(&m);
+        assert_eq!(oa.role, Role::Assistant);
+        let tc = oa.tool_calls.unwrap();
+        assert_eq!(tc[0].function.name, "w");
+        assert!(tc[0].function.arguments.contains("NYC"));
     }
 
     #[test]
-    fn tool_result_blocks_become_tool_messages() {
-        let msgs = vec![
-            anthropic_message(
-                "assistant",
-                json!([{"type": "tool_use", "id": "toolu_1",
-                "name": "get_weather", "input": {}}]),
-            ),
-            anthropic_message(
-                "user",
-                json!([
-                    {"type": "tool_result", "tool_use_id": "toolu_1", "content": "22C"},
-                    {"type": "text", "text": "and tomorrow?"}
-                ]),
-            ),
-        ];
-        let out = to_openai_messages(&msgs);
-        assert_eq!(out.len(), 3);
-        assert_eq!(out[1].role, Role::Tool);
-        assert_eq!(out[1].tool_call_id.as_deref(), Some("toolu_1"));
-        assert_eq!(out[1].content_text(), "22C");
-        assert_eq!(out[2].role, Role::User);
-        assert_eq!(out[2].content_text(), "and tomorrow?");
+    fn tool_result_block_becomes_role_tool() {
+        let m = AnthropicMessage {
+            role: "user".into(),
+            content: json!([
+                {"type": "tool_result", "tool_use_id": "t1", "content": "22C sunny"}
+            ]),
+        };
+        let oa = convert_message(&m);
+        assert_eq!(oa.role, Role::Tool);
+        assert_eq!(oa.tool_call_id.as_deref(), Some("t1"));
+        assert!(matches!(oa.content, Some(MessageContent::Text(ref s)) if s == "22C sunny"));
     }
 
     #[test]
-    fn system_blocks_and_plain_string_flatten_the_same_way() {
-        let blocks = SystemField::Blocks(vec![SystemBlock {
-            text: "be terse".into(),
-        }]);
+    fn system_blocks_concatenated() {
         let req = MessagesRequest {
-            model: "gpt-4o".into(),
-            max_tokens: 100,
-            system: Some(blocks),
-            messages: vec![anthropic_message("user", json!("hi"))],
+            model: "m".into(),
+            max_tokens: 10,
+            system: Some(SystemField::Blocks(vec![
+                SystemBlock {
+                    kind: "text".into(),
+                    text: "a".into(),
+                },
+                SystemBlock {
+                    kind: "text".into(),
+                    text: "b".into(),
+                },
+            ])),
+            messages: vec![],
             stream: None,
             temperature: None,
             tools: None,
             tool_choice: None,
         };
-        let oa = to_openai_request(&req);
-        assert_eq!(oa.messages[0].role, Role::System);
-        assert_eq!(oa.messages[0].content_text(), "be terse");
-        assert_eq!(oa.max_tokens, Some(100));
+        let oa = to_openai_request(&req, false).unwrap();
+        assert_eq!(oa.messages.len(), 1);
+        assert!(matches!(oa.messages[0].content, Some(MessageContent::Text(ref s)) if s == "a\nb"));
     }
 
     #[test]
-    fn stream_sequence_is_complete_and_chunked() {
-        let out = MessagesResponse {
-            id: "msg_1".into(),
-            kind: "message".into(),
-            role: "assistant".into(),
-            model: "gpt-4o".into(),
-            content: vec![
-                ContentBlock::Text {
-                    text: "x".repeat(50),
-                },
-                ContentBlock::ToolUse {
-                    id: "toolu_1".into(),
-                    name: "get_weather".into(),
-                    input: json!({"city": "NYC"}),
-                },
-            ],
-            stop_reason: Some(StopReason::ToolUse),
-            usage: AnthropicUsage {
-                input_tokens: 10,
-                output_tokens: 20,
-            },
+    fn tool_choice_none_suppresses_tools() {
+        let req = MessagesRequest {
+            model: "m".into(),
+            max_tokens: 10,
+            system: None,
+            messages: vec![],
+            stream: None,
+            temperature: None,
+            tools: Some(vec![AnthropicTool {
+                name: "x".into(),
+                description: "".into(),
+                input_schema: json!({"type": "object"}),
+            }]),
+            tool_choice: Some(json!("none")),
         };
-        let evs = stream_events(&out);
-        let names: Vec<&str> = evs.iter().map(StreamEvent::name).collect();
-        assert_eq!(names.first(), Some(&"message_start"));
-        assert_eq!(names.last(), Some(&"message_stop"));
-        assert!(names.contains(&"content_block_start"));
-        assert!(names.contains(&"content_block_delta"));
-        assert!(names.contains(&"content_block_stop"));
-        assert!(names.contains(&"message_delta"));
-        // 50 chars of text -> 3 deltas; `{"city":"NYC"}` (14) -> 1 delta.
-        let text_deltas = evs
-            .iter()
-            .filter(|e| matches!(e, StreamEvent::ContentBlockDelta { delta: Delta::TextDelta { text }, .. } if !text.is_empty()))
-            .count();
-        assert_eq!(text_deltas, 3);
-        let json_deltas = evs
-            .iter()
-            .filter(|e| {
-                matches!(
-                    e,
-                    StreamEvent::ContentBlockDelta {
-                        delta: Delta::InputJsonDelta { .. },
-                        ..
-                    }
-                )
-            })
-            .count();
-        assert_eq!(json_deltas, 1);
-        // message_start carries no content yet.
-        match &evs[0] {
-            StreamEvent::MessageStart { message } => {
-                assert!(message.content.is_empty());
-                assert_eq!(message.usage.output_tokens, 0);
-                assert_eq!(message.usage.input_tokens, 10);
-            }
-            other => panic!("first event is {other:?}"),
-        }
+        let oa = to_openai_request(&req, true).unwrap();
+        assert!(oa.tools.is_none());
+    }
+
+    #[test]
+    fn build_response_marks_tool_use() {
+        let calls = vec![ToolCall {
+            id: "t1".into(),
+            name: "w".into(),
+            arguments: json!({"city": "NYC"}),
+        }];
+        let req = MessagesRequest {
+            model: "claude".into(),
+            max_tokens: 128,
+            system: None,
+            messages: vec![],
+            stream: None,
+            temperature: None,
+            tools: None,
+            tool_choice: None,
+        };
+        let r = build_response(
+            &req,
+            "m".into(),
+            "claude".into(),
+            "".into(),
+            calls,
+            FinishReason::ToolCalls,
+        );
+        assert_eq!(r.stop_reason.as_deref(), Some("tool_use"));
+        assert_eq!(r.content.len(), 1);
     }
 }

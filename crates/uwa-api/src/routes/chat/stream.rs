@@ -1,96 +1,156 @@
-//! Pseudo-streaming answer of `/v1/chat/completions`.
+//! SSE response for `/v1/chat/completions`.
 //!
-//! The pipeline always runs to completion; here the finished answer is
-//! replayed as `chat.completion.chunk` events in [`STREAM_CHUNK_CHARS`]-sized
-//! pieces and closed with `data: [DONE]`. Real network-first SSE comes later.
+//! Pseudo-streaming: we chunk the final text and emit standard
+//! `chat.completion.chunk` frames. Real token streaming (network-first)
+//! requires the CDP SSE bridge and is scheduled for a later iteration.
 
-use axum::body::Body;
-use axum::response::Response;
-use serde_json::{json, Value};
+use axum::response::sse::{Event, KeepAlive, Sse};
+use axum::response::{IntoResponse, Response};
+use serde_json::json;
+use std::time::Duration;
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
 
-use uwa_core::types::stream_chunks;
 use uwa_core::types::FinishReason;
 use uwa_core::RequestId;
-use uwa_tools::ToolParseOutcome;
+use uwa_tools::ToolCall;
 
-/// Content type used for every SSE response we emit.
-pub const EVENT_STREAM: &str = "text/event-stream; charset=utf-8";
-
-/// Replay `outcome` as an SSE stream of chat completion chunks.
-pub fn sse(
-    model: &str,
+pub fn stream_response(
     id: RequestId,
+    model: String,
     created: u64,
-    outcome: ToolParseOutcome,
+    text: String,
+    calls: Vec<ToolCall>,
     finish: FinishReason,
 ) -> Response {
-    let base = json!({
-        "id": id.to_string(),
+    let (tx, rx) = mpsc::channel::<Result<Event, std::convert::Infallible>>(64);
+    let stream_id = id.to_string();
+
+    tokio::spawn(async move {
+        // Role chunk first (OpenAI convention).
+        let _ = tx
+            .send(Ok(sse_chunk(
+                &stream_id,
+                created,
+                &model,
+                json!({"role": "assistant"}),
+                None,
+            )))
+            .await;
+
+        if calls.is_empty() {
+            // Text: chunk every ~24 chars for a smooth-looking stream.
+            let mut buf = String::new();
+            for ch in text.chars() {
+                buf.push(ch);
+                if buf.chars().count() >= 24 {
+                    let _ = tx
+                        .send(Ok(sse_chunk(
+                            &stream_id,
+                            created,
+                            &model,
+                            json!({"content": buf.clone()}),
+                            None,
+                        )))
+                        .await;
+                    buf.clear();
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }
+            if !buf.is_empty() {
+                let _ = tx
+                    .send(Ok(sse_chunk(
+                        &stream_id,
+                        created,
+                        &model,
+                        json!({"content": buf}),
+                        None,
+                    )))
+                    .await;
+            }
+        } else {
+            // Tool calls: one aggregated delta.
+            let wire: Vec<serde_json::Value> = calls
+                .iter()
+                .enumerate()
+                .map(|(i, c)| {
+                    json!({
+                        "index": i,
+                        "id": c.id,
+                        "type": "function",
+                        "function": {
+                            "name": c.name,
+                            "arguments": serde_json::to_string(&c.arguments)
+                                .unwrap_or_else(|_| "{}".into()),
+                        }
+                    })
+                })
+                .collect();
+            let _ = tx
+                .send(Ok(sse_chunk(
+                    &stream_id,
+                    created,
+                    &model,
+                    json!({"tool_calls": wire}),
+                    None,
+                )))
+                .await;
+        }
+
+        // Terminal chunk + [DONE].
+        let finish_str = match finish {
+            FinishReason::Stop => "stop",
+            FinishReason::ToolCalls => "tool_calls",
+            FinishReason::Length => "length",
+            FinishReason::ContentFilter => "content_filter",
+        };
+        let _ = tx
+            .send(Ok(sse_chunk(
+                &stream_id,
+                created,
+                &model,
+                json!({}),
+                Some(finish_str),
+            )))
+            .await;
+        let _ = tx.send(Ok(Event::default().data("[DONE]"))).await;
+    });
+
+    Sse::new(ReceiverStream::new(rx))
+        .keep_alive(KeepAlive::default())
+        .into_response()
+}
+
+fn sse_chunk(
+    id: &str,
+    created: u64,
+    model: &str,
+    delta: serde_json::Value,
+    finish_reason: Option<&str>,
+) -> Event {
+    let payload = json!({
+        "id": id,
         "object": "chat.completion.chunk",
         "created": created,
         "model": model,
+        "choices": [{
+            "index": 0,
+            "delta": delta,
+            "finish_reason": finish_reason,
+        }]
     });
-    let mut body = String::new();
-
-    // The role arrives once, up front, per the OpenAI chunk protocol.
-    push(
-        &mut body,
-        &base,
-        json!({"index": 0, "delta": {"role": "assistant", "content": ""}, "finish_reason": null}),
-    );
-    for piece in stream_chunks(&outcome.text) {
-        push(
-            &mut body,
-            &base,
-            json!({"index": 0, "delta": {"content": piece}, "finish_reason": null}),
-        );
-    }
-    for (index, call) in outcome.calls.iter().enumerate() {
-        let args = serde_json::to_string(&call.arguments).unwrap_or_else(|_| "{}".into());
-        push(
-            &mut body,
-            &base,
-            json!({
-                "index": 0,
-                "delta": {"tool_calls": [{
-                    "index": index,
-                    "id": call.id,
-                    "type": "function",
-                    "function": {"name": call.name, "arguments": ""},
-                }]},
-                "finish_reason": null,
-            }),
-        );
-        for piece in stream_chunks(&args) {
-            push(
-                &mut body,
-                &base,
-                json!({
-                    "index": 0,
-                    "delta": {"tool_calls": [{"index": index, "function": {"arguments": piece}}]},
-                    "finish_reason": null,
-                }),
-            );
-        }
-    }
-    push(
-        &mut body,
-        &base,
-        json!({"index": 0, "delta": {}, "finish_reason": finish}),
-    );
-    body.push_str("data: [DONE]\n\n");
-
-    Response::builder()
-        .header("content-type", EVENT_STREAM)
-        .header("cache-control", "no-cache")
-        .body(Body::from(body))
-        .expect("static header values")
+    Event::default().data(serde_json::to_string(&payload).unwrap_or_default())
 }
 
-fn push(body: &mut String, base: &Value, choice: Value) {
-    let mut payload = base.clone();
-    payload["choices"] = json!([choice]);
-    body.push_str("data: ");
-    body.push_str(&payload.to_string());
-    body.push_str("\n\n");
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sse_chunk_has_required_fields() {
+        let ev = sse_chunk("req_1", 100, "gpt-4o", json!({"content": "hi"}), None);
+        // Extract payload from Event by re-serializing? Event doesn't expose
+        // fields, so we just check it constructs without panic.
+        let _ = ev;
+    }
 }

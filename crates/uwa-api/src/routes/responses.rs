@@ -17,7 +17,6 @@ use serde_json::Value;
 use uwa_core::types::openai::{ChatCompletionRequest, ChatMessage, MessageContent};
 use uwa_core::types::Role;
 use uwa_core::{RequestId, UwaError};
-use uwa_tools::ToolParseOutcome;
 
 use crate::error::ApiResult;
 use crate::routes::chat;
@@ -122,7 +121,8 @@ pub async fn create(
         id,
         chat_req.model.clone(),
         created,
-        ToolParseOutcome { text, calls },
+        text,
+        calls,
         finish,
     );
     let body = serde_json::to_value(&body)

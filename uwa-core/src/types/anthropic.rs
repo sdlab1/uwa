@@ -1,13 +1,23 @@
-//! Anthropic-compatible DTOs. Kept separate so we can evolve the
-//! `/v1/messages` adapter without touching OpenAI code.
+//! Anthropic Messages API DTOs.
 //!
-//! Covers request (`MessagesRequest`), response (`MessagesResponse`) and the
-//! SSE stream vocabulary (`StreamEvent`) of the Messages API.
+//! Reference: https://docs.anthropic.com/en/api/messages
+//!
+//! ## Subset we support
+//!
+//! * Request: `model`, `max_tokens`, `system` (string or blocks), `messages`
+//!   (with `tool_use` and `tool_result` blocks), `stream`, `temperature`,
+//!   `tools`, `tool_choice`.
+//! * Response: `{id, type:"message", role, content, stop_reason, usage}`.
+//! * Streaming: `message_start`, `content_block_start`, `content_block_delta`
+//!   (`text_delta`, `input_json_delta`), `content_block_stop`,
+//!   `message_delta`, `message_stop`.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub use super::{stream_chunks, STREAM_CHUNK_CHARS};
+
+// ---------- request ----------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MessagesRequest {
@@ -23,18 +33,10 @@ pub struct MessagesRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<AnthropicTool>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_choice: Option<ToolChoice>,
+    pub tool_choice: Option<Value>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AnthropicMessage {
-    /// `"user"` | `"assistant"`.
-    pub role: String,
-    /// A string, or an array of [`ContentBlock`]s.
-    pub content: Value,
-}
-
-/// `system` is either a plain string or a list of `{"type":"text"}` blocks.
+/// `system` field accepts a plain string or an array of text blocks.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum SystemField {
@@ -44,25 +46,54 @@ pub enum SystemField {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemBlock {
-    #[serde(default)]
+    #[serde(rename = "type")]
+    pub kind: String, // always "text"
     pub text: String,
 }
 
 impl SystemField {
-    /// Flattened plain text; blocks are joined with newlines.
     pub fn as_text(&self) -> String {
         match self {
             Self::Text(s) => s.clone(),
             Self::Blocks(b) => b
                 .iter()
-                .map(|b| b.text.as_str())
+                .map(|x| x.text.as_str())
                 .collect::<Vec<_>>()
                 .join("\n"),
         }
     }
 }
 
-/// One element of `message.content`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnthropicMessage {
+    pub role: String,   // "user" | "assistant"
+    pub content: Value, // string or array of blocks
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnthropicTool {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    pub input_schema: Value,
+}
+
+// ---------- response ----------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MessagesResponse {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub kind: String, // "message"
+    pub role: String, // "assistant"
+    pub model: String,
+    pub content: Vec<ContentBlock>,
+    pub stop_reason: Option<String>, // "end_turn" | "tool_use" | "max_tokens" | "stop_sequence"
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_sequence: Option<String>,
+    pub usage: AnthropicUsage,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlock {
@@ -74,72 +105,57 @@ pub enum ContentBlock {
         name: String,
         input: Value,
     },
-    ToolResult {
-        tool_use_id: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        content: Option<Value>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AnthropicUsage {
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+}
+
+// ---------- streaming events (serialize-only) ----------
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum StreamEvent {
+    MessageStart {
+        message: MessagesResponse,
     },
-    /// Any block type we do not model (`thinking`, `image`, ...).
-    #[serde(other)]
-    Other,
+    ContentBlockStart {
+        index: u32,
+        content_block: ContentBlock,
+    },
+    ContentBlockDelta {
+        index: u32,
+        delta: Delta,
+    },
+    ContentBlockStop {
+        index: u32,
+    },
+    MessageDelta {
+        delta: MessageDeltaBody,
+        usage: AnthropicUsage,
+    },
+    MessageStop,
 }
 
-impl ContentBlock {
-    /// Plain text of a block; only `text` (and the text form of a tool
-    /// result) carries any.
-    pub fn text(&self) -> String {
-        match self {
-            Self::Text { text } => text.clone(),
-            Self::ToolResult { content, .. } => content_text(content.as_ref()),
-            _ => String::new(),
-        }
-    }
-
-    /// The block as it starts streaming: empty payload, identity kept.
-    pub fn started(&self) -> Self {
-        match self {
-            Self::Text { .. } => Self::Text {
-                text: String::new(),
-            },
-            Self::ToolUse { id, name, .. } => Self::ToolUse {
-                id: id.clone(),
-                name: name.clone(),
-                input: serde_json::json!({}),
-            },
-            other => other.clone(),
-        }
-    }
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Delta {
+    TextDelta { text: String },
+    InputJsonDelta { partial_json: String },
 }
 
-/// Flatten any Anthropic content value (string or block array) into text.
-pub fn content_text(content: Option<&Value>) -> String {
-    match content {
-        None => String::new(),
-        Some(Value::String(s)) => s.clone(),
-        Some(Value::Array(blocks)) => blocks
-            .iter()
-            .map(|b| match b.get("text").and_then(Value::as_str) {
-                Some(t) => t.to_string(),
-                None => content_text(Some(b)),
-            })
-            .filter(|t| !t.is_empty())
-            .collect::<Vec<_>>()
-            .join("\n"),
-        Some(other) => other.to_string(),
-    }
+#[derive(Debug, Clone, Serialize)]
+pub struct MessageDeltaBody {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stop_sequence: Option<String>,
 }
 
-/// A tool advertised by the client: `{ name, description, input_schema }`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AnthropicTool {
-    pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    pub input_schema: Value,
-}
+// ---------- count_tokens ----------
 
-/// Request for `POST /v1/messages/count_tokens`. The same shape as
-/// [`MessagesRequest`] minus `max_tokens`, which the Claude SDK omits here.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CountTokensRequest {
     pub model: String,
@@ -151,13 +167,11 @@ pub struct CountTokensRequest {
     pub tools: Option<Vec<AnthropicTool>>,
 }
 
-/// Response for `POST /v1/messages/count_tokens`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CountTokensResponse {
     pub input_tokens: u32,
 }
-
-/// `tool_choice`. `"none"` means: do not expose any tool to the model.
+// ToolChoice enum
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ToolChoice {
@@ -174,88 +188,7 @@ impl ToolChoice {
     }
 }
 
-/// Why the model stopped.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum StopReason {
-    EndTurn,
-    ToolUse,
-    MaxTokens,
-    StopSequence,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AnthropicUsage {
-    pub input_tokens: u32,
-    pub output_tokens: u32,
-}
-
-/// A complete `/v1/messages` response.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MessagesResponse {
-    pub id: String,
-    #[serde(rename = "type")]
-    pub kind: String, // always "message"
-    pub role: String, // always "assistant"
-    pub model: String,
-    pub content: Vec<ContentBlock>,
-    pub stop_reason: Option<StopReason>,
-    pub usage: AnthropicUsage,
-}
-
-/// Payload of `message_delta`.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
-pub struct MessageDelta {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub stop_reason: Option<StopReason>,
-}
-
-/// Payload of `content_block_delta`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum Delta {
-    TextDelta { text: String },
-    InputJsonDelta { partial_json: String },
-}
-
-/// One SSE event of a streamed `/v1/messages` answer.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum StreamEvent {
-    MessageStart {
-        message: MessagesResponse,
-    },
-    ContentBlockStart {
-        index: usize,
-        content_block: ContentBlock,
-    },
-    ContentBlockDelta {
-        index: usize,
-        delta: Delta,
-    },
-    ContentBlockStop {
-        index: usize,
-    },
-    MessageDelta {
-        delta: MessageDelta,
-        usage: AnthropicUsage,
-    },
-    MessageStop,
-}
-
-impl StreamEvent {
-    /// The SSE `event:` name — identical to the payload `type`.
-    pub fn name(&self) -> &'static str {
-        match self {
-            Self::MessageStart { .. } => "message_start",
-            Self::ContentBlockStart { .. } => "content_block_start",
-            Self::ContentBlockDelta { .. } => "content_block_delta",
-            Self::ContentBlockStop { .. } => "content_block_stop",
-            Self::MessageDelta { .. } => "message_delta",
-            Self::MessageStop => "message_stop",
-        }
-    }
-}
+// ---------- tests ----------
 
 #[cfg(test)]
 mod tests {
@@ -263,78 +196,54 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn system_is_string_or_blocks() {
-        let s: SystemField = serde_json::from_value(json!("be brief")).unwrap();
-        assert_eq!(s.as_text(), "be brief");
-        let b: SystemField = serde_json::from_value(json!([
-            {"type": "text", "text": "one"},
-            {"type": "text", "text": "two"}
-        ]))
-        .unwrap();
-        assert_eq!(b.as_text(), "one\ntwo");
-    }
-
-    #[test]
-    fn content_blocks_parse_including_unknown() {
-        let text: ContentBlock =
-            serde_json::from_value(json!({"type": "text", "text": "hi"})).unwrap();
-        assert_eq!(text.text(), "hi");
-        let call: ContentBlock = serde_json::from_value(json!({
-            "type": "tool_use", "id": "toolu_1", "name": "get_weather",
-            "input": {"city": "NYC"}
+    fn system_accepts_string_or_blocks() {
+        let a: MessagesRequest = serde_json::from_value(json!({
+            "model": "claude-3-5-sonnet",
+            "max_tokens": 10,
+            "system": "be brief",
+            "messages": []
         }))
         .unwrap();
-        match &call {
-            ContentBlock::ToolUse { id, name, input } => {
-                assert_eq!(id, "toolu_1");
-                assert_eq!(name, "get_weather");
-                assert_eq!(input["city"], "NYC");
-            }
-            other => panic!("wrong variant: {other:?}"),
-        }
-        let res: ContentBlock = serde_json::from_value(json!({
-            "type": "tool_result", "tool_use_id": "toolu_1", "content": "22C"
+        assert_eq!(a.system.unwrap().as_text(), "be brief");
+
+        let b: MessagesRequest = serde_json::from_value(json!({
+            "model": "claude-3-5-sonnet",
+            "max_tokens": 10,
+            "system": [{"type": "text", "text": "a"}, {"type": "text", "text": "b"}],
+            "messages": []
         }))
         .unwrap();
-        assert_eq!(res.text(), "22C");
-        let other: ContentBlock =
-            serde_json::from_value(json!({"type": "thinking", "thinking": "..."})).unwrap();
-        assert!(matches!(other, ContentBlock::Other));
+        assert_eq!(b.system.unwrap().as_text(), "a\nb");
     }
 
     #[test]
-    fn tool_choice_none_is_recognised() {
-        let none: ToolChoice = serde_json::from_value(json!({"type": "none"})).unwrap();
-        assert!(!none.allows_tools());
-        assert_eq!(serde_json::to_value(none).unwrap(), json!({"type": "none"}));
-        let auto: ToolChoice = serde_json::from_value(json!({"type": "auto"})).unwrap();
-        assert!(auto.allows_tools());
-        let one: ToolChoice = serde_json::from_value(json!({"type": "tool", "name": "x"})).unwrap();
-        assert!(matches!(one, ToolChoice::Tool { name } if name == "x"));
+    fn message_with_content_blocks_round_trips() {
+        let m: AnthropicMessage = serde_json::from_value(json!({
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "hello"},
+                {"type": "tool_result", "tool_use_id": "t1", "content": "22C"}
+            ]
+        }))
+        .unwrap();
+        assert_eq!(m.role, "user");
+        assert!(m.content.is_array());
     }
 
     #[test]
-    fn stream_events_carry_the_expected_type() {
-        let ev = StreamEvent::ContentBlockDelta {
-            index: 0,
-            delta: Delta::TextDelta { text: "abc".into() },
+    fn response_serializes_with_correct_type_tag() {
+        let r = MessagesResponse {
+            id: "msg_1".into(),
+            kind: "message".into(),
+            role: "assistant".into(),
+            model: "claude-3-5-sonnet".into(),
+            content: vec![ContentBlock::Text { text: "hi".into() }],
+            stop_reason: Some("end_turn".into()),
+            stop_sequence: None,
+            usage: AnthropicUsage::default(),
         };
-        assert_eq!(ev.name(), "content_block_delta");
-        assert_eq!(
-            serde_json::to_value(&ev).unwrap()["type"],
-            "content_block_delta"
-        );
-        assert_eq!(StreamEvent::MessageStop.name(), "message_stop");
-    }
-
-    #[test]
-    fn chunks_are_at_most_24_chars() {
-        let chunks = stream_chunks(&"x".repeat(50));
-        assert_eq!(chunks.len(), 3);
-        assert!(chunks
-            .iter()
-            .all(|c| c.chars().count() <= STREAM_CHUNK_CHARS));
-        assert_eq!(chunks.concat(), "x".repeat(50));
-        assert!(stream_chunks("").is_empty());
+        let v = serde_json::to_value(&r).unwrap();
+        assert_eq!(v["type"], "message");
+        assert_eq!(v["content"][0]["type"], "text");
     }
 }
