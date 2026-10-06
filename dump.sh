@@ -66,8 +66,9 @@ done < "$SCRIPT_DIR/repo.conf"
 SOURCE_GROUP=(ALL_SRCS ALL_TOMLS UWA_BIN_CONFIG MANIFEST RUST_TOOLCHAIN CARGO_DEPS2)
 TESTS_GROUP=(ALL_TESTS)
 
-# Only source files are collected
-EXTENSIONS=( -name '*.rs' -o -name '*.toml' )
+# Source files: Rust source and configuration (*.rs, *.toml)
+# For tests, we also collect fixtures: HTML, TXT, and SNAP files found under tests/ directories.
+EXTENSIONS=( -name '*.rs' -o -name '*.toml' -o -name '*.html' -o -name '*.txt' -o -name '*.snap' )
 
 # Service dirs - build artifacts and VCS, always skipped
 EXCLUDE_DIRS=( -name target -o -name _build -o -name deps -o -name .git \
