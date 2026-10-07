@@ -257,7 +257,10 @@ pub struct ResourceContents {
     pub uri: String,
     #[serde(rename = "mimeType", default, skip_serializing_if = "Option::is_none")]
     pub mime_type: Option<String>,
-    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blob: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

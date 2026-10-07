@@ -36,6 +36,7 @@ use std::time::Duration;
 use uwa_core::types::openai::MessageContent;
 use uwa_core::types::openai::{ChatCompletionRequest, ChatMessage, FunctionCall, ToolCallRef};
 use uwa_core::types::{FinishReason, Role};
+use uwa_core::TabId;
 use uwa_core::{ToolSpec, UwaError};
 use uwa_tools::{
     build_system_prompt, compose_browser_turn, parse, render_tool_response, ToolCall,
@@ -51,6 +52,7 @@ pub async fn run_pipeline(
     state: &AppState,
     req: &ChatCompletionRequest,
     all_specs: &[ToolSpec],
+    pinned_tab: Option<&TabId>,
 ) -> Result<(String, Vec<ToolCall>, FinishReason), UwaError> {
     let provider_cfg = state
         .config
@@ -61,7 +63,7 @@ pub async fn run_pipeline(
     breaker.allow()?;
     let _permit = state.runtime.semaphores.acquire(&provider_cfg.name).await?;
 
-    let result = run_pipeline_inner(state, req, all_specs).await;
+    let result = run_pipeline_inner(state, req, all_specs, pinned_tab).await;
 
     match &result {
         Ok(_) => breaker.record_success(),
@@ -78,10 +80,19 @@ pub async fn run_pipeline(
     result
 }
 
+pub async fn run_pipeline_with_hint(
+    state: &AppState,
+    req: &ChatCompletionRequest,
+    all_specs: &[ToolSpec],
+    hint: &crate::routing::RoutingHint,
+) -> Result<(String, Vec<ToolCall>, FinishReason), UwaError> {
+    run_pipeline(state, req, all_specs, hint.tab.as_ref()).await
+}
 async fn run_pipeline_inner(
     state: &AppState,
     req: &ChatCompletionRequest,
     all_specs: &[ToolSpec],
+    pinned_tab: Option<&TabId>,
 ) -> Result<(String, Vec<ToolCall>, FinishReason), UwaError> {
     let provider_cfg = state
         .config
@@ -112,16 +123,21 @@ async fn run_pipeline_inner(
     let send_timeout = Duration::from_millis(state.config.server.request_timeout_ms.max(1_000));
 
     for round in 0..MAX_TOOL_ROUNDS {
-        let tab = match &session_handle {
-            Some(h) => h.tab.clone(),
-            None => state
-                .transport
-                .list_tabs()
-                .await?
-                .into_iter()
-                .next()
-                .ok_or_else(|| UwaError::Unavailable("no browser tabs available".into()))?,
+        let tab = if let Some(t) = pinned_tab {
+            t.clone()
+        } else {
+            match &session_handle {
+                Some(h) => h.tab.clone(),
+                None => {
+                    let tabs = state.transport.list_tabs().await?;
+                    println!("pipeline: available tabs: {:?}", tabs);
+                    tabs.into_iter()
+                        .next()
+                        .ok_or_else(|| UwaError::Unavailable("no browser tabs available".into()))?
+                }
+            }
         };
+        println!("pipeline: selected tab: {:?}", tab);
         let page = state.transport.page(&tab).await?;
 
         let body = build_browser_body(system_injection.as_deref(), &conversation, round == 0);
@@ -186,7 +202,6 @@ async fn run_pipeline_inner(
         "tool loop exceeded {MAX_TOOL_ROUNDS} rounds without a final answer"
     )))
 }
-
 fn build_browser_body(system: Option<&str>, messages: &[ChatMessage], first_round: bool) -> String {
     let mut s = String::new();
     if first_round {

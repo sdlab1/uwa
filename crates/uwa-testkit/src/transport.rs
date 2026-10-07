@@ -52,6 +52,7 @@ impl MockTransport {
     /// Register a tab backed by a specific page.
     pub fn add_tab(mut self, page: Arc<MockPage>) -> Self {
         let id = TabId::new();
+        println!("MockTransport: generated tab id: {}", id.as_str());
         self.tabs.push(id.clone());
         self.healthy
             .lock()
@@ -147,6 +148,7 @@ mod tests {
     async fn page_for_known_tab_is_the_one_registered() {
         let page = Arc::new(MockPage::new().with_html("<b>hi</b>"));
         let id = TabId::new();
+        println!("MockTransport: generated tab id: {}", id.as_str());
         let t = MockTransport::new().with_page(id.clone(), page);
         let got = t.page(&id).await.expect("known tab");
         assert_eq!(got.html().await.expect("html"), "<b>hi</b>");
@@ -173,6 +175,7 @@ mod tests {
     async fn page_for_unknown_tab_errors() {
         let t = MockTransport::new();
         let id = TabId::new();
+        println!("MockTransport: generated tab id: {}", id.as_str());
         match t.page(&id).await {
             Err(e) => assert!(matches!(e, UwaError::TabNotFound(_)), "{e:?}"),
             Ok(_) => panic!("unknown tab must not produce a page"),

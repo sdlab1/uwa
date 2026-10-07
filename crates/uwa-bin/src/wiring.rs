@@ -218,7 +218,7 @@ fn chat_dispatcher(state: AppState) -> DispatcherFn {
                 tool_choice: Some(serde_json::json!("none")),
                 user: None,
             };
-            let (text, _, _) = uwa_api::routes::chat::run_pipeline(&st, &req, &[]).await?;
+            let (text, _, _) = uwa_api::routes::chat::run_pipeline(&st, &req, &[], None).await?;
             Ok(text)
         })
     })

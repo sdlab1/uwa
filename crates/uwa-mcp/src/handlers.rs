@@ -123,7 +123,8 @@ impl McpHandler for WebTabsHandler {
             contents: vec![ResourceContents {
                 uri: TABS_URI.into(),
                 mime_type: Some("application/json".into()),
-                text: self.tabs_json().await?,
+                text: Some(self.tabs_json().await?),
+                blob: None,
             }],
         })
     }
@@ -230,7 +231,10 @@ mod tests {
         assert_eq!(h.resources()[0].uri, TABS_URI);
         let r = h.read_resource(TABS_URI).await.unwrap();
         assert_eq!(r.contents[0].mime_type.as_deref(), Some("application/json"));
-        assert!(r.contents[0].text.contains(&id), "missing {id}");
+        assert!(
+            r.contents[0].text.as_ref().unwrap().contains(&id),
+            "missing {id}"
+        );
         assert!(h.read_resource("uwa://nope").await.is_err());
     }
 

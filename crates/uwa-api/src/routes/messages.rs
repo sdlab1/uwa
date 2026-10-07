@@ -88,7 +88,7 @@ pub async fn messages(
 
     // Run pipeline.
     let (text, calls, finish) =
-        crate::routes::chat::pipeline::run_pipeline(&state, &oa_req, &all_specs).await?;
+        crate::routes::chat::pipeline::run_pipeline(&state, &oa_req, &all_specs, None).await?;
 
     let msg_id = format!("msg_{}", uuid::Uuid::new_v4().simple());
 

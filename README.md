@@ -1,129 +1,186 @@
-# ⚡ project_uwa (Universal Web API — Rust Edition)
+# uwa — Universal Web API
 
-> **A lightweight, low-overhead, asynchronous Rust bridge designed to expose local browser-based LLM sessions as standard OpenAI and Anthropic-compatible HTTP APIs.**
+Local OpenAI/Anthropic-compatible HTTP bridge over **logged-in web UIs**:
+ChatGPT, Claude, Gemini, DeepSeek — and any MCP server you throw at it.
 
----
+No API keys. No scraping service. Just a bridge between your browser session
+and any OpenAI-compatible client (Cursor, Continue, Codex CLI, Claude Desktop,
+the official SDKs).
 
-> !WARNING
-> **DISCLAIMER & LEGAL NOTICE**  
-> This project is created strictly for **educational, academic, and research purposes** as a proof-of-concept in browser automation, CDP (Chrome DevTools Protocol) interaction, and low-level HTTP reverse-proxying.  
-> 
-> - **No Harm Intended:** The authors do not encourage, condone, or support any activity that violates the Terms of Service (ToS) of any web service or AI provider.
-> - **User Responsibility:** Users are solely responsible for compliance with applicable terms, rate limits, and policies of third-party platforms.
-> - **Non-Profit & Open Source:** This software is provided "as is" under the MIT License, without warranty of any kind. Use it responsibly and at your own risk.
+```
+┌───────────────┐   OpenAI/Anthropic    ┌───────────────┐   CDP    ┌───────────────┐
+│ Cursor / Codex│ ────────────────────► │  uwa daemon   │ ───────► │ Chromium with │
+│   Claude SDK  │ ◄──────────────────── │  (this repo)  │          │ logged-in UIs │
+└───────────────┘    tools / SSE        └───────────────┘          └───────────────┘
+                                               │
+                                               │  MCP (stdio + HTTP+SSE)
+                                               ▼
+                                        ┌───────────────┐
+                                        │ Claude Desktop│
+                                        │ / Cursor MCP  │
+                                        └───────────────┘
+```
 
----
+## Quickstart
 
-## 💡 Motivation: Why Rust?
+### 1. Launch Chromium with remote debugging
 
-Modern developer tools and web-bridging scripts are heavily dominated by Python. While convenient, Python introduces significant runtime overhead, high memory usage, high abstraction layers, and threading constraints due to the GIL (Global Interpreter Lock).
+```bash
+# Linux
+chromium --remote-debugging-port=9222 \
+         --user-data-dir=$HOME/.uwa-chrome &
 
-**`project_uwa` was built with a simple philosophy: *Because we can, and Rust makes it better.***
+# macOS
+/Applications/Chromium.app/Contents/MacOS/Chromium \
+  --remote-debugging-port=9222 --user-data-dir=$HOME/.uwa-chrome &
+```
 
-This project serves as a clean-room, high-performance Rust refactoring inspired by open-source browser-bridge concepts like [`universal-web-api`](https://github.com/lumingya/universal-web-api). By leveraging Rust's zero-cost abstractions, asynchronous runtime (`tokio`), fast web framework (`axum`), and low-level browser automation (`cdp`), this project aims to demonstrate:
+In that browser: log in to `chatgpt.com`, `claude.ai`, `gemini.google.com`,
+`chat.deepseek.com`. Leave the tabs open.
 
-* **Minimal Memory Footprint:** Running a lean local bridge without heavy runtime interpreters.
-* **Blazing Fast I/O:** Efficient event-driven async networking and direct CDP WebSocket communication.
-* **Type-Safe Architecture:** Strong compile-time guarantees across session management, parsing, and request handling.
-* **Rust Ecosystem Advocacy:** Promoting native, memory-safe, and resource-efficient tooling for developer infrastructure.
+### 2. Run the daemon
 
----
+```bash
+cp crates/uwa-bin/config.example.toml uwa.toml
+# edit `api_key` and selectors if needed
 
-## 🛠️ Architecture Overview
+UWA_CHROMIUM_WS=ws://127.0.0.1:9222/devtools/browser \
+  cargo run -p uwa-bin --release --features metrics -- --config uwa.toml
+```
 
-The bridge operates as a multi-layered local proxy:
+### 3. Point any OpenAI client at it
 
-1. **HTTP API Layer (`axum` + `tokio`):** Accepts standard `/v1/chat/completions` requests from clients (Cursor, Continue, OpenAI SDKs) and streams back SSE responses.
-2. **Session & Tab Management (`dashmap` + `governor`):** Manages local tab pools, concurrency, and session isolation.
-3. **CDP Automation Layer:** Communicates with local Chromium browser instances via Chrome DevTools Protocol (CDP) for DOM interaction and network event monitoring.
-4. **Response Parsing & Normalization (`scraper` + `serde_json`):** Parses DOM streams and network payloads into standardized JSON / SSE chunks.
+```bash
+export OPENAI_BASE_URL=http://127.0.0.1:8080/v1
+export OPENAI_API_KEY=change-me
 
----
+curl $OPENAI_BASE_URL/models -H "Authorization: Bearer $OPENAI_API_KEY"
 
-## 🚀 Quick start
+curl $OPENAI_BASE_URL/chat/completions \
+  -H "Authorization: Bearer $OPENAI_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gpt-4o","messages":[{"role":"user","content":"say hi"}]}'
+```
 
-### Docker Compose (Chromium + daemon)
+That's it — Cursor / Continue / Codex / Claude SDK now see `gpt-4o`,
+`claude-3-5-sonnet`, etc. as normal models.
+
+## Endpoints
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/healthz` | liveness |
+| GET | `/readyz` | readiness |
+| GET | `/metrics` | Prometheus (feature `metrics`) |
+| GET | `/v1/models` | OpenAI model list |
+| POST | `/v1/chat/completions` | OpenAI chat (JSON + SSE + tools) |
+| POST | `/v1/messages` | Anthropic Messages (JSON + SSE) |
+| POST | `/v1/messages/count_tokens` | Anthropic token count |
+| POST | `/v1/responses` | OpenAI Responses (Codex CLI) |
+| GET | `/v1/provider/status` | provider diagnostics |
+| GET | `/api/pool/status` | tab pool diagnostics |
+| GET | `/admin/sessions` | live sessions |
+| POST | `/admin/sessions/recover` | re-probe tabs
+- DELETE | `/admin/sessions/:id` | drop a session
+- GET | `/admin/providers` | provider configs
+- GET | `/admin/breakers` | circuit breaker states
+- POST | `/admin/breakers/:name/reset` | force-close a breaker
+
+**Scoped routing** — override provider without changing the body:
+
+```
+POST /url/chatgpt.com/v1/chat/completions     # pick provider by domain
+POST /tab/tab_abc/v1/chat/completions         # pin a specific tab
+POST /v1/chat/completions                     # default (from `model` alias)
+   + Header: X-UWA-Provider: chatgpt          # provider override
+```
+
+## MCP
+
+**As a server** (`mcp_server.enabled = true` in config): `uwa` exposes its
+own tools over stdio and (optionally) HTTP+SSE. Add to Claude Desktop:
+
+```json
+{
+  "mcpServers": {
+    "uwa": {
+      "command": "/path/to/uwa",
+      "args": ["--config", "/path/to/uwa.toml"]
+    }
+  }
+}
+```
+
+Tools exposed:
+- `web__chat(provider, message)` — one-shot ask
+- `web__list_tabs()` — list connected tabs
+- prompt `ask(provider, question)` — templated ask
+- resource `uwa://web/tabs` — JSON list of tabs
+
+**As a client** (`[[mcp_clients]]` in config): `uwa` consumes external MCP
+servers and injects their tools into the web-UI LLM via the `<tool_call>`
+protocol. That means your Cursor session can call `fs__read_file` even
+though ChatGPT's web UI has no idea what MCP is.
+
+## Configuration
+
+All TOML + `UWA__*` env vars. See `crates/uwa-bin/config.example.toml`.
+
+Key sections:
+
+- `[server]` — bind, port, api_key, timeouts, pid_file
+- `[stealth]` — pack name, optional user scripts dir
+- `[mcp_server]` — enable MCP server (stdio + optional HTTP)
+- `[[mcp_clients]]` — external MCP servers to consume
+- `[model_aliases]` — `"gpt-4o" = "chatgpt"` mapping
+- `[providers.*]` — per-site config: URL patterns, capabilities, selectors,
+  extraction strategy, finisher tuning, network rules
+
+## Development
+
+```bash
+cargo fmt --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace
+cargo test --workspace --all-features
+
+# Real Chromium integration
+UWA_CHROMIUM=1 cargo test -p uwa-browser -- --ignored --test-threads=1
+```
+
+## Docker
 
 ```bash
 docker compose up --build
 curl http://127.0.0.1:8080/healthz
-curl http://127.0.0.1:8080/v1/models
 ```
 
-The compose file starts a headless Chromium with `--remote-debugging-port=9222`
-and the daemon pointed at it via `UWA_CHROMIUM_WS=http://chromium:9222`
-(`CdpTransport` resolves that http endpoint through `/json/version`).
-MCP over HTTP+SSE listens on `port + 1` (8081 here).
+## Architecture
 
-### Local
+- `uwa-core` — DTO, traits, errors. No I/O.
+- `uwa-config` — TOML loader + validation.
+- `uwa-tools` — `<tool_call>` parsing, prompt injection, tool history.
+- `uwa-mcp` — MCP server + client (stdio + HTTP+SSE).
+- `uwa-api` — axum HTTP surface (OpenAI + Anthropic + admin).
+- `uwa-browser` — CDP transport + `TabPool` + `NetBus`.
+- `uwa-extract` — network-first + DOM-fallback extraction + finisher.
+- `uwa-providers` — one generic `SiteProvider` driven by TOML.
+- `uwa-session` → conversation → tab mapping with LRU + TTL.
+- `uwa-resilience` → circuit breaker, semaphore, retry.
+- `uwa-lifecycle` → PID file + unified shutdown.
+- `uwa-stealth` → deterministic JS patches.
+- `uwa-testkit` → shared test doubles.
 
-```bash
-# 1. a browser with an open debugging port
-chromium --headless=new --no-sandbox --disable-gpu \
-  --password-store=basic --remote-debugging-port=9222 --user-data-dir=/tmp/uwa-profile &
+## Known limitations
 
-# 2. the daemon
-cargo run -p uwa-bin -- --config crates/uwa-bin/config.example.toml
+- **Anthropic streaming** is pseudo-chunked; real token streaming requires
+  network-first SSE capture, currently implemented and tested only against
+  ChatGPT.
+- **`FrameId → TargetId` mapping** handles main frames and same-target
+  iframes; cross-origin isolated frames (OOPIF) are not mapped.
+- **Selectors drift** — mitigate with `selectors_version` in config and the
+  `uwa-snapshot` binary.
 
-# 3. a chat turn through the OpenAI-compatible surface
-curl -s http://127.0.0.1:8080/v1/chat/completions \
-  -H 'content-type: application/json' \
-  -d '{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}'
-```
+## License
 
----
-
-## ⚙️ Configuration
-
-`--config <path>` / `-c <path>` / env `UWA_CONFIG`, default `uwa.toml`.
-A commented example lives in [`crates/uwa-bin/config.example.toml`](crates/uwa-bin/config.example.toml).
-
-| Key / env | Meaning |
-|---|---|
-| `server.bind`, `server.port` | HTTP listener (default `127.0.0.1:8080`) |
-| `server.api_key` | if set, `Authorization: Bearer <key>` is required |
-| `server.pid_file` | single-instance guard (default `uwa.pid`) |
-| `server.request_timeout_ms` | whole-request budget, feeds the HTTP timeout layer |
-| `[model_aliases]` | public model name → provider name (`gpt-4o = "chatgpt"`) |
-| `[providers.<name>]` | url patterns, capabilities, selectors, extraction rules |
-| `[[mcp_clients]]` | external MCP servers spawned over stdio at start-up |
-| `UWA_CHROMIUM_WS` | CDP endpoint, default `http://127.0.0.1:9222` |
-| `RUST_LOG` | `tracing` filter, e.g. `info,uwa=debug` |
-
-Logs go to **stderr** so stdout stays free for the MCP stdio transport.
-
----
-
-## 🔌 API surface
-
-| Endpoint | Purpose |
-|---|---|
-| `GET /healthz`, `GET /readyz` | liveness / readiness |
-| `GET /v1/models` | configured model aliases + capabilities |
-| `POST /v1/chat/completions` | OpenAI-shaped, streaming via SSE (`data: …`, `data: [DONE]`) |
-| `POST /v1/messages` | Anthropic-shaped adapter |
-| `POST /v1/messages/count_tokens` | approximate prompt size for the Claude SDK's context check |
-| `POST /v1/responses` | OpenAI Responses API shape, non-streaming |
-| `POST /mcp`, `GET /mcp/sse` | MCP over HTTP+SSE, needs `--features uwa-bin/mcp-http` |
-
-Start-up order (and the graceful shutdown it reverses) lives in
-[`crates/uwa-bin/src/wiring.rs`](crates/uwa-bin/src/wiring.rs).
-
----
-
-## 🧪 Testing
-
-```bash
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace --all-targets
-cargo test --workspace --all-features          # mcp-http + snapshot
-cargo test --workspace --doc
-
-# live Chromium tests (spawns its own browser; set UWA_CHROME_BIN if needed)
-UWA_CHROMIUM=1 cargo test -p uwa-browser -- --include-ignored --test-threads=1
-```
-
-Shared test doubles — `MockPage`, `MockTransport`, `MockProvider`,
-`MockToolProvider`, `test_server` — live in `crates/uwa-testkit`.
-CI runs the same commands (see [`.github/workflows/ci.yml`](.github/workflows/ci.yml)).
+MIT.

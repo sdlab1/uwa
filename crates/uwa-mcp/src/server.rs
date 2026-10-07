@@ -296,7 +296,8 @@ mod dispatch_tests {
                 contents: vec![ResourceContents {
                     uri: uri.into(),
                     mime_type: None,
-                    text: "body".into(),
+                    text: Some("body".into()),
+                    blob: None,
                 }],
             })
         }
