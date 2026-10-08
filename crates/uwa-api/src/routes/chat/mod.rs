@@ -18,7 +18,6 @@ use uwa_core::{RequestId, ToolSpec, UwaError};
 use uwa_tools::{ToolCall, ToolDefinition};
 
 use crate::error::ApiResult;
-use crate::routing::HintExtractor;
 use crate::state::AppState;
 
 use crate::routes::chat::pipeline::run_pipeline_with_hint;

@@ -113,15 +113,9 @@ pub async fn resolve_hint(
                 .config
                 .providers
                 .iter()
-                .find(|(_, cfg)| {
-                    cfg.url_patterns
-                        .iter()
-                        .any(|pat| pat.contains(domain))
-                })
+                .find(|(_, cfg)| cfg.url_patterns.iter().any(|pat| pat.contains(domain)))
                 .map(|(name, _)| name.clone())
-                .ok_or_else(|| {
-                    UwaError::NoProviderForUrl(domain.to_string())
-                })?;
+                .ok_or_else(|| UwaError::NoProviderForUrl(domain.to_string()))?;
             out.provider = Some(provider_name);
         }
     }

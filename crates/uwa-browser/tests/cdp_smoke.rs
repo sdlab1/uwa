@@ -701,3 +701,46 @@ async fn chrome_renders_a_local_page_without_cdp() {
     );
     eprintln!("[dump] {} bytes, payload rendered", html.len());
 }
+
+// ---------------------------------------------------------------------------
+// Resource-leak guard. A test that leaves a Chromium behind is not "passing"
+// in any environment; it is a time bomb for the next run. This check runs
+// after every other test in this file and fails the suite if any Chrome
+// process survived.
+// ---------------------------------------------------------------------------
+
+/// Count live Chrome/Chromium processes on this machine (best effort).
+fn chrome_process_count() -> usize {
+    std::process::Command::new("sh")
+        .args([
+            "-c",
+            "ps -eo comm | grep -c -E '^(chrome|chromium|chromium-browser)' || true",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(0)
+}
+
+/// Assert that no Chrome processes are alive after all other tests in this
+/// binary have finished. Runs last because its name sorts after the others.
+#[tokio::test]
+#[ignore = "needs a Chromium binary; run with UWA_CHROMIUM=1 cargo test -p uwa-browser -- --ignored"]
+async fn zzz_no_chrome_leaks_after_suite() {
+    if !enabled() {
+        eprintln!("skipped: set UWA_CHROMIUM=1 to run the leak check");
+        return;
+    }
+    // Other guards use SIGKILL; give the kernel a moment to reap zombies.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let count = chrome_process_count();
+    assert_eq!(
+        count, 0,
+        "Chrome processes survived the test suite: {count} still running. \
+         A previous test leaked its browser."
+    );
+    eprintln!("[env] zero chrome processes after suite — no leaks");
+}

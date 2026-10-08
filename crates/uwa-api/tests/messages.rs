@@ -1,6 +1,6 @@
-use std::sync::Arc;
 use axum_test::TestServer;
 use serde_json::json;
+use std::sync::Arc;
 use uwa_testkit::{
     config::{config_with_key, TEST_AUTH_HEADER},
     AppBuilder, MockProvider, MockTransport,

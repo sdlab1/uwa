@@ -30,9 +30,10 @@ where
     // We cannot set session_id on the generic Command trait.
     // The concrete command structs have the field, but the trait doesn't expose it.
     // Browser::execute ignores the command's session_id field anyway.
-    let resp = browser.execute(cmd).await.map_err(|e| {
-        UwaError::Transport(format!("cdp session command: {e:?}"))
-    })?;
+    let resp = browser
+        .execute(cmd)
+        .await
+        .map_err(|e| UwaError::Transport(format!("cdp session command: {e:?}")))?;
     Ok(resp.result)
 }
 

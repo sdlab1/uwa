@@ -12,13 +12,13 @@
 
 pub mod attach;
 pub mod bus;
+pub mod cdp_cmd;
 pub mod frame;
+pub mod oopif;
 pub mod page;
 pub mod tab_id;
 pub mod tabpool;
 pub mod transport;
-pub mod oopif;
-pub mod cdp_cmd;
 
 pub use bus::NetBus;
 pub use frame::FrameMap;

@@ -20,10 +20,7 @@ pub async fn provider_status(State(state): State<AppState>) -> Json<Value> {
 
 pub async fn pool_status(State(state): State<AppState>) -> Json<Value> {
     // We clone the tabs vector to avoid holding the lock across the await point.
-    let tabs = match state.transport.list_tabs().await {
-        Ok(tabs) => tabs,
-        Err(_) => vec![],
-    };
+    let tabs = state.transport.list_tabs().await.unwrap_or_default();
     Json(json!({
         "total_tabs": tabs.len(),
         "tabs": tabs.iter().map(|t| t.as_str()).collect::<Vec<_>>(),

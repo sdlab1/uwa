@@ -27,7 +27,7 @@ use uwa_stealth::StealthPack;
 use crate::attach::attach_stealth;
 use crate::bus::NetBus;
 use crate::frame::FrameMap;
-use crate::oopif::{install_auto_attach, pump_target_lifecycle, OopifRegistry};
+use crate::oopif::{pump_target_lifecycle, OopifRegistry};
 use crate::page::CdpPageAdapter;
 use crate::tab_id::{tab_id_from_target, target_id_from_tab};
 use crate::tabpool::TabPool;
@@ -66,21 +66,24 @@ impl CdpTransport {
         let target_ids = Arc::new(Mutex::new(HashMap::new()));
         let pumped = Arc::new(Mutex::new(HashSet::new()));
 
+        // NOTE: Do NOT call `install_auto_attach` here. Chromiumoxide already
+        // sends `Target.setAutoAttach({flatten: true, autoAttach: true,
+        // waitForDebuggerOnStart: true})` as part of `page_init_commands`
+        // (handler/target.rs:572). Calling it again at the browser level makes
+        // the browser session auto-attach to every target (including ones
+        // chromiumoxide already manages), pausing them twice and hanging
+        // `browser.pages()`.
         let oopif = Arc::new(OopifRegistry::new());
-        install_auto_attach(&browser).await?;
         // The handler must be polled: it drives the websocket, the commands
         // and every event listener installed below.
         let browser = Arc::new(browser);
 
         // The handler must be polled: it drives the websocket, the commands
         // and every event listener installed below.
-        let handler_task = tokio::spawn({
-            let browser = browser.clone();
-            async move {
-                while let Some(res) = handler.next().await {
-                    if let Err(e) = res {
-                        debug!("cdp handler: {e}");
-                    }
+        let handler_task = tokio::spawn(async move {
+            while let Some(res) = handler.next().await {
+                if let Err(e) = res {
+                    debug!("cdp handler: {e}");
                 }
             }
         });
@@ -141,11 +144,11 @@ impl CdpTransport {
                 }
             })
         };
+        tasks.push(created_task);
         let destroyed_task = {
             let pool = pool.clone();
             let bus = bus.clone();
             let target_ids = target_ids.clone();
-            let oopif = oopif.clone();
             tokio::spawn(async move {
                 let mut destroyed = destroyed;
                 while let Some(ev) = destroyed.next().await {
@@ -158,7 +161,6 @@ impl CdpTransport {
                 }
             })
         };
-        tasks.push(created_task);
         tasks.push(destroyed_task);
 
         // `Target.getTargets` is answered asynchronously on the first request,
@@ -199,6 +201,10 @@ impl CdpTransport {
 
     pub fn bus(&self) -> NetBus {
         self.bus.clone()
+    }
+
+    pub fn oopif(&self) -> Arc<OopifRegistry> {
+        self.oopif.clone()
     }
 
     /// Resolve a logical tab to its CDP target id (for bus subscriptions).
@@ -410,7 +416,7 @@ async fn resolve_body(
         }
     };
     let root_frame_id = oopif
-        .root_frame_target_id(&owner)
+        .root_frame_target_id(&CdpTargetId::from(owner.clone()))
         .await
         .unwrap_or_else(|| owner.clone());
     let tx = bus.sender_for_root_frame(root_frame_id).await;

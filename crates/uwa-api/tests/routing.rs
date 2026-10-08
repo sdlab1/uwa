@@ -40,16 +40,12 @@ async fn url_domain_path_resolves_provider() {
             "messages": [{"role": "user", "content": "x"}]
         }))
         .await;
-    let r = server()
-        .post("/url/chatgpt.com/v1/chat/completions")
-        .add_header("Authorization", TEST_AUTH_HEADER)
-        .json(&json!({
-            "model": "gpt-4o",
-            "messages": [{"role": "user", "content": "x"}]
-        }))
-        .await;
     if !r.status_code().is_success() {
-        eprintln!("Request failed with status: {}; body: {}", r.status_code(), r.text());
+        eprintln!(
+            "Request failed with status: {}; body: {}",
+            r.status_code(),
+            r.text()
+        );
     }
     r.assert_status_ok();
 }

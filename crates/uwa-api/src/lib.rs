@@ -37,13 +37,19 @@ pub fn router(state: AppState) -> Router {
         .route("/api/pool/status", get(routes::status::pool_status));
 
     let api_url_scoped = Router::new()
-        .route("/url/:domain/v1/chat/completions", post(routes::chat::chat_completions))
+        .route(
+            "/url/:domain/v1/chat/completions",
+            post(routes::chat::chat_completions),
+        )
         .route("/url/:domain/v1/messages", post(routes::messages::messages))
         .route("/url/:domain/v1/models", get(routes::models::list_models))
         .layer(axum::middleware::from_fn(routing::from_url_path));
 
     let api_tab_scoped = Router::new()
-        .route("/tab/:tab_id/v1/chat/completions", post(routes::chat::chat_completions))
+        .route(
+            "/tab/:tab_id/v1/chat/completions",
+            post(routes::chat::chat_completions),
+        )
         .route("/tab/:tab_id/v1/messages", post(routes::messages::messages))
         .route("/tab/:tab_id/v1/models", get(routes::models::list_models))
         .layer(axum::middleware::from_fn(routing::from_tab_path));
