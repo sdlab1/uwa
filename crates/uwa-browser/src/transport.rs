@@ -27,10 +27,10 @@ use uwa_stealth::StealthPack;
 use crate::attach::attach_stealth;
 use crate::bus::NetBus;
 use crate::frame::FrameMap;
+use crate::oopif::{install_auto_attach, pump_target_lifecycle, OopifRegistry};
 use crate::page::CdpPageAdapter;
 use crate::tab_id::{tab_id_from_target, target_id_from_tab};
 use crate::tabpool::TabPool;
-use crate::oopif::{OopifRegistry, install_auto_attach, pump_target_lifecycle};
 
 /// Transport backed by a Chromium instance reachable over CDP.
 pub struct CdpTransport {
@@ -115,6 +115,7 @@ impl CdpTransport {
             let target_ids = target_ids.clone();
             let pumped = pumped.clone();
             let stealth = stealth.clone();
+            let oopif = oopif.clone();
             tokio::spawn(async move {
                 let mut created = created;
                 while let Some(ev) = created.next().await {
@@ -124,7 +125,16 @@ impl CdpTransport {
                     let tid = ev.target_info.target_id.inner().clone();
                     match get_page_retry(&browser, &tid).await {
                         Ok(page) => {
-                            register_target(page, &pool, &bus, &target_ids, &pumped, &stealth).await
+                            register_target(
+                                page,
+                                &pool,
+                                &bus,
+                                &target_ids,
+                                &pumped,
+                                &stealth,
+                                &oopif,
+                            )
+                            .await
                         }
                         Err(e) => warn!(target = %tid, "get_page: {e}"),
                     }
@@ -135,6 +145,7 @@ impl CdpTransport {
             let pool = pool.clone();
             let bus = bus.clone();
             let target_ids = target_ids.clone();
+            let oopif = oopif.clone();
             tokio::spawn(async move {
                 let mut destroyed = destroyed;
                 while let Some(ev) = destroyed.next().await {
@@ -168,7 +179,7 @@ impl CdpTransport {
             warn!("connected to {ws_url} but it exposes no pages");
         }
         for page in pages {
-            register_target(page, &pool, &bus, &target_ids, &pumped, &stealth).await;
+            register_target(page, &pool, &bus, &target_ids, &pumped, &stealth, &oopif).await;
         }
 
         info!("cdp connected to {ws_url}");
@@ -277,6 +288,7 @@ async fn register_target(
     target_ids: &Arc<Mutex<HashMap<TabId, String>>>,
     pumped: &Arc<Mutex<HashSet<String>>>,
     stealth: &Option<StealthPack>,
+    oopif: &Arc<OopifRegistry>,
 ) {
     let tid = page.target_id().inner().clone();
     if !pumped.lock().await.insert(tid.clone()) {
@@ -299,12 +311,12 @@ async fn register_target(
             warn!(target = %tid, "stealth: {e}");
         }
     }
-    tokio::spawn(pump_page(page, bus.clone(), tid));
+    tokio::spawn(pump_page(page, bus.clone(), tid, oopif.clone()));
 }
 
 /// Per-page network pump: attributes responses to frames, pulls the body once
 /// the request finishes and republishes it on the target's [`NetBus`] channel.
-async fn pump_page(page: CdpPage, bus: NetBus, target_id: String) {
+async fn pump_page(page: CdpPage, bus: NetBus, target_id: String, oopif: Arc<OopifRegistry>) {
     let mut frames = match page.event_listener::<EventFrameAttached>().await {
         Ok(s) => s,
         Err(e) => {
@@ -358,14 +370,14 @@ async fn pump_page(page: CdpPage, bus: NetBus, target_id: String) {
                 );
                 if finished_first.remove(&req) {
                     debug!(target = %target_id, req = %req, "response caught up with its finish");
-                    resolve_body(&page, &bus, &req, &mut inflight).await;
+                    resolve_body(&page, &bus, &req, &mut inflight, &oopif).await;
                 }
             }
             ev = finished.next() => {
                 let Some(ev) = ev else { break };
                 let req = ev.request_id.inner().clone();
                 if inflight.contains_key(&req) {
-                    resolve_body(&page, &bus, &req, &mut inflight).await;
+                    resolve_body(&page, &bus, &req, &mut inflight, &oopif).await;
                 } else if finished_first.len() < 4096 {
                     debug!(target = %target_id, req = %req, "finish precedes its response");
                     finished_first.insert(req);
@@ -382,6 +394,7 @@ async fn resolve_body(
     bus: &NetBus,
     req: &str,
     inflight: &mut HashMap<String, (String, String, String)>,
+    oopif: &Arc<OopifRegistry>,
 ) {
     let Some((url, mime, owner)) = inflight.remove(req) else {
         return;
@@ -396,7 +409,11 @@ async fn resolve_body(
             String::new()
         }
     };
-    let tx = bus.sender_for(owner).await;
+    let root_frame_id = oopif
+        .root_frame_target_id(&owner)
+        .await
+        .unwrap_or_else(|| owner.clone());
+    let tx = bus.sender_for_root_frame(root_frame_id).await;
     let _ = tx.send(NetworkEvent::ResponseBody { url, body, mime });
     let _ = tx.send(NetworkEvent::Finished {
         request_id: req.to_string(),

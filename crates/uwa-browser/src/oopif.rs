@@ -156,7 +156,16 @@ impl OopifRegistry {
 
     pub async fn len(&self) -> usize {
         self.by_frame.read().await.len()
-}
+    }
+
+    /// Returns the root frame target ID for the given target ID.
+    ///
+    /// For now, we return the target ID itself as a placeholder.
+    /// In the future, this should walk up the frame tree to find the
+    /// top-level frame's target ID.
+    pub async fn root_frame_target_id(&self, target_id: &TargetId) -> Option<String> {
+        // Placeholder: treat each target as its own root frame.
+        Some(target_id.clone())
     }
 fn oopif_filter() -> TargetFilter {
     TargetFilter::new(vec![

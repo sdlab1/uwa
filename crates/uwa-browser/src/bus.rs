@@ -1,5 +1,7 @@
 //! Broadcast bus: one channel per CDP target so every subscriber on that tab
 //! sees the same network events.
+//!
+//! Additionally, supports grouping by root frame ID for OOPIF scenarios.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -10,7 +12,10 @@ const CAPACITY: usize = 512;
 
 #[derive(Default, Clone)]
 pub struct NetBus {
-    inner: Arc<Mutex<HashMap<String, broadcast::Sender<NetworkEvent>>>>,
+    /// Keyed by target ID (existing behavior).
+    target_inner: Arc<Mutex<HashMap<String, broadcast::Sender<NetworkEvent>>>>,
+    /// Keyed by root frame ID (for OOPIF root-frame routing).
+    root_frame_inner: Arc<Mutex<HashMap<String, broadcast::Sender<NetworkEvent>>>>,
 }
 
 impl NetBus {
@@ -20,8 +25,19 @@ impl NetBus {
 
     /// Get (creating if needed) the sender for `target_id`.
     pub async fn sender_for(&self, target_id: String) -> broadcast::Sender<NetworkEvent> {
-        let mut g = self.inner.lock().await;
+        let mut g = self.target_inner.lock().await;
         g.entry(target_id)
+            .or_insert_with(|| broadcast::channel(CAPACITY).0)
+            .clone()
+    }
+
+    /// Get (creating if needed) the sender for `root_frame_id`.
+    pub async fn sender_for_root_frame(
+        &self,
+        root_frame_id: String,
+    ) -> broadcast::Sender<NetworkEvent> {
+        let mut g = self.root_frame_inner.lock().await;
+        g.entry(root_frame_id)
             .or_insert_with(|| broadcast::channel(CAPACITY).0)
             .clone()
     }
@@ -31,12 +47,30 @@ impl NetBus {
         self.sender_for(target_id.to_string()).await.subscribe()
     }
 
+    /// Subscribe to events grouped by root frame ID.
+    pub async fn subscribe_to_root_frame(
+        &self,
+        root_frame_id: &str,
+    ) -> broadcast::Receiver<NetworkEvent> {
+        self.sender_for_root_frame(root_frame_id.to_string())
+            .await
+            .subscribe()
+    }
+
     pub async fn remove(&self, target_id: &str) {
-        self.inner.lock().await.remove(target_id);
+        self.target_inner.lock().await.remove(target_id);
+    }
+
+    pub async fn remove_root_frame(&self, root_frame_id: &str) {
+        self.root_frame_inner.lock().await.remove(root_frame_id);
     }
 
     pub async fn targets(&self) -> Vec<String> {
-        self.inner.lock().await.keys().cloned().collect()
+        self.target_inner.lock().await.keys().cloned().collect()
+    }
+
+    pub async fn root_frames(&self) -> Vec<String> {
+        self.root_frame_inner.lock().await.keys().cloned().collect()
     }
 }
 
