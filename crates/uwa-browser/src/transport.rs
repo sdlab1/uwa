@@ -30,12 +30,14 @@ use crate::frame::FrameMap;
 use crate::page::CdpPageAdapter;
 use crate::tab_id::{tab_id_from_target, target_id_from_tab};
 use crate::tabpool::TabPool;
+use crate::oopif::{OopifRegistry, install_auto_attach, pump_target_lifecycle};
 
 /// Transport backed by a Chromium instance reachable over CDP.
 pub struct CdpTransport {
     browser: Arc<Browser>,
     pool: Arc<TabPool>,
     bus: NetBus,
+    oopif: Arc<OopifRegistry>,
     target_ids: Arc<Mutex<HashMap<TabId, String>>>,
     tasks: Vec<JoinHandle<()>>,
 }
@@ -64,16 +66,30 @@ impl CdpTransport {
         let target_ids = Arc::new(Mutex::new(HashMap::new()));
         let pumped = Arc::new(Mutex::new(HashSet::new()));
 
+        let oopif = Arc::new(OopifRegistry::new());
+        install_auto_attach(&browser).await?;
         // The handler must be polled: it drives the websocket, the commands
         // and every event listener installed below.
-        let handler_task = tokio::spawn(async move {
-            while let Some(res) = handler.next().await {
-                if let Err(e) = res {
-                    debug!("cdp handler: {e}");
+        let browser = Arc::new(browser);
+
+        // The handler must be polled: it drives the websocket, the commands
+        // and every event listener installed below.
+        let handler_task = tokio::spawn({
+            let browser = browser.clone();
+            async move {
+                while let Some(res) = handler.next().await {
+                    if let Err(e) = res {
+                        debug!("cdp handler: {e}");
+                    }
                 }
             }
         });
-        let mut tasks: Vec<JoinHandle<()>> = vec![handler_task];
+        let pump_task = {
+            let browser = browser.clone();
+            let oopif = oopif.clone();
+            tokio::spawn(pump_target_lifecycle(browser, oopif))
+        };
+        let mut tasks: Vec<JoinHandle<()>> = vec![handler_task, pump_task];
 
         // Listeners go in before the page enumeration so a target created in
         // between is registered exactly once (see `pumped`).
@@ -91,7 +107,6 @@ impl CdpTransport {
         // `Target.attachToTarget` for every target that the target state
         // machine already attaches to, which splits one page over two CDP
         // sessions and stalls navigation.
-        let browser = Arc::new(browser);
 
         let created_task = {
             let browser = browser.clone();
@@ -163,6 +178,7 @@ impl CdpTransport {
             bus,
             target_ids,
             tasks,
+            oopif,
         })
     }
 

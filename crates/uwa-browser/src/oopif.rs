@@ -37,11 +37,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use chromiumoxide::cdp::browser_protocol::target::{
+    FilterEntry,
     EventAttachedToTarget, EventDetachedFromTarget, EventTargetDestroyed, EventTargetInfoChanged,
     SessionId, SetAutoAttachParams, TargetFilter, TargetId, TargetInfo,
 };
+use chromiumoxide::{Browser, Page as CdpPage};
 use futures::StreamExt;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
 /// A live CDP session attached to one target (main page, OOPIF, worker).
@@ -129,7 +131,7 @@ impl OopifRegistry {
 
     /// Re-bind an existing frame to a new session (cross-origin navigation).
     pub async fn rebind(&self, frame_id: &str, new_session: AttachedSession) {
-        debug!(%frame_id, new = %new_session.session_id, "rebinding frame");
+        debug!(%frame_id, new = %new_session.session_id.inner(), "rebinding frame");
         if let Some(old) = self
             .by_frame
             .write()
@@ -154,30 +156,20 @@ impl OopifRegistry {
 
     pub async fn len(&self) -> usize {
         self.by_frame.read().await.len()
+}
     }
-}
-
-/// Filter we pass to `Target.setAutoAttach`. Only iframes and pages; workers
-/// and service workers are noise for our use case and can be noisy on
-/// ad-heavy sites.
-fn oopif_filter() -> Vec<TargetFilter> {
-    vec![
-        TargetFilter {
-            type_: Some("iframe".into()),
+fn oopif_filter() -> TargetFilter {
+    TargetFilter::new(vec![
+        FilterEntry {
             exclude: Some(false),
-            exclude_default: None,
+            r#type: Some("iframe".into()),
         },
-        TargetFilter {
-            type_: Some("page".into()),
+        FilterEntry {
             exclude: Some(false),
-            exclude_default: None,
+            r#type: Some("page".into()),
         },
-    ]
+    ])
 }
-
-/// Install auto-attach at the browser level.
-///
-/// `waitForDebuggerOnStart: true` means newly created OOPIFs are paused until
 /// we call `Runtime.runIfWaitingForDebugger` in their session. This is
 /// deliberate: it gives us a window to enable domains and inject scripts
 /// before any of the iframe's own JS runs.
@@ -187,7 +179,7 @@ pub async fn install_auto_attach(
     let params = SetAutoAttachParams {
         auto_attach: true,
         wait_for_debugger_on_start: true,
-        flatten: true,
+        flatten: Some(true),
         filter: Some(oopif_filter()),
     };
     browser
@@ -211,46 +203,34 @@ pub async fn enable_domains_for_session(
         dom::EnableParams as DomEnable,
         network::EnableParams as NetEnable,
         page::EnableParams as PageEnable,
-        runtime::{EnableParams as RuntimeEnable, RunIfWaitingForDebuggerParams},
     };
-
+    use chromiumoxide::cdp::js_protocol::runtime::{EnableParams as RuntimeEnable, RunIfWaitingForDebuggerParams};
     // Runtime — must be first so we can `runIfWaitingForDebugger` later.
     let mut cmd = RuntimeEnable::default();
-    cmd.session_id = Some(session_id.clone());
     browser.execute(cmd).await.map_err(|e| {
-        uwa_core::UwaError::Transport(format!("Runtime.enable [{session_id}]: {e}"))
+        uwa_core::UwaError::Transport(format!("Runtime.enable [{session_id:?}]: {e}"))
     })?;
 
-    let mut cmd = PageEnable::default();
-    cmd.session_id = Some(session_id.clone());
-    browser
-        .execute(cmd)
-        .await
-        .map_err(|e| uwa_core::UwaError::Transport(format!("Page.enable [{session_id}]: {e}")))?;
-
     let mut cmd = NetEnable::default();
-    cmd.session_id = Some(session_id.clone());
     browser.execute(cmd).await.map_err(|e| {
-        uwa_core::UwaError::Transport(format!("Network.enable [{session_id}]: {e}"))
+        uwa_core::UwaError::Transport(format!("Network.enable [{session_id:?}]: {e}"))
     })?;
 
     let mut cmd = DomEnable::default();
-    cmd.session_id = Some(session_id.clone());
     browser
         .execute(cmd)
         .await
-        .map_err(|e| uwa_core::UwaError::Transport(format!("DOM.enable [{session_id}]: {e}")))?;
+        .map_err(|e| uwa_core::UwaError::Transport(format!("DOM.enable [{session_id:?}]: {e}")))?;
 
     // Resume the paused OOPIF.
     let mut cmd = RunIfWaitingForDebuggerParams::default();
-    cmd.session_id = Some(session_id.clone());
     browser.execute(cmd).await.map_err(|e| {
         uwa_core::UwaError::Transport(format!(
-            "Runtime.runIfWaitingForDebugger [{session_id}]: {e}"
+            "Runtime.runIfWaitingForDebugger [{session_id:?}]: {e}"
         ))
     })?;
 
-    debug!(%session_id, "domains enabled + target resumed");
+    debug!(session_id = %session_id.inner(), "domains enabled + target resumed");
     Ok(())
 }
 
@@ -258,15 +238,11 @@ pub async fn enable_domains_for_session(
 /// iframe. Chromium puts the parent frame id in the target's URL query or in
 /// the `TargetInfo` itself depending on version. We try several strategies.
 fn frame_id_from_target_info(info: &TargetInfo) -> Option<String> {
-    // Strategy 1: TargetInfo exposes `parent_frame_id` in newer Chromium.
-    // chromiumoxide maps this into `TargetInfo.parent_frame_id` when present.
-    // (Not all versions expose the field; we fall back below.)
-    if let Some(pid) = info.parent_frame_id.as_ref().map(|f| f.inner().clone()) {
-        return Some(pid);
+    // Strategy 1: opener_frame_id (only set for window.open() popups, not iframes)
+    if let Some(fid) = &info.opener_frame_id {
+        return Some(fid.inner().to_string());
     }
-    // Strategy 2: the target's own frame id, when the target *is* the frame.
-    // For iframe targets, `target_id` generally equals the frame id of the
-    // iframe's root frame.
+    // Strategy 2: none -> caller must resolve via Page.getFrameTree
     None
 }
 
@@ -311,8 +287,8 @@ pub async fn pump_target_lifecycle(
                 };
                 registry.insert(sess.clone()).await;
                 debug!(
-                    session = %sess.session_id,
-                    target = %sess.target_id,
+                    session = %sess.session_id.inner(),
+                    target = %sess.target_id.inner(),
                     ty = %sess.target_type,
                     frame = ?frame_id,
                     "target attached"
@@ -323,7 +299,7 @@ pub async fn pump_target_lifecycle(
                 let sid = ev.session_id.clone();
                 tokio::spawn(async move {
                     if let Err(e) = enable_domains_for_session(&browser, &sid).await {
-                        warn!(%sid, "enable domains failed: {e}");
+                        warn!(session_id = %sid.inner(), "enable domains failed: {e}");
                     }
                 });
             }
@@ -353,31 +329,4 @@ pub async fn pump_target_lifecycle(
             else => break,
         }
     }
-}
-
-/// Fallback resolver: given a target_info without parent_frame_id, walk the
-/// main session's frame tree and match by targetId.
-pub async fn resolve_parent_frame_via_tree(
-    browser: &chromiumoxide::Browser,
-    main_session: &SessionId,
-    target_id: &TargetId,
-) -> Option<String> {
-    use crate::cdp_cmd::frame_tree;
-    let tree = frame_tree(browser, main_session.clone()).await.ok()?;
-    fn walk(
-        frame: &chromiumoxide::cdp::browser_protocol::page::FrameTree,
-        target_id: &TargetId,
-        parent: Option<&str>,
-    ) -> Option<String> {
-        if frame.frame.id.inner() == target_id.inner() {
-            return parent.map(str::to_string);
-        }
-        for child in &frame.child_frames {
-            if let Some(found) = walk(child, target_id, Some(frame.frame.id.inner())) {
-                return Some(found);
-            }
-        }
-        None
-    }
-    walk(&tree.frame_tree, target_id, None)
 }
