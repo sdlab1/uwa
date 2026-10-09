@@ -1,49 +1,29 @@
 #!/usr/bin/env bash
-# dump.sh - glues project_uwa Rust sources into Markdown dump file(s).
-# Behavior (same as the original dump.sh.bak):
-#   ./dump.sh            -> all three dumps: source_dump.md, tests_dump.md, full_dump.md
-#   ./dump.sh source     -> only source_dump.md + colored stats
-#   ./dump.sh tests      -> only tests_dump.md  + colored stats
-#   ./dump.sh full       -> only full_dump.md   + colored stats
-# Extra modes:
-#   ./dump.sh percrate   -> separate dump for each crate (<crate>_dump.md);
-#                           tests of a crate are included INTO its dump
-#                           (see PERCRATE_TESTS_SEPARATE below to split them)
-#   ./dump.sh stats      -> colored stats only, no dumps
-#   ./dump.sh <crate>    -> dump of a single crate (name or path, e.g. uwa-bin)
-#
-# Dump files are written next to repo.conf, WITHOUT timestamp in the name.
-# Only sources go into dumps: *.rs *.toml (no *.md - code and configs only).
-# Service dirs (target, .git, node_modules, deps, ...) are always skipped.
-# Colors come from colors.sh (auto-disabled when output is not a terminal).
+# dump.sh — glues project_uwa source into markdown dumps.
+# Default (./dump.sh) → all three dumps: source_dump.md, tests_dump.md, full_dump.md
+# Modes: source, tests, full, percrate, stats, <crate>
+# Only git-tracked files matching *.rs, *.toml, *.html, *.txt, *.snap are included.
+# Source dumps: *.rs + *.toml. Tests dumps: test *.rs + fixtures (*.html, *.txt, *.snap).
+# Service dirs (target, .git, etc.) are excluded via .gitignore.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
-# --- Colors -----------------------------------------------------------
-# Shared muted scheme lives in colors.sh; it auto-disables when stdout
-# is not a terminal. Empty fallback if the file is missing.
 # shellcheck source=colors.sh
 if [[ -f "$SCRIPT_DIR/colors.sh" ]]; then
   source "$SCRIPT_DIR/colors.sh"
 else
-  C_RESET='' C_DIM='' C_TITLE='' C_HDR='' C_HEADER='' C_EXT='' C_NUM='' C_TOT=''
+  C_RESET='' C_DIM='' C_TITLE='' C_HDR='' C_EXT='' C_NUM='' C_TOT=''
   C_OK='' C_WARN='' C_ERR='' C_ACCENT=''
 fi
 
-# --- Per-crate dumps configuration ------------------------------------
-# In percrate mode the tests of each crate are glued INTO its crate dump
-# (<crate>_dump.md) - modular by design: set PERCRATE_TESTS_SEPARATE=1
-# (env var) to emit them as separate <crate>_tests_dump.md files instead.
-PERCRATE_TESTS_SEPARATE="${PERCRATE_TESTS_SEPARATE:-0}"
-
-# --- repo.conf parser (strips inline comments after '=') ---------------
 if [[ ! -f "$SCRIPT_DIR/repo.conf" ]]; then
   echo "Error: repo.conf not found in $SCRIPT_DIR" >&2
   exit 1
 fi
+
 declare -A PATHS
 while IFS='=' read -r key value || [[ -n "$key" ]]; do
   [[ -z "$key" || "$key" == \#* ]] && continue
@@ -55,22 +35,14 @@ while IFS='=' read -r key value || [[ -n "$key" ]]; do
   PATHS[$key]="$value"
 done < "$SCRIPT_DIR/repo.conf"
 
-# --- Alias groups -----------------------------------------------------
-# SOURCE_GROUP - application source: src/ of every crate + crates'
-#               Cargo.toml + uwa-bin config template + root configs
-#               (Cargo.toml, rust-toolchain.toml, cargo_dependencies2.toml).
-#               (*.lock is NOT included - the dump is source only.)
-# TESTS_GROUP  - integration tests (tests/) of every crate.
-# NOTE: ALL_SRCS/ALL_TOMLS/ALL_TESTS are group aliases from repo.conf
-# (space-separated alias lists); collect_files expands them recursively.
+# Alias groups
 SOURCE_GROUP=(ALL_SRCS ALL_TOMLS UWA_BIN_CONFIG MANIFEST RUST_TOOLCHAIN CARGO_DEPS2)
 TESTS_GROUP=(ALL_TESTS)
 
-# Source files: Rust source and configuration (*.rs, *.toml)
-# For tests, we also collect fixtures: HTML, TXT, and SNAP files found under tests/ directories.
+# File extensions to include
 EXTENSIONS=( -name '*.rs' -o -name '*.toml' -o -name '*.html' -o -name '*.txt' -o -name '*.snap' )
 
-# Service dirs - build artifacts and VCS, always skipped
+# Service dirs to always skip
 EXCLUDE_DIRS=( -name target -o -name _build -o -name deps -o -name .git \
                -o -name node_modules -o -name playwright-report \
                -o -name test-results -o -name cover \
@@ -84,26 +56,27 @@ collect_single_alias() {
   [[ -e "$path" ]] || return 0
 
   if [[ -f "$path" ]]; then
-    echo "$path"
+    case "$path" in
+      *.rs|*.toml|*.html|*.txt|*.snap)
+        git ls-files --cached --others --exclude-standard --error-unmatch "$path" >/dev/null 2>&1 && echo "$path"
+        ;;
+    esac
   else
-    find "$path" \
-      -type d \( "${EXCLUDE_DIRS[@]}" \) -prune -o \
-      -type f \( "${EXTENSIONS[@]}" \) \
-      -print
+    git ls-files --cached --others --exclude-standard -- "$path" 2>/dev/null | while IFS= read -r f; do
+      case "$f" in
+        *.rs|*.toml|*.html|*.txt|*.snap) echo "$f" ;;
+      esac
+    done
   fi
 }
 
 # --- collect_files: collects files for an alias group ------------------
-# The group is the NAME of a bash array holding alias names. An element
-# is either a leaf alias (single path) or a group alias from repo.conf
-# (space-separated alias list) - the latter is expanded recursively.
 collect_files() {
   local -n group_ref=$1
   local alias sub path
   for alias in "${group_ref[@]}"; do
     path="${PATHS[$alias]:-}"
     if [[ -n "$path" && "$path" == *\ * ]]; then
-      # nested group alias from repo.conf - expand into leaf aliases
       for sub in $path; do
         collect_single_alias "$sub"
       done
@@ -113,13 +86,28 @@ collect_files() {
   done | sort -u
 }
 
+# --- expand_group_aliases: repo.conf group -> leaf alias NAMES --------
+expand_group_aliases() {
+  local group="$1"
+  local value="${PATHS[$group]:-}"
+  [[ -z "$value" ]] && return 0
+  local item sub
+  for item in $value; do
+    sub="${PATHS[$item]:-}"
+    if [[ -n "$sub" && "$sub" == *\ * ]]; then
+      expand_group_aliases "$item"
+    else
+      echo "$item"
+    fi
+  done
+}
+
 # --- make_anchor: HTML anchor from a path ------------------------------
 make_anchor() {
   printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9._-' '-'
 }
 
 # --- print_group_stats <TITLE> <GROUP_NAME> ----------------------------
-# Aggregates group files by extension: files / lines / KB.
 print_group_stats() {
   local title="$1" group="$2"
   local tmp; tmp="$(mktemp)"
@@ -160,7 +148,6 @@ print_group_stats() {
 }
 
 # --- print_top10_largest <GROUP_NAME> ----------------------------------
-# Top-10 largest files of a group: path + size.
 print_top10_largest() {
   local group="$1"
   local all; all="$(mktemp)"
@@ -172,8 +159,6 @@ print_top10_largest() {
     bytes="$(wc -c < "$f")"
     printf '%s\t%s\n' "$bytes" "$f"
   done | sort -t$'\t' -k1 -rn > "$all"
-  # NOTE: head reads from a file, not from the pipe - otherwise sort
-  # catches SIGPIPE (code 141) and `set -euo pipefail` kills the script.
   head -n 10 "$all" > "$tmp"
   rm -f "$all"
 
@@ -195,7 +180,6 @@ print_source_stats() { print_group_stats "SOURCE - src / Cargo.toml / config / m
 print_tests_stats()  { print_group_stats "TESTS - integration tests (tests/)"                   TESTS_GROUP; }
 
 # --- build_dump <name> <title> <GROUP_NAME>... -------------------------
-# Builds one dump: TOC + per-file code blocks + Stats section.
 build_dump() {
   local mode="$1"     # dump file name without the _dump.md suffix
   local title="$2"    # H1 title inside the dump
@@ -237,6 +221,9 @@ build_dump() {
     case "$ext" in
       rs)   lang="rust" ;;
       toml) lang="toml" ;;
+      html) lang="html" ;;
+      txt)  lang="text" ;;
+      snap) lang="text" ;;
       *)    lang="" ;;
     esac
     {
@@ -280,40 +267,13 @@ build_dump() {
   echo "${C_OK}=== $mode dump created: $DUMP_FILE ($files_dumped files) ===${C_RESET}"
 }
 
-# --- expand_group_aliases: repo.conf group -> leaf alias NAMES --------
-# Expands a group alias (space-separated alias list) into the names of
-# its leaf aliases. Used to derive the crate list from ALL_SRCS, so
-# adding a crate only requires a repo.conf edit - no script changes.
-expand_group_aliases() {
-  local group="$1"
-  local value="${PATHS[$group]:-}"
-  [[ -z "$value" ]] && return 0
-  local item sub
-  for item in $value; do
-    sub="${PATHS[$item]:-}"
-    if [[ -n "$sub" && "$sub" == *\ * ]]; then
-      expand_group_aliases "$item"
-    else
-      echo "$item"
-    fi
-  done
-}
-
 # --- build_percrate_dumps ----------------------------------------------
-# Separate dump for each crate. Modular layout:
-#   crate dump group = [crate]_SRC + [crate]_TOML (+ config template)
-#                      + [crate]_TESTS        <-- tests glued together
-# To split tests into their own <crate>_tests_dump.md, set
-# PERCRATE_TESTS_SEPARATE=1 (or: PERCRATE_TESTS_SEPARATE=1 ./dump.sh percrate).
 build_percrate_dumps() {
   local alias base crate_name
-  # Crate list is derived from the ALL_SRCS group alias of repo.conf -
-  # a new crate is picked up automatically from repo.conf alone.
   for alias in $(expand_group_aliases ALL_SRCS); do
     base="${alias%_SRC}"
     crate_name="${base,,}"
 
-    # modular part 1: crate code + manifests (+ config template)
     CRATE_GROUP=()
     [[ -n "${PATHS[${base}_SRC]:-}"  ]] && CRATE_GROUP+=("${base}_SRC")
     [[ -n "${PATHS[${base}_TOML]:-}" ]] && CRATE_GROUP+=("${base}_TOML")
@@ -322,14 +282,12 @@ build_percrate_dumps() {
     fi
 
     if [[ "$PERCRATE_TESTS_SEPARATE" == "1" ]]; then
-      # modular split: tests of the crate as a separate dump
       build_dump "$crate_name" "UWA ${crate_name//_/-} Dump" CRATE_GROUP
       if [[ -n "${PATHS[${base}_TESTS]:-}" ]]; then
         CRATE_TESTS_GROUP=("${base}_TESTS")
         build_dump "${crate_name}_tests" "UWA ${crate_name//_/-} Tests Dump" CRATE_TESTS_GROUP
       fi
     else
-      # modular part 2: tests of the crate glued into the same dump
       [[ -n "${PATHS[${base}_TESTS]:-}" ]] && CRATE_GROUP+=("${base}_TESTS")
       build_dump "$crate_name" "UWA ${crate_name//_/-} Dump" CRATE_GROUP
     fi
@@ -337,8 +295,6 @@ build_percrate_dumps() {
 }
 
 # --- build_crate_dump <crate-or-path> ----------------------------------
-# Dump of a single crate: [crate]_SRC + _TOML + _TESTS (+ config template).
-# If no aliases match, the argument is used as a direct file/dir path.
 build_crate_dump() {
   local crate_arg="$1"
   local stem
@@ -352,8 +308,6 @@ build_crate_dump() {
       CRATE_GROUP+=("UWA_BIN_CONFIG")
     fi
   elif [[ -e "$crate_arg" ]]; then
-    # alias not found - register the path temporarily as an alias so the
-    # same collection code handles it (file or dir)
     PATHS["__ARG_PATH__"]="$crate_arg"
     CRATE_GROUP=("__ARG_PATH__")
   else
@@ -361,15 +315,15 @@ build_crate_dump() {
     exit 2
   fi
 
-  # dump file name: lowercase, underscores (uwa-bin -> uwa_bin_dump.md)
   local dump_name="${crate_arg,,}"
   dump_name="${dump_name//-/_}"; dump_name="${dump_name//\//_}"
   build_dump "$dump_name" "UWA $crate_arg Dump" CRATE_GROUP
 }
 
+# Per-crate dumps config (modular: tests glued by default, split via env)
+PERCRATE_TESTS_SEPARATE="${PERCRATE_TESTS_SEPARATE:-0}"
+
 # --- What to generate ---------------------------------------------------
-# Default (no args) - all three dumps, same as the original dump.sh.bak:
-# source_dump.md, tests_dump.md, full_dump.md
 MODE="${1:-all}"
 case "$MODE" in
   all)      build_dump "source" "UWA Source Dump" SOURCE_GROUP; print_source_stats
