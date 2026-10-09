@@ -5,7 +5,6 @@
 **A high-performance, asynchronous Rust bridge that turns logged-in browser LLM sessions into standard OpenAI / Anthropic APIs.**
 
 [![ci](https://github.com/sdlab1/uwa/actions/workflows/ci.yml/badge.svg)](https://github.com/sdlab1/uwa/actions/workflows/ci.yml)
-[![providers-e2e](https://github.com/sdlab1/uwa/actions/workflows/providers.yml/badge.svg)](https://github.com/sdlab1/uwa/actions/workflows/providers.yml)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![rust: 1.75+](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://rustup.rs)
 
