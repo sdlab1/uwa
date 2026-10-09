@@ -2,7 +2,9 @@
 
 # uwa — Universal Web API
 
-**A high-performance, asynchronous Rust bridge that turns logged-in browser LLM sessions into standard OpenAI / Anthropic APIs.**
+> **A local-first, high-performance, asynchronous Rust bridge that turns logged-in browser LLM sessions into standard OpenAI- and Anthropic-compatible HTTP APIs.**
+
+Built with a single goal: **because Rust makes it faster, leaner, and harder to break.**
 
 [![ci](https://github.com/sdlab1/uwa/actions/workflows/ci.yml/badge.svg)](https://github.com/sdlab1/uwa/actions/workflows/ci.yml)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -26,11 +28,7 @@
 - [Known limitations](#known-limitations)
 - [License](#license)
 
-> **A local-first, high-performance bridge that turns your logged-in browser sessions into standard OpenAI- and Anthropic-compatible HTTP APIs.**
-
 `uwa` is a native Rust reimplementation of the local web-API bridge concept. It speaks directly to Chromium over the Chrome DevTools Protocol (CDP), drives a Tab Pool, extracts streaming responses through a dual-channel (network-first / DOM-fallback) pipeline, and exposes everything behind a standard OpenAI/Anthropic surface. No Node.js, no Python runtime on the hot path, no API keys leaving your machine.
-
-Built with a single goal: **because Rust makes it faster, leaner, and harder to break.**
 
 ---
 
