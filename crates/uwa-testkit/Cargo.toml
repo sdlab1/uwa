@@ -13,6 +13,7 @@ uwa-config = { workspace = true, features = ["test-helpers"] }
 uwa-mcp = { workspace = true }
 uwa-session = { workspace = true }
 uwa-resilience = { workspace = true }
+uwa-history = { path = "../uwa-history" }
 async-trait.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["sync", "time", "macros"] }

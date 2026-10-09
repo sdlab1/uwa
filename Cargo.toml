@@ -41,4 +41,5 @@ uwa-resilience = { path = "crates/uwa-resilience" }
 uwa-extract  = { path = "crates/uwa-extract" }
 uwa-stealth  = { path = "crates/uwa-stealth" }
 uwa-providers = { path = "crates/uwa-providers" }
+uwa-history  = { path = "crates/uwa-history" }
 scraper      = "0.20"

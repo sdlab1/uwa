@@ -32,6 +32,7 @@ pub struct RuntimeServices {
     pub sessions: Option<Arc<SessionManager>>,
     pub semaphores: Arc<ProviderSemaphores>,
     pub breakers: Arc<DashMap<String, Arc<CircuitBreaker>>>,
+    pub history: Option<Arc<uwa_history::HistoryStore>>,
 }
 
 impl Default for RuntimeServices {
@@ -41,6 +42,7 @@ impl Default for RuntimeServices {
             sessions: None,
             semaphores: Arc::new(ProviderSemaphores::new(4)),
             breakers: Arc::new(DashMap::new()),
+            history: None,
         }
     }
 }
@@ -77,6 +79,13 @@ impl AppState {
     pub fn with_semaphores(mut self, s: Arc<ProviderSemaphores>) -> Self {
         let mut rt = (*self.runtime).clone();
         rt.semaphores = s;
+        self.runtime = Arc::new(rt);
+        self
+    }
+
+    pub fn with_history(mut self, h: Arc<uwa_history::HistoryStore>) -> Self {
+        let mut rt = (*self.runtime).clone();
+        rt.history = Some(h);
         self.runtime = Arc::new(rt);
         self
     }

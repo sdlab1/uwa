@@ -8,6 +8,7 @@
 //! - [`ApiError`] — the OpenAI-shaped error at the HTTP edge
 
 pub mod error;
+pub mod history;
 pub mod metrics;
 pub mod middleware;
 pub mod routes;
@@ -56,8 +57,19 @@ pub fn router(state: AppState) -> Router {
 
     let api_scoped = api_url_scoped.merge(api_tab_scoped);
 
+    let admin = Router::new()
+        .route("/admin/history", get(routes::admin::history))
+        .route("/admin/history/:id", get(routes::admin::history_record))
+        .route("/admin/stats", get(routes::admin::stats))
+        .route("/admin/selector-test", post(routes::admin::selector_test))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            middleware::require_api_key,
+        ));
+
     let api = api_plain
         .merge(api_scoped)
+        .merge(admin)
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             middleware::require_api_key,

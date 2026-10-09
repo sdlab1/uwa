@@ -63,12 +63,36 @@ pub async fn run_pipeline(
     breaker.allow()?;
     let _permit = state.runtime.semaphores.acquire(&provider_cfg.name).await?;
 
-    let result = run_pipeline_inner(state, req, all_specs, pinned_tab).await;
+    let mut recorder = crate::history::RequestRecorder::new(req, &provider_cfg.name, None);
+
+    let result = run_pipeline_inner(state, req, all_specs, pinned_tab, &mut recorder).await;
 
     match &result {
-        Ok(_) => breaker.record_success(),
-        Err(_) => breaker.record_failure(),
+        Ok((text, calls, finish)) => {
+            breaker.record_success();
+            recorder.finish_success(
+                text,
+                calls.len(),
+                match finish {
+                    FinishReason::Stop => "stop",
+                    FinishReason::ToolCalls => "tool_calls",
+                    FinishReason::Length => "length",
+                    FinishReason::ContentFilter => "content_filter",
+                },
+                "dom",
+            );
+        }
+        Err(e) => {
+            breaker.record_failure();
+            recorder.finish_error(&e.to_string());
+        }
     }
+
+    // Persist to history (non-blocking when no store configured).
+    if let Some(h) = &state.runtime.history {
+        h.append(recorder.into_record()).await;
+    }
+
     crate::metrics::circuit_state(
         &provider_cfg.name,
         match breaker.state() {
@@ -93,6 +117,7 @@ async fn run_pipeline_inner(
     req: &ChatCompletionRequest,
     all_specs: &[ToolSpec],
     pinned_tab: Option<&TabId>,
+    recorder: &mut crate::history::RequestRecorder,
 ) -> Result<(String, Vec<ToolCall>, FinishReason), UwaError> {
     let provider_cfg = state
         .config
@@ -142,11 +167,16 @@ async fn run_pipeline_inner(
 
         let body = build_browser_body(system_injection.as_deref(), &conversation, round == 0);
 
+        recorder.mark_send_start();
         tokio::time::timeout(send_timeout, site.send_message(page.as_ref(), &body))
             .await
             .map_err(|_| UwaError::Timeout(send_timeout))??;
+        recorder.mark_send_end();
 
+        recorder.mark_send_start();
         let raw = site.wait_response(page.as_ref()).await?;
+        recorder.mark_wait_end();
+        recorder.set_tab(tab.as_str());
 
         if let Some(h) = &session_handle {
             h.touch().await;
@@ -157,6 +187,9 @@ async fn run_pipeline_inner(
         if !parsed.has_calls() {
             return Ok((parsed.text, vec![], FinishReason::Stop));
         }
+
+        recorder.record_tool_calls(parsed.calls.len());
+        recorder.increment_round();
 
         // No router ⇒ hand tool calls to the client verbatim.
         let router = match &state.runtime.tool_router {

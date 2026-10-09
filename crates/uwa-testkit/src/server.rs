@@ -30,6 +30,7 @@ pub struct AppBuilder {
     tool_router: Option<Arc<ToolRouter>>,
     sessions: Option<Arc<SessionManager>>,
     semaphores: Option<Arc<ProviderSemaphores>>,
+    history: Option<Arc<uwa_history::HistoryStore>>,
 }
 
 impl AppBuilder {
@@ -41,6 +42,7 @@ impl AppBuilder {
             tool_router: None,
             sessions: None,
             semaphores: None,
+            history: None,
         }
     }
 
@@ -81,6 +83,11 @@ impl AppBuilder {
         self
     }
 
+    pub fn with_history(mut self, h: Arc<uwa_history::HistoryStore>) -> Self {
+        self.history = Some(h);
+        self
+    }
+
     pub fn build_state(self) -> AppState {
         let mut registry = ProviderRegistry::new();
         for p in self.providers {
@@ -95,6 +102,9 @@ impl AppBuilder {
         }
         if let Some(s) = self.semaphores {
             state = state.with_semaphores(s);
+        }
+        if let Some(h) = self.history {
+            state = state.with_history(h);
         }
         state
     }
