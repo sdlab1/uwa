@@ -25,9 +25,11 @@ pub struct CdpPageAdapter {
     /// OOPIF registry — maps frame IDs to attached CDP sessions. Used to
     /// decide whether `eval_in_frame` targets an OOPIF (separate renderer)
     /// or a same-process frame.
+    #[cfg_attr(not(feature = "nodriver"), allow(dead_code))]
     oopif: std::sync::Arc<crate::oopif::OopifRegistry>,
     /// Debug URL (http://host:port) — used to resolve OOPIF WebSocket URLs
     /// via `/json/list` for direct CDP connections.
+    #[cfg_attr(not(feature = "nodriver"), allow(dead_code))]
     debug_url: std::sync::Arc<String>,
     _guard: TabGuard,
 }

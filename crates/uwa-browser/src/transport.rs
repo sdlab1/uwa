@@ -389,6 +389,7 @@ async fn register_target(
 /// for the iframe's own CDP target — we see it here, resolve the frame ID
 /// via `Page.getFrameTree`, and register the session in [`OopifRegistry`].
 #[allow(clippy::too_many_arguments)]
+#[cfg_attr(not(feature = "nodriver"), allow(unused_variables))]
 async fn pump_page(
     page: CdpPage,
     bus: NetBus,
