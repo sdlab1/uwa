@@ -260,6 +260,8 @@ impl uwa_core::Transport for CdpTransport {
             target_id,
             self.bus.clone(),
             guard,
+            self.oopif.clone(),
+            self.debug_url.clone(),
         )))
     }
 

@@ -22,15 +22,31 @@ pub struct CdpPageAdapter {
     page: CdpPage,
     target_id: String,
     bus: NetBus,
+    /// OOPIF registry — maps frame IDs to attached CDP sessions. Used to
+    /// decide whether `eval_in_frame` targets an OOPIF (separate renderer)
+    /// or a same-process frame.
+    oopif: std::sync::Arc<crate::oopif::OopifRegistry>,
+    /// Debug URL (http://host:port) — used to resolve OOPIF WebSocket URLs
+    /// via `/json/list` for direct CDP connections.
+    debug_url: std::sync::Arc<String>,
     _guard: TabGuard,
 }
 
 impl CdpPageAdapter {
-    pub fn new(page: CdpPage, target_id: String, bus: NetBus, guard: TabGuard) -> Self {
+    pub fn new(
+        page: CdpPage,
+        target_id: String,
+        bus: NetBus,
+        guard: TabGuard,
+        oopif: std::sync::Arc<crate::oopif::OopifRegistry>,
+        debug_url: std::sync::Arc<String>,
+    ) -> Self {
         Self {
             page,
             target_id,
             bus,
+            oopif,
+            debug_url,
             _guard: guard,
         }
     }
@@ -198,15 +214,17 @@ impl uwa_core::Page for CdpPageAdapter {
     }
 
     async fn eval_in_frame(&self, frame_id: &str, js: &str) -> Result<Value> {
-        use chromiumoxide::cdp::browser_protocol::page::CreateIsolatedWorldParams;
+        // If this frame is a tracked OOPIF (cross-origin, separate renderer
+        // process), evaluate via its dedicated WebSocket connection. This
+        // bypasses chromiumoxide's session-scoped command limitation.
+        if let Some(session) = self.oopif.session_for_frame(frame_id).await {
+            let tid = session.target_id.inner();
+            let ws_url = crate::oopif_ws::resolve_ws_url(&self.debug_url, tid).await?;
+            return crate::oopif_ws::eval_in_oopif_ws(&ws_url, js).await;
+        }
 
-        // Create an isolated world in the target frame. This works for
-        // same-process iframes (same-origin or same-site). For cross-origin
-        // OOPIFs (separate renderer process), Chrome rejects the command
-        // ("No frame for given id found") — evaluating inside an OOPIF
-        // requires session-scoped CDP commands, which chromiumoxide 0.7.0
-        // does not expose publicly. OOPIF sessions are still tracked in
-        // the OopifRegistry for when session support arrives (0.8+).
+        // Same-process frame: create an isolated world and evaluate in it.
+        use chromiumoxide::cdp::browser_protocol::page::CreateIsolatedWorldParams;
         let world = self
             .page
             .execute(
@@ -222,7 +240,6 @@ impl uwa_core::Page for CdpPageAdapter {
                 UwaError::Transport(format!("createIsolatedWorld for frame `{frame_id}`: {e}"))
             })?;
 
-        // Evaluate in the isolated world's execution context.
         let params = EvaluateParams::builder()
             .expression(js.to_string())
             .context_id(world.result.execution_context_id)

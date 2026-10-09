@@ -20,7 +20,7 @@
 //! requires session-scoped CDP commands (chromiumoxide 0.7.0 limitation;
 //! see todo/08.md Part C).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use uwa_browser::CdpTransport;
@@ -134,13 +134,13 @@ async fn main() {
 
             // Dump child frames if requested.
             if include_oopifs {
-                dump_child_frames(&page, &transport, path).await;
+                dump_child_frames(page.as_ref(), &transport, path).await;
             }
         }
         None => {
             print!("{html}");
             if include_oopifs {
-                dump_child_frames(&page, &transport, &PathBuf::from("fixture.html")).await;
+                dump_child_frames(page.as_ref(), &transport, Path::new("fixture.html")).await;
             }
         }
     }
@@ -154,7 +154,7 @@ async fn main() {
 /// Same-origin iframes: fully dumped via `eval_in_frame`.
 /// Cross-origin OOPIFs: frame ID + URL logged; internal HTML requires
 /// session-scoped CDP commands (not available in chromiumoxide 0.7.0).
-async fn dump_child_frames(page: &Box<dyn Page>, transport: &CdpTransport, main_path: &PathBuf) {
+async fn dump_child_frames(page: &dyn Page, transport: &CdpTransport, main_path: &Path) {
     let frames = match page.frame_tree().await {
         Ok(f) => f,
         Err(e) => {

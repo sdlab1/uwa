@@ -50,29 +50,90 @@ pub async fn resolve_ws_url(debug_url: &str, target_id: &str) -> Result<String> 
     let (host, port) = stripped
         .rsplit_once(':')
         .ok_or_else(|| UwaError::Transport(format!("bad debug_url `{debug_url}`")))?;
+    let port: u16 = port
+        .parse()
+        .map_err(|_| UwaError::Transport(format!("bad port in `{debug_url}`")))?;
 
-    // Minimal HTTP/1.1 GET over TCP.
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let mut sock = tokio::net::TcpStream::connect((host, port.parse().unwrap_or(9222)))
+    let mut sock = tokio::net::TcpStream::connect((host, port))
         .await
         .map_err(|e| UwaError::Transport(format!("connect {host}:{port}: {e}")))?;
+
     let req =
         format!("GET /json/list HTTP/1.1\r\nHost: {host}:{port}\r\nConnection: close\r\n\r\n");
     sock.write_all(req.as_bytes())
         .await
         .map_err(|e| UwaError::Transport(format!("send /json/list: {e}")))?;
 
+    // Read response: headers first (until \r\n\r\n), then body based on
+    // Content-Length. Chrome's debug server sends Content-Length, so we know
+    // exactly how many bytes to expect — no need to wait for EOF.
     let mut buf = Vec::new();
-    sock.read_to_end(&mut buf)
-        .await
-        .map_err(|e| UwaError::Transport(format!("read /json/list: {e}")))?;
+    let mut chunk = [0u8; 4096];
 
-    // Split headers from body.
+    // Phase 1: read until we have the full header block.
+    loop {
+        let n = tokio::time::timeout(std::time::Duration::from_secs(5), sock.read(&mut chunk))
+            .await
+            .map_err(|_| UwaError::Transport("read headers timed out".into()))?
+            .map_err(|e| UwaError::Transport(format!("read /json/list: {e}")))?;
+        if n == 0 {
+            return Err(UwaError::Transport(
+                "connection closed before headers".into(),
+            ));
+        }
+        buf.extend_from_slice(&chunk[..n]);
+        if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+            break; // Headers complete.
+        }
+        if buf.len() > 16 * 1024 {
+            return Err(UwaError::Transport("headers too large".into()));
+        }
+    }
+
+    // Phase 2: parse Content-Length and read the body.
+    let header_end = buf
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .expect("checked above");
+    let headers = String::from_utf8_lossy(&buf[..header_end]);
+    let content_length: usize = headers
+        .lines()
+        .find(|l| l.to_ascii_lowercase().starts_with("content-length:"))
+        .and_then(|l| l.split(':').nth(1))
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(0);
+
+    let body_start = header_end + 4;
+    let needed = body_start + content_length;
+
+    // Phase 3: read until we have the full body.
+    while buf.len() < needed {
+        let n = tokio::time::timeout(std::time::Duration::from_secs(5), sock.read(&mut chunk))
+            .await
+            .map_err(|_| UwaError::Transport("read body timed out".into()))?
+            .map_err(|e| UwaError::Transport(format!("read body: {e}")))?;
+        if n == 0 {
+            break; // Server closed early; use what we have.
+        }
+        buf.extend_from_slice(&chunk[..n]);
+        if buf.len() > 64 * 1024 {
+            break; // Hard cap.
+        }
+    }
+
+    let _ = sock.shutdown().await;
+
+    // Parse: split headers from body.
     let raw = String::from_utf8_lossy(&buf);
     let body = raw.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or(&raw);
 
-    let targets: Vec<Value> = serde_json::from_str(body)
-        .map_err(|e| UwaError::Transport(format!("parse /json/list: {e}")))?;
+    let targets: Vec<Value> = serde_json::from_str(body.trim()).map_err(|e| {
+        UwaError::Transport(format!(
+            "parse /json/list: {e} (body: {}...)",
+            &body[..body.len().min(200)]
+        ))
+    })?;
 
     for t in &targets {
         if t.get("id").and_then(|v| v.as_str()) == Some(target_id) {
@@ -193,6 +254,53 @@ where
 ///
 /// Called from `pump_page` when an OOPIF target attaches. Spawned in a
 /// background task so the event loop stays responsive.
+/// Evaluate JS inside an OOPIF target via its dedicated WebSocket.
+///
+/// This bypasses chromiumoxide's session limitation: each OOPIF target has
+/// its own `webSocketDebuggerUrl`; connecting to it creates a fresh CDP
+/// session where commands go directly to that target's renderer.
+pub async fn eval_in_oopif_ws(ws_url: &str, js: &str) -> Result<Value> {
+    let (ws, _) = tokio_tungstenite::connect_async(ws_url)
+        .await
+        .map_err(|e| UwaError::Transport(format!("ws connect to OOPIF `{ws_url}`: {e}")))?;
+    let (mut write, mut read) = ws.split();
+
+    // Enable Runtime (required for evaluate).
+    let enable_cmd = json!({"id": 1, "method": "Runtime.enable", "params": {}});
+    write
+        .send(Message::Text(enable_cmd.to_string()))
+        .await
+        .map_err(|e| UwaError::Transport(format!("send Runtime.enable: {e}")))?;
+    let _ = read_next_response(&mut read, 1).await?;
+
+    // Evaluate.
+    let eval_cmd = json!({
+        "id": 2,
+        "method": "Runtime.evaluate",
+        "params": {
+            "expression": js,
+            "returnByValue": true,
+            "awaitPromise": true
+        }
+    });
+    write
+        .send(Message::Text(eval_cmd.to_string()))
+        .await
+        .map_err(|e| UwaError::Transport(format!("send Runtime.evaluate: {e}")))?;
+    let resp = read_next_response(&mut read, 2).await?;
+
+    // Extract the result value.
+    let result = resp
+        .get("result")
+        .and_then(|r| r.get("result"))
+        .and_then(|r| r.get("value"))
+        .cloned()
+        .unwrap_or(Value::Null);
+
+    let _ = write.close().await;
+    Ok(result)
+}
+
 pub async fn stealth_oopif(debug_url: &str, target_id: &str, pack: Arc<StealthPack>) -> Result<()> {
     let ws_url = resolve_ws_url(debug_url, target_id).await?;
     inject_stealth(&ws_url, &pack).await
