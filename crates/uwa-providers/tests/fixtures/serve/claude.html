@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html>
+<head><title>fake claude</title></head>
+<body>
+<main id="root">
+  <div id="messages"></div>
+  <div id="composer" contenteditable="true" role="textbox" aria-label="Send message..." style="width: 500px; height: 60px; border: 1px solid #ccc;"></div>
+  <button aria-label="Send message" onclick="
+    const box = document.querySelector('div[contenteditable=true]');
+    const text = box.innerText;
+    if (!text) return;
+    box.innerText = '';
+    const el = document.createElement('div');
+    el.setAttribute('data-testid', 'assistant-message');
+    document.getElementById('messages').appendChild(el);
+    let i = 0;
+    const reply = 'FIXTURE_REPLY: ' + text;
+    const t = setInterval(() => {
+      el.textContent = reply.slice(0, ++i);
+      if (i >= reply.length) {
+        clearInterval(t);
+        el.setAttribute('data-stream-done', 'true');
+      }
+    }, 20);
+  ">Send</button>
+  <button aria-label="Stop" style="display:none">Stop</button>
+</main>
+</body>
+</html>

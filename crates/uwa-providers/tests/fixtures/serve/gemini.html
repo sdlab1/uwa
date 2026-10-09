@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html>
+<head><title>fake gemini</title></head>
+<body>
+<main id="root">
+  <div id="messages"></div>
+  <div class="ql-editor" contenteditable="true" role="textbox" style="width: 500px; height: 60px; border: 1px solid #ccc;"></div>
+  <button class="send-button" onclick="
+    const box = document.querySelector('div.ql-editor');
+    const text = box.innerText;
+    if (!text) return;
+    box.innerText = '';
+    const el = document.createElement('model-response');
+    document.getElementById('messages').appendChild(el);
+    let i = 0;
+    const reply = 'FIXTURE_REPLY: ' + text;
+    const t = setInterval(() => {
+      el.textContent = reply.slice(0, ++i);
+      if (i >= reply.length) {
+        clearInterval(t);
+        el.setAttribute('data-stream-done', 'true');
+      }
+    }, 20);
+  ">Send</button>
+  <button class="stop-button" style="display:none">Stop</button>
+</main>
+</body>
+</html>

@@ -242,6 +242,10 @@ pub struct ProviderCfg {
     pub prompt_padding: PromptPaddingCfg,
     #[serde(default)]
     pub stealth: bool,
+    /// Declarative action list. When non-empty, `GenericProvider` runs it
+    /// instead of the default fill+click+wait path.
+    #[serde(default)]
+    pub workflow: uwa_core::workflow::Workflow,
 }
 
 impl ProviderCfg {
@@ -270,6 +274,7 @@ impl ProviderCfg {
             file_paste: FilePasteCfg::default(),
             prompt_padding: PromptPaddingCfg::default(),
             stealth: false,
+            workflow: Default::default(),
         }
     }
 

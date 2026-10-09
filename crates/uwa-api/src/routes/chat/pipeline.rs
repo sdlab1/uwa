@@ -42,6 +42,16 @@ use uwa_tools::{
 use crate::history::RequestRecorder;
 use crate::state::AppState;
 
+/// RAII cleanup for multimodal temp files. Runs on every exit path,
+/// including errors and panics that unwind.
+struct AttachmentGuard(Vec<uwa_core::types::Attachment>);
+
+impl Drop for AttachmentGuard {
+    fn drop(&mut self) {
+        uwa_providers::attachments::cleanup(&self.0);
+    }
+}
+
 /// Full pipeline. Public because `messages.rs` (Anthropic) also calls it.
 pub async fn run_pipeline(
     state: &AppState,
@@ -143,6 +153,18 @@ async fn run_pipeline_inner(
     let known_names: Vec<String> = all_specs.iter().map(|s| s.name.clone()).collect();
     let send_timeout = Duration::from_millis(state.config.server.request_timeout_ms.max(1_000));
 
+    // Multimodal: decode image parts into temp files (skipped quietly on
+    // error — a bad image must not fail the chat turn). The guard removes
+    // them on every exit path.
+    let _attachments = AttachmentGuard(
+        uwa_providers::attachments::extract_attachments(req)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!("attachment extraction failed: {e}");
+                Vec::new()
+            }),
+    );
+
     // One browser round. If the browser LLM emits tool calls, control
     // returns to the client — there is no server-side loop by design.
     let tab = if let Some(t) = pinned_tab {
@@ -164,9 +186,18 @@ async fn run_pipeline_inner(
     let body = build_browser_body(system_injection.as_deref(), &conversation, true);
 
     recorder.mark_send_start();
-    tokio::time::timeout(send_timeout, site.send_message(page.as_ref(), &body))
+    if _attachments.0.is_empty() {
+        tokio::time::timeout(send_timeout, site.send_message(page.as_ref(), &body))
+            .await
+            .map_err(|_| UwaError::Timeout(send_timeout))??;
+    } else {
+        tokio::time::timeout(
+            send_timeout,
+            site.send_multimodal(page.as_ref(), &body, &_attachments.0),
+        )
         .await
         .map_err(|_| UwaError::Timeout(send_timeout))??;
+    }
     recorder.mark_send_end();
 
     recorder.mark_send_start();

@@ -15,9 +15,12 @@ serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["time", "macros"] }
 tracing.workspace = true
+thiserror.workspace = true
 url.workspace = true
 metrics = "0.23"
 uuid = { version = "1", features = ["v4"] }
+base64 = "0.22"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 
 [dependencies.uwa-browser]
 path = "../uwa-browser"
@@ -36,6 +39,10 @@ optional = true
 workspace = true
 optional = true
 
+[dependencies.axum]
+version = "0.7"
+optional = true
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 uwa-config = { workspace = true, features = ["test-helpers"] }
@@ -45,8 +52,14 @@ insta = { version = "1", features = ["yaml"] }
 [features]
 default = []
 snapshot = ["dep:uwa-browser", "dep:uwa-stealth", "dep:clap", "dep:anyhow"]
+fixture-server = ["dep:axum", "dep:clap", "dep:anyhow", "dep:uwa-browser", "tokio/rt"]
 
 [[bin]]
 name = "uwa-snapshot"
 path = "src/bin/snapshot.rs"
 required-features = ["snapshot"]
+
+[[bin]]
+name = "uwa-fixture-server"
+path = "src/bin/uwa-fixture-server.rs"
+required-features = ["fixture-server"]

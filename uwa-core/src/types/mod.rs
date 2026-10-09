@@ -1,5 +1,8 @@
 pub mod anthropic;
+pub mod attachment;
 pub mod openai;
+
+pub use attachment::Attachment;
 
 /// A message role used by both OpenAI and Anthropic adapters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

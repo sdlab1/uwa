@@ -4,7 +4,7 @@ use crate::error::ApiResult;
 use crate::state::AppState;
 use axum::extract::{Path, Query, State};
 use axum::Json;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use uwa_core::UwaError;
 use uwa_history::{Stats, StatsWindow};
 
@@ -191,4 +191,115 @@ pub async fn selector_test(
             error: Some(e.to_string()),
         })),
     }
+}
+
+// ---------- selector auto-generation ----------
+
+#[derive(Debug, Deserialize)]
+pub struct GenerateRequest {
+    pub provider: String,
+    #[serde(default)]
+    pub tab_id: Option<String>,
+}
+
+pub async fn selector_generate(
+    State(state): State<AppState>,
+    Json(req): Json<GenerateRequest>,
+) -> ApiResult<Json<uwa_providers::autogen::PageAnalysis>> {
+    // Verify the provider exists.
+    let cfg = state.config.clone();
+    let Some(_provider) = cfg.providers.get(&req.provider) else {
+        return Err(UwaError::UnknownModel(req.provider.clone()).into());
+    };
+
+    let tabs = state.transport.list_tabs().await?;
+    let tab = match &req.tab_id {
+        Some(id) => uwa_core::TabId::from_raw(id.clone()),
+        None => tabs
+            .into_iter()
+            .next()
+            .ok_or_else(|| UwaError::Internal("no tabs".into()))?,
+    };
+    let page = state.transport.page(&tab).await?;
+    let analysis = uwa_providers::autogen::analyze(page.as_ref()).await?;
+    Ok(Json(analysis))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ApplySelectorsRequest {
+    pub provider: String,
+    #[serde(default)]
+    pub input: Option<String>,
+    #[serde(default)]
+    pub send_button: Option<String>,
+    #[serde(default)]
+    pub assistant_message: Option<String>,
+    /// When true: persist to disk. Currently a no-op — the full TOML
+    /// round-trip lives in `/admin/config/reload`.
+    #[serde(default)]
+    pub persist: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ApplySelectorsResponse {
+    pub applied: bool,
+    pub diff: serde_json::Value,
+    pub persisted_to: Option<String>,
+}
+
+pub async fn selector_apply(
+    State(state): State<AppState>,
+    Json(req): Json<ApplySelectorsRequest>,
+) -> ApiResult<Json<ApplySelectorsResponse>> {
+    let cfg = state.config.clone();
+    let p = cfg
+        .providers
+        .get(&req.provider)
+        .ok_or_else(|| UwaError::UnknownModel(req.provider.clone()))?;
+
+    let mut diff = serde_json::Map::new();
+    if let Some(v) = &req.input {
+        if p.selectors.input.as_deref() != Some(v.as_str()) {
+            diff.insert(
+                "input".into(),
+                serde_json::json!({ "old": p.selectors.input, "new": v }),
+            );
+        }
+    }
+    if let Some(v) = &req.send_button {
+        if p.selectors.send_button.as_deref() != Some(v.as_str()) {
+            diff.insert(
+                "send_button".into(),
+                serde_json::json!({ "old": p.selectors.send_button, "new": v }),
+            );
+        }
+    }
+    if let Some(v) = &req.assistant_message {
+        if p.selectors.assistant_message.as_deref() != Some(v.as_str()) {
+            diff.insert(
+                "assistant_message".into(),
+                serde_json::json!({ "old": p.selectors.assistant_message, "new": v }),
+            );
+        }
+    }
+
+    if !req.persist {
+        return Ok(Json(ApplySelectorsResponse {
+            applied: false,
+            diff: serde_json::Value::Object(diff),
+            persisted_to: None,
+        }));
+    }
+
+    // Persist: the full TOML write-back is deferred to
+    // `/admin/config/reload`, which takes the whole document.
+    tracing::warn!(
+        "selector_apply: persist=true is a no-op; use /admin/config/reload with full TOML"
+    );
+
+    Ok(Json(ApplySelectorsResponse {
+        applied: false,
+        diff: serde_json::Value::Object(diff),
+        persisted_to: None,
+    }))
 }

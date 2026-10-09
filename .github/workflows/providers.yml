@@ -1,0 +1,68 @@
+name: providers-e2e
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  schedule:
+    # Nightly at 03:00 UTC.
+    - cron: "0 3 * * *"
+
+jobs:
+  fixture-e2e:
+    name: fixture e2e (real Chromium)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: install chromium
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y chromium-browser || sudo apt-get install -y chromium
+
+      - name: build fixture server + tests
+        run: |
+          cargo build -p uwa-providers --features fixture-server --bin uwa-fixture-server
+          cargo build -p uwa-providers --features fixture-server --tests
+
+      - name: start headless Chromium
+        run: |
+          chromium-browser --headless=new --no-sandbox --disable-gpu \
+            --remote-debugging-address=127.0.0.1 --remote-debugging-port=9222 \
+            --user-data-dir=/tmp/cdp &
+          for i in $(seq 1 30); do
+            curl -sf http://127.0.0.1:9222/json/version && break
+            sleep 1
+          done
+
+      - name: run fixture smoke tests
+        run: |
+          cargo test -p uwa-providers --features fixture-server --test fixture_server_smoke
+
+      - name: run e2e fixture tests
+        env:
+          UWA_CHROMIUM: "1"
+          UWA_CHROMIUM_WS: "ws://127.0.0.1:9222/devtools/browser"
+        run: |
+          cargo test -p uwa-providers --features fixture-server \
+            --test e2e_fixture -- --ignored --test-threads=1 --nocapture
+
+      - name: leak check
+        if: always()
+        run: |
+          if pgrep -f "chromium-browser.*headless" > /dev/null; then
+            echo "::warning::Chromium still running after tests"
+          fi
+
+  snapshot-tests:
+    name: snapshot regression
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p uwa-providers --test snapshots
+      - run: cargo test -p uwa-extract --test dom_snapshots

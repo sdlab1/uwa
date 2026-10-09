@@ -62,6 +62,11 @@ pub fn router(state: AppState) -> Router {
         .route("/admin/history/:id", get(routes::admin::history_record))
         .route("/admin/stats", get(routes::admin::stats))
         .route("/admin/selector-test", post(routes::admin::selector_test))
+        .route(
+            "/admin/selector-generate",
+            post(routes::admin::selector_generate),
+        )
+        .route("/admin/selector-apply", post(routes::admin::selector_apply))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             middleware::require_api_key,

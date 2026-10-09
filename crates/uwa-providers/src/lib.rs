@@ -16,10 +16,13 @@
 //! - [`generic::GenericProvider`] — the one and only `SiteProvider` impl
 //! - [`registry::build_providers`] — `Config` → `HashMap<name, Arc<dyn SiteProvider>>`
 
+pub mod attachments;
+pub mod autogen;
 pub mod file_attach;
 pub mod generic;
 pub mod input;
 pub mod registry;
+pub mod workflow;
 
 #[cfg(test)]
 pub(crate) mod test_support;

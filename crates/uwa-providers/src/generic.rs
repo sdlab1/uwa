@@ -261,13 +261,62 @@ impl SiteProvider for GenericProvider {
         // 1. Apply prompt padding if enabled.
         let padded = self.build_send_text(text);
 
-        // 2. File paste decision.
+        // 2. Declarative workflow, when configured, replaces the default path.
+        if !self.cfg.workflow.is_empty() {
+            let mut runner = crate::workflow::WorkflowRunner::new(&self.cfg.selectors, padded)
+                .with_stream_timeout(Duration::from_millis(self.cfg.finisher.max_wait_ms));
+            runner
+                .run(page, &self.cfg.workflow)
+                .await
+                .map_err(|e| UwaError::Transport(format!("workflow: {e}")))?;
+            return Ok(());
+        }
+
+        // 3. File paste decision.
         if self.should_file_paste(&padded) {
             return self.send_via_file(page, &padded).await;
         }
 
-        // 3. Normal path.
+        // 4. Normal path.
         self.send_inline(page, &padded).await
+    }
+
+    async fn send_multimodal(
+        &self,
+        page: &dyn Page,
+        text: &str,
+        attachments: &[uwa_core::types::Attachment],
+    ) -> Result<()> {
+        if attachments.is_empty() {
+            return self.send_message(page, text).await;
+        }
+
+        // 1. Attach each image via the site's file input (DOM first,
+        //    drag-drop fallback).
+        let input_sel = self.input_selector()?;
+        let file_input_candidate = format!("{input_sel} ~ input[type=file]");
+        for att in attachments {
+            let mut attached = false;
+            match crate::file_attach::attach_file_via_dom(page, &file_input_candidate, &att.path)
+                .await
+            {
+                Ok(()) => attached = true,
+                Err(e) => {
+                    tracing::debug!(file = %att.name, "dom attach failed: {e}");
+                }
+            }
+            if !attached {
+                crate::file_attach::attach_file_via_dragdrop(page, &att.path).await?;
+            }
+            // Give the UI a moment to process the upload.
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+
+        // 2. Wait for the attachment UI to settle.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        // 3. Send the text through the normal path.
+        self.send_message(page, text).await
     }
 
     async fn wait_response(&self, page: &dyn Page) -> Result<String> {

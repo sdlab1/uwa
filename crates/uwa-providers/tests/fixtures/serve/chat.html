@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html>
+<head><title>fake chatgpt</title></head>
+<body>
+<main id="root">
+  <div id="messages"></div>
+  <textarea id="prompt-textarea" placeholder="Send a message..." style="width: 500px; height: 100px;"></textarea>
+  <button data-testid="send-button" onclick="
+    const text = document.getElementById('prompt-textarea').value;
+    if (!text) return;
+    document.getElementById('prompt-textarea').value = '';
+    const el = document.createElement('div');
+    el.setAttribute('data-message-author-role', 'assistant');
+    el.className = 'markdown';
+    document.getElementById('messages').appendChild(el);
+    let i = 0;
+    const reply = 'FIXTURE_REPLY: ' + text;
+    const t = setInterval(() => {
+      el.textContent = reply.slice(0, ++i);
+      if (i >= reply.length) {
+        clearInterval(t);
+        el.setAttribute('data-stream-done', 'true');
+      }
+    }, 20);
+  ">Send</button>
+  <button data-testid="stop-button" style="display:none">Stop</button>
+</main>
+</body>
+</html>

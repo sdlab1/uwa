@@ -70,6 +70,18 @@ pub trait SiteProvider: Send + Sync {
     /// Send the user's message into the currently-open conversation.
     async fn send_message(&self, page: &dyn Page, text: &str) -> Result<()>;
 
+    /// Multimodal-aware send. Default: ignore attachments, delegate to
+    /// [`SiteProvider::send_message`].
+    async fn send_multimodal(
+        &self,
+        page: &dyn Page,
+        text: &str,
+        attachments: &[crate::types::Attachment],
+    ) -> Result<()> {
+        let _ = attachments;
+        self.send_message(page, text).await
+    }
+
     /// Block until the assistant's answer for the last message is complete.
     /// Returns the extracted, normalized text.
     async fn wait_response(&self, page: &dyn Page) -> Result<String>;

@@ -18,6 +18,7 @@ pub mod ids;
 pub mod net;
 pub mod traits;
 pub mod types;
+pub mod workflow;
 
 pub use error::{Result, UwaError};
 pub use ids::{ConversationId, RequestId, SessionId, TabId};
