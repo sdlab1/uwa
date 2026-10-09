@@ -439,143 +439,143 @@ async fn pump_page(
 
     loop {
         tokio::select! {
-            ev = frames.next() => {
-                let Some(ev) = ev else { break };
-                let fid = ev.frame_id.inner().clone();
-                let parent = Some(ev.parent_frame_id.inner().clone());
-                frame_map.attach(&fid, parent.as_deref());
-                recent_frames.push_back(fid.clone());
-                // Keep the queue bounded: frames from long-gone iframes are
-                // never matched by a new OOPIF.
-                if recent_frames.len() > 32 {
-                    recent_frames.pop_front();
-                }
-                // Back-fill any OOPIF that attached before its frame event.
-                if !pending_oopifs.is_empty() {
-                    if let Some(sess) = pending_oopifs.pop() {
-                        let mut updated = sess;
-                        updated.frame_id = Some(fid.clone());
-                        oopif.update_frame_id(updated).await;
-                        #[cfg(feature = "metrics")]
-metrics::counter!(
-                            "uwa_oopif_backfilled_total"
-                        )
-                        .increment(1);
-                        debug!(frame = %fid, "back-filled pending OOPIF frame_id");
-                    }
-                }
-            }
-            ev = responses.next() => {
-                let Some(ev) = ev else { break };
-                let req = ev.request_id.inner().clone();
-                let owner = ev
-                    .frame_id
-                    .as_ref()
-                    .and_then(|f| frame_map.target_for(f.inner()).map(str::to_string))
-                    .unwrap_or_else(|| target_id.clone());
-                debug!(target = %target_id, req = %req, url = %ev.response.url, "response");
-                inflight.insert(
-                    req.clone(),
-                    (ev.response.url.clone(), ev.response.mime_type.clone(), owner),
-                );
-                if finished_first.remove(&req) {
-                    debug!(target = %target_id, req = %req, "response caught up with its finish");
-                    resolve_body(&page, &bus, &req, &mut inflight, &oopif).await;
-                }
-            }
-            ev = finished.next() => {
-                let Some(ev) = ev else { break };
-                let req = ev.request_id.inner().clone();
-                if inflight.contains_key(&req) {
-                    resolve_body(&page, &bus, &req, &mut inflight, &oopif).await;
-                } else if finished_first.len() < 4096 {
-                    debug!(target = %target_id, req = %req, "finish precedes its response");
-                    finished_first.insert(req);
-                }
-            }
-            Some(ev) = async { oo_attached_rx.as_mut()?.next().await }, if oo_attached_rx.is_some() => {
-                let info = &ev.target_info;
-                if info.r#type != "iframe" {
-                    debug!(target = %info.target_id.inner(), ty = %info.r#type, "non-iframe child target, skipping");
-                    continue;
-                }
-                // Pop the most recent frame ID — it is the frame slot this
-                // OOPIF was spawned for. If none is available yet, park the
-                // session; the next `frameAttached` will back-fill it.
-                let frame_id = recent_frames.pop_back();
-                let session = crate::oopif::AttachedSession {
-                    session_id: ev.session_id.clone(),
-                    target_id: info.target_id.clone(),
-                    target_type: info.r#type.clone(),
-                    frame_id: frame_id.clone(),
-                    url: info.url.clone(),
-                };
-                match frame_id {
-                    Some(fid) => {
-                        oopif.insert(session).await;
-                        #[cfg(feature = "metrics")]
-metrics::counter!(
-                            "uwa_oopif_attached_total",
-                            "type" => info.r#type.clone(),
-                            "state" => "registered"
-                        )
-                        .increment(1);
-                        debug!(
-                            target = %info.target_id.inner(),
-                            frame = %fid,
-                            url = %info.url,
-                            "OOPIF attached and registered"
-                        );
-                        // Inject stealth into the OOPIF via its dedicated
-                        // WebSocket (bypasses chromiumoxide's session
-                        // limitation). One-shot, spawned in background.
-                        #[cfg(feature = "nodriver")]
-                        if let Some(pack) = &stealth {
-                            let ws_url = debug_ws_url.clone();
-                            let tid = info.target_id.inner().clone();
-                            let pack = pack.clone();
-                            tokio::spawn(async move {
-                                match crate::oopif_ws::stealth_oopif(&ws_url, &tid, pack).await {
-                                    Ok(()) => {
-                                        tracing::debug!(target = %tid, "stealth injected into OOPIF");
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!(target = %tid, "OOPIF stealth failed: {e}");
-                                        #[cfg(feature = "metrics")]
-                                        metrics::counter!("uwa_oopif_attach_failed_total")
-                                            .increment(1);
-                                    }
-                                }
-                            });
+                    ev = frames.next() => {
+                        let Some(ev) = ev else { break };
+                        let fid = ev.frame_id.inner().clone();
+                        let parent = Some(ev.parent_frame_id.inner().clone());
+                        frame_map.attach(&fid, parent.as_deref());
+                        recent_frames.push_back(fid.clone());
+                        // Keep the queue bounded: frames from long-gone iframes are
+                        // never matched by a new OOPIF.
+                        if recent_frames.len() > 32 {
+                            recent_frames.pop_front();
+                        }
+                        // Back-fill any OOPIF that attached before its frame event.
+                        if !pending_oopifs.is_empty() {
+                            if let Some(sess) = pending_oopifs.pop() {
+                                let mut updated = sess;
+                                updated.frame_id = Some(fid.clone());
+                                oopif.update_frame_id(updated).await;
+                                #[cfg(feature = "metrics")]
+        metrics::counter!(
+                                    "uwa_oopif_backfilled_total"
+                                )
+                                .increment(1);
+                                debug!(frame = %fid, "back-filled pending OOPIF frame_id");
+                            }
                         }
                     }
-                    None => {
-                        pending_oopifs.push(session);
+                    ev = responses.next() => {
+                        let Some(ev) = ev else { break };
+                        let req = ev.request_id.inner().clone();
+                        let owner = ev
+                            .frame_id
+                            .as_ref()
+                            .and_then(|f| frame_map.target_for(f.inner()).map(str::to_string))
+                            .unwrap_or_else(|| target_id.clone());
+                        debug!(target = %target_id, req = %req, url = %ev.response.url, "response");
+                        inflight.insert(
+                            req.clone(),
+                            (ev.response.url.clone(), ev.response.mime_type.clone(), owner),
+                        );
+                        if finished_first.remove(&req) {
+                            debug!(target = %target_id, req = %req, "response caught up with its finish");
+                            resolve_body(&page, &bus, &req, &mut inflight, &oopif).await;
+                        }
+                    }
+                    ev = finished.next() => {
+                        let Some(ev) = ev else { break };
+                        let req = ev.request_id.inner().clone();
+                        if inflight.contains_key(&req) {
+                            resolve_body(&page, &bus, &req, &mut inflight, &oopif).await;
+                        } else if finished_first.len() < 4096 {
+                            debug!(target = %target_id, req = %req, "finish precedes its response");
+                            finished_first.insert(req);
+                        }
+                    }
+                    Some(ev) = async { oo_attached_rx.as_mut()?.next().await }, if oo_attached_rx.is_some() => {
+                        let info = &ev.target_info;
+                        if info.r#type != "iframe" {
+                            debug!(target = %info.target_id.inner(), ty = %info.r#type, "non-iframe child target, skipping");
+                            continue;
+                        }
+                        // Pop the most recent frame ID — it is the frame slot this
+                        // OOPIF was spawned for. If none is available yet, park the
+                        // session; the next `frameAttached` will back-fill it.
+                        let frame_id = recent_frames.pop_back();
+                        let session = crate::oopif::AttachedSession {
+                            session_id: ev.session_id.clone(),
+                            target_id: info.target_id.clone(),
+                            target_type: info.r#type.clone(),
+                            frame_id: frame_id.clone(),
+                            url: info.url.clone(),
+                        };
+                        match frame_id {
+                            Some(fid) => {
+                                oopif.insert(session).await;
+                                #[cfg(feature = "metrics")]
+        metrics::counter!(
+                                    "uwa_oopif_attached_total",
+                                    "type" => info.r#type.clone(),
+                                    "state" => "registered"
+                                )
+                                .increment(1);
+                                debug!(
+                                    target = %info.target_id.inner(),
+                                    frame = %fid,
+                                    url = %info.url,
+                                    "OOPIF attached and registered"
+                                );
+                                // Inject stealth into the OOPIF via its dedicated
+                                // WebSocket (bypasses chromiumoxide's session
+                                // limitation). One-shot, spawned in background.
+                                #[cfg(feature = "nodriver")]
+                                if let Some(pack) = &stealth {
+                                    let ws_url = debug_ws_url.clone();
+                                    let tid = info.target_id.inner().clone();
+                                    let pack = pack.clone();
+                                    tokio::spawn(async move {
+                                        match crate::oopif_ws::stealth_oopif(&ws_url, &tid, pack).await {
+                                            Ok(()) => {
+                                                tracing::debug!(target = %tid, "stealth injected into OOPIF");
+                                            }
+                                            Err(e) => {
+                                                tracing::warn!(target = %tid, "OOPIF stealth failed: {e}");
+                                                #[cfg(feature = "metrics")]
+                                                metrics::counter!("uwa_oopif_attach_failed_total")
+                                                    .increment(1);
+                                            }
+                                        }
+                                    });
+                                }
+                            }
+                            None => {
+                                pending_oopifs.push(session);
+                                #[cfg(feature = "metrics")]
+        metrics::counter!(
+                                    "uwa_oopif_attached_total",
+                                    "type" => info.r#type.clone(),
+                                    "state" => "pending_frame_id"
+                                )
+                                .increment(1);
+                                debug!(
+                                    target = %info.target_id.inner(),
+                                    "OOPIF attached before its frame event; parked for back-fill"
+                                );
+                            }
+                        }
+                    }
+                    Some(ev) = async { oo_detached_rx.as_mut()?.next().await }, if oo_detached_rx.is_some() => {
+                        oopif.remove_by_session(&ev.session_id).await;
                         #[cfg(feature = "metrics")]
-metrics::counter!(
-                            "uwa_oopif_attached_total",
-                            "type" => info.r#type.clone(),
-                            "state" => "pending_frame_id"
+        metrics::counter!(
+                            "uwa_oopif_detached_total",
+                            "reason" => "detached"
                         )
                         .increment(1);
-                        debug!(
-                            target = %info.target_id.inner(),
-                            "OOPIF attached before its frame event; parked for back-fill"
-                        );
+                        debug!(session = %ev.session_id.inner(), "OOPIF detached");
                     }
                 }
-            }
-            Some(ev) = async { oo_detached_rx.as_mut()?.next().await }, if oo_detached_rx.is_some() => {
-                oopif.remove_by_session(&ev.session_id).await;
-                #[cfg(feature = "metrics")]
-metrics::counter!(
-                    "uwa_oopif_detached_total",
-                    "reason" => "detached"
-                )
-                .increment(1);
-                debug!(session = %ev.session_id.inner(), "OOPIF detached");
-            }
-        }
     }
     debug!(target = %target_id, "network pump stopped");
 }

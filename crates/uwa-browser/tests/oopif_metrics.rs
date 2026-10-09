@@ -4,6 +4,7 @@
 //! in `uwa-api`. This test guards against API drift in the `metrics` crate
 //! and verifies the counter/gauge names match what Prometheus scrapes.
 
+#[cfg(feature = "metrics")]
 #[test]
 fn attach_counter_is_callable() {
     metrics::counter!("uwa_oopif_attached_total", "type" => "iframe", "state" => "registered")
@@ -14,17 +15,20 @@ fn attach_counter_is_callable() {
         .increment(1);
 }
 
+#[cfg(feature = "metrics")]
 #[test]
 fn detach_counter_is_callable() {
     metrics::counter!("uwa_oopif_detached_total", "reason" => "detached").increment(1);
     metrics::counter!("uwa_oopif_detached_total", "reason" => "destroyed").increment(1);
 }
 
+#[cfg(feature = "metrics")]
 #[test]
 fn backfill_counter_is_callable() {
     metrics::counter!("uwa_oopif_backfilled_total").increment(1);
 }
 
+#[cfg(feature = "metrics")]
 #[test]
 fn gauge_is_callable() {
     metrics::gauge!("uwa_oopif_sessions_active").set(0.0);
@@ -32,6 +36,7 @@ fn gauge_is_callable() {
     metrics::gauge!("uwa_oopif_sessions_active").set(0.0);
 }
 
+#[cfg(feature = "metrics")]
 #[test]
 fn metric_names_match_prometheus_convention() {
     // All names must start with uwa_oopif_ and use snake_case.

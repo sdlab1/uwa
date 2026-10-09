@@ -325,34 +325,34 @@ pub async fn pump_target_lifecycle(
 
     loop {
         tokio::select! {
-            Some(ev) = info_changed.next() => {
-                let info = &ev.target_info;
-                if let Some(fid) = frame_id_from_target_info(info) {
-                    if let Some(existing) = registry.session_for_frame(&fid).await {
-                        if existing.target_id != info.target_id {
-                            // Same frame slot, new target — cross-origin nav.
-                            registry.rebind(&fid, AttachedSession {
-                                session_id: existing.session_id,
-                                target_id: info.target_id.clone(),
-                                target_type: info.r#type.clone(),
-                                frame_id: Some(fid.clone()),
-                                url: info.url.clone(),
-                            }).await;
+                    Some(ev) = info_changed.next() => {
+                        let info = &ev.target_info;
+                        if let Some(fid) = frame_id_from_target_info(info) {
+                            if let Some(existing) = registry.session_for_frame(&fid).await {
+                                if existing.target_id != info.target_id {
+                                    // Same frame slot, new target — cross-origin nav.
+                                    registry.rebind(&fid, AttachedSession {
+                                        session_id: existing.session_id,
+                                        target_id: info.target_id.clone(),
+                                        target_type: info.r#type.clone(),
+                                        frame_id: Some(fid.clone()),
+                                        url: info.url.clone(),
+                                    }).await;
+                                }
+                            }
                         }
                     }
+                    Some(ev) = async { destroyed.as_mut()?.next().await }, if destroyed.is_some() => {
+                        registry.remove_by_target(&ev.target_id).await;
+                        #[cfg(feature = "metrics")]
+        metrics::counter!(
+                            "uwa_oopif_detached_total",
+                            "reason" => "destroyed"
+                        )
+                        .increment(1);
+                    }
+                    else => break,
                 }
-            }
-            Some(ev) = async { destroyed.as_mut()?.next().await }, if destroyed.is_some() => {
-                registry.remove_by_target(&ev.target_id).await;
-                #[cfg(feature = "metrics")]
-metrics::counter!(
-                    "uwa_oopif_detached_total",
-                    "reason" => "destroyed"
-                )
-                .increment(1);
-            }
-            else => break,
-        }
     }
 }
 
