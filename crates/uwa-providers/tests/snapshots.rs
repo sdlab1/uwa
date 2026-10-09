@@ -32,6 +32,7 @@ fn provider() -> GenericProvider {
         },
         extraction: ExtractionStrategy::DomOnly,
         net: None,
+        backend: None,
         finisher: uwa_core::FinisherTuning {
             dom_stable_ms: 20,
             poll_ms: 5,

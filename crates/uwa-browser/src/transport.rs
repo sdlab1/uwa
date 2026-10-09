@@ -456,7 +456,8 @@ async fn pump_page(
                         let mut updated = sess;
                         updated.frame_id = Some(fid.clone());
                         oopif.update_frame_id(updated).await;
-                        metrics::counter!(
+                        #[cfg(feature = "metrics")]
+metrics::counter!(
                             "uwa_oopif_backfilled_total"
                         )
                         .increment(1);
@@ -512,7 +513,8 @@ async fn pump_page(
                 match frame_id {
                     Some(fid) => {
                         oopif.insert(session).await;
-                        metrics::counter!(
+                        #[cfg(feature = "metrics")]
+metrics::counter!(
                             "uwa_oopif_attached_total",
                             "type" => info.r#type.clone(),
                             "state" => "registered"
@@ -527,6 +529,7 @@ async fn pump_page(
                         // Inject stealth into the OOPIF via its dedicated
                         // WebSocket (bypasses chromiumoxide's session
                         // limitation). One-shot, spawned in background.
+                        #[cfg(feature = "nodriver")]
                         if let Some(pack) = &stealth {
                             let ws_url = debug_ws_url.clone();
                             let tid = info.target_id.inner().clone();
@@ -538,6 +541,7 @@ async fn pump_page(
                                     }
                                     Err(e) => {
                                         tracing::warn!(target = %tid, "OOPIF stealth failed: {e}");
+                                        #[cfg(feature = "metrics")]
                                         metrics::counter!("uwa_oopif_attach_failed_total")
                                             .increment(1);
                                     }
@@ -547,7 +551,8 @@ async fn pump_page(
                     }
                     None => {
                         pending_oopifs.push(session);
-                        metrics::counter!(
+                        #[cfg(feature = "metrics")]
+metrics::counter!(
                             "uwa_oopif_attached_total",
                             "type" => info.r#type.clone(),
                             "state" => "pending_frame_id"
@@ -562,7 +567,8 @@ async fn pump_page(
             }
             Some(ev) = async { oo_detached_rx.as_mut()?.next().await }, if oo_detached_rx.is_some() => {
                 oopif.remove_by_session(&ev.session_id).await;
-                metrics::counter!(
+                #[cfg(feature = "metrics")]
+metrics::counter!(
                     "uwa_oopif_detached_total",
                     "reason" => "detached"
                 )

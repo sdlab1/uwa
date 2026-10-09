@@ -1,33 +1,33 @@
-//! Direct WebSocket connections to OOPIF targets.
-//!
-//! ## Why this exists
-//!
-//! Chromiumoxide 0.7.0 does not expose session-scoped CDP commands: when a
-//! cross-origin iframe becomes an OOPIF (separate renderer process), the
-//! `Target.attachedToTarget` event carries the parent page's sessionId and
-//! is routed to that page's Target handler. A browser-level listener never
-//! sees it, and `Browser::execute` always sends to the default session.
-//!
-//! The production workaround: connect a **separate WebSocket** directly to
-//! the OOPIF's `webSocketDebuggerUrl` (obtained from the debug HTTP
-//! endpoint `/json/list`). Each target has its own dedicated WebSocket;
-//! connecting to it creates a fresh CDP session without any session-id
-//! routing. We can then send any command — `addScriptToEvaluateOnNewDocument`
-//! for stealth, `Runtime.evaluate` for JS, etc.
-//!
-//! ## Lifecycle
-//!
-//! ```text
-//! pump_page detects Target.attachedToTarget (iframe)
-//!   → OopifRegistry tracks the session
-//!   → oopif_ws::inject_stealth(target_id, stealth) is spawned
-//!     → HTTP GET /json/list → find webSocketDebuggerUrl
-//!     → WebSocket connect → send addScriptToEvaluateOnNewDocument
-//!     → WebSocket close (one-shot; reconnect on next need)
-//! ```
-//!
-//! The WebSocket is one-shot: we connect, inject, disconnect. This is
-//! cheap (a single TCP handshake) and avoids connection leaks.
+// Direct WebSocket connections to OOPIF targets.
+//
+// ## Why this exists
+//
+// Chromiumoxide 0.7.0 does not expose session-scoped CDP commands: when a
+// cross-origin iframe becomes an OOPIF (separate renderer process), the
+// `Target.attachedToTarget` event carries the parent page's sessionId and
+// is routed to that page's Target handler. A browser-level listener never
+// sees it, and `Browser::execute` always sends to the default session.
+//
+// The production workaround: connect a **separate WebSocket** directly to
+// the OOPIF's `webSocketDebuggerUrl` (obtained from the debug HTTP
+// endpoint `/json/list`). Each target has its own dedicated WebSocket;
+// connecting to it creates a fresh CDP session without any session-id
+// routing. We can then send any command — `addScriptToEvaluateOnNewDocument`
+// for stealth, `Runtime.evaluate` for JS, etc.
+//
+// ## Lifecycle
+//
+// ```text
+// pump_page detects Target.attachedToTarget (iframe)
+//   → OopifRegistry tracks the session
+//   → oopif_ws::inject_stealth(target_id, stealth) is spawned
+//     → HTTP GET /json/list → find webSocketDebuggerUrl
+//     → WebSocket connect → send addScriptToEvaluateOnNewDocument
+//     → WebSocket close (one-shot; reconnect on next need)
+// ```
+//
+// The WebSocket is one-shot: we connect, inject, disconnect. This is
+// cheap (a single TCP handshake) and avoids connection leaks.
 
 use std::sync::Arc;
 

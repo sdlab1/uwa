@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 uwa-core.workspace = true
+uwa-config = { path = "../uwa-config" }
 uwa-stealth = { path = "../uwa-stealth" }
 async-trait.workspace = true
 tokio.workspace = true
@@ -16,9 +17,9 @@ tracing.workspace = true
 url.workspace = true
 futures.workspace = true
 base64 = "0.21"
-metrics = "0.23"
-tokio-tungstenite = "0.23"
-chromiumoxide = { version = "0.7.0", default-features = false, features = [
+metrics = { version = "0.23", optional = true }
+tokio-tungstenite = { version = "0.23", optional = true }
+chromiumoxide = { version = "0.7.0", default-features = false, optional = true, features = [
     "tokio-runtime",
     "bytes",
 ] }
@@ -28,3 +29,9 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 libc = "0.2"
+
+[features]
+default = ["cdp"]
+cdp = ["dep:chromiumoxide"]
+nodriver = ["dep:tokio-tungstenite", "dep:metrics"]
+metrics = ["dep:metrics"]

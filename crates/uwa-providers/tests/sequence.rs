@@ -38,6 +38,7 @@ fn provider_cfg() -> ProviderCfg {
         },
         extraction: ExtractionStrategy::DomOnly,
         net: None,
+        backend: None,
         finisher: uwa_core::FinisherTuning {
             dom_stable_ms: 30,
             poll_ms: 10,

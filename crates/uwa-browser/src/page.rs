@@ -217,6 +217,7 @@ impl uwa_core::Page for CdpPageAdapter {
         // If this frame is a tracked OOPIF (cross-origin, separate renderer
         // process), evaluate via its dedicated WebSocket connection. This
         // bypasses chromiumoxide's session-scoped command limitation.
+        #[cfg(feature = "nodriver")]
         if let Some(session) = self.oopif.session_for_frame(frame_id).await {
             let tid = session.target_id.inner();
             let ws_url = crate::oopif_ws::resolve_ws_url(&self.debug_url, tid).await?;

@@ -36,6 +36,9 @@ pub struct Config {
     /// Stealth configuration.
     #[serde(default)]
     pub stealth: StealthCfg,
+    /// Backend selection (cdp vs nodriver) with per-provider overrides.
+    #[serde(default)]
+    pub backend: BackendCfg,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -55,6 +58,107 @@ impl Default for StealthCfg {
         Self {
             pack: default_stealth_pack(),
             user_scripts_dir: None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Backend configuration: chromiumoxide (CDP) vs nodriver (Python sidecar).
+// ---------------------------------------------------------------------------
+
+/// Global backend settings. Per-provider override in `[providers.*.backend]`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct BackendCfg {
+    /// Global default backend kind. Providers without an explicit
+    /// `backend = "..."` use this.
+    #[serde(default)]
+    pub kind: BackendKind,
+    #[serde(default)]
+    pub cdp: CdpBackendCfg,
+    #[serde(default)]
+    pub nodriver: NodriverBackendCfg,
+}
+
+/// Which browser backend drives the pages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum BackendKind {
+    /// chromiumoxide attach to a running Chrome. Oracle / debug / CI.
+    Cdp,
+    /// Python sidecar + nodriver. Stealth. Default for aggressive sites.
+    #[default]
+    Nodriver,
+}
+
+/// CDP (chromiumoxide) backend settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CdpBackendCfg {
+    #[serde(default = "default_cdp_ws")]
+    pub ws_url: String,
+    #[serde(default = "default_idle_ttl_secs")]
+    pub idle_ttl_secs: u64,
+}
+
+fn default_cdp_ws() -> String {
+    "ws://127.0.0.1:9222/devtools/browser".into()
+}
+
+fn default_idle_ttl_secs() -> u64 {
+    1800
+}
+
+impl Default for CdpBackendCfg {
+    fn default() -> Self {
+        Self {
+            ws_url: default_cdp_ws(),
+            idle_ttl_secs: default_idle_ttl_secs(),
+        }
+    }
+}
+
+/// Nodriver (Python sidecar) backend settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodriverBackendCfg {
+    #[serde(default = "default_python")]
+    pub python: String,
+    #[serde(default = "default_sidecar_script")]
+    pub script: String,
+    #[serde(default)]
+    pub headless: bool,
+    #[serde(default)]
+    pub user_data_dir: Option<std::path::PathBuf>,
+    #[serde(default)]
+    pub browser_path: Option<std::path::PathBuf>,
+    /// Extra Chrome launch flags.
+    #[serde(default)]
+    pub extra_args: Vec<String>,
+    /// How long to wait for the sidecar to answer `initialize`.
+    #[serde(default = "default_sidecar_timeout_ms")]
+    pub init_timeout_ms: u64,
+}
+
+fn default_python() -> String {
+    "python3".into()
+}
+
+fn default_sidecar_script() -> String {
+    "sidecar/uwa_nodriver_sidecar.py".into()
+}
+
+fn default_sidecar_timeout_ms() -> u64 {
+    30_000
+}
+
+impl Default for NodriverBackendCfg {
+    fn default() -> Self {
+        Self {
+            python: default_python(),
+            script: default_sidecar_script(),
+            headless: false,
+            user_data_dir: None,
+            browser_path: None,
+            extra_args: vec![],
+            init_timeout_ms: default_sidecar_timeout_ms(),
         }
     }
 }
@@ -112,6 +216,10 @@ pub struct ProviderCfg {
     /// Free-form version tag for the selectors. Shown in /readyz.
     #[serde(default)]
     pub selectors_version: Option<String>,
+    /// Per-provider backend override. If absent, global `[backend].kind`
+    /// is used.
+    #[serde(default)]
+    pub backend: Option<BackendKind>,
 }
 
 impl ProviderCfg {
@@ -134,6 +242,7 @@ impl ProviderCfg {
             net: None,
             finisher: uwa_core::FinisherTuning::default(),
             selectors_version: None,
+            backend: None,
         }
     }
 }
@@ -307,6 +416,105 @@ mod tests {
         "#;
         let err = Config::load_from_str(bad).unwrap_err();
         assert!(err.to_string().contains("nonexistent"));
+    }
+
+    #[test]
+    fn backend_defaults_to_nodriver() {
+        let cfg = Config::load_from_str(
+            r#"
+            [server]
+            bind = "127.0.0.1"
+            port = 8080
+        "#,
+        )
+        .unwrap();
+        assert_eq!(cfg.backend.kind, BackendKind::Nodriver);
+        assert_eq!(
+            cfg.backend.cdp.ws_url,
+            "ws://127.0.0.1:9222/devtools/browser"
+        );
+        assert_eq!(cfg.backend.nodriver.python, "python3");
+        assert!(!cfg.backend.nodriver.headless);
+    }
+
+    #[test]
+    fn provider_can_override_backend() {
+        let cfg = Config::load_from_str(
+            r##"
+            [server]
+            bind = "127.0.0.1"
+            port = 8080
+            [backend]
+            kind = "nodriver"
+            [providers.x]
+            name = "x"
+            url_patterns = ["https://x/*"]
+            capabilities = { streams = true, tool_calls = false, vision = false }
+            backend = "cdp"
+            [providers.x.selectors]
+            input = "#i"
+            send_button = "#s"
+            assistant_message = "#a"
+        "##,
+        )
+        .unwrap();
+        assert_eq!(cfg.backend.kind, BackendKind::Nodriver);
+        assert_eq!(cfg.providers["x"].backend, Some(BackendKind::Cdp));
+    }
+
+    #[test]
+    fn backend_cdp_config_parses() {
+        let cfg = Config::load_from_str(
+            r#"
+            [server]
+            bind = "127.0.0.1"
+            port = 8080
+            [backend]
+            kind = "cdp"
+            [backend.cdp]
+            ws_url = "ws://localhost:9999/devtools/browser"
+            idle_ttl_secs = 600
+        "#,
+        )
+        .unwrap();
+        assert_eq!(cfg.backend.kind, BackendKind::Cdp);
+        assert_eq!(
+            cfg.backend.cdp.ws_url,
+            "ws://localhost:9999/devtools/browser"
+        );
+        assert_eq!(cfg.backend.cdp.idle_ttl_secs, 600);
+    }
+
+    #[test]
+    fn backend_nodriver_config_parses() {
+        let cfg = Config::load_from_str(
+            r#"
+            [server]
+            bind = "127.0.0.1"
+            port = 8080
+            [backend.nodriver]
+            headless = true
+            python = "python3.11"
+            script = "sidecar/my_sidecar.py"
+            user_data_dir = "/tmp/uwa-chrome"
+            extra_args = ["--lang=en-US"]
+            init_timeout_ms = 5000
+        "#,
+        )
+        .unwrap();
+        assert_eq!(cfg.backend.kind, BackendKind::Nodriver);
+        assert!(cfg.backend.nodriver.headless);
+        assert_eq!(cfg.backend.nodriver.python, "python3.11");
+        assert_eq!(cfg.backend.nodriver.script, "sidecar/my_sidecar.py");
+        assert_eq!(
+            cfg.backend.nodriver.user_data_dir,
+            Some("/tmp/uwa-chrome".into())
+        );
+        assert_eq!(
+            cfg.backend.nodriver.extra_args,
+            vec!["--lang=en-US".to_string()]
+        );
+        assert_eq!(cfg.backend.nodriver.init_timeout_ms, 5000);
     }
 
     #[test]

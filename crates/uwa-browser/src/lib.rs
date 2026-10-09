@@ -14,7 +14,10 @@ pub mod attach;
 pub mod bus;
 pub mod cdp_cmd;
 pub mod frame;
+#[cfg(feature = "nodriver")]
+pub mod nodriver;
 pub mod oopif;
+#[cfg(feature = "nodriver")]
 pub mod oopif_ws;
 pub mod page;
 pub mod tab_id;

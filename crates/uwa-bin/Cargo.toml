@@ -10,7 +10,9 @@ name = "uwa"
 path = "src/main.rs"
 
 [features]
-default = []
+default = ["cdp", "nodriver"]
+cdp = ["uwa-browser/cdp"]
+nodriver = ["uwa-browser/nodriver"]
 metrics = ["uwa-api/metrics"]
 
 [dependencies]
@@ -18,7 +20,7 @@ uwa-core = { path = "../../uwa-core" }
 uwa-config = { path = "../uwa-config" }
 uwa-api = { path = "../uwa-api" }
 uwa-mcp = { path = "../uwa-mcp" }
-uwa-browser = { path = "../uwa-browser" }
+uwa-browser = { path = "../uwa-browser", features = ["cdp", "nodriver"] }
 uwa-providers = { path = "../uwa-providers" }
 uwa-stealth = { path = "../uwa-stealth" }
 uwa-session = { path = "../uwa-session" }
