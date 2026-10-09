@@ -924,10 +924,20 @@ fn chrome_process_count() -> usize {
 }
 
 /// Assert that no Chrome processes are alive after all other tests in this
-/// binary have finished. Runs last because its name sorts after the others.
+/// binary have finished.
+///
+/// NOTE: this test must be the LAST test in this file. With
+/// `--test-threads=1` Rust runs tests in DEFINITION order (not alphabetical),
+/// so placing it last guarantees it runs after all other tests. If you add
+/// tests after this one, move this guard to the end of the file.
+///
+/// For CI, also add a belt-and-suspenders check AFTER the test run:
+/// ```sh
+/// cargo test -p uwa-browser -- --include-ignored --test-threads=1 && ///     [ "$(pgrep -c 'chrome|chromium' || echo 0)" = "0" ]
+/// ```
 #[tokio::test]
 #[ignore = "needs a Chromium binary; run with UWA_CHROMIUM=1 cargo test -p uwa-browser -- --ignored"]
-async fn zzz_no_chrome_leaks_after_suite() {
+async fn chrome_leak_guard_after_suite() {
     if !enabled() {
         eprintln!("skipped: set UWA_CHROMIUM=1 to run the leak check");
         return;

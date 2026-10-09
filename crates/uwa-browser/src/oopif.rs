@@ -37,8 +37,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use chromiumoxide::cdp::browser_protocol::target::{
-    EventAttachedToTarget, EventDetachedFromTarget, EventTargetDestroyed, EventTargetInfoChanged,
-    FilterEntry, SessionId, SetAutoAttachParams, TargetFilter, TargetId, TargetInfo,
+    EventTargetDestroyed, EventTargetInfoChanged, FilterEntry, SessionId, SetAutoAttachParams,
+    TargetFilter, TargetId, TargetInfo,
 };
 use futures::StreamExt;
 use tokio::sync::RwLock;
@@ -306,54 +306,26 @@ pub async fn pump_target_lifecycle(
     browser: Arc<chromiumoxide::Browser>,
     registry: Arc<OopifRegistry>,
 ) {
-    let mut attached = match browser.event_listener::<EventAttachedToTarget>().await {
+    // NOTE: Target.attachedToTarget and Target.detachedFromTarget events
+    // from page-level auto-attach carry the page's sessionId and are routed
+    // to that page's Target handler by chromiumoxide — a browser-level
+    // listener never sees them. OOPIF attach/detach tracking is done
+    // per-page in `transport::pump_page`. This function only handles
+    // browser-level target lifecycle events that DO reach us:
+    // Target.targetInfoChanged (cross-origin navigation rebinding) and
+    // Target.targetDestroyed (cleanup).
+    let mut info_changed = match browser.event_listener::<EventTargetInfoChanged>().await {
         Ok(s) => s,
         Err(e) => {
-            warn!("Target.attachedToTarget listener unavailable: {e}");
+            warn!("Target.targetInfoChanged listener unavailable: {e}");
             return;
         }
     };
-    let mut info_changed = browser
-        .event_listener::<EventTargetInfoChanged>()
-        .await
-        .ok();
-    let mut detached = browser
-        .event_listener::<EventDetachedFromTarget>()
-        .await
-        .ok();
     let mut destroyed = browser.event_listener::<EventTargetDestroyed>().await.ok();
 
     loop {
         tokio::select! {
-            Some(ev) = attached.next() => {
-                let info = &ev.target_info;
-                let frame_id = frame_id_from_target_info(info);
-                let sess = AttachedSession {
-                    session_id: ev.session_id.clone(),
-                    target_id: info.target_id.clone(),
-                    target_type: info.r#type.clone(),
-                    frame_id: frame_id.clone(),
-                    url: info.url.clone(),
-                };
-                registry.insert(sess.clone()).await;
-                debug!(
-                    session = %sess.session_id.inner(),
-                    target = %sess.target_id.inner(),
-                    ty = %sess.target_type,
-                    frame = ?frame_id,
-                    "target attached"
-                );
-                // Enable domains in a background task so the pump
-                // stays responsive to further attach events.
-                let browser = browser.clone();
-                let tid = ev.target_info.target_id.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = enable_domains_for_session(&browser, &tid).await {
-                        warn!(target_id = %tid.inner(), "enable domains failed: {e}");
-                    }
-                });
-            }
-            Some(ev) = async { info_changed.as_mut()?.next().await }, if info_changed.is_some() => {
+            Some(ev) = info_changed.next() => {
                 let info = &ev.target_info;
                 if let Some(fid) = frame_id_from_target_info(info) {
                     if let Some(existing) = registry.session_for_frame(&fid).await {
@@ -369,9 +341,6 @@ pub async fn pump_target_lifecycle(
                         }
                     }
                 }
-            }
-            Some(ev) = async { detached.as_mut()?.next().await }, if detached.is_some() => {
-                registry.remove_by_session(&ev.session_id).await;
             }
             Some(ev) = async { destroyed.as_mut()?.next().await }, if destroyed.is_some() => {
                 registry.remove_by_target(&ev.target_id).await;

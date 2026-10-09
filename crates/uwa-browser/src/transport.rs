@@ -318,7 +318,35 @@ async fn register_target(
             warn!(target = %tid, "stealth: {e}");
         }
     }
-    tokio::spawn(pump_page(page, bus.clone(), tid, oopif.clone()));
+
+    // Set up OOPIF listeners SYNCHRONOUSLY, before spawning the pump task.
+    // This guarantees we don't miss Target.attachedToTarget events that fire
+    // while the spawned task is still queuing. The page's auto-attach (set
+    // up by chromiumoxide's page_init_commands) emits these events on the
+    // page's session, so a browser-level listener would not see them.
+    let oo_attached_rx = match page.event_listener::<EventAttachedToTarget>().await {
+        Ok(s) => Some(s),
+        Err(e) => {
+            warn!(target = %tid, "OOPIF attach listener: {e}");
+            None
+        }
+    };
+    let oo_detached_rx = match page.event_listener::<EventDetachedFromTarget>().await {
+        Ok(s) => Some(s),
+        Err(e) => {
+            warn!(target = %tid, "OOPIF detach listener: {e}");
+            None
+        }
+    };
+
+    tokio::spawn(pump_page(
+        page,
+        bus.clone(),
+        tid,
+        oopif.clone(),
+        oo_attached_rx,
+        oo_detached_rx,
+    ));
 }
 
 /// Per-page pump: attributes network responses to frames, tracks OOPIF
@@ -330,7 +358,14 @@ async fn register_target(
 /// cross-origin iframe loads, the page session emits `Target.attachedToTarget`
 /// for the iframe's own CDP target — we see it here, resolve the frame ID
 /// via `Page.getFrameTree`, and register the session in [`OopifRegistry`].
-async fn pump_page(page: CdpPage, bus: NetBus, target_id: String, oopif: Arc<OopifRegistry>) {
+async fn pump_page(
+    page: CdpPage,
+    bus: NetBus,
+    target_id: String,
+    oopif: Arc<OopifRegistry>,
+    mut oo_attached_rx: Option<chromiumoxide::listeners::EventStream<EventAttachedToTarget>>,
+    mut oo_detached_rx: Option<chromiumoxide::listeners::EventStream<EventDetachedFromTarget>>,
+) {
     let mut frames = match page.event_listener::<EventFrameAttached>().await {
         Ok(s) => s,
         Err(e) => {
@@ -352,10 +387,7 @@ async fn pump_page(page: CdpPage, bus: NetBus, target_id: String, oopif: Arc<Oop
             return;
         }
     };
-    // OOPIF lifecycle: the page session emits attachedToTarget for every
-    // child target (iframes, popups, workers). We track iframes.
-    let mut oo_attached = page.event_listener::<EventAttachedToTarget>().await.ok();
-    let mut oo_detached = page.event_listener::<EventDetachedFromTarget>().await.ok();
+    // OOPIF lifecycle: listeners were pre-registered in register_target.
 
     let mut frame_map = FrameMap::for_target(target_id.clone());
     let mut inflight: HashMap<String, (String, String, String)> = HashMap::new();
@@ -423,7 +455,7 @@ async fn pump_page(page: CdpPage, bus: NetBus, target_id: String, oopif: Arc<Oop
                     finished_first.insert(req);
                 }
             }
-            Some(ev) = async { oo_attached.as_mut()?.next().await }, if oo_attached.is_some() => {
+            Some(ev) = async { oo_attached_rx.as_mut()?.next().await }, if oo_attached_rx.is_some() => {
                 let info = &ev.target_info;
                 if info.r#type != "iframe" {
                     debug!(target = %info.target_id.inner(), ty = %info.r#type, "non-iframe child target, skipping");
@@ -459,7 +491,7 @@ async fn pump_page(page: CdpPage, bus: NetBus, target_id: String, oopif: Arc<Oop
                     }
                 }
             }
-            Some(ev) = async { oo_detached.as_mut()?.next().await }, if oo_detached.is_some() => {
+            Some(ev) = async { oo_detached_rx.as_mut()?.next().await }, if oo_detached_rx.is_some() => {
                 oopif.remove_by_session(&ev.session_id).await;
                 debug!(session = %ev.session_id.inner(), "OOPIF detached");
             }
