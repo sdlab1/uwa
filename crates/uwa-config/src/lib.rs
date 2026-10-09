@@ -17,6 +17,14 @@ use std::path::{Path, PathBuf};
 use url::Url;
 use uwa_core::{Capabilities, UwaError};
 
+pub mod features;
+pub mod groups;
+pub mod preset;
+
+pub use features::{FilePasteCfg, PromptPaddingCfg, ProxyCfg};
+pub use groups::{GroupCfg, GroupMember, GroupStrategy};
+pub use preset::{EffectiveProviderCfg, PresetCfg};
+
 pub type Result<T> = std::result::Result<T, UwaError>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -39,6 +47,15 @@ pub struct Config {
     /// Backend selection (cdp vs nodriver) with per-provider overrides.
     #[serde(default)]
     pub backend: BackendCfg,
+    /// Proxy configuration.
+    #[serde(default)]
+    pub proxy: ProxyCfg,
+    /// Scheduled restart configuration.
+    #[serde(default)]
+    pub scheduled_restart: ScheduledRestartCfg,
+    /// Routing groups configuration.
+    #[serde(default)]
+    pub groups: HashMap<String, GroupCfg>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -195,7 +212,23 @@ pub struct ServerCfg {
     pub pid_file: Option<PathBuf>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ScheduledRestartCfg {
+    #[serde(default)]
+    pub enabled: bool,
+    /// 24h `HH:MM` in UTC. e.g. `"04:00"`.
+    #[serde(default)]
+    pub at: Option<String>,
+    /// Maximum in-flight requests to drain before forcing shutdown.
+    #[serde(default = "default_drain_secs")]
+    pub drain_secs: u64,
+}
+
+fn default_drain_secs() -> u64 {
+    30
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ProviderCfg {
     pub name: String,
     /// URL patterns (glob-ish: `https://chatgpt.com/*`).
@@ -220,6 +253,17 @@ pub struct ProviderCfg {
     /// is used.
     #[serde(default)]
     pub backend: Option<BackendKind>,
+    // --- new ---
+    #[serde(default)]
+    pub presets: std::collections::HashMap<String, PresetCfg>,
+    #[serde(default)]
+    pub default_preset: Option<String>,
+    #[serde(default)]
+    pub file_paste: FilePasteCfg,
+    #[serde(default)]
+    pub prompt_padding: PromptPaddingCfg,
+    #[serde(default)]
+    pub stealth: bool,
 }
 
 impl ProviderCfg {
@@ -243,7 +287,32 @@ impl ProviderCfg {
             finisher: uwa_core::FinisherTuning::default(),
             selectors_version: None,
             backend: None,
+            presets: std::collections::HashMap::new(),
+            default_preset: None,
+            file_paste: FilePasteCfg::default(),
+            prompt_padding: PromptPaddingCfg::default(),
+            stealth: false,
         }
+    }
+
+    /// Resolve the effective configuration for a preset.
+    ///
+    /// * If `preset` is `None` — uses `default_preset` (or top-level fields
+    ///   if no presets are defined).
+    /// * If `preset` is `Some("x")` and "x" exists — overrides.
+    /// * If `preset` is `Some("x")` and "x" does not exist — `Err`.
+    pub fn effective(&self, preset: Option<&str>) -> Result<EffectiveProviderCfg> {
+        preset::effective_provider(self, preset)
+    }
+
+    pub fn preset_names(&self) -> Vec<String> {
+        let mut v: Vec<String> = self.presets.keys().cloned().collect();
+        v.sort();
+        v
+    }
+
+    pub fn has_preset(&self, name: &str) -> bool {
+        self.presets.contains_key(name)
     }
 }
 
@@ -301,6 +370,21 @@ impl Config {
                 return Err(UwaError::Config(format!(
                     "model alias `{model}` -> unknown provider `{prov}`"
                 )));
+            }
+        }
+        // Validate groups if present.
+        for (name, g) in &self.groups {
+            g.validate(&self.providers)
+                .map_err(|e| UwaError::Config(format!("group `{name}`: {e}")))?;
+        }
+        // Validate presets per provider.
+        for (name, p) in &self.providers {
+            if let Some(default) = &p.default_preset {
+                if !p.presets.contains_key(default) {
+                    return Err(UwaError::Config(format!(
+                        "provider `{name}` has default_preset `{default}` that does not exist"
+                    )));
+                }
             }
         }
         Ok(())

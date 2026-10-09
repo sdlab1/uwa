@@ -150,22 +150,19 @@ impl GenericProvider {
             tokio::time::sleep(Duration::from_millis(60)).await;
         }
     }
-}
 
-#[async_trait]
-impl SiteProvider for GenericProvider {
-    fn name(&self) -> &str {
-        &self.cfg.name
+    /// Build the text to send, applying prompt padding if enabled.
+    fn build_send_text(&self, text: &str) -> String {
+        self.cfg.prompt_padding.apply(text)
     }
 
-    fn matches(&self, url: &Url) -> bool {
-        self.cfg
-            .url_patterns
-            .iter()
-            .any(|pat| url_matches(pat, url))
+    /// Determine if file paste should be used for the given text length.
+    fn should_file_paste(&self, text: &str) -> bool {
+        self.cfg.file_paste.enabled && text.len() > self.cfg.file_paste.threshold_bytes
     }
 
-    async fn send_message(&self, page: &dyn Page, text: &str) -> Result<()> {
+    /// Send message via inline text input.
+    async fn send_inline(&self, page: &dyn Page, text: &str) -> Result<()> {
         let input_sel = self.input_selector()?;
         let send_sel = self.send_selector()?;
 
@@ -198,6 +195,79 @@ impl SiteProvider for GenericProvider {
         }
 
         self.wait_for_generation_start(page).await
+    }
+
+    /// Send message via file attachment (for very long prompts).
+    async fn send_via_file(&self, page: &dyn Page, text: &str) -> Result<()> {
+        // 1. Write temp file.
+        let tmp =
+            std::env::temp_dir().join(format!("uwa-paste-{}.txt", uuid::Uuid::new_v4().simple()));
+        tokio::fs::write(&tmp, text)
+            .await
+            .map_err(|e| UwaError::Internal(format!("write temp file: {e}")))?;
+
+        // 2. Attach to page (try DOM-driven file input first, fallback to drag-drop).
+        // Try to find a file input near the text input, or any file input.
+        let file_input_sel = self
+            .cfg
+            .selectors
+            .input
+            .as_deref()
+            .map(|s| format!("{s} ~ input[type=file]"))
+            .unwrap_or_else(|| "input[type=file]".into());
+
+        let attach_ok = crate::file_attach::attach_file_via_dom(page, &file_input_sel, &tmp)
+            .await
+            .is_ok();
+
+        if !attach_ok {
+            // Fallback: drag-drop.
+            crate::file_attach::attach_file_via_dragdrop(page, &tmp).await?;
+        }
+
+        // 3. Wait for attachment to appear.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        // 4. Type hint text and send.
+        let input_sel = self.input_selector()?;
+        let send_sel = self.send_selector()?;
+        if self.cfg.file_paste.reacquire_input_after_upload {
+            input::wait_exists(page, input_sel, Duration::from_secs(5)).await?;
+        }
+        input::inject_text(page, input_sel, &self.cfg.file_paste.hint_text).await?;
+        input::click_js(page, send_sel).await?;
+
+        // 5. Cleanup.
+        let _ = tokio::fs::remove_file(&tmp).await;
+
+        self.wait_for_generation_start(page).await
+    }
+}
+
+#[async_trait]
+impl SiteProvider for GenericProvider {
+    fn name(&self) -> &str {
+        &self.cfg.name
+    }
+
+    fn matches(&self, url: &Url) -> bool {
+        self.cfg
+            .url_patterns
+            .iter()
+            .any(|pat| url_matches(pat, url))
+    }
+
+    async fn send_message(&self, page: &dyn Page, text: &str) -> Result<()> {
+        // 1. Apply prompt padding if enabled.
+        let padded = self.build_send_text(text);
+
+        // 2. File paste decision.
+        if self.should_file_paste(&padded) {
+            return self.send_via_file(page, &padded).await;
+        }
+
+        // 3. Normal path.
+        self.send_inline(page, &padded).await
     }
 
     async fn wait_response(&self, page: &dyn Page) -> Result<String> {

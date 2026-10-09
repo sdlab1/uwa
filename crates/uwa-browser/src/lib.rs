@@ -30,3 +30,6 @@ pub use page::CdpPageAdapter;
 pub use tab_id::{tab_id_from_target, target_id_from_tab};
 pub use tabpool::{TabGuard, TabPool};
 pub use transport::CdpTransport;
+
+#[cfg(feature = "nodriver")]
+pub use nodriver::NodriverTransport;

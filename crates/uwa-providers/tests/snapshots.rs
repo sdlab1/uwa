@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use uwa_config::{ExtractionStrategy, ProviderCfg, Selectors};
-use uwa_core::{Capabilities, SiteProvider};
+use uwa_core::SiteProvider;
 use uwa_extract::ExtractionPipeline;
 use uwa_providers::GenericProvider;
 use uwa_testkit::MockPage;
@@ -19,27 +19,20 @@ fn fixture(name: &str) -> String {
 }
 
 fn provider() -> GenericProvider {
-    let cfg = ProviderCfg {
-        name: "demo".into(),
-        url_patterns: vec!["https://demo.test/*".into()],
-        capabilities: Capabilities::default(),
-        selectors: Selectors {
-            input: Some("#prompt".into()),
-            send_button: Some("#send".into()),
-            stop_button: None,
-            assistant_message: Some(".assistant".into()),
-            conversation_root: None,
-        },
-        extraction: ExtractionStrategy::DomOnly,
-        net: None,
-        backend: None,
-        finisher: uwa_core::FinisherTuning {
-            dom_stable_ms: 20,
-            poll_ms: 5,
-            min_wait_ms: 20,
-            max_wait_ms: 1_000,
-        },
-        selectors_version: None,
+    let mut cfg = ProviderCfg::default_for_test("demo");
+    cfg.selectors = Selectors {
+        input: Some("#prompt".into()),
+        send_button: Some("#send".into()),
+        stop_button: None,
+        assistant_message: Some(".assistant".into()),
+        conversation_root: None,
+    };
+    cfg.extraction = ExtractionStrategy::DomOnly;
+    cfg.finisher = uwa_core::FinisherTuning {
+        dom_stable_ms: 20,
+        poll_ms: 5,
+        min_wait_ms: 20,
+        max_wait_ms: 1_000,
     };
     GenericProvider::new(cfg, Arc::new(ExtractionPipeline::new()))
 }

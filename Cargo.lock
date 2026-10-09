@@ -2669,6 +2669,7 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
+ "uuid",
  "uwa-browser",
  "uwa-config",
  "uwa-core",

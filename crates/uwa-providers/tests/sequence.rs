@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use serde_json::{json, Value};
 use uwa_config::{ExtractionStrategy, ProviderCfg, Selectors};
-use uwa_core::{Capabilities, SiteProvider, UwaError};
+use uwa_core::{SiteProvider, UwaError};
 use uwa_extract::ExtractionPipeline;
 use uwa_providers::GenericProvider;
 use uwa_testkit::MockPage;
@@ -25,28 +25,22 @@ fn evals_containing(page: &MockPage, needle: &str) -> usize {
 }
 
 fn provider_cfg() -> ProviderCfg {
-    ProviderCfg {
-        name: "demo".into(),
-        url_patterns: vec!["https://demo.test/*".into()],
-        capabilities: Capabilities::default(),
-        selectors: Selectors {
-            input: Some("#prompt".into()),
-            send_button: Some("#send".into()),
-            stop_button: Some("#stop".into()),
-            assistant_message: Some(".assistant".into()),
-            conversation_root: None,
-        },
-        extraction: ExtractionStrategy::DomOnly,
-        net: None,
-        backend: None,
-        finisher: uwa_core::FinisherTuning {
-            dom_stable_ms: 30,
-            poll_ms: 10,
-            min_wait_ms: 30,
-            max_wait_ms: 500,
-        },
-        selectors_version: None,
-    }
+    let mut cfg = ProviderCfg::default_for_test("demo");
+    cfg.selectors = Selectors {
+        input: Some("#prompt".into()),
+        send_button: Some("#send".into()),
+        stop_button: Some("#stop".into()),
+        assistant_message: Some(".assistant".into()),
+        conversation_root: None,
+    };
+    cfg.extraction = ExtractionStrategy::DomOnly;
+    cfg.finisher = uwa_core::FinisherTuning {
+        dom_stable_ms: 30,
+        poll_ms: 10,
+        min_wait_ms: 30,
+        max_wait_ms: 500,
+    };
+    cfg
 }
 
 fn provider(cfg: ProviderCfg) -> GenericProvider {

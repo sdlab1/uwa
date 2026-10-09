@@ -10,10 +10,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use uwa_api::{router, AppState, ProviderRegistry};
+use uwa_browser::NodriverTransport;
 use uwa_config::Config;
-use uwa_core::types::openai::{ChatCompletionRequest, ChatMessage};
-use uwa_core::types::Role;
-use uwa_core::Transport;
+use uwa_core::{
+    types::openai::{ChatCompletionRequest, ChatMessage},
+    types::Role,
+    Transport,
+};
 use uwa_mcp::{
     DispatcherFn, McpClientProvider, McpServer, StdioClient, ToolRouter, WebChatHandler,
     WebPromptHandler, WebTabsHandler,
@@ -64,9 +67,31 @@ pub async fn run_with(config_path: PathBuf, cdp_url: &str) -> anyhow::Result<()>
         registry.register(p);
     }
 
-    // Real transport — the daemon is useless without a browser.
-    let transport: Arc<dyn Transport> = Arc::new(
-        uwa_browser::CdpTransport::connect(
+    // Transport: prefer nodriver if any provider uses it, else CDP.
+    let use_nodriver = config
+        .providers
+        .values()
+        .any(|p| matches!(p.backend, Some(uwa_config::BackendKind::Nodriver)))
+        || matches!(config.backend.kind, uwa_config::BackendKind::Nodriver);
+
+    let transport: Arc<dyn Transport> = if use_nodriver {
+        // Merge proxy args into nodriver config.
+        let mut nd_cfg = config.backend.nodriver.clone();
+        for arg in config.proxy.chrome_args() {
+            if !nd_cfg.extra_args.contains(&arg) {
+                nd_cfg.extra_args.push(arg);
+            }
+        }
+        let transport = NodriverTransport::spawn(&nd_cfg)
+            .await
+            .with_context(|| "spawn nodriver sidecar")?;
+        tracing::info!(
+            "using nodriver transport with proxy={:?}",
+            config.proxy.enabled
+        );
+        Arc::new(transport)
+    } else {
+        let transport = uwa_browser::CdpTransport::connect(
             cdp_url,
             Duration::from_secs(1800),
             Some(uwa_stealth::builtin::default_pack()),
@@ -77,8 +102,16 @@ pub async fn run_with(config_path: PathBuf, cdp_url: &str) -> anyhow::Result<()>
                 "connect Chromium at {cdp_url} — start it with \
                  --remote-debugging-port=9222 or set UWA_CHROMIUM_WS"
             )
-        })?,
-    );
+        })?;
+
+        if !config.proxy.chrome_args().is_empty() {
+            tracing::warn!(
+                "proxy configured but CDP backend attaches to a running Chrome — \
+                 restart Chrome with the proxy args from `/admin/config` output"
+            );
+        }
+        Arc::new(transport)
+    };
 
     // MCP clients.
     let mut tool_router = ToolRouter::new();
@@ -295,7 +328,7 @@ mod tests {
         std::fs::write(
             &config_path,
             format!(
-                "[server]\nbind = \"127.0.0.1\"\nport = 59999\npid_file = \"{}\"\n",
+                "[server]\nbind = \"127.0.0.1\"\nport = 59999\npid_file = \"{}\"\n[backend]\nkind = \"cdp\"\n",
                 pid_path.display()
             ),
         )

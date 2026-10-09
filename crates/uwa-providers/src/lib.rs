@@ -16,6 +16,7 @@
 //! - [`generic::GenericProvider`] — the one and only `SiteProvider` impl
 //! - [`registry::build_providers`] — `Config` → `HashMap<name, Arc<dyn SiteProvider>>`
 
+pub mod file_attach;
 pub mod generic;
 pub mod input;
 pub mod registry;

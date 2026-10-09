@@ -18,11 +18,20 @@ enabled = false
 # args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
 
 [model_aliases]
-"gpt-4o"           = "chatgpt"
-"gpt-4o-mini"      = "chatgpt"
+"gpt-4o"            = "chatgpt"
+"gpt-4o-mini"       = "chatgpt"
 "claude-3-5-sonnet" = "claude"
-"gemini-1.5-pro"   = "gemini"
-"deepseek-chat"    = "deepseek"
+"gemini-1.5-pro"    = "gemini"
+"gemini-2.0-flash"  = "gemini"
+"deepseek-chat"     = "deepseek"
+"deepseek-r1"       = "deepseek"
+"kimi-k2"           = "kimi"
+"qwen-max"          = "qwen"
+"qwen-plus"         = "qwen"
+"grok-2"            = "grok"
+"doubao-pro"        = "doubao"
+"aistudio-gemini"   = "ai-studio"
+"arena-model"       = "arena"
 
 # ---------- ChatGPT ----------
 [providers.chatgpt]
@@ -54,6 +63,11 @@ idle_timeout_ms = 30000
 kind = "sse"
 json_path = "v.message.content.parts.0"
 
+[providers.chatgpt.file_paste]
+enabled = true
+threshold_bytes = 129999
+hint_text = "The attached file contains context for your reply. Answer based on the file."
+
 # ---------- Claude ----------
 [providers.claude]
 name = "claude"
@@ -67,18 +81,31 @@ send_button       = "button[aria-label='Send message']"
 stop_button       = "button[aria-label='Stop']"
 assistant_message = "[data-testid=assistant-message]"
 
-# ---------- Gemini ----------
+# ---------- Gemini — с пресетами ----------
 [providers.gemini]
 name = "gemini"
 url_patterns = ["https://gemini.google.com/*"]
 capabilities = { streams = true, tool_calls = false, vision = true, max_context_tokens = 1000000 }
 extraction = "dom_only"
+default_preset = "flash"
 
 [providers.gemini.selectors]
 input             = "div.ql-editor"
 send_button       = "button.send-button"
 stop_button       = "button.stop-button"
 assistant_message = "model-response"
+
+[providers.gemini.presets.flash]
+display_name = "Gemini 2.0 Flash"
+[providers.gemini.presets.flash.selectors]
+input       = "div.ql-editor"
+send_button = "button.send-button"
+
+[providers.gemini.presets.pro]
+display_name = "Gemini 1.5 Pro"
+[providers.gemini.presets.pro.selectors]
+input       = "div.ql-editor[data-model='pro']"
+send_button = "button.send-button.pro"
 
 # ---------- DeepSeek ----------
 [providers.deepseek]
@@ -92,3 +119,117 @@ input             = "textarea#chat-input"
 send_button       = "div[role=button].send"
 stop_button       = "div[role=button].stop"
 assistant_message = "[data-role=assistant]"
+
+# ---------- Kimi ----------
+[providers.kimi]
+name = "kimi"
+url_patterns = ["https://kimi.moonshot.cn/*", "https://www.kimi.com/*"]
+capabilities = { streams = true, tool_calls = true, vision = false, max_context_tokens = 200000 }
+extraction = "dom_only"
+
+[providers.kimi.selectors]
+input             = "div[contenteditable=true]"
+send_button       = "div.send-button"
+stop_button       = "div.stop-button"
+assistant_message = "[data-role=assistant]"
+
+# ---------- Qwen ----------
+[providers.qwen]
+name = "qwen"
+url_patterns = ["https://chat.qwen.ai/*", "https://tongyi.aliyun.com/*"]
+capabilities = { streams = true, tool_calls = false, vision = false, max_context_tokens = 128000 }
+extraction = "dom_only"
+
+[providers.qwen.selectors]
+input             = "textarea[placeholder]"
+send_button       = "button.send"
+stop_button       = "button.stop"
+assistant_message = "[data-role=assistant]"
+
+# ---------- Grok ----------
+[providers.grok]
+name = "grok"
+url_patterns = ["https://grok.com/*", "https://x.com/i/grok*"]
+capabilities = { streams = true, tool_calls = false, vision = false, max_context_tokens = 128000 }
+extraction = "dom_only"
+stealth = true
+
+[providers.grok.selectors]
+input             = "textarea[aria-label='Ask Grok anything']"
+send_button       = "button[type=submit]"
+stop_button       = "button[aria-label='Stop']"
+assistant_message = "[data-message-author-role=assistant]"
+
+# ---------- Doubao ----------
+[providers.doubao]
+name = "doubao"
+url_patterns = ["https://www.doubao.com/*"]
+capabilities = { streams = true, tool_calls = false, vision = true, max_context_tokens = 128000 }
+extraction = "dom_only"
+
+[providers.doubao.selectors]
+input             = "textarea[data-testid='chat_input_input']"
+send_button       = "button[data-testid='chat_input_send_button']"
+stop_button       = "button[data-testid='chat_input_stop_button']"
+assistant_message = "[data-testid='receive_message']"
+
+# ---------- AI Studio ----------
+[providers.ai-studio]
+name = "ai-studio"
+url_patterns = ["https://aistudio.google.com/*"]
+capabilities = { streams = true, tool_calls = false, vision = true, max_context_tokens = 1000000 }
+extraction = "dom_only"
+
+[providers.ai-studio.selectors]
+input             = "textarea[placeholder]"
+send_button       = "button[aria-label='Run']"
+stop_button       = "button[aria-label='Stop']"
+assistant_message = "ms-chat-turn[data-turn-role='Model']"
+
+# ---------- Arena AI ----------
+[providers.arena]
+name = "arena"
+url_patterns = ["https://lmarena.ai/*", "https://chat.lmsys.org/*"]
+capabilities = { streams = true, tool_calls = false, vision = false, max_context_tokens = 64000 }
+extraction = "dom_only"
+
+[providers.arena.selectors]
+input             = "textarea[placeholder='Enter text...']"
+send_button       = "button.send-btn"
+stop_button       = "button.stop-btn"
+assistant_message = ".chat-message[data-role='assistant']"
+
+# ---------- Routing Groups ----------
+[groups.fast]
+strategy = "round_robin"
+members = [
+    { provider = "gemini", preset = "flash" },
+    { provider = "chatgpt" },
+]
+
+[groups.smart]
+strategy = "hash_conversation"
+members = [
+    { provider = "claude" },
+    { provider = "chatgpt" },
+]
+
+[groups.fallback]
+strategy = "failover"
+members = [
+    { provider = "chatgpt" },
+    { provider = "claude" },
+    { provider = "gemini" },
+]
+
+# ---------- Proxy ----------
+[proxy]
+enabled = false
+# address = "socks5://127.0.0.1:1080"
+# bypass = "localhost,127.0.0.1"
+
+# ---------- Scheduled Restart ----------
+[scheduled_restart]
+enabled = false
+at = "04:00"
+drain_secs = 30
