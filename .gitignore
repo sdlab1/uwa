@@ -30,3 +30,7 @@ rustc-ice-*.txt
 
 # todo folder with todo docs
 todo/
+
+sidecar/__pycache__/
+sidecar/tests/__pycache__/
+sidecar/.pytest_cache/
