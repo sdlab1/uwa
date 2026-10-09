@@ -41,6 +41,9 @@ pub struct CdpTransport {
     oopif: Arc<OopifRegistry>,
     target_ids: Arc<Mutex<HashMap<TabId, String>>>,
     tasks: Vec<JoinHandle<()>>,
+    /// Original debug URL (http://host:port or ws://host:port/...) — used
+    /// to resolve OOPIF target WebSocket URLs via /json/list.
+    debug_url: Arc<String>,
 }
 
 impl Drop for CdpTransport {
@@ -112,6 +115,7 @@ impl CdpTransport {
         // machine already attaches to, which splits one page over two CDP
         // sessions and stalls navigation.
 
+        let debug_url = Arc::new(ws_url.to_string());
         let created_task = {
             let browser = browser.clone();
             let pool = pool.clone();
@@ -120,6 +124,7 @@ impl CdpTransport {
             let pumped = pumped.clone();
             let stealth = stealth.clone();
             let oopif = oopif.clone();
+            let debug_url = debug_url.clone();
             tokio::spawn(async move {
                 let mut created = created;
                 while let Some(ev) = created.next().await {
@@ -137,6 +142,7 @@ impl CdpTransport {
                                 &pumped,
                                 &stealth,
                                 &oopif,
+                                &debug_url,
                             )
                             .await
                         }
@@ -182,7 +188,17 @@ impl CdpTransport {
             warn!("connected to {ws_url} but it exposes no pages");
         }
         for page in pages {
-            register_target(page, &pool, &bus, &target_ids, &pumped, &stealth, &oopif).await;
+            register_target(
+                page,
+                &pool,
+                &bus,
+                &target_ids,
+                &pumped,
+                &stealth,
+                &oopif,
+                &debug_url,
+            )
+            .await;
         }
 
         info!("cdp connected to {ws_url}");
@@ -193,6 +209,7 @@ impl CdpTransport {
             target_ids,
             tasks,
             oopif,
+            debug_url: Arc::new(ws_url.to_string()),
         })
     }
 
@@ -206,6 +223,12 @@ impl CdpTransport {
 
     pub fn oopif(&self) -> Arc<OopifRegistry> {
         self.oopif.clone()
+    }
+
+    /// The original debug URL used to connect (http or ws).
+    /// Used by the snapshot binary and OOPIF WebSocket resolver.
+    pub fn debug_url(&self) -> Arc<String> {
+        self.debug_url.clone()
     }
 
     /// Resolve a logical tab to its CDP target id (for bus subscriptions).
@@ -288,6 +311,7 @@ async fn eval_on(page: &CdpPage, js: &str) -> Result<serde_json::Value> {
 ///
 /// Returns immediately if the target already has a pump, so the initial page
 /// enumeration and `Target.targetCreated` never double-subscribe.
+#[allow(clippy::too_many_arguments)]
 async fn register_target(
     page: CdpPage,
     pool: &Arc<TabPool>,
@@ -296,6 +320,7 @@ async fn register_target(
     pumped: &Arc<Mutex<HashSet<String>>>,
     stealth: &Option<StealthPack>,
     oopif: &Arc<OopifRegistry>,
+    debug_ws_url: &Arc<String>,
 ) {
     let tid = page.target_id().inner().clone();
     if !pumped.lock().await.insert(tid.clone()) {
@@ -339,6 +364,7 @@ async fn register_target(
         }
     };
 
+    let stealth_arc: Option<Arc<StealthPack>> = stealth.as_ref().map(|s| Arc::new(s.clone()));
     tokio::spawn(pump_page(
         page,
         bus.clone(),
@@ -346,6 +372,8 @@ async fn register_target(
         oopif.clone(),
         oo_attached_rx,
         oo_detached_rx,
+        debug_ws_url.clone(),
+        stealth_arc,
     ));
 }
 
@@ -358,6 +386,7 @@ async fn register_target(
 /// cross-origin iframe loads, the page session emits `Target.attachedToTarget`
 /// for the iframe's own CDP target — we see it here, resolve the frame ID
 /// via `Page.getFrameTree`, and register the session in [`OopifRegistry`].
+#[allow(clippy::too_many_arguments)]
 async fn pump_page(
     page: CdpPage,
     bus: NetBus,
@@ -365,6 +394,8 @@ async fn pump_page(
     oopif: Arc<OopifRegistry>,
     mut oo_attached_rx: Option<chromiumoxide::listeners::EventStream<EventAttachedToTarget>>,
     mut oo_detached_rx: Option<chromiumoxide::listeners::EventStream<EventDetachedFromTarget>>,
+    debug_ws_url: Arc<String>,
+    stealth: Option<Arc<StealthPack>>,
 ) {
     let mut frames = match page.event_listener::<EventFrameAttached>().await {
         Ok(s) => s,
@@ -423,6 +454,10 @@ async fn pump_page(
                         let mut updated = sess;
                         updated.frame_id = Some(fid.clone());
                         oopif.update_frame_id(updated).await;
+                        metrics::counter!(
+                            "uwa_oopif_backfilled_total"
+                        )
+                        .increment(1);
                         debug!(frame = %fid, "back-filled pending OOPIF frame_id");
                     }
                 }
@@ -475,15 +510,47 @@ async fn pump_page(
                 match frame_id {
                     Some(fid) => {
                         oopif.insert(session).await;
+                        metrics::counter!(
+                            "uwa_oopif_attached_total",
+                            "type" => info.r#type.clone(),
+                            "state" => "registered"
+                        )
+                        .increment(1);
                         debug!(
                             target = %info.target_id.inner(),
                             frame = %fid,
                             url = %info.url,
                             "OOPIF attached and registered"
                         );
+                        // Inject stealth into the OOPIF via its dedicated
+                        // WebSocket (bypasses chromiumoxide's session
+                        // limitation). One-shot, spawned in background.
+                        if let Some(pack) = &stealth {
+                            let ws_url = debug_ws_url.clone();
+                            let tid = info.target_id.inner().clone();
+                            let pack = pack.clone();
+                            tokio::spawn(async move {
+                                match crate::oopif_ws::stealth_oopif(&ws_url, &tid, pack).await {
+                                    Ok(()) => {
+                                        tracing::debug!(target = %tid, "stealth injected into OOPIF");
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(target = %tid, "OOPIF stealth failed: {e}");
+                                        metrics::counter!("uwa_oopif_attach_failed_total")
+                                            .increment(1);
+                                    }
+                                }
+                            });
+                        }
                     }
                     None => {
                         pending_oopifs.push(session);
+                        metrics::counter!(
+                            "uwa_oopif_attached_total",
+                            "type" => info.r#type.clone(),
+                            "state" => "pending_frame_id"
+                        )
+                        .increment(1);
                         debug!(
                             target = %info.target_id.inner(),
                             "OOPIF attached before its frame event; parked for back-fill"
@@ -493,6 +560,11 @@ async fn pump_page(
             }
             Some(ev) = async { oo_detached_rx.as_mut()?.next().await }, if oo_detached_rx.is_some() => {
                 oopif.remove_by_session(&ev.session_id).await;
+                metrics::counter!(
+                    "uwa_oopif_detached_total",
+                    "reason" => "detached"
+                )
+                .increment(1);
                 debug!(session = %ev.session_id.inner(), "OOPIF detached");
             }
         }

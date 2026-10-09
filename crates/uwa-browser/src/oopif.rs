@@ -344,6 +344,11 @@ pub async fn pump_target_lifecycle(
             }
             Some(ev) = async { destroyed.as_mut()?.next().await }, if destroyed.is_some() => {
                 registry.remove_by_target(&ev.target_id).await;
+                metrics::counter!(
+                    "uwa_oopif_detached_total",
+                    "reason" => "destroyed"
+                )
+                .increment(1);
             }
             else => break,
         }
