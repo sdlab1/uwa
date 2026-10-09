@@ -10,6 +10,106 @@
 
 </div>
 
+## Table of contents
+
+- [Features](#features)
+- [Quickstart](#quickstart)
+- [Endpoints](#endpoints)
+- [Providers](#providers)
+- [Configuration](#configuration)
+- [MCP integration](#mcp-integration)
+- [Web dashboard](#web-dashboard)
+- [Dual backend](#dual-backend)
+- [Architecture](#architecture)
+- [Development](#development)
+- [Docker](#docker)
+- [Known limitations](#known-limitations)
+- [License](#license)
+
+> **A local-first, high-performance bridge that turns your logged-in browser sessions into standard OpenAI- and Anthropic-compatible HTTP APIs.**
+
+`uwa` is a native Rust reimplementation of the local web-API bridge concept. It speaks directly to Chromium over the Chrome DevTools Protocol (CDP), drives a Tab Pool, extracts streaming responses through a dual-channel (network-first / DOM-fallback) pipeline, and exposes everything behind a standard OpenAI/Anthropic surface. No Node.js, no Python runtime on the hot path, no API keys leaving your machine.
+
+Built with a single goal: **because Rust makes it faster, leaner, and harder to break.**
+
+---
+
+## ⚠️ Disclaimer & Legal Notice
+
+This project is provided strictly for **educational, academic, and research purposes** as a proof-of-concept in browser automation, CDP interaction, and low-level HTTP reverse-proxying.
+
+- **No Harm Intended** — The authors do not encourage, condone, or support any activity that violates the Terms of Service (ToS) of any web service or AI provider.
+- **User Responsibility** — Users are solely responsible for compliance with applicable terms, rate limits, and policies of third-party platforms.
+- **Non-Profit & Open Source** — Provided "as is" under the MIT License, without warranty of any kind. Use it responsibly and at your own risk.
+
+`uwa` runs entirely on the user's local system. It does **not** provide any functionality to bypass authentication, solve CAPTCHAs, or reverse-engineer encrypted APIs. You must log into your own valid accounts in the controlled browser. Do not use this tool for high-frequency automated requests or commercial purposes.
+
+---
+
+## 💡 Why Rust?
+
+Modern developer tooling is dominated by Python. Convenient as it is, Python introduces interpreter overhead, heavy memory footprints, and GIL-imposed concurrency limits that are unacceptable when you are sitting between an interactive browser and a real-time streaming pipeline.
+
+**`uwa` was built on a simple principle: *because we can, and Rust makes it better.***
+
+| Concern | Python bridge | `uwa` (Rust) |
+|---|---|---|
+| Memory footprint | ~200 MB idle | < 30 MB idle |
+| Streaming latency | interpreter + GIL | zero-cost async, no GC |
+| Type safety | runtime duck-typing | compile-time contracts across 14 crates |
+| Concurrency | thread pool + locks | `tokio` tasks, `ArcSwap`, per-provider semaphores |
+| Deployment | venv + pip + deps | single static binary + optional sidecar |
+
+By combining Rust's ownership model, `tokio`'s async runtime, `axum`'s tower-based HTTP stack, and raw CDP over WebSockets, `uwa` demonstrates that infrastructure tooling does not need to be heavy to be productive.
+
+**Credits** — inspired by the original Python implementation, [`universal-web-api`](https://github.com/lumingya/universal-web-api). `uwa` is a clean-room Rust redesign, not a port.
+
+---
+
+## 🏛️ Highlights
+
+- **Zero-config OpenAI/Anthropic compatibility** — `/v1/chat/completions`, `/v1/messages`, `/v1/responses`, `/v1/models`, `/v1/messages/count_tokens`.
+- **Dual-backend transport** — `chromiumoxide` (CDP-attach, oracle/debug) or `nodriver` (Python sidecar, stealth-by-construction for aggressive sites). Per-provider choice at startup, no hot-swap ambiguity.
+- **OOPIF-aware extraction** — `Target.setAutoAttach({ flatten: true })` with frame-scoped CDP sessions; SSE from cross-origin iframes lands in the same channel as the main page.
+- **Network-first streaming** — per-site SSE parsers (ChatGPT cumulative → delta, Claude `content_block_delta`, Gemini batchexecute), DOM stability fallback via `scraper`.
+- **Two-way MCP** — serves itself as an MCP server (`web__chat`, prompt `ask`, resource `uwa://web/tabs`) and consumes external MCP servers, injecting their tools into the web-UI LLM via the `<tool_call>` protocol.
+- **Resilience built-in** — circuit breaker, per-provider semaphores, jittered retry, graceful shutdown, PID file.
+- **Hot config reload** — `POST /admin/config/reload` swaps `ArcSwap<Config>` and provider registry atomically, no restart.
+- **Observability** — `/metrics` (Prometheus, default-on), `/admin/history` (JSONL-backed), `/admin/stats` (p50/p95, error rate), live SSE log stream, self-contained web dashboard at `/`.
+
+---
+
+## 🧱 Architecture at a glance
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│  Clients  (Cursor · Codex · Continue · Claude SDK · Claude   │
+│           Desktop MCP · any OpenAI/Anthropic-compatible app) │
+└──────────────────────────┬───────────────────────────────────┘
+                           │  HTTP (OpenAI · Anthropic · Responses)
+                           ▼
+┌──────────────────────────────────────────────────────────────┐
+│  uwa-api  (axum + tower)                                     │
+│  ├─ /v1/*  ───── OpenAI / Anthropic / Responses adapters     │
+│  ├─ /admin/* ─── hot reload · history · stats · breakers     │
+│  └─ /       ─── dashboard (static, no framework)             │
+├──────────────────────────────────────────────────────────────┤
+│  uwa-session · uwa-resilience · uwa-history · uwa-tools      │
+│  uwa-mcp  (server + client)                                  │
+├──────────────────────────────────────────────────────────────┤
+│  uwa-providers  (one generic SiteProvider, TOML-driven)      │
+│  uwa-extract    (SSE parsers · DOM fallback · finisher)      │
+├──────────────────────────────────────────────────────────────┤
+│  uwa-browser   ── CdpTransport (chromiumoxide)               │
+│                ── NodriverTransport (Python sidecar)         │
+│                ── TabPool · NetBus · OopifRegistry           │
+├──────────────────────────────────────────────────────────────┤
+│  Chromium (running or launched)                              │
+│  ├─ logged-in web UIs: chatgpt.com · claude.ai · …           │
+│  └─ stealth flags applied by nodriver at launch              │
+└──────────────────────────────────────────────────────────────┘
+```
+
 ---
 
 ## What it is
@@ -31,24 +131,6 @@ It exposes a **local, standard HTTP API** — same wire format your clients alre
                                         │ / Cursor MCP  │
                                         └───────────────┘
 ```
-
----
-
-## Table of contents
-
-- [Features](#features)
-- [Quickstart](#quickstart)
-- [Endpoints](#endpoints)
-- [Providers](#providers)
-- [Configuration](#configuration)
-- [MCP integration](#mcp-integration)
-- [Web dashboard](#web-dashboard)
-- [Dual backend](#dual-backend)
-- [Architecture](#architecture)
-- [Development](#development)
-- [Docker](#docker)
-- [Known limitations](#known-limitations)
-- [License](#license)
 
 ---
 
