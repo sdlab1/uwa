@@ -35,12 +35,6 @@ pub struct Config {
     /// model-name -> provider-name
     #[serde(default)]
     pub model_aliases: HashMap<String, String>,
-    /// External MCP servers to connect to as stdio subprocesses.
-    #[serde(default)]
-    pub mcp_clients: Vec<McpClientConfig>,
-    /// Expose this bridge itself via stdio as an MCP server.
-    #[serde(default)]
-    pub mcp_server: McpServerConfig,
     /// Stealth configuration.
     #[serde(default)]
     pub stealth: StealthCfg,
@@ -178,22 +172,6 @@ impl Default for NodriverBackendCfg {
             init_timeout_ms: default_sidecar_timeout_ms(),
         }
     }
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct McpServerConfig {
-    #[serde(default)]
-    pub enabled: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct McpClientConfig {
-    pub name: String,
-    pub command: String,
-    #[serde(default)]
-    pub args: Vec<String>,
-    #[serde(default)]
-    pub env: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

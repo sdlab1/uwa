@@ -1,8 +1,10 @@
 //! Every piece of the daemon, in start-up order:
-//! config → pid file → shutdown → providers → transport → MCP clients →
-//! sessions → semaphores → MCP server → HTTP → graceful drain.
+//! config → pid file → shutdown → providers → transport → sessions →
+//! history → semaphores → HTTP → graceful drain.
 //!
 //! `main.rs` only parses the CLI and calls [`run`].
+//!
+//! No MCP here — UWA is a bridge. MCP servers live in the client (agent).
 
 use anyhow::Context;
 use std::net::SocketAddr;
@@ -10,17 +12,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use uwa_api::{router, AppState, ProviderRegistry};
-use uwa_browser::NodriverTransport;
 use uwa_config::Config;
-use uwa_core::{
-    types::openai::{ChatCompletionRequest, ChatMessage},
-    types::Role,
-    Transport,
-};
-use uwa_mcp::{
-    DispatcherFn, McpClientProvider, McpServer, StdioClient, ToolRouter, WebChatHandler,
-    WebPromptHandler, WebTabsHandler,
-};
+use uwa_core::Transport;
 
 /// Endpoint of a Chromium started with `--remote-debugging-port=9222`.
 /// `CdpTransport::connect` resolves `http(s)` URLs through `/json/version`,
@@ -82,7 +75,7 @@ pub async fn run_with(config_path: PathBuf, cdp_url: &str) -> anyhow::Result<()>
                 nd_cfg.extra_args.push(arg);
             }
         }
-        let transport = NodriverTransport::spawn(&nd_cfg)
+        let transport = uwa_browser::NodriverTransport::spawn(&nd_cfg)
             .await
             .with_context(|| "spawn nodriver sidecar")?;
         tracing::info!(
@@ -113,25 +106,6 @@ pub async fn run_with(config_path: PathBuf, cdp_url: &str) -> anyhow::Result<()>
         Arc::new(transport)
     };
 
-    // MCP clients.
-    let mut tool_router = ToolRouter::new();
-    for client_cfg in &config.mcp_clients {
-        let args: Vec<String> = client_cfg.args.clone();
-        match StdioClient::spawn(&client_cfg.name, &client_cfg.command, &args).await {
-            Ok(client) => {
-                let client = Arc::new(client);
-                if let Err(e) = client.initialize().await {
-                    tracing::warn!(server = %client_cfg.name, "MCP initialize failed: {e}");
-                } else {
-                    tracing::info!(server = %client_cfg.name, "MCP client registered");
-                    tool_router.register(Arc::new(McpClientProvider::new(client)));
-                }
-            }
-            Err(e) => tracing::warn!(server = %client_cfg.name, "MCP spawn failed: {e}"),
-        }
-    }
-    let tool_router = Arc::new(tool_router);
-
     // Sessions + sweeper.
     let sessions = Arc::new(uwa_session::SessionManager::new(
         uwa_session::SessionCfg::default(),
@@ -156,6 +130,10 @@ pub async fn run_with(config_path: PathBuf, cdp_url: &str) -> anyhow::Result<()>
         });
     }
 
+    // History (JSONL persistence on).
+    let history =
+        Arc::new(uwa_history::HistoryStore::new(uwa_history::HistoryCfg::default(), true).await?);
+
     // Semaphores: two slots per configured provider, four by default.
     let mut sem = uwa_resilience::semaphore::ProviderSemaphores::new(4);
     for name in config.providers.keys() {
@@ -165,21 +143,7 @@ pub async fn run_with(config_path: PathBuf, cdp_url: &str) -> anyhow::Result<()>
     let state = AppState::minimal(config.clone(), Arc::new(registry), transport.clone())
         .with_sessions(sessions.clone())
         .with_semaphores(Arc::new(sem))
-        .with_tool_router(tool_router);
-
-    // MCP server (stdio)
-    let mut mcp_handle = None;
-    if config.mcp_server.enabled {
-        let mcp = build_mcp_server(&state);
-
-        let mcp_stdio = mcp;
-        mcp_handle = Some(tokio::spawn(async move {
-            if let Err(e) = mcp_stdio.serve_stdio().await {
-                tracing::error!("MCP stdio: {e}");
-            }
-        }));
-        tracing::info!("MCP server enabled on stdio");
-    }
+        .with_history(history);
 
     // HTTP API.
     let addr: SocketAddr = format!("{}:{}", config.server.bind, config.server.port).parse()?;
@@ -201,9 +165,6 @@ pub async fn run_with(config_path: PathBuf, cdp_url: &str) -> anyhow::Result<()>
         Ok(Ok(Err(e))) => tracing::warn!("http server: {e}"),
         Ok(Err(_)) | Err(_) => tracing::warn!("http did not drain within 15s"),
     }
-    if let Some(handle) = mcp_handle {
-        handle.abort();
-    }
 
     // Give in-flight conversations a moment before the tabs go away.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
@@ -214,54 +175,9 @@ pub async fn run_with(config_path: PathBuf, cdp_url: &str) -> anyhow::Result<()>
     Ok(())
 }
 
-/// The MCP server the daemon exposes: chat via the pipeline, tabs as a tool
-/// and a resource, and the `ask` prompt.
-fn build_mcp_server(state: &AppState) -> Arc<McpServer> {
-    let providers_list: Arc<dyn Fn() -> Vec<String> + Send + Sync> = {
-        let cfg = state.config.clone();
-        Arc::new(move || {
-            let mut names: Vec<String> = cfg.providers.keys().cloned().collect();
-            names.sort();
-            names
-        })
-    };
-    Arc::new(
-        McpServer::new("uwa")
-            .register(Arc::new(WebChatHandler::new(chat_dispatcher(
-                state.clone(),
-            ))))
-            .register(Arc::new(WebTabsHandler::new(state.transport.clone())))
-            .register(Arc::new(WebPromptHandler::new(providers_list))),
-    )
-}
-
-/// `web__chat(provider, message)` — an MCP client asks the pipeline for one
-/// answer, with no local or remote tools in play.
-fn chat_dispatcher(state: AppState) -> DispatcherFn {
-    Arc::new(move |provider, message| {
-        let st = state.clone();
-        Box::pin(async move {
-            let req = ChatCompletionRequest {
-                model: provider,
-                messages: vec![ChatMessage::text(Role::User, message)],
-                stream: Some(false),
-                temperature: None,
-                max_tokens: None,
-                tools: None,
-                tool_choice: Some(serde_json::json!("none")),
-                user: None,
-            };
-            let (text, _, _) = uwa_api::routes::chat::run_pipeline(&st, &req, &[], None).await?;
-            Ok(text)
-        })
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::{json, Value};
-    use uwa_mcp::JsonRpcRequest;
     use uwa_testkit::MockTransport;
 
     fn state_without_browser() -> AppState {
@@ -282,41 +198,12 @@ mod tests {
         )
     }
 
-    async fn call(server: &McpServer, method: &str) -> Value {
-        let resp = server
-            .dispatch_public(JsonRpcRequest::new(1, method, Some(json!({}))))
-            .await;
-        match (resp.result, resp.error) {
-            (Some(v), _) => v,
-            (None, Some(e)) => panic!("{method} failed: {e:?}"),
-            (None, None) => panic!("{method} returned nothing"),
-        }
-    }
-
     #[tokio::test]
-    async fn build_mcp_server_serves_tools_resources_and_prompts() {
-        let mcp = build_mcp_server(&state_without_browser());
-
-        let tools = call(&mcp, "tools/list").await;
-        let names: Vec<&str> = tools["tools"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|t| t["name"].as_str())
-            .collect();
-        assert!(names.contains(&"web__chat"), "{names:?}");
-        assert!(names.contains(&"web__list_tabs"), "{names:?}");
-
-        let resources = call(&mcp, "resources/list").await;
-        assert_eq!(resources["resources"][0]["uri"], "uwa://web/tabs");
-
-        let prompts = call(&mcp, "prompts/list").await;
-        assert_eq!(prompts["prompts"][0]["name"], "ask");
-
-        let init = call(&mcp, "initialize").await;
-        assert!(init["capabilities"]["tools"].is_object());
-        assert!(init["capabilities"]["resources"].is_object());
-        assert!(init["capabilities"]["prompts"].is_object());
+    async fn state_assembles_without_mcp() {
+        // Bridge semantics: the state carries no MCP anything.
+        let state = state_without_browser();
+        assert!(state.providers.is_empty());
+        assert!(state.runtime.history.is_none());
     }
 
     #[tokio::test]

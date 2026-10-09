@@ -3,6 +3,16 @@
 //! This module is deliberately thin: it does request routing, resolves
 //! provider + tools, and delegates to [`pipeline::run_pipeline`]. All
 //! response shaping lives in [`nonstream`] and [`stream`].
+//!
+//! ## Bridge semantics
+//!
+//! UWA is a **translation bridge**, not an agent. Tools come from the
+//! client request (`req.tools`) — nothing else. UWA injects their
+//! schemas into the browser prompt, parses tool-call markers from the
+//! browser LLM's answer, and returns them to the client as OpenAI
+//! `tool_calls`. UWA never executes tools; the client (an agent, a
+//! script, whatever) runs them however it wants and sends the results
+//! back as `role:"tool"` messages.
 
 pub mod nonstream;
 pub mod pipeline;
@@ -13,15 +23,14 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::Value;
 use uwa_core::types::openai::ChatCompletionRequest;
-use uwa_core::types::FinishReason;
 use uwa_core::{RequestId, ToolSpec, UwaError};
-use uwa_tools::{ToolCall, ToolDefinition};
+use uwa_tools::ToolDefinition;
 
 use crate::error::ApiResult;
 use crate::state::AppState;
 
-use crate::routes::chat::pipeline::run_pipeline_with_hint;
 pub use pipeline::run_pipeline;
+use pipeline::run_pipeline_with_hint;
 
 /// Extract ToolSpecs from the request's tools field.
 pub fn local_tools(req: &ChatCompletionRequest) -> Vec<ToolSpec> {
@@ -35,28 +44,6 @@ pub fn local_tools(req: &ChatCompletionRequest) -> Vec<ToolSpec> {
     }
 }
 
-/// Run the pipeline with the given local tools and optionally include MCP tools.
-pub async fn run_pipeline_with(
-    state: &AppState,
-    req: &ChatCompletionRequest,
-    local_tools: Vec<ToolSpec>,
-    include_remote: bool,
-) -> Result<(String, Vec<ToolCall>, FinishReason), UwaError> {
-    let mut all_specs = local_tools;
-    if include_remote {
-        let tool_choice_disabled = matches!(
-            req.tool_choice.as_ref().and_then(Value::as_str),
-            Some("none")
-        );
-        if !tool_choice_disabled {
-            if let Some(router) = &state.runtime.tool_router {
-                all_specs.extend(router.all_definitions().await?);
-            }
-        }
-    }
-    run_pipeline(state, req, &all_specs, None).await
-}
-
 /// HTTP handler.
 pub async fn chat_completions(
     State(state): State<AppState>,
@@ -64,10 +51,6 @@ pub async fn chat_completions(
     Json(req): Json<ChatCompletionRequest>,
 ) -> ApiResult<Response> {
     let hint = crate::routing::resolve_hint(&state, &hint).await?;
-    println!(
-        "hint after resolve: provider={:?}, tab={:?}",
-        hint.provider, hint.tab
-    );
 
     // Resolve provider: hint first, then model_aliases.
     let provider_name = match hint.provider.as_deref() {
@@ -86,19 +69,15 @@ pub async fn chat_completions(
         Some("none")
     );
 
-    // Local tools from request + MCP tools from the router.
-    let mut all_specs: Vec<ToolSpec> = match &req.tools {
+    // Tools come from the client request only. That's ALL we support —
+    // UWA is a transparent bridge and never dispatches tools itself.
+    let all_specs: Vec<ToolSpec> = match &req.tools {
         Some(arr) if !tool_choice_disabled => ToolDefinition::from_openai_array(arr)?
             .into_iter()
             .map(ToolSpec::from)
             .collect(),
         _ => Vec::new(),
     };
-    if !tool_choice_disabled {
-        if let Some(router) = &state.runtime.tool_router {
-            all_specs.extend(router.all_definitions().await?);
-        }
-    }
 
     if !all_specs.is_empty() && !site.capabilities().tool_calls {
         return Err(UwaError::BadRequest(format!(

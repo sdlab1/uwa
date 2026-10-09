@@ -19,7 +19,7 @@ Built with a single goal: **because Rust makes it faster, leaner, and harder to 
 - [Endpoints](#endpoints)
 - [Providers](#providers)
 - [Configuration](#configuration)
-- [MCP integration](#mcp-integration)
+- [Bridge semantics](#bridge-semantics)
 - [Web dashboard](#web-dashboard)
 - [Dual backend](#dual-backend)
 - [Architecture](#architecture)
@@ -70,7 +70,7 @@ By combining Rust's ownership model, `tokio`'s async runtime, `axum`'s tower-bas
 - **Dual-backend transport** — `chromiumoxide` (CDP-attach, oracle/debug) or `nodriver` (Python sidecar, stealth-by-construction for aggressive sites). Per-provider choice at startup, no hot-swap ambiguity.
 - **OOPIF-aware extraction** — `Target.setAutoAttach({ flatten: true })` with frame-scoped CDP sessions; SSE from cross-origin iframes lands in the same channel as the main page.
 - **Network-first streaming** — per-site SSE parsers (ChatGPT cumulative → delta, Claude `content_block_delta`, Gemini batchexecute), DOM stability fallback via `scraper`.
-- **Two-way MCP** — serves itself as an MCP server (`web__chat`, prompt `ask`, resource `uwa://web/tabs`) and consumes external MCP servers, injecting their tools into the web-UI LLM via the `<tool_call>` protocol.
+- **Bridge semantics** — UWA translates OpenAI/Anthropic tool-calling to the browser LLM and back. Tools come from the client; the client executes them (via MCP, shell, or anything else). UWA never executes tools.
 - **Resilience built-in** — circuit breaker, per-provider semaphores, jittered retry, graceful shutdown, PID file.
 - **Hot config reload** — `POST /admin/config/reload` swaps `ArcSwap<Config>` and provider registry atomically, no restart.
 - **Observability** — `/metrics` (Prometheus, default-on), `/admin/history` (JSONL-backed), `/admin/stats` (p50/p95, error rate), live SSE log stream, self-contained web dashboard at `/`.
@@ -82,7 +82,7 @@ By combining Rust's ownership model, `tokio`'s async runtime, `axum`'s tower-bas
 ```
 ┌──────────────────────────────────────────────────────────────┐
 │  Clients  (Cursor · Codex · Continue · Claude SDK · Claude   │
-│           Desktop MCP · any OpenAI/Anthropic-compatible app) │
+│           Code · any OpenAI/Anthropic-compatible app)        │
 └──────────────────────────┬───────────────────────────────────┘
                            │  HTTP (OpenAI · Anthropic · Responses)
                            ▼
@@ -93,7 +93,6 @@ By combining Rust's ownership model, `tokio`'s async runtime, `axum`'s tower-bas
 │  └─ /       ─── dashboard (static, no framework)             │
 ├──────────────────────────────────────────────────────────────┤
 │  uwa-session · uwa-resilience · uwa-history · uwa-tools      │
-│  uwa-mcp  (server + client)                                  │
 ├──────────────────────────────────────────────────────────────┤
 │  uwa-providers  (one generic SiteProvider, TOML-driven)      │
 │  uwa-extract    (SSE parsers · DOM fallback · finisher)      │
@@ -112,22 +111,15 @@ By combining Rust's ownership model, `tokio`'s async runtime, `axum`'s tower-bas
 
 ## What it is
 
-`uwa` sits between your tools (Cursor, Continue, Codex CLI, Claude Desktop, any OpenAI/Anthropic SDK) and a Chromium instance where you're already logged in to web LLMs (ChatGPT, Claude, Gemini, DeepSeek, Kimi, Qwen, Grok, Doubao, AI Studio, LMArena).
+`uwa` sits between your tools (Cursor, Continue, Codex CLI, Claude Code, any OpenAI/Anthropic SDK) and a Chromium instance where you're already logged in to web LLMs (ChatGPT, Claude, Gemini, DeepSeek, Kimi, Qwen, Grok, Doubao, AI Studio, LMArena).
 
 It exposes a **local, standard HTTP API** — same wire format your clients already speak — and drives the browser behind the scenes over CDP (Chrome DevTools Protocol). No API keys, no scraping service, no MITM.
 
 ```
 ┌───────────────┐   OpenAI/Anthropic    ┌───────────────┐   CDP / pipe   ┌─────────────────┐
 │ Cursor / Codex│ ────────────────────► │  uwa daemon   │ ─────────────► │ Chromium with   │
-│  Claude SDK   │ ◄──────────────────── │  (this repo)  │                │ logged-in UIs   │
-└───────────────┘   tools / SSE         └───────┬───────┘                └─────────────────┘
-                                                │
-                                                │  MCP (stdio + HTTP+SSE)
-                                                ▼
-                                        ┌───────────────┐
-                                        │ Claude Desktop│
-                                        │ / Cursor MCP  │
-                                        └───────────────┘
+│  Claude Code  │ ◄──────────────────── │  (this repo)  │                │ logged-in UIs   │
+└───────────────┘   tools / SSE         └───────────────┘                └─────────────────┘
 ```
 
 ---
@@ -140,8 +132,7 @@ It exposes a **local, standard HTTP API** — same wire format your clients alre
 - **OpenAI Responses API** — `/v1/responses`, adapter for Codex CLI.
 - **Anthropic Messages** — `/v1/messages`, JSON + SSE streaming, `tool_use` / `tool_result` blocks.
 - **Anthropic token count** — `/v1/messages/count_tokens` for Claude SDK pre-checks.
-- **MCP server** (stdio + HTTP+SSE) — exposes `web__chat`, `web__list_tabs`, prompt `ask`, resource `uwa://web/tabs`.
-- **MCP client** — consumes external MCP servers and injects their tools into the web-UI LLM via the `<tool_call>` protocol.
+- **Transparent tool bridging** — client-declared `tools` are injected into the browser prompt; the browser LLM's tool-call markers are parsed and returned as standard `tool_calls`. UWA never executes tools.
 
 ### Transport & extraction
 
@@ -218,7 +209,7 @@ UWA_CHROMIUM_WS=ws://127.0.0.1:9222/devtools/browser \
   cargo run -p uwa-bin --release --features metrics -- --config uwa.toml
 ```
 
-The daemon prints its listen address on stderr. Logs go to stderr so they don't mix with MCP stdio.
+The daemon prints its listen address on stderr. Logs go to stderr.
 
 ### 3. Point any OpenAI client at it
 
@@ -353,8 +344,6 @@ Full reference: [`crates/uwa-bin/config.example.toml`](crates/uwa-bin/config.exa
 | `[backend]` | `kind = "cdp" \| "nodriver"`, plus per-backend options |
 | `[proxy]` | HTTP/SOCKS5 proxy settings |
 | `[stealth]` | pack name (`default`, `full`, `none`), user scripts dir |
-| `[mcp_server]` | enable MCP server over stdio (+ optional HTTP) |
-| `[[mcp_clients]]` | external MCP servers to consume |
 | `[model_aliases]` | `"gpt-4o" = "chatgpt"` mapping |
 | `[providers.*]` | per-site config |
 | `[groups.*]` | routing groups (round_robin / failover / hash_conversation) |
@@ -417,52 +406,24 @@ Route with `/group/fast/v1/chat/completions`.
 
 ---
 
-## MCP integration
+## Bridge semantics
 
-### As a server
+**UWA is a translation bridge, not an agent. It never executes tools.**
 
-```toml
-[mcp_server]
-enabled = true
-```
+Tools come from the client request (`tools: [...]`). UWA injects their schemas
+into the browser prompt, parses the tool-call markers from the browser LLM's
+answer, and returns them to the caller as standard OpenAI `tool_calls` /
+Anthropic `tool_use` blocks. The caller -- an agent like Claude Code or Cursor,
+a script, anything -- executes them however it wants (via MCP, shell, direct
+syscalls) and sends the results back as `role:"tool"` / `tool_result` messages.
 
-Exposed tools:
+### MCP
 
-- `web__chat(provider, message)` — one-shot ask.
-- `web__list_tabs()` — list connected tabs.
-- Prompt `ask(provider, question)` — templated ask.
-- Resource `uwa://web/tabs` — JSON list of tabs.
-
-Add to Claude Desktop:
-
-```json
-{
-  "mcpServers": {
-    "uwa": {
-      "command": "/path/to/uwa",
-      "args": ["--config", "/path/to/uwa.toml"]
-    }
-  }
-}
-```
-
-The MCP server writes to **stdout**; all `tracing` logs go to **stderr** — no interleaving.
-
-### As a client
-
-```toml
-[[mcp_clients]]
-name = "fs"
-command = "npx"
-args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
-
-[[mcp_clients]]
-name = "git"
-command = "uvx"
-args = ["mcp-server-git", "--repository", "."]
-```
-
-`uwa` consumes the external server's tool list and **injects it into the web-UI LLM via the `<tool_call>` protocol**. ChatGPT's web UI doesn't know what MCP is; the model just sees tool descriptions and emits `<tool_call>{"name":"fs__read_file",...}</tool_call>` blocks — which `uwa` parses, dispatches, and feeds back as `<tool_response>`.
+MCP is **not part of UWA** -- by design. Configure MCP servers in your
+**agent** (Claude Code, Cursor, custom), not in UWA. UWA exposes a standard
+OpenAI/Anthropic API with `tools` support; the agent's MCP servers appear to
+the agent as regular tools, and the agent forwards the ones it needs in each
+request. UWA stays a transparent pipe.
 
 ---
 
@@ -532,7 +493,6 @@ Fourteen Rust crates, one Python sidecar, one static dashboard.
 uwa-core          DTO, traits, ids, errors, workflow schema, net rules. No I/O.
 uwa-config        TOML loader + validator + presets + groups + features.
 uwa-tools         <tool_call> parser (4 strategies), prompt injection, history.
-uwa-mcp           MCP server + client (stdio + HTTP+SSE), tool router.
 uwa-api           axum HTTP surface (OpenAI + Anthropic + admin + dashboard).
 uwa-browser       CDP + nodriver transports, TabPool, NetBus, OOPIF registry.
 uwa-extract       Network-first + DOM-fallback extraction + finisher + parsers.
@@ -551,7 +511,7 @@ crates/uwa-api/static/  Dashboard (HTML / CSS / JS).
 ### Key design decisions
 
 - **`uwa-core` is pure** — no axum, no chromiumoxide, no HTTP clients. Just `serde`, `thiserror`, `async-trait`.
-- **Everything external is a trait** — `Page`, `Transport`, `SiteProvider`, `ToolProvider`, `McpClient`, `McpHandler`. Tests mock 90%.
+- **Everything external is a trait** — `Page`, `Transport`, `SiteProvider`. Tests mock 90%.
 - **`RuntimeServices` uses `Arc<…>` fields** — `AppState::with_*` is a cheap copy, no data loss.
 - **`DashMap` guards never held across `.await`** — always snapshot first, then lock inner mutexes.
 - **Config is reloadable via `ArcSwap`** — in-flight requests keep their snapshot; new requests see the new config.
@@ -581,7 +541,6 @@ cargo test --workspace --all-features
 
 # Feature combos
 cargo test --workspace --features uwa-api/metrics
-cargo test --workspace --features uwa-mcp/mcp-http
 cargo build -p uwa-providers --features snapshot
 cargo build -p uwa-providers --features fixture-server
 ```

@@ -19,13 +19,13 @@ metrics = ["uwa-api/metrics"]
 uwa-core = { path = "../../uwa-core" }
 uwa-config = { path = "../uwa-config" }
 uwa-api = { path = "../uwa-api" }
-uwa-mcp = { path = "../uwa-mcp" }
 uwa-browser = { path = "../uwa-browser", features = ["cdp", "nodriver"] }
 uwa-providers = { path = "../uwa-providers" }
 uwa-stealth = { path = "../uwa-stealth" }
 uwa-session = { path = "../uwa-session" }
 uwa-resilience = { path = "../uwa-resilience" }
 uwa-lifecycle = { path = "../uwa-lifecycle" }
+uwa-history = { path = "../uwa-history" }
 
 tokio.workspace = true
 anyhow.workspace = true

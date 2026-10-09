@@ -1,4 +1,6 @@
 //! Wiring smoke test — everything except the real Chromium connect.
+//!
+//! No MCP: UWA is a bridge; tool execution lives in the client.
 
 use std::sync::Arc;
 use uwa_api::{AppState, ProviderRegistry};
@@ -15,7 +17,11 @@ async fn appstate_assembles_with_all_pieces() {
     sem = sem.with_limit("chatgpt", 2);
 
     let sessions = Arc::new(uwa_session::SessionManager::new(Default::default()));
-    let tool_router = Arc::new(uwa_mcp::ToolRouter::new());
+    let history = Arc::new(
+        uwa_history::HistoryStore::new(uwa_history::HistoryCfg::default(), false)
+            .await
+            .unwrap(),
+    );
 
     let state = AppState::minimal(
         cfg,
@@ -24,10 +30,10 @@ async fn appstate_assembles_with_all_pieces() {
     )
     .with_sessions(sessions.clone())
     .with_semaphores(Arc::new(sem))
-    .with_tool_router(tool_router);
+    .with_history(history);
 
     assert!(state.runtime.sessions.is_some());
-    assert!(state.runtime.tool_router.is_some());
+    assert!(state.runtime.history.is_some());
     assert_eq!(state.runtime.semaphores.available("chatgpt"), 2);
     // Breaker lazily created on first use.
     let b = state.breaker("chatgpt");

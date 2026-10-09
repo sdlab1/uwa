@@ -22,6 +22,4 @@ pub mod types;
 pub use error::{Result, UwaError};
 pub use ids::{ConversationId, RequestId, SessionId, TabId};
 pub use net::{ExtractionStrategy, FinisherTuning, NetDecoder, NetRules};
-pub use traits::{
-    Capabilities, NetworkEvent, Page, SiteProvider, ToolProvider, ToolSpec, Transport,
-};
+pub use traits::{Capabilities, NetworkEvent, Page, SiteProvider, ToolSpec, Transport};

@@ -65,19 +65,14 @@ pub async fn messages(
     // Convert to OpenAI.
     let oa_req = to_openai_request(&req, tool_choice_disabled)?;
 
-    // Collect tool specs — same logic as chat.rs.
-    let mut all_specs: Vec<ToolSpec> = match &oa_req.tools {
+    // Collect tool specs — client tools only (bridge semantics).
+    let all_specs: Vec<ToolSpec> = match &oa_req.tools {
         Some(arr) if !tool_choice_disabled => ToolDefinition::from_openai_array(arr)?
             .into_iter()
             .map(ToolSpec::from)
             .collect(),
         _ => Vec::new(),
     };
-    if !tool_choice_disabled {
-        if let Some(router) = &state.runtime.tool_router {
-            all_specs.extend(router.all_definitions().await?);
-        }
-    }
     if !all_specs.is_empty() && !site.capabilities().tool_calls {
         return Err(UwaError::BadRequest(format!(
             "model `{}` does not support tool calls",

@@ -4,7 +4,6 @@ use std::sync::Arc;
 use uwa_api::{router, AppState, ProviderRegistry};
 use uwa_config::Config;
 use uwa_core::{SiteProvider, Transport};
-use uwa_mcp::ToolRouter;
 use uwa_resilience::semaphore::ProviderSemaphores;
 use uwa_session::SessionManager;
 
@@ -27,7 +26,6 @@ pub struct AppBuilder {
     config: Arc<Config>,
     providers: Vec<Arc<dyn SiteProvider>>,
     transport: Arc<dyn Transport>,
-    tool_router: Option<Arc<ToolRouter>>,
     sessions: Option<Arc<SessionManager>>,
     semaphores: Option<Arc<ProviderSemaphores>>,
     history: Option<Arc<uwa_history::HistoryStore>>,
@@ -39,7 +37,6 @@ impl AppBuilder {
             config: default_config(),
             providers: Vec::new(),
             transport: Arc::new(MockTransport::with_n_tabs(1)),
-            tool_router: None,
             sessions: None,
             semaphores: None,
             history: None,
@@ -68,11 +65,6 @@ impl AppBuilder {
         self
     }
 
-    pub fn with_tool_router(mut self, tr: Arc<ToolRouter>) -> Self {
-        self.tool_router = Some(tr);
-        self
-    }
-
     pub fn with_sessions(mut self, sm: Arc<SessionManager>) -> Self {
         self.sessions = Some(sm);
         self
@@ -94,9 +86,6 @@ impl AppBuilder {
             registry.register(p);
         }
         let mut state = AppState::minimal(self.config, Arc::new(registry), self.transport);
-        if let Some(tr) = self.tool_router {
-            state = state.with_tool_router(tr);
-        }
         if let Some(sm) = self.sessions {
             state = state.with_sessions(sm);
         }

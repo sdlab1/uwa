@@ -1,6 +1,6 @@
 //! Shared application state: configuration, browser, providers and the
-//! runtime services assembled at startup (tool router, sessions, semaphores,
-//! circuit breakers).
+//! runtime services assembled at startup (sessions, semaphores, circuit
+//! breakers, history).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -8,7 +8,6 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use uwa_config::Config;
 use uwa_core::{Result, SiteProvider, Transport, UwaError};
-use uwa_mcp::ToolRouter;
 use uwa_resilience::circuit::{CircuitBreaker, CircuitCfg};
 use uwa_resilience::semaphore::ProviderSemaphores;
 use uwa_session::SessionManager;
@@ -28,7 +27,6 @@ pub struct AppState {
 /// so every route can keep a plain `Clone`.
 #[derive(Clone)]
 pub struct RuntimeServices {
-    pub tool_router: Option<Arc<ToolRouter>>,
     pub sessions: Option<Arc<SessionManager>>,
     pub semaphores: Arc<ProviderSemaphores>,
     pub breakers: Arc<DashMap<String, Arc<CircuitBreaker>>>,
@@ -38,7 +36,6 @@ pub struct RuntimeServices {
 impl Default for RuntimeServices {
     fn default() -> Self {
         Self {
-            tool_router: None,
             sessions: None,
             semaphores: Arc::new(ProviderSemaphores::new(4)),
             breakers: Arc::new(DashMap::new()),
@@ -48,7 +45,7 @@ impl Default for RuntimeServices {
 }
 
 impl AppState {
-    /// State with the default runtime services (no MCP router, no sessions).
+    /// State with the default runtime services (no sessions).
     pub fn minimal(
         config: Arc<Config>,
         providers: Arc<ProviderRegistry>,
@@ -60,13 +57,6 @@ impl AppState {
             transport,
             runtime: Arc::new(RuntimeServices::default()),
         }
-    }
-
-    pub fn with_tool_router(mut self, tr: Arc<ToolRouter>) -> Self {
-        let mut rt = (*self.runtime).clone();
-        rt.tool_router = Some(tr);
-        self.runtime = Arc::new(rt);
-        self
     }
 
     pub fn with_sessions(mut self, sm: Arc<SessionManager>) -> Self {

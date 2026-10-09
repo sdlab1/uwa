@@ -10,8 +10,6 @@
 //!   controllable tabs
 //! - [`provider::MockProvider`] — [`SiteProvider`](uwa_core::SiteProvider)
 //!   with a programmable answer and optional delay
-//! - [`tool_provider::MockToolProvider`] — `ToolProvider` for `ToolRouter`
-//!   tests
 //! - [`server::AppBuilder`], [`server::TestApp`] — one-shot
 //!   [`AppState`](uwa_api::AppState) + `axum_test` server
 //! - [`config::default_config`], [`config::config_with_key`] — canned
@@ -21,12 +19,10 @@ pub mod config;
 pub mod page;
 pub mod provider;
 pub mod server;
-pub mod tool_provider;
 pub mod transport;
 
 pub use config::{config_with_key, default_config, TEST_API_KEY, TEST_AUTH_HEADER};
 pub use page::MockPage;
 pub use provider::MockProvider;
 pub use server::{test_server, AppBuilder, TestApp};
-pub use tool_provider::MockToolProvider;
 pub use transport::MockTransport;

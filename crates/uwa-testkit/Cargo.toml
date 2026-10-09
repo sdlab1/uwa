@@ -10,7 +10,6 @@ publish = false
 uwa-core.workspace = true
 uwa-api = { path = "../uwa-api" }
 uwa-config = { workspace = true, features = ["test-helpers"] }
-uwa-mcp = { workspace = true }
 uwa-session = { workspace = true }
 uwa-resilience = { workspace = true }
 uwa-history = { path = "../uwa-history" }

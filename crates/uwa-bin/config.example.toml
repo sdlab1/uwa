@@ -9,14 +9,6 @@ request_timeout_ms = 120000
 pack = "default"
 # user_scripts_dir = "/etc/uwa/stealth.d"
 
-[mcp_server]
-enabled = false
-
-# [[mcp_clients]]
-# name = "fs"
-# command = "npx"
-# args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
-
 [model_aliases]
 "gpt-4o"            = "chatgpt"
 "gpt-4o-mini"       = "chatgpt"

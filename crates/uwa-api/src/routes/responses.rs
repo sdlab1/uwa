@@ -109,11 +109,11 @@ pub async fn create(
 ) -> ApiResult<Json<ResponsesResponse>> {
     let chat_req = to_chat_request(&req)?;
 
-    // Same entry the chat route uses, so breaker, semaphore, session pinning
-    // and the MCP tool loop all apply unchanged.
+    // Same entry the chat route uses, so breaker, semaphore and session
+    // pinning all apply unchanged. Bridge semantics: tools come from the
+    // client request only.
     let local_tools = chat::local_tools(&chat_req);
-    let (text, calls, finish) =
-        chat::run_pipeline_with(&state, &chat_req, local_tools, true).await?;
+    let (text, calls, finish) = chat::run_pipeline(&state, &chat_req, &local_tools, None).await?;
 
     let id = RequestId::new();
     let created = now_secs();

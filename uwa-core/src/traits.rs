@@ -98,25 +98,11 @@ pub trait Transport: Send + Sync {
 }
 
 /// One tool definition, decoupled from MCP/OpenAI formats.
-/// `uwa-tools` has the OpenAI <-> this converters; `uwa-mcp` has MCP <-> this.
+/// `uwa-tools` has the OpenAI <-> this converters.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ToolSpec {
     pub name: String,
     pub description: String,
     /// JSON Schema for arguments.
     pub parameters: Value,
-}
-
-/// Something that can list and execute tools. Implemented by:
-/// - `uwa-tools::LocalToolProvider` (inline tools from the chat request)
-/// - `uwa-mcp::McpClientProvider` (external MCP servers)
-#[async_trait]
-pub trait ToolProvider: Send + Sync {
-    /// Namespace used to prefix tools when multiple providers are registered.
-    /// `""` means "no namespace".
-    fn namespace(&self) -> &str;
-    async fn list_tools(&self) -> Result<Vec<ToolSpec>>;
-    /// Execute a tool by name (already de-namespaced by the router).
-    /// Returns the text content of the result (concatenated).
-    async fn call_tool(&self, name: &str, args: Value) -> Result<String>;
 }

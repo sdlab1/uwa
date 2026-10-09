@@ -34,7 +34,6 @@ jobs:
         features:
           - ""
           - "uwa-api/metrics"
-          - "uwa-mcp/mcp-http"
           - "uwa-bin/metrics"
           - "uwa-providers/snapshot"
     steps:
