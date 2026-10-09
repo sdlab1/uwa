@@ -170,4 +170,71 @@ impl uwa_core::Page for CdpPageAdapter {
             .map_err(|e| UwaError::Transport(format!("add_init_script: {e}")))?;
         Ok(())
     }
+
+    async fn frame_tree(&self) -> Result<Vec<(String, String)>> {
+        use chromiumoxide::cdp::browser_protocol::page::GetFrameTreeParams;
+
+        let tree = self
+            .page
+            .execute(GetFrameTreeParams::default())
+            .await
+            .map_err(|e| UwaError::Transport(format!("getFrameTree: {e}")))?;
+
+        fn walk(
+            tree: &chromiumoxide::cdp::browser_protocol::page::FrameTree,
+            out: &mut Vec<(String, String)>,
+        ) {
+            out.push((tree.frame.id.inner().clone(), tree.frame.url.clone()));
+            if let Some(children) = &tree.child_frames {
+                for child in children {
+                    walk(child, out);
+                }
+            }
+        }
+
+        let mut frames = Vec::new();
+        walk(&tree.result.frame_tree, &mut frames);
+        Ok(frames)
+    }
+
+    async fn eval_in_frame(&self, frame_id: &str, js: &str) -> Result<Value> {
+        use chromiumoxide::cdp::browser_protocol::page::CreateIsolatedWorldParams;
+
+        // Create an isolated world in the target frame. This works for
+        // same-process iframes (same-origin or same-site). For cross-origin
+        // OOPIFs (separate renderer process), Chrome rejects the command
+        // ("No frame for given id found") — evaluating inside an OOPIF
+        // requires session-scoped CDP commands, which chromiumoxide 0.7.0
+        // does not expose publicly. OOPIF sessions are still tracked in
+        // the OopifRegistry for when session support arrives (0.8+).
+        let world = self
+            .page
+            .execute(
+                CreateIsolatedWorldParams::builder()
+                    .frame_id(frame_id.to_string())
+                    .grant_univeral_access(true)
+                    .world_name("uwa-eval")
+                    .build()
+                    .map_err(|e| UwaError::Internal(format!("build CreateIsolatedWorld: {e}")))?,
+            )
+            .await
+            .map_err(|e| {
+                UwaError::Transport(format!("createIsolatedWorld for frame `{frame_id}`: {e}"))
+            })?;
+
+        // Evaluate in the isolated world's execution context.
+        let params = EvaluateParams::builder()
+            .expression(js.to_string())
+            .context_id(world.result.execution_context_id)
+            .return_by_value(true)
+            .await_promise(true)
+            .build()
+            .map_err(UwaError::Internal)?;
+        let res = self
+            .page
+            .evaluate(Evaluation::Expression(params))
+            .await
+            .map_err(|e| UwaError::Transport(format!("evaluate in frame `{frame_id}`: {e}")))?;
+        Ok(res.value().cloned().unwrap_or(Value::Null))
+    }
 }

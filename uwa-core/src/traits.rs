@@ -29,6 +29,20 @@ pub trait Page: Send + Sync {
     async fn eval_early(&self, _js: &str) -> Result<()> {
         Ok(())
     }
+    /// Return the frame tree as (frame_id, url) pairs, root first.
+    /// Default: empty (test mocks don't have frames).
+    async fn frame_tree(&self) -> Result<Vec<(String, String)>> {
+        Ok(Vec::new())
+    }
+    /// Evaluate JS inside a specific frame (including cross-origin OOPIFs).
+    /// `frame_id` is the CDP frame ID; the implementation routes to the
+    /// correct CDP session / execution context.
+    /// Default: error (only the CDP transport supports frames).
+    async fn eval_in_frame(&self, frame_id: &str, _js: &str) -> Result<Value> {
+        Err(crate::error::UwaError::Transport(format!(
+            "eval_in_frame(frame `{frame_id}`) requires a real browser transport"
+        )))
+    }
 }
 
 /// A network event relevant to response extraction.

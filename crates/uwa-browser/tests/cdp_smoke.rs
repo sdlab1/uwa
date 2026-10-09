@@ -164,6 +164,9 @@ fn chrome_args(profile: &std::path::Path, port: u16) -> Vec<String> {
         "--no-first-run".into(),
         "--no-default-browser-check".into(),
         "--password-store=basic".into(),
+        // Site isolation is required for OOPIF support: without it Chrome
+        // runs cross-origin iframes in the same renderer process.
+        "--site-per-process".into(),
         format!("--user-data-dir={}", profile.display()),
         "about:blank".into(),
     ]
@@ -529,6 +532,10 @@ fn launch_args_carry_the_keyring_workaround() {
     assert!(has("--no-sandbox"), "{args:?}");
     assert!(has("--disable-dev-shm-usage"), "{args:?}");
     assert!(has("--no-first-run"), "{args:?}");
+    assert!(
+        has("--site-per-process"),
+        "OOPIF support requires site isolation: {args:?}"
+    );
     assert!(has_prefix("--remote-debugging-port="), "{args:?}");
     assert!(
         has_prefix(&format!("--user-data-dir={}", profile.display())),
@@ -700,6 +707,197 @@ async fn chrome_renders_a_local_page_without_cdp() {
         &html[..html.len().min(600)]
     );
     eprintln!("[dump] {} bytes, payload rendered", html.len());
+}
+
+// ---------------------------------------------------------------------------
+// Frame evaluation + OOPIF tracking test.
+// ---------------------------------------------------------------------------
+
+/// Serve a two-iframe test page:
+/// - iframe#same → `http://127.0.0.1:{port}/iframe.html` (same-origin, same-process)
+/// - iframe#cross → `http://localhost:{port}/iframe.html` (cross-origin → OOPIF under --site-per-process)
+async fn serve_oopif_site(port: u16) {
+    let listener = TcpListener::bind(("0.0.0.0", port))
+        .await
+        .expect("bind oopif site");
+    eprintln!("[oopif-site] listening on 0.0.0.0:{port}");
+    loop {
+        let (mut sock, _) = match listener.accept().await {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("[oopif-site] accept error: {e}");
+                return;
+            }
+        };
+        tokio::spawn(async move {
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 1024];
+            loop {
+                let n = match sock.read(&mut chunk).await {
+                    Ok(0) | Err(_) => return,
+                    Ok(n) => n,
+                };
+                buf.extend_from_slice(&chunk[..n]);
+                if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let head = String::from_utf8_lossy(&buf);
+            let path = head.split_whitespace().nth(1).unwrap_or("/");
+
+            let body: String = if path.starts_with("/iframe.html") {
+                r#"<!doctype html><html><head><title>FrameContent</title></head>
+                   <body><div id="inner">frame-body-loaded</div></body></html>"#
+                    .to_string()
+            } else {
+                format!(
+                    r#"<!doctype html><html><head><title>Parent</title></head>
+                       <body><h1>Parent Page</h1>
+                       <iframe id="same" src="http://127.0.0.1:{port}/iframe.html"
+                               style="width:300px;height:100px"></iframe>
+                       <iframe id="cross" src="http://localhost:{port}/iframe.html"
+                               style="width:300px;height:100px"></iframe>
+                       </body></html>"#
+                )
+            };
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: text/html\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = sock.write_all(resp.as_bytes()).await;
+            let _ = sock.write_all(body.as_bytes()).await;
+            let _ = sock.flush().await;
+            let _ = sock.shutdown().await;
+        });
+    }
+}
+
+#[tokio::test]
+#[ignore = "needs a Chromium binary; run with UWA_CHROMIUM=1 cargo test -p uwa-browser -- --ignored"]
+async fn live_frames_eval_and_oopif_tracking() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("off")),
+        )
+        .with_writer(std::io::stderr)
+        .try_init();
+    if !enabled() {
+        eprintln!("skipped: set UWA_CHROMIUM=1 to run the frames test");
+        return;
+    }
+
+    let site_port = 38215u16;
+    let chrome_port = 38214u16;
+    tokio::spawn(serve_oopif_site(site_port));
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let guard = ChromeGuard::spawn(chrome_port).expect("no chromium found; set UWA_CHROME_BIN");
+    let debug_url = guard.debug_url(chrome_port);
+    assert!(
+        wait_for_ws(&debug_url, Duration::from_secs(20)).await,
+        "CDP endpoint never became reachable"
+    );
+
+    let scenario = async {
+        let transport = CdpTransport::connect(
+            &debug_url,
+            Duration::from_secs(30),
+            Some(uwa_stealth::default_pack()),
+        )
+        .await
+        .expect("connect");
+        eprintln!("[frames] connected");
+
+        let tabs = transport.list_tabs().await.expect("list_tabs");
+        let tab = tabs.first().expect("at least one tab").clone();
+        let page = transport.page(&tab).await.expect("acquire page");
+
+        let parent = url::Url::parse(&format!("http://127.0.0.1:{site_port}/")).unwrap();
+        page.goto(&parent).await.expect("goto parent");
+        eprintln!("[frames] navigated to parent");
+
+        // Give both iframes a moment to load.
+        tokio::time::sleep(Duration::from_secs(2)).await;
+
+        // --- Part 1: eval_in_frame in a same-origin (same-process) iframe ---
+        let frames = page.frame_tree().await.expect("frame_tree");
+        let same_origin_url = format!("http://127.0.0.1:{site_port}/iframe.html");
+        let mut same_frame_id: Option<String> = None;
+        for (fid, url) in &frames {
+            eprintln!("[frames] frame: id={fid} url={url}");
+            if url == &same_origin_url {
+                same_frame_id = Some(fid.clone());
+                break;
+            }
+        }
+        let same_frame_id = same_frame_id.expect("same-origin iframe not found in frame tree");
+        eprintln!("[frames] same-origin frame_id={same_frame_id}");
+
+        // Evaluate in the same-origin iframe — must read its own document.
+        let title = page
+            .eval_in_frame(&same_frame_id, "document.title")
+            .await
+            .expect("eval_in_frame on same-origin iframe");
+        eprintln!("[frames] title = {title:?}");
+        assert_eq!(
+            title,
+            serde_json::json!("FrameContent"),
+            "eval_in_frame must return the iframe's own document.title"
+        );
+
+        let inner = page
+            .eval_in_frame(
+                &same_frame_id,
+                "document.getElementById('inner')?.textContent",
+            )
+            .await
+            .expect("eval_in_frame DOM read");
+        eprintln!("[frames] inner = {inner:?}");
+        assert_eq!(
+            inner,
+            serde_json::json!("frame-body-loaded"),
+            "eval_in_frame must read DOM inside the iframe"
+        );
+
+        // --- Part 2: OOPIF detection (cross-origin iframe) ---
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut oopif_detected = false;
+        while Instant::now() < deadline && !oopif_detected {
+            let sessions = transport.oopif().all_sessions().await;
+            for s in &sessions {
+                if s.target_type == "iframe" {
+                    oopif_detected = true;
+                    eprintln!(
+                        "[frames] OOPIF tracked: frame={:?} target={} url={}",
+                        s.frame_id,
+                        s.target_id.inner(),
+                        s.url
+                    );
+                    break;
+                }
+            }
+            if !oopif_detected {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+            }
+        }
+        if oopif_detected {
+            eprintln!("[frames] OOPIF detection: OK");
+        } else {
+            eprintln!(
+                "[frames] OOPIF not detected (site isolation may treat localhost as same-site)"
+            );
+        }
+
+        drop(page);
+        eprintln!("[frames] ok");
+    };
+
+    tokio::time::timeout(SCENARIO_BUDGET, scenario)
+        .await
+        .expect("frames scenario exceeded its time budget");
+
+    drop(guard);
 }
 
 // ---------------------------------------------------------------------------

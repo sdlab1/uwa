@@ -1,7 +1,7 @@
 //! CDP transport: connect to a running Chromium and expose it as
 //! `uwa_core::Transport` backed by `chromiumoxide`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -12,7 +12,8 @@ use chromiumoxide::cdp::browser_protocol::network::{
 };
 use chromiumoxide::cdp::browser_protocol::page::EventFrameAttached;
 use chromiumoxide::cdp::browser_protocol::target::{
-    EventTargetCreated, EventTargetDestroyed, TargetId as CdpTargetId,
+    EventAttachedToTarget, EventDetachedFromTarget, EventTargetCreated, EventTargetDestroyed,
+    TargetId as CdpTargetId,
 };
 use chromiumoxide::cdp::js_protocol::runtime::EvaluateParams;
 use chromiumoxide::js::Evaluation;
@@ -320,8 +321,15 @@ async fn register_target(
     tokio::spawn(pump_page(page, bus.clone(), tid, oopif.clone()));
 }
 
-/// Per-page network pump: attributes responses to frames, pulls the body once
-/// the request finishes and republishes it on the target's [`NetBus`] channel.
+/// Per-page pump: attributes network responses to frames, tracks OOPIF
+/// children attached under this page, and republishes everything on the
+/// target's [`NetBus`] channel.
+///
+/// OOPIF tracking works because chromiumoxide installs
+/// `Target.setAutoAttach({flatten: true})` on every page session. When a
+/// cross-origin iframe loads, the page session emits `Target.attachedToTarget`
+/// for the iframe's own CDP target — we see it here, resolve the frame ID
+/// via `Page.getFrameTree`, and register the session in [`OopifRegistry`].
 async fn pump_page(page: CdpPage, bus: NetBus, target_id: String, oopif: Arc<OopifRegistry>) {
     let mut frames = match page.event_listener::<EventFrameAttached>().await {
         Ok(s) => s,
@@ -344,6 +352,10 @@ async fn pump_page(page: CdpPage, bus: NetBus, target_id: String, oopif: Arc<Oop
             return;
         }
     };
+    // OOPIF lifecycle: the page session emits attachedToTarget for every
+    // child target (iframes, popups, workers). We track iframes.
+    let mut oo_attached = page.event_listener::<EventAttachedToTarget>().await.ok();
+    let mut oo_detached = page.event_listener::<EventDetachedFromTarget>().await.ok();
 
     let mut frame_map = FrameMap::for_target(target_id.clone());
     let mut inflight: HashMap<String, (String, String, String)> = HashMap::new();
@@ -352,6 +364,13 @@ async fn pump_page(page: CdpPage, bus: NetBus, target_id: String, oopif: Arc<Oop
     // wire. Remember those ids and publish as soon as the response lands —
     // dropping the pair silently loses the body.
     let mut finished_first: HashSet<String> = HashSet::new();
+    // Frame IDs from `Page.frameAttached`, newest last. When an OOPIF target
+    // attaches, we pop the most recent frame ID — this is the frame slot the
+    // OOPIF was spawned for. If the queue is empty (the OOPIF attached before
+    // we saw the frame event), we park the session in `pending_oopifs` and
+    // back-fill it on the next `frameAttached`.
+    let mut recent_frames: VecDeque<String> = VecDeque::new();
+    let mut pending_oopifs: Vec<crate::oopif::AttachedSession> = Vec::new();
 
     loop {
         tokio::select! {
@@ -360,6 +379,21 @@ async fn pump_page(page: CdpPage, bus: NetBus, target_id: String, oopif: Arc<Oop
                 let fid = ev.frame_id.inner().clone();
                 let parent = Some(ev.parent_frame_id.inner().clone());
                 frame_map.attach(&fid, parent.as_deref());
+                recent_frames.push_back(fid.clone());
+                // Keep the queue bounded: frames from long-gone iframes are
+                // never matched by a new OOPIF.
+                if recent_frames.len() > 32 {
+                    recent_frames.pop_front();
+                }
+                // Back-fill any OOPIF that attached before its frame event.
+                if !pending_oopifs.is_empty() {
+                    if let Some(sess) = pending_oopifs.pop() {
+                        let mut updated = sess;
+                        updated.frame_id = Some(fid.clone());
+                        oopif.update_frame_id(updated).await;
+                        debug!(frame = %fid, "back-filled pending OOPIF frame_id");
+                    }
+                }
             }
             ev = responses.next() => {
                 let Some(ev) = ev else { break };
@@ -388,6 +422,46 @@ async fn pump_page(page: CdpPage, bus: NetBus, target_id: String, oopif: Arc<Oop
                     debug!(target = %target_id, req = %req, "finish precedes its response");
                     finished_first.insert(req);
                 }
+            }
+            Some(ev) = async { oo_attached.as_mut()?.next().await }, if oo_attached.is_some() => {
+                let info = &ev.target_info;
+                if info.r#type != "iframe" {
+                    debug!(target = %info.target_id.inner(), ty = %info.r#type, "non-iframe child target, skipping");
+                    continue;
+                }
+                // Pop the most recent frame ID — it is the frame slot this
+                // OOPIF was spawned for. If none is available yet, park the
+                // session; the next `frameAttached` will back-fill it.
+                let frame_id = recent_frames.pop_back();
+                let session = crate::oopif::AttachedSession {
+                    session_id: ev.session_id.clone(),
+                    target_id: info.target_id.clone(),
+                    target_type: info.r#type.clone(),
+                    frame_id: frame_id.clone(),
+                    url: info.url.clone(),
+                };
+                match frame_id {
+                    Some(fid) => {
+                        oopif.insert(session).await;
+                        debug!(
+                            target = %info.target_id.inner(),
+                            frame = %fid,
+                            url = %info.url,
+                            "OOPIF attached and registered"
+                        );
+                    }
+                    None => {
+                        pending_oopifs.push(session);
+                        debug!(
+                            target = %info.target_id.inner(),
+                            "OOPIF attached before its frame event; parked for back-fill"
+                        );
+                    }
+                }
+            }
+            Some(ev) = async { oo_detached.as_mut()?.next().await }, if oo_detached.is_some() => {
+                oopif.remove_by_session(&ev.session_id).await;
+                debug!(session = %ev.session_id.inner(), "OOPIF detached");
             }
         }
     }

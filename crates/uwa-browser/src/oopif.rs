@@ -148,6 +148,33 @@ impl OopifRegistry {
         );
     }
 
+    /// Update the frame ID of an already-registered OOPIF session.
+    ///
+    /// When an OOPIF target first attaches, its frame ID may not be resolvable
+    /// yet (the target is still on `about:blank`). This method back-fills the
+    /// mapping once the frame tree becomes available.
+    pub async fn update_frame_id(&self, session: AttachedSession) {
+        if let Some(fid) = session.frame_id.clone() {
+            debug!(
+                session = %session.session_id.inner(),
+                frame = %fid,
+                "back-filling OOPIF frame_id"
+            );
+            self.by_frame
+                .write()
+                .await
+                .insert(fid.clone(), session.clone());
+            self.by_session
+                .write()
+                .await
+                .insert(session.session_id.clone(), fid);
+        }
+        self.by_target
+            .write()
+            .await
+            .insert(session.target_id.clone(), session.session_id.clone());
+    }
+
     pub async fn all_sessions(&self) -> Vec<AttachedSession> {
         self.by_frame.read().await.values().cloned().collect()
     }
