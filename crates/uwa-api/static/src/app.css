@@ -355,3 +355,24 @@ tbody tr:hover { background: var(--panel-2); }
 .log-INFO   .log-msg { color: var(--text); }
 .log-DEBUG  .log-msg { color: var(--muted); }
 .log-TRACE  .log-msg { color: var(--muted); opacity: 0.7; }
+
+/* ---------- Stage waterfall ---------- */
+.wf { display: flex; flex-direction: column; gap: 4px; }
+.wf-bar {
+  display: flex; width: 100%;
+  border-radius: 4px; overflow: hidden;
+  background: var(--panel-3);
+}
+.wf-seg { height: 100%; transition: width 200ms ease; }
+.wf-acq  { background: #4caf7d; }
+.wf-send { background: #5a9eff; }
+.wf-wait { background: #e6a23c; }
+.wf-legend {
+  display: flex; gap: 14px;
+  font-size: 11px; color: var(--muted);
+  margin-top: 2px;
+}
+.wf-dot {
+  display: inline-block; width: 8px; height: 8px; border-radius: 2px;
+  margin-right: 5px; vertical-align: middle;
+}

@@ -2,7 +2,9 @@
   import { onMount } from 'svelte';
   import type { ChatMessage, ModelObject, ToolCallRef } from '../lib/types';
   import { chat, chatStream, getModels, ApiError } from '../lib/api';
-  import { toast } from '../lib/stores';
+  import {
+    toast, streamStart, streamFirstToken, streamDelta, streamDone, streamError,
+  } from '../lib/stores';
   import {
     loadSessions, saveSessions, newSession, deriveTitle, type ChatSession,
   } from '../lib/chatStore';
@@ -119,6 +121,7 @@
     firstTokenAt = null;
     finishedAt = null;
     startedAt = performance.now();
+    streamStart();
   }
 
   async function send(text: string, toolsJson: string) {
@@ -151,11 +154,13 @@
           onFirstToken: () => {
             firstTokenAt = performance.now();
             phase = 'first-token';
+            streamFirstToken();
             queueMicrotask(() => (phase = 'streaming'));
           },
           onDelta: (chunk) => {
             streamText += chunk;
             charsStreamed += chunk.length;
+            streamDelta(chunk.length);
             s.messages[assistantIndex]!.content = streamText;
             s.updatedAt = Date.now();
             scheduleSave();
@@ -191,16 +196,19 @@
       }
       finishedAt = performance.now();
       phase = 'done';
+      streamDone();
     } catch (e) {
       if (e instanceof DOMException && e.name === 'AbortError') {
         phase = 'idle';
         toast('Cancelled', 'warn');
       } else if (e instanceof ApiError) {
         phase = 'error';
+        streamError(`${e.status} ${e.code}: ${e.message}`);
         s.messages[assistantIndex]!.content = `⚠️ ${e.status} ${e.code}: ${e.message}`;
         toast(e.message, 'err');
       } else {
         phase = 'error';
+        streamError(String(e));
         s.messages[assistantIndex]!.content = `⚠️ ${String(e)}`;
         toast(String(e), 'err');
       }
