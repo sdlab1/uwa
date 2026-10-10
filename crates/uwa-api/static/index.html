@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>uwa — Universal Web API</title>
+<link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="logo">uwa</span>
+    <span class="tag">Universal Web API</span>
+  </div>
+  <div class="topbar-right">
+    <span id="key-status" class="pill pill-warn" title="API key state">key: ?</span>
+    <span id="server-status" class="pill pill-warn" title="/healthz">server: ?</span>
+    <button id="key-btn" class="ghost-btn" type="button">Set key</button>
+  </div>
+</header>
+
+<nav id="nav" class="nav"></nav>
+
+<main id="app" class="app"></main>
+
+<div id="toast-root" class="toast-root"></div>
+
+<script src="/static/dist/main.js" defer></script>
+</body>
+</html>

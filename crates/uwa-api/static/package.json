@@ -1,0 +1,14 @@
+{
+  "private": true,
+  "name": "uwa-ui",
+  "version": "0.1.0",
+  "scripts": {
+    "build": "esbuild src/main.ts --bundle --format=iife --target=es2020 --outfile=dist/main.js",
+    "watch": "esbuild src/main.ts --bundle --format=iife --target=es2020 --outfile=dist/main.js --watch",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "esbuild": "^0.20.2",
+    "typescript": "^5.4.5"
+  }
+}

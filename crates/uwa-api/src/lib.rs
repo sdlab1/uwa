@@ -24,6 +24,35 @@ use std::time::Duration;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
+/// Resolve the UI directory: `UWA_STATIC_DIR` wins, else the crate's own
+/// `static/` at build time (works for `cargo run` and the built binary in
+/// the repo).
+fn static_dir() -> std::path::PathBuf {
+    std::env::var("UWA_STATIC_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("static"))
+}
+
+async fn serve_index() -> axum::response::Response {
+    use axum::http::header::CONTENT_TYPE;
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+
+    let path = static_dir().join("index.html");
+    match tokio::fs::read_to_string(&path).await {
+        Ok(html) => ([(CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response(),
+        Err(e) => (
+            StatusCode::NOT_FOUND,
+            format!(
+                "uwa-ui: index.html not found at {}: {e}\n\
+                 (build the UI with `crates/uwa-api/static/build.sh`)",
+                path.display()
+            ),
+        )
+            .into_response(),
+    }
+}
+
 pub fn router(state: AppState) -> Router {
     let api_plain = Router::new()
         .route("/v1/models", get(routes::models::list_models))
@@ -67,6 +96,16 @@ pub fn router(state: AppState) -> Router {
             post(routes::admin::selector_generate),
         )
         .route("/admin/selector-apply", post(routes::admin::selector_apply))
+        .route("/admin/sessions", get(routes::admin::sessions))
+        .route(
+            "/admin/sessions/recover",
+            post(routes::admin::recover_sessions),
+        )
+        .route(
+            "/admin/sessions/:id",
+            axum::routing::delete(routes::admin::drop_session),
+        )
+        .route("/admin/logs/stream", get(routes::admin::log_stream))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             middleware::require_api_key,
@@ -83,6 +122,8 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(routes::health::healthz))
         .route("/readyz", get(routes::health::readyz))
+        .route("/", get(serve_index))
+        .nest_service("/static", tower_http::services::ServeDir::new(static_dir()))
         .merge(api)
         .layer(axum::middleware::from_fn(middleware::inject_request_id))
         .layer(TraceLayer::new_for_http())

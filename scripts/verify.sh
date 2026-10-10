@@ -6,6 +6,9 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+echo "==> 0/10 ui build"
+crates/uwa-api/static/build.sh
+
 echo "==> 1/10 cargo fmt"
 cargo fmt --all -- --check
 

@@ -193,6 +193,135 @@ pub async fn selector_test(
     }
 }
 
+// ---------- sessions ----------
+
+pub async fn sessions(State(state): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
+    let Some(sm) = &state.runtime.sessions else {
+        return Err(UwaError::Internal("session manager not configured".into()).into());
+    };
+    let list = sm.list().await;
+    let now = std::time::Instant::now();
+    let out: Vec<serde_json::Value> = list
+        .iter()
+        .map(|s| {
+            serde_json::json!({
+                "conversation": s.conversation.as_str(),
+                "tab": s.tab.as_str(),
+                "age_secs": now.duration_since(s.created).as_secs(),
+                "idle_secs": s.idle.as_secs(),
+                "generation": s.holders,
+            })
+        })
+        .collect();
+    Ok(Json(serde_json::json!({ "sessions": out })))
+}
+
+pub async fn drop_session(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let Some(sm) = &state.runtime.sessions else {
+        return Err(UwaError::Internal("session manager not configured".into()).into());
+    };
+    let cid = uwa_core::ConversationId::from_raw(id);
+    let removed = sm.remove(&cid);
+    Ok(Json(serde_json::json!({ "removed": removed.is_some() })))
+}
+
+pub async fn recover_sessions(State(state): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
+    let Some(sm) = &state.runtime.sessions else {
+        return Err(UwaError::Internal("session manager not configured".into()).into());
+    };
+    let dropped = sm.recover(state.transport.as_ref()).await;
+    Ok(Json(serde_json::json!({
+        "dropped_tabs": dropped.iter().map(|t| t.as_str()).collect::<Vec<_>>(),
+    })))
+}
+
+// ---------- log stream (SSE) ----------
+
+pub async fn log_stream(State(state): State<AppState>) -> axum::response::Response {
+    use axum::response::sse::{Event, KeepAlive, Sse};
+    use axum::response::IntoResponse;
+    // channel registered in `metrics::LOG_TX` — set up on first call.
+    static ONCE: std::sync::OnceLock<tokio::sync::broadcast::Sender<String>> =
+        std::sync::OnceLock::new();
+    let tx = ONCE.get_or_init(|| {
+        let (tx, _rx) = tokio::sync::broadcast::channel::<String>(256);
+        install_tracing_bridge(tx.clone());
+        tx
+    });
+    let _ = state; // keep the extractor for consistency
+
+    let rx = tx.subscribe();
+    let stream = futures::stream::unfold(rx, |mut rx| async move {
+        loop {
+            match rx.recv().await {
+                Ok(line) => {
+                    return Some((
+                        Ok::<_, std::convert::Infallible>(Event::default().data(line)),
+                        rx,
+                    ))
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+            }
+        }
+    });
+
+    Sse::new(stream)
+        .keep_alive(KeepAlive::default())
+        .into_response()
+}
+
+/// Install a one-time tracing layer that forwards formatted events to the
+/// broadcast channel. If another layer is already installed, skip.
+fn install_tracing_bridge(tx: tokio::sync::broadcast::Sender<String>) {
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+
+    struct Bridge {
+        tx: tokio::sync::broadcast::Sender<String>,
+    }
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Bridge {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            let meta = event.metadata();
+            let mut visitor = FieldVisitor(String::with_capacity(64));
+            event.record(&mut visitor);
+            let line = format!(
+                "{{\"level\":\"{}\",\"target\":\"{}\",\"message\":\"{}\"}}",
+                meta.level(),
+                meta.target(),
+                visitor.0.replace('"', "\\\""),
+            );
+            let _ = self.tx.send(line);
+        }
+    }
+    struct FieldVisitor(String);
+    impl tracing::field::Visit for FieldVisitor {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            if field.name() == "message" {
+                self.0.push_str(&format!("{:?}", value));
+            }
+        }
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            if field.name() == "message" {
+                self.0.push_str(value);
+            }
+        }
+    }
+
+    // Attach the bridge lazily; if a global default is already set this is a
+    // no-op (the UI falls back to "no stream available").
+    let _ = tracing_subscriber::registry()
+        .with(Bridge { tx })
+        .try_init();
+}
+
 // ---------- selector auto-generation ----------
 
 #[derive(Debug, Deserialize)]
