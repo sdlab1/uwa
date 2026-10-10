@@ -47,7 +47,7 @@ TESTS_GROUP=(ALL_TESTS)
 # --- is_source_file: single source of truth for dumpable extensions ----
 is_source_file() {
   case "$1" in
-    *.rs|*.toml|*.ts|*.js|*.css|*.sh|*.json|*.html|*.txt|*.snap|*.md) return 0 ;;
+    *.rs|*.toml|*.ts|*.js|*.css|*.sh|*.json|*.html|*.txt|*.snap|*.md|*.svelte) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -224,6 +224,7 @@ build_dump() {
       rs)   lang="rust" ;;
       toml) lang="toml" ;;
       ts)   lang="typescript" ;;
+      svelte) lang="svelte" ;;
       js)   lang="javascript" ;;
       css)  lang="css" ;;
       sh)   lang="bash" ;;
