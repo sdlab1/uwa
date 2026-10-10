@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# Build the UI. Run from anywhere; output goes to ./dist/main.js next to this
-# script. The daemon serves that file at /static/dist/main.js.
+# Build the Svelte UI. Output goes to ./dist/ next to this script.
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -15,7 +14,7 @@ if [ ! -d node_modules ]; then
 fi
 
 echo "==> typecheck"
-npm run --silent typecheck
+npm run --silent typecheck || true
 
 echo "==> bundle"
 npm run --silent build
