@@ -1,4 +1,3 @@
-```markdown
 <div align="center">
 
 # uwa — Universal Web API
