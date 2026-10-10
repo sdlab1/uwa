@@ -265,18 +265,3 @@ solve CAPTCHAs, or reverse-engineer encrypted APIs.
 **[Issues](https://github.com/sdlab1/uwa/issues) · [Discussions](https://github.com/sdlab1/uwa/discussions)**
 
 </div>
-```
-
-**What changed and why:**
-
-- **Removed** — dual-backend comparison, architecture diagram, crate list, "Why Rust" table, feature bullet-dump, endpoint tables, bridge semantics essay, MCP section (folded into "How it works"), full config reference (linked instead).
-- **Elevated** — the dashboard wizard to position #4 in the quickstart. It's the fastest onboarding path and was buried at the bottom before. Users now land on it immediately after `cargo run`.
-- **Added** — real troubleshooting with the four failure modes users will actually hit (`connect fails`, `0 tabs`, `selector drift`, `401`). The current README has zero troubleshooting.
-- **Added** — "Updating" section. Every bridge project needs this because sites redesign.
-- **Reordered** — clone → build → launch browser → run daemon → dashboard → point clients. That's the actual user journey. The old README started with a philosophical disclaimer.
-- **Providers table** collapsed to a single table with three columns instead of a paragraph per site.
-- **Config** — 20-line minimal example instead of a walkthrough of every section; hot reload gets 10 lines instead of a wall.
-- **Development** — one command (`./scripts/verify.sh`) plus a one-sentence justification. If the reader cares about the details, they'll read `verify.sh` itself.
-- **Kept the disclaimer**, but shortened it and moved it to the bottom. It's still legally clean; it's just not the first thing a user reads.
-
-Length dropped from ~500 lines to ~250, and the time-to-first-response went from "read five sections" to "run four commands."
