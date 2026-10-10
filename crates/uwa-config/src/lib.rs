@@ -21,7 +21,7 @@ pub mod features;
 pub mod groups;
 pub mod preset;
 
-pub use features::{FilePasteCfg, PromptPaddingCfg, ProxyCfg};
+pub use features::{FilePasteCfg, MediaCfg, PromptPaddingCfg, ProxyCfg};
 pub use groups::{GroupCfg, GroupMember, GroupStrategy};
 pub use preset::{EffectiveProviderCfg, PresetCfg};
 
@@ -246,6 +246,9 @@ pub struct ProviderCfg {
     /// instead of the default fill+click+wait path.
     #[serde(default)]
     pub workflow: uwa_core::workflow::Workflow,
+    /// Audio capture + video detection.
+    #[serde(default)]
+    pub media: MediaCfg,
 }
 
 impl ProviderCfg {
@@ -275,6 +278,7 @@ impl ProviderCfg {
             prompt_padding: PromptPaddingCfg::default(),
             stealth: false,
             workflow: Default::default(),
+            media: MediaCfg::default(),
         }
     }
 

@@ -75,6 +75,18 @@ pub async fn run_with(config_path: PathBuf, cdp_url: &str) -> anyhow::Result<()>
                 nd_cfg.extra_args.push(arg);
             }
         }
+        // Audio capture needs the autoplay policy relaxed, or Chrome will
+        // refuse to start playback without a user gesture.
+        let needs_audio = config
+            .providers
+            .values()
+            .any(|p| p.media.audio_capture_enabled);
+        if needs_audio {
+            let arg = "--autoplay-policy=no-user-gesture-required".to_string();
+            if !nd_cfg.extra_args.contains(&arg) {
+                nd_cfg.extra_args.push(arg);
+            }
+        }
         let transport = uwa_browser::NodriverTransport::spawn(&nd_cfg)
             .await
             .with_context(|| "spawn nodriver sidecar")?;

@@ -43,6 +43,42 @@ pub trait Page: Send + Sync {
             "eval_in_frame(frame `{frame_id}`) requires a real browser transport"
         )))
     }
+
+    /// Start capturing audio from any `<audio>`/`<video>` that plays from
+    /// now on. Injects a Web Audio API hook. Default: no-op.
+    async fn start_audio_capture(&self) -> Result<()> {
+        Ok(())
+    }
+
+    /// Stop capturing and return all accumulated audio as a single blob
+    /// (webm/opus). Returns `None` if nothing was captured.
+    async fn stop_audio_capture(&self) -> Result<Option<Vec<u8>>> {
+        Ok(None)
+    }
+
+    /// Scan the page for `<video>` and `<audio>` sources.
+    /// Default: empty (mocks have no media).
+    async fn scan_media(&self) -> Result<Vec<MediaResource>> {
+        Ok(Vec::new())
+    }
+}
+
+/// One detected media element on a page.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct MediaResource {
+    pub kind: MediaKind,
+    pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mime: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_secs: Option<f64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MediaKind {
+    Audio,
+    Video,
 }
 
 /// A network event relevant to response extraction.

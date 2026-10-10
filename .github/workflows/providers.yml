@@ -45,10 +45,17 @@ jobs:
       - name: run e2e fixture tests
         env:
           UWA_CHROMIUM: "1"
-          UWA_CHROMIUM_WS: "ws://127.0.0.1:9222/devtools/browser"
+          UWA_CHROMIUM_WS: "http://127.0.0.1:9222"
         run: |
           cargo test -p uwa-providers --features fixture-server \
             --test e2e_fixture -- --ignored --test-threads=1 --nocapture
+
+      - name: run media capture e2e tests
+        env:
+          UWA_CHROMIUM: "1"
+          UWA_CHROMIUM_WS: "http://127.0.0.1:9222"
+        run: |
+          cargo test -p uwa-browser --test media_scan_e2e -- --ignored --test-threads=1 --nocapture
 
       - name: leak check
         if: always()

@@ -15,6 +15,7 @@ uwa-config = { path = "../uwa-config" }
 uwa-tools = { path = "../uwa-tools" }
 uwa-history = { path = "../uwa-history" }
 uwa-providers = { path = "../uwa-providers" }
+uwa-extract = { path = "../uwa-extract" }
 axum = { version = "0.7", features = ["json", "macros"] }
 tokio.workspace = true
 tokio-stream = { version = "0.1", features = ["sync"] }

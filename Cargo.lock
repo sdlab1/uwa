@@ -2811,6 +2811,7 @@ dependencies = [
  "uuid",
  "uwa-config",
  "uwa-core",
+ "uwa-extract",
  "uwa-history",
  "uwa-providers",
  "uwa-resilience",
@@ -2867,6 +2868,7 @@ dependencies = [
  "uwa-config",
  "uwa-core",
  "uwa-stealth",
+ "uwa-testkit",
 ]
 
 [[package]]

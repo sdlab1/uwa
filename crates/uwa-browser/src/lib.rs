@@ -14,6 +14,7 @@ pub mod attach;
 pub mod bus;
 pub mod cdp_cmd;
 pub mod frame;
+pub mod media_capture;
 #[cfg(feature = "nodriver")]
 pub mod nodriver;
 pub mod oopif;
@@ -23,7 +24,6 @@ pub mod page;
 pub mod tab_id;
 pub mod tabpool;
 pub mod transport;
-
 pub use bus::NetBus;
 pub use frame::FrameMap;
 pub use page::CdpPageAdapter;

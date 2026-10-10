@@ -111,6 +111,33 @@ impl PromptPaddingCfg {
     }
 }
 
+// ---------- Media ----------
+
+/// Audio capture + video detection knobs. Everything off by default —
+/// capture costs a Web Audio hook and a Chrome autoplay flag.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MediaCfg {
+    /// Hook `HTMLMediaElement.prototype.play` and record whatever plays
+    /// during the response into a webm temp file.
+    #[serde(default)]
+    pub audio_capture_enabled: bool,
+    /// Max seconds to keep recording after the last chunk arrives.
+    #[serde(default = "default_audio_max_wait")]
+    pub audio_max_wait_secs: u64,
+    /// Auto-attach captured audio to the response (MVP: writes the file and
+    /// logs the path; full multimodal-response DTO is a follow-up).
+    #[serde(default)]
+    pub attach_audio_to_response: bool,
+    /// Detect `<video>` elements in the DOM after each response. Never
+    /// auto-downloads.
+    #[serde(default)]
+    pub video_detection_enabled: bool,
+}
+
+fn default_audio_max_wait() -> u64 {
+    12
+}
+
 // ---------- Proxy ----------
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

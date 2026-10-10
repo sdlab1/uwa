@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::broadcast;
 use url::Url;
-use uwa_core::{NetworkEvent, Page, Result, UwaError};
+use uwa_core::{MediaResource, NetworkEvent, Page, Result, UwaError};
 
 /// A [`Page`] whose every answer the test chooses.
 #[derive(Clone)]
@@ -245,6 +245,56 @@ impl Page for MockPage {
             let _ = self.inner.net_tx.send(e);
         }
         Ok(rx)
+    }
+
+    /// Record the capture intent so tests can assert the provider drove
+    /// it. The real JS lives in `uwa-browser::media_capture`.
+    async fn start_audio_capture(&self) -> Result<()> {
+        self.inner
+            .log
+            .lock()
+            .expect("log lock")
+            .push("audio_capture:start".into());
+        Ok(())
+    }
+
+    /// Mirrors [`MockPage::start_audio_capture`]: records the call and
+    /// returns whatever `expect_default` scripts (None by default).
+    async fn stop_audio_capture(&self) -> Result<Option<Vec<u8>>> {
+        self.inner
+            .log
+            .lock()
+            .expect("log lock")
+            .push("audio_capture:stop".into());
+        let scripted = self.eval("stop_audio_capture").await?;
+        match scripted {
+            Value::Array(chunks) => {
+                let mut buf = Vec::new();
+                for c in chunks {
+                    if let Some(s) = c.as_str() {
+                        buf.extend_from_slice(s.as_bytes());
+                    }
+                }
+                if buf.is_empty() {
+                    Ok(None)
+                } else {
+                    Ok(Some(buf))
+                }
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// Mirrors [`MockPage::start_audio_capture`]: records the call and
+    /// returns whatever `expect_default` scripts.
+    async fn scan_media(&self) -> Result<Vec<MediaResource>> {
+        self.inner
+            .log
+            .lock()
+            .expect("log lock")
+            .push("media_scan".into());
+        let scripted = self.eval("scan_media").await?;
+        Ok(serde_json::from_value(scripted).unwrap_or_default())
     }
 }
 

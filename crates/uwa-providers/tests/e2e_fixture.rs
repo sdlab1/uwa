@@ -50,8 +50,7 @@ impl Drop for FixtureServer {
 }
 
 async fn run_fixture_flow(fixture_path: &str, selectors_toml: &str) -> String {
-    let ws = std::env::var("UWA_CHROMIUM_WS")
-        .unwrap_or_else(|_| "ws://127.0.0.1:9222/devtools/browser".into());
+    let ws = std::env::var("UWA_CHROMIUM_WS").unwrap_or_else(|_| "http://127.0.0.1:9222".into());
 
     let server = FixtureServer::spawn().await.expect("fixture server");
     let url = format!("{}{fixture_path}", server.base_url);
@@ -172,8 +171,7 @@ async fn workflow_clicks_send_instead_of_default_path() {
     if std::env::var("UWA_CHROMIUM").is_err() {
         return;
     }
-    let ws = std::env::var("UWA_CHROMIUM_WS")
-        .unwrap_or_else(|_| "ws://127.0.0.1:9222/devtools/browser".into());
+    let ws = std::env::var("UWA_CHROMIUM_WS").unwrap_or_else(|_| "http://127.0.0.1:9222".into());
     let server = FixtureServer::spawn().await.expect("fixture server");
     let url = format!("{}/fake/chat", server.base_url);
 

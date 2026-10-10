@@ -257,4 +257,16 @@ impl uwa_core::Page for CdpPageAdapter {
             .map_err(|e| UwaError::Transport(format!("evaluate in frame `{frame_id}`: {e}")))?;
         Ok(res.value().cloned().unwrap_or(Value::Null))
     }
+
+    async fn start_audio_capture(&self) -> Result<()> {
+        crate::media_capture::start_capture(self).await
+    }
+
+    async fn stop_audio_capture(&self) -> Result<Option<Vec<u8>>> {
+        crate::media_capture::stop_capture(self).await
+    }
+
+    async fn scan_media(&self) -> Result<Vec<uwa_core::MediaResource>> {
+        crate::media_capture::scan_media(self).await
+    }
 }

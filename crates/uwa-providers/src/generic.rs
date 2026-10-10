@@ -258,6 +258,15 @@ impl SiteProvider for GenericProvider {
     }
 
     async fn send_message(&self, page: &dyn Page, text: &str) -> Result<()> {
+        // 0. Audio capture: hook playback before anything happens on the
+        //    page, so any sound the site makes during the response is
+        //    recorded. Best-effort — a capture failure must not block chat.
+        if self.cfg.media.audio_capture_enabled {
+            if let Err(e) = page.start_audio_capture().await {
+                tracing::warn!(provider = %self.cfg.name, "audio capture start: {e}");
+            }
+        }
+
         // 1. Apply prompt padding if enabled.
         let padded = self.build_send_text(text);
 
@@ -322,6 +331,50 @@ impl SiteProvider for GenericProvider {
     async fn wait_response(&self, page: &dyn Page) -> Result<String> {
         let cfg = self.pipeline_cfg()?;
         let outcome: ExtractionOutcome = self.pipeline.run(page, &cfg).await?;
+
+        // Audio: stop the capture and stage the blob as a temp file.
+        // MVP: the path is logged; a full multimodal response DTO is a
+        // follow-up. Best-effort on every path.
+        if self.cfg.media.audio_capture_enabled {
+            match page.stop_audio_capture().await {
+                Ok(Some(bytes)) if !bytes.is_empty() => {
+                    let path = std::env::temp_dir()
+                        .join(format!("uwa-audio-{}.webm", uuid::Uuid::new_v4().simple()));
+                    match tokio::fs::write(&path, &bytes).await {
+                        Ok(()) => {
+                            tracing::info!(
+                                provider = %self.cfg.name,
+                                file = %path.display(),
+                                bytes = bytes.len(),
+                                "audio captured"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(provider = %self.cfg.name, "write audio file: {e}")
+                        }
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => tracing::warn!(provider = %self.cfg.name, "audio capture stop: {e}"),
+            }
+        }
+
+        // Video: detect and log; never auto-download.
+        if self.cfg.media.video_detection_enabled {
+            if let Ok(media) = page.scan_media().await {
+                let videos = media
+                    .iter()
+                    .filter(|m| m.kind == uwa_core::MediaKind::Video)
+                    .count();
+                if videos > 0 {
+                    tracing::info!(
+                        provider = %self.cfg.name,
+                        videos,
+                        "video elements detected"
+                    );
+                }
+            }
+        }
 
         // Metrics: no-op if no recorder is installed.
         metrics::counter!(
