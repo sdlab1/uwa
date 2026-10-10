@@ -32,6 +32,6 @@ libc = "0.2"
 
 [features]
 default = ["cdp"]
-cdp = ["dep:chromiumoxide"]
-nodriver = ["dep:tokio-tungstenite", "dep:metrics"]
+cdp = ["dep:chromiumoxide", "dep:tokio-tungstenite"]
+nodriver = ["dep:metrics"]
 metrics = ["dep:metrics"]

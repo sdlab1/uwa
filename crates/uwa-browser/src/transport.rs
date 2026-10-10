@@ -389,7 +389,7 @@ async fn register_target(
 /// for the iframe's own CDP target — we see it here, resolve the frame ID
 /// via `Page.getFrameTree`, and register the session in [`OopifRegistry`].
 #[allow(clippy::too_many_arguments)]
-#[cfg_attr(not(feature = "nodriver"), allow(unused_variables))]
+#[cfg_attr(not(feature = "cdp"), allow(unused_variables))]
 async fn pump_page(
     page: CdpPage,
     bus: NetBus,
@@ -530,7 +530,7 @@ async fn pump_page(
                                 // Inject stealth into the OOPIF via its dedicated
                                 // WebSocket (bypasses chromiumoxide's session
                                 // limitation). One-shot, spawned in background.
-                                #[cfg(feature = "nodriver")]
+                                #[cfg(feature = "cdp")]
                                 if let Some(pack) = &stealth {
                                     let ws_url = debug_ws_url.clone();
                                     let tid = info.target_id.inner().clone();

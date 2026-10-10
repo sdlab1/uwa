@@ -25,11 +25,11 @@ pub struct CdpPageAdapter {
     /// OOPIF registry — maps frame IDs to attached CDP sessions. Used to
     /// decide whether `eval_in_frame` targets an OOPIF (separate renderer)
     /// or a same-process frame.
-    #[cfg_attr(not(feature = "nodriver"), allow(dead_code))]
+    #[cfg_attr(not(feature = "cdp"), allow(dead_code))]
     oopif: std::sync::Arc<crate::oopif::OopifRegistry>,
     /// Debug URL (http://host:port) — used to resolve OOPIF WebSocket URLs
     /// via `/json/list` for direct CDP connections.
-    #[cfg_attr(not(feature = "nodriver"), allow(dead_code))]
+    #[cfg_attr(not(feature = "cdp"), allow(dead_code))]
     debug_url: std::sync::Arc<String>,
     _guard: TabGuard,
 }
@@ -219,7 +219,7 @@ impl uwa_core::Page for CdpPageAdapter {
         // If this frame is a tracked OOPIF (cross-origin, separate renderer
         // process), evaluate via its dedicated WebSocket connection. This
         // bypasses chromiumoxide's session-scoped command limitation.
-        #[cfg(feature = "nodriver")]
+        #[cfg(feature = "cdp")]
         if let Some(session) = self.oopif.session_for_frame(frame_id).await {
             let tid = session.target_id.inner();
             let ws_url = crate::oopif_ws::resolve_ws_url(&self.debug_url, tid).await?;
