@@ -52,8 +52,8 @@ mime_contains = ["text/event-stream"]
 idle_timeout_ms = 30000
 
 [providers.chatgpt.net.decoder]
-kind = "sse"
-json_path = "v.message.content.parts.0"
+kind = "site"
+name = "chatgpt"
 
 [providers.chatgpt.file_paste]
 enabled = true
@@ -73,6 +73,15 @@ send_button       = "button[aria-label='Send message']"
 stop_button       = "button[aria-label='Stop']"
 assistant_message = "[data-testid=assistant-message]"
 
+[providers.claude.net]
+url_contains = ["/api/"]
+mime_contains = ["text/event-stream"]
+idle_timeout_ms = 30000
+
+[providers.claude.net.decoder]
+kind = "site"
+name = "claude"
+
 # ---------- Gemini — с пресетами ----------
 [providers.gemini]
 name = "gemini"
@@ -86,6 +95,15 @@ input             = "div.ql-editor"
 send_button       = "button.send-button"
 stop_button       = "button.stop-button"
 assistant_message = "model-response"
+
+[providers.gemini.net]
+url_contains = ["batchexecute"]
+mime_contains = ["application/json", "text/plain", "text/event-stream"]
+idle_timeout_ms = 30000
+
+[providers.gemini.net.decoder]
+kind = "site"
+name = "gemini"
 
 [providers.gemini.presets.flash]
 display_name = "Gemini 2.0 Flash"

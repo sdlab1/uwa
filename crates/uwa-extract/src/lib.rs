@@ -24,6 +24,7 @@
 pub mod dom;
 pub mod finisher;
 pub mod net;
+pub mod parsers;
 pub mod pipeline;
 
 pub use dom::DomExtractor;

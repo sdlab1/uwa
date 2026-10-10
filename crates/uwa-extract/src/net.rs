@@ -16,6 +16,8 @@ use uwa_core::{NetworkEvent, Result};
 
 pub use uwa_core::net::{NetDecoder, NetRules};
 
+use crate::parsers;
+
 /// One parsed SSE frame.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SseFrame {
@@ -254,6 +256,14 @@ impl NetExtractor for DefaultNetExtractor {
         let rules = rules.clone();
         let (tx, out_rx) = mpsc::channel::<NetDelta>(64);
 
+        // Site parser (NetDecoder::Site): fresh registry per response so
+        // cumulative-diff state starts clean.
+        let site_parser: Option<std::sync::Arc<dyn parsers::SiteStreamParser>> =
+            match &rules.decoder {
+                NetDecoder::Site { name } => parsers::ParserRegistry::new().get(name),
+                _ => None,
+            };
+
         tokio::spawn(async move {
             let idle = Duration::from_millis(rules.idle_timeout_ms);
             let mut sse = SseParser::new();
@@ -273,12 +283,23 @@ impl NetExtractor for DefaultNetExtractor {
                         active_url = Some(url.clone());
                         if mime.contains("event-stream") {
                             for frame in sse.feed(&body) {
-                                if let Some(s) = decode_sse_frame(&frame.data, &rules.decoder) {
+                                if let Some(s) = decode_sse_frame(
+                                    &frame.data,
+                                    &rules.decoder,
+                                    site_parser.as_ref(),
+                                ) {
                                     if !s.is_empty() && tx.send(NetDelta(s)).await.is_err() {
                                         return;
                                     }
                                 }
-                                if frame.data.trim() == "[DONE]" {
+                                let frame_done = match &rules.decoder {
+                                    NetDecoder::Site { .. } => site_parser
+                                        .as_ref()
+                                        .map(|p| p.is_done(&frame.data))
+                                        .unwrap_or(false),
+                                    _ => frame.data.trim() == "[DONE]",
+                                };
+                                if frame_done {
                                     let _ = tx.send(NetDelta(String::new())).await;
                                     return;
                                 }
@@ -294,7 +315,11 @@ impl NetExtractor for DefaultNetExtractor {
                     NetworkEvent::Finished { request_id: _ } => {
                         if active_url.is_some() {
                             if let Some(tail) = sse.finish() {
-                                if let Some(s) = decode_sse_frame(&tail.data, &rules.decoder) {
+                                if let Some(s) = decode_sse_frame(
+                                    &tail.data,
+                                    &rules.decoder,
+                                    site_parser.as_ref(),
+                                ) {
                                     if !s.is_empty() {
                                         let _ = tx.send(NetDelta(s)).await;
                                     }
@@ -311,7 +336,11 @@ impl NetExtractor for DefaultNetExtractor {
     }
 }
 
-fn decode_sse_frame(data: &str, decoder: &NetDecoder) -> Option<String> {
+fn decode_sse_frame(
+    data: &str,
+    decoder: &NetDecoder,
+    site: Option<&std::sync::Arc<dyn parsers::SiteStreamParser>>,
+) -> Option<String> {
     match decoder {
         NetDecoder::Sse { json_path } => {
             if json_path == "__raw__" {
@@ -324,15 +353,23 @@ fn decode_sse_frame(data: &str, decoder: &NetDecoder) -> Option<String> {
             let v: Value = serde_json::from_str(data).ok()?;
             json_path_str(&v, json_path)
         }
+        NetDecoder::Site { .. } => {
+            let p = site?;
+            p.extract_delta(data)
+        }
     }
 }
 
 fn decode_json(body: &str, decoder: &NetDecoder) -> Option<String> {
-    let path = match decoder {
-        NetDecoder::Sse { json_path } | NetDecoder::Json { json_path } => json_path,
-    };
-    let v: Value = serde_json::from_str(body).ok()?;
-    json_path_str(&v, path)
+    match decoder {
+        NetDecoder::Sse { json_path } | NetDecoder::Json { json_path } => {
+            let v: Value = serde_json::from_str(body).ok()?;
+            json_path_str(&v, json_path)
+        }
+        // Site parsers are streaming-shaped; a non-SSE body has no frames
+        // to decode. Skip.
+        NetDecoder::Site { .. } => None,
+    }
 }
 
 /// A reusable helper: collect a `ReceiverStream<NetDelta>` into a single String.
@@ -443,7 +480,7 @@ mod tests {
         let d = NetDecoder::Sse {
             json_path: "delta.content".into(),
         };
-        assert_eq!(decode_sse_frame(frame, &d).as_deref(), Some("hello"));
+        assert_eq!(decode_sse_frame(frame, &d, None).as_deref(), Some("hello"));
     }
 
     #[test]
@@ -453,7 +490,7 @@ mod tests {
             json_path: "__raw__".into(),
         };
         assert_eq!(
-            decode_sse_frame(frame, &d).as_deref(),
+            decode_sse_frame(frame, &d, None).as_deref(),
             Some("plain text chunk")
         );
     }

@@ -38,6 +38,11 @@ pub enum NetDecoder {
     Sse { json_path: String },
     /// Parse body as one JSON doc; `json_path` extracts text.
     Json { json_path: String },
+    /// Per-site parser registered by name (see `uwa_extract::parsers`).
+    ///
+    /// Use this when the site's SSE frames have quirks a generic JSON path
+    /// can't express — e.g. cumulative snapshots instead of deltas.
+    Site { name: String },
 }
 
 impl NetRules {
