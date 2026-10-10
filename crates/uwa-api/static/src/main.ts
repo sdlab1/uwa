@@ -91,6 +91,11 @@ const routes: Route[] = [
 // ---------- Boot ----------
 
 function boot(): void {
+  // The index ships with a static "UI is building…" banner for the
+  // fresh-clone window (bundle not yet produced by the daemon's
+  // auto-build). main.js made it this far → assets exist → drop it.
+  document.getElementById("boot-banner")?.remove();
+
   updateKeyPill();
   void updateServerPill();
   onKeyChange(updateKeyPill);

@@ -21,7 +21,14 @@
 
 <nav id="nav" class="nav"></nav>
 
-<main id="app" class="app"></main>
+<main id="app" class="app">
+  <!-- Visible only until dist/main.js loads; main.js clears it on boot.
+       Covers the fresh-clone window while the daemon's auto-build runs. -->
+  <div id="boot-banner" class="banner info">
+    uwa UI is building&hellip; the daemon is running <code>static/build.sh</code>
+    (npm install + esbuild). Reload this page in a minute.
+  </div>
+</main>
 
 <div id="toast-root" class="toast-root"></div>
 
