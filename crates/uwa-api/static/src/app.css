@@ -96,3 +96,11 @@ tbody tr:hover { background: var(--panel-2); }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: #2a3142; border-radius: 5px; }
 ::-webkit-scrollbar-thumb:hover { background: #3a4252; }
+
+:not(pre) > code {
+  background: var(--panel-3);
+  color: var(--text);
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 12px;
+}
