@@ -15,12 +15,14 @@
 //! - [`config::default_config`], [`config::config_with_key`] — canned
 //!   [`Config`](uwa_config::Config)s
 
+pub mod chromium;
 pub mod config;
 pub mod page;
 pub mod provider;
 pub mod server;
 pub mod transport;
 
+pub use chromium::{chromium_ws_url, normalize_cdp_url, CANONICAL_CDP};
 pub use config::{config_with_key, default_config, TEST_API_KEY, TEST_AUTH_HEADER};
 pub use page::MockPage;
 pub use provider::MockProvider;

@@ -6,7 +6,7 @@ async fn scan_media_detects_video_tag() {
     if std::env::var("UWA_CHROMIUM").is_err() {
         return;
     }
-    let url = std::env::var("UWA_CHROMIUM_WS").unwrap_or_else(|_| "http://127.0.0.1:9222".into());
+    let url = uwa_testkit::chromium_ws_url();
     let t = uwa_browser::CdpTransport::connect(&url, std::time::Duration::from_secs(60), None)
         .await
         .unwrap();
@@ -35,7 +35,7 @@ async fn audio_capture_roundtrip_on_local_page() {
     if std::env::var("UWA_CHROMIUM").is_err() {
         return;
     }
-    let url = std::env::var("UWA_CHROMIUM_WS").unwrap_or_else(|_| "http://127.0.0.1:9222".into());
+    let url = uwa_testkit::chromium_ws_url();
     let t = uwa_browser::CdpTransport::connect(&url, std::time::Duration::from_secs(60), None)
         .await
         .unwrap();

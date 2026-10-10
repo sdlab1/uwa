@@ -111,7 +111,10 @@ pub struct CdpBackendCfg {
 }
 
 fn default_cdp_ws() -> String {
-    "ws://127.0.0.1:9222/devtools/browser".into()
+    // http:// resolves through /json/version inside CdpTransport::connect.
+    // A bare ws://.../devtools/browser (no browser GUID) is NOT a valid
+    // connect target — Chrome answers 404.
+    "http://127.0.0.1:9222".into()
 }
 
 fn default_idle_ttl_secs() -> u64 {
@@ -500,10 +503,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(cfg.backend.kind, BackendKind::Nodriver);
-        assert_eq!(
-            cfg.backend.cdp.ws_url,
-            "ws://127.0.0.1:9222/devtools/browser"
-        );
+        assert_eq!(cfg.backend.cdp.ws_url, "http://127.0.0.1:9222");
         assert_eq!(cfg.backend.nodriver.python, "python3");
         assert!(!cfg.backend.nodriver.headless);
     }

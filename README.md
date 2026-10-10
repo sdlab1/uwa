@@ -205,7 +205,7 @@ In that browser, log in to the sites you'll use — `chatgpt.com`, `claude.ai`, 
 cp crates/uwa-bin/config.example.toml uwa.toml
 # edit `api_key` if you want auth, adjust selectors if needed
 
-UWA_CHROMIUM_WS=ws://127.0.0.1:9222/devtools/browser \
+UWA_CHROMIUM_WS=http://127.0.0.1:9222 \
   cargo run -p uwa-bin --release --features metrics -- --config uwa.toml
 ```
 
