@@ -23,7 +23,7 @@ Built with a single goal: **because Rust makes it faster, leaner, and harder to 
 - [Web dashboard](#web-dashboard)
 - [Dual backend](#dual-backend)
 - [Architecture](#architecture)
-- [Development](#development)
+- [Development & Verification](#development--verification)
 - [Docker](#docker)
 - [Known limitations](#known-limitations)
 - [License](#license)
@@ -295,9 +295,9 @@ The default config ships with 10+ providers. Adding another is a TOML edit — n
 
 | Provider | URL pattern | Extraction | Notes |
 |---|---|---|---|
-| **ChatGPT** | `chatgpt.com/*` | `network_first` | Site parser `chatgpt` |
-| **Claude** | `claude.ai/*` | `dom_only` | Site parser `claude` |
-| **Gemini** | `gemini.google.com/*` | `dom_only` | Presets: `flash`, `pro` |
+| **ChatGPT** | `chatgpt.com/*` | `network_first` | Site parser `chatgpt` (cumulative → delta) |
+| **Claude** | `claude.ai/*` | `network_first` | Site parser `claude` (`content_block_delta`) |
+| **Gemini** | `gemini.google.com/*` | `network_first` | Site parser `gemini` (batchexecute), Presets: `flash`, `pro` |
 | **DeepSeek** | `chat.deepseek.com/*` | `dom_only` | |
 | **Kimi** | `kimi.moonshot.cn/*` | `dom_only` | |
 | **Qwen** | `chat.qwen.ai/*` | `dom_only` | |
@@ -519,7 +519,17 @@ crates/uwa-api/static/  Dashboard (HTML / CSS / JS).
 
 ---
 
-## Development
+## Development & Verification
+
+### Verification protocol
+
+Before committing, run the canonical 10-step verification script:
+
+```bash
+./scripts/verify.sh
+```
+
+This verifies code formatting, builds (default + all-features), clippy with `-D warnings`, unit/integration tests, property-based tests (`PROPTEST_CASES=5000`), feature-matrix builds, dead-code checks, and snapshot tests. **Zero ignored tests** are strictly enforced across all test suites.
 
 ### Prerequisites
 
@@ -554,9 +564,9 @@ chromium --headless=new --no-sandbox --disable-gpu \
   --user-data-dir=/tmp/cdp &
 
 # Terminal 2
-UWA_CHROMIUM=1 cargo test -p uwa-browser -- --ignored --test-threads=1
+UWA_CHROMIUM=1 cargo test -p uwa-browser -- --test-threads=1
 UWA_CHROMIUM=1 cargo test -p uwa-providers --features fixture-server \
-  --test e2e_fixture -- --ignored --test-threads=1
+  --test e2e_fixture -- --test-threads=1
 ```
 
 ### Sidecar tests
@@ -597,8 +607,8 @@ For the nodriver backend inside Docker, add the sidecar files to the image and s
 
 ## Known limitations
 
-- **Anthropic streaming** is pseudo-chunked — real token streaming works only when the site uses network-first extraction (currently ChatGPT).
-- **`FrameId → TargetId` mapping** handles main frames and same-target iframes. Cross-origin isolated frames are mapped via `Target.setAutoAttach(flatten)` but `eval_in_frame` inside a **cross-process** OOPIF requires `Page.createIsolatedWorld` scoped to the OOPIF's session, which chromiumoxide 0.7.0 doesn't expose through its public API. A small fork or a bump to 0.8+ unlocks it.
+- **Anthropic streaming** is pseudo-chunked — real token streaming works when the site uses network-first extraction (ChatGPT, Claude, Gemini).
+- **`FrameId → TargetId` mapping** handles main frames, same-target iframes, and cross-origin isolated frames (OOPIF). Script evaluation inside cross-process OOPIF frames is supported via direct WebSocket target connections (`oopif_ws.rs`).
 - **Selectors drift** — mitigate with `selectors_version` and the `uwa-snapshot` binary.
 - **Audio capture** requires Chrome launched with `--autoplay-policy=no-user-gesture-required` (added automatically when `media.audio_capture_enabled = true`).
 - **TTS fallback** (Session 4 scope) — audio capture works; routing captured audio back through a TTS-capable provider is not implemented.
