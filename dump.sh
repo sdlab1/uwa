@@ -2,9 +2,14 @@
 # dump.sh — glues project_uwa source into markdown dumps.
 # Default (./dump.sh) → all three dumps: source_dump.md, tests_dump.md, full_dump.md
 # Modes: source, tests, full, percrate, stats, <crate>
-# Only git-tracked files matching *.rs, *.toml, *.html, *.txt, *.snap are included.
-# Source dumps: *.rs + *.toml. Tests dumps: test *.rs + fixtures (*.html, *.txt, *.snap).
-# Service dirs (target, .git, etc.) are excluded via .gitignore.
+# Collected extensions: *.rs *.toml *.ts *.js *.css *.sh *.json *.html
+# *.txt *.snap (+ *.md only via explicit single-file whitelist in
+# repo.conf, e.g. the build guide). Dirs are taken as git sees them, so
+# .gitignore rules apply (target/, node_modules/, ... never leak in).
+# Lock files (Cargo.lock, package-lock.json) and dist/ build output are
+# excluded on purpose - dumps are source only.
+# Source dumps: code + configs + static UI (TypeScript/Node.js) + guide.
+# Tests dumps: test *.rs + fixtures (*.html, *.txt, *.snap).
 
 set -euo pipefail
 
@@ -36,17 +41,16 @@ while IFS='=' read -r key value || [[ -n "$key" ]]; do
 done < "$SCRIPT_DIR/repo.conf"
 
 # Alias groups
-SOURCE_GROUP=(ALL_SRCS ALL_TOMLS UWA_BIN_CONFIG MANIFEST RUST_TOOLCHAIN CARGO_DEPS2)
+SOURCE_GROUP=(ALL_SRCS ALL_TOMLS UWA_BIN_CONFIG MANIFEST RUST_TOOLCHAIN CARGO_DEPS2 UWA_API_EXTRA RUST_BUILD_GUIDE)
 TESTS_GROUP=(ALL_TESTS)
 
-# File extensions to include
-EXTENSIONS=( -name '*.rs' -o -name '*.toml' -o -name '*.html' -o -name '*.txt' -o -name '*.snap' )
-
-# Service dirs to always skip
-EXCLUDE_DIRS=( -name target -o -name _build -o -name deps -o -name .git \
-               -o -name node_modules -o -name playwright-report \
-               -o -name test-results -o -name cover \
-               -o -name .pytest_cache -o -name __pycache__ )
+# --- is_source_file: single source of truth for dumpable extensions ----
+is_source_file() {
+  case "$1" in
+    *.rs|*.toml|*.ts|*.js|*.css|*.sh|*.json|*.html|*.txt|*.snap|*.md) return 0 ;;
+    *) return 1 ;;
+  esac
+}
 
 # --- collect_single_alias: files of one alias (file or dir) -----------
 collect_single_alias() {
@@ -56,16 +60,14 @@ collect_single_alias() {
   [[ -e "$path" ]] || return 0
 
   if [[ -f "$path" ]]; then
-    case "$path" in
-      *.rs|*.toml|*.html|*.txt|*.snap)
-        git ls-files --cached --others --exclude-standard --error-unmatch "$path" >/dev/null 2>&1 && echo "$path"
-        ;;
-    esac
+    # Single-file aliases are an explicit whitelist in repo.conf:
+    # included if the file exists, even when gitignored
+    # (e.g. RUST_BUILD_GUIDE=rust_build.md).
+    is_source_file "$path" && echo "$path"
   else
+    # Dir aliases: only files as git sees them (respects .gitignore).
     git ls-files --cached --others --exclude-standard -- "$path" 2>/dev/null | while IFS= read -r f; do
-      case "$f" in
-        *.rs|*.toml|*.html|*.txt|*.snap) echo "$f" ;;
-      esac
+      is_source_file "$f" && echo "$f"
     done
   fi
 }
@@ -176,7 +178,7 @@ print_top10_largest() {
   rm -f "$tmp"
 }
 
-print_source_stats() { print_group_stats "SOURCE - src / Cargo.toml / config / manifest" SOURCE_GROUP; }
+print_source_stats() { print_group_stats "SOURCE - src / toml / config / UI / guide" SOURCE_GROUP; }
 print_tests_stats()  { print_group_stats "TESTS - integration tests (tests/)"                   TESTS_GROUP; }
 
 # --- build_dump <name> <title> <GROUP_NAME>... -------------------------
@@ -221,9 +223,15 @@ build_dump() {
     case "$ext" in
       rs)   lang="rust" ;;
       toml) lang="toml" ;;
+      ts)   lang="typescript" ;;
+      js)   lang="javascript" ;;
+      css)  lang="css" ;;
+      sh)   lang="bash" ;;
+      json) lang="json" ;;
       html) lang="html" ;;
       txt)  lang="text" ;;
       snap) lang="text" ;;
+      md)   lang="markdown" ;;
       *)    lang="" ;;
     esac
     {
@@ -280,6 +288,8 @@ build_percrate_dumps() {
     if [[ "$base" == "UWA_BIN" && -n "${PATHS[UWA_BIN_CONFIG]:-}" ]]; then
       CRATE_GROUP+=("UWA_BIN_CONFIG")
     fi
+    # Extra sources from repo.conf (e.g. uwa-api static UI)
+    [[ -n "${PATHS[${base}_EXTRA]:-}" ]] && CRATE_GROUP+=("${base}_EXTRA")
 
     if [[ "$PERCRATE_TESTS_SEPARATE" == "1" ]]; then
       build_dump "$crate_name" "UWA ${crate_name//_/-} Dump" CRATE_GROUP
@@ -307,6 +317,7 @@ build_crate_dump() {
     if [[ "$stem" == "UWA_BIN" && -n "${PATHS[UWA_BIN_CONFIG]:-}" ]]; then
       CRATE_GROUP+=("UWA_BIN_CONFIG")
     fi
+    [[ -n "${PATHS[${stem}_EXTRA]:-}" ]] && CRATE_GROUP+=("${stem}_EXTRA")
   elif [[ -e "$crate_arg" ]]; then
     PATHS["__ARG_PATH__"]="$crate_arg"
     CRATE_GROUP=("__ARG_PATH__")
