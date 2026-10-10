@@ -1,7 +1,7 @@
 //! In-crate test support. Not part of the public API — gated by `#[cfg(test)]`
 //! in `lib.rs`:
 //!
-//! ```ignore
+//! ```text
 //! #[cfg(test)]
 //! pub(crate) mod test_support;
 //! ```
@@ -11,7 +11,7 @@
 
 use async_trait::async_trait;
 use serde_json::Value;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::time::Duration;
 use tokio::sync::broadcast;
 use url::Url;
@@ -24,7 +24,6 @@ use uwa_core::{NetworkEvent, Page, Result};
 // matches, returns `default` (which starts as `false`).
 //
 // `html`: fixed string returned by `html()`.
-#[allow(dead_code)]
 pub(crate) struct ScriptedPage {
     script: Mutex<Vec<(String, Value)>>,
     default: Value,
@@ -32,9 +31,7 @@ pub(crate) struct ScriptedPage {
     log: Mutex<Vec<String>>,
 }
 
-#[allow(dead_code)]
 impl ScriptedPage {
-    #[allow(dead_code)]
     pub fn new(script: Vec<(&str, Value)>) -> Self {
         Self {
             script: Mutex::new(
@@ -49,13 +46,6 @@ impl ScriptedPage {
         }
     }
 
-    #[allow(dead_code)]
-    pub fn with_html(self, h: &str) -> Self {
-        *self.html.lock().unwrap() = h.to_string();
-        self
-    }
-
-    #[allow(dead_code)]
     pub fn log(&self) -> Vec<String> {
         self.log.lock().unwrap().clone()
     }
@@ -97,6 +87,3 @@ impl Page for ScriptedPage {
         Ok(rx)
     }
 }
-
-#[allow(dead_code)]
-fn _keep(_: Arc<()>) {}

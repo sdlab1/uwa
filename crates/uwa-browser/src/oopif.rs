@@ -94,7 +94,7 @@ impl OopifRegistry {
 
     pub async fn remove_by_session(&self, session_id: &SessionId) {
         let frame = self.by_session.write().await.remove(session_id);
-        let target = {
+        {
             let mut g = self.by_target.write().await;
             let t = g
                 .iter()
@@ -103,12 +103,10 @@ impl OopifRegistry {
             if let Some(t) = &t {
                 g.remove(t);
             }
-            t
-        };
+        }
         if let Some(fid) = frame {
             self.by_frame.write().await.remove(&fid);
         }
-        let _ = target;
     }
 
     pub async fn remove_by_target(&self, target_id: &TargetId) -> Option<SessionId> {

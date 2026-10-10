@@ -237,6 +237,10 @@ mod tests {
             name = "x"
             url_patterns = ["https://x/*"]
             capabilities = { streams = true, tool_calls = false, vision = false }
+            [providers.x.selectors]
+            input = "#i"
+            send_button = "#s"
+            assistant_message = "#a"
             [providers.x.presets.pro.selectors]
             input = "#i"
             "####,

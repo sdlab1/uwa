@@ -25,6 +25,14 @@ fn load(providers: &str) -> Config {
     Config::load_from_str(&format!("{HEAD}{providers}")).expect("valid config")
 }
 
+/// Structural mistakes must be caught at *load* time (see
+/// `Config::validate`), long before a browser is ever opened.
+fn load_err(providers: &str) -> String {
+    Config::load_from_str(&format!("{HEAD}{providers}"))
+        .expect_err("config must be rejected")
+        .to_string()
+}
+
 #[test]
 fn validates_provider_tables() {
     // Happy path: two providers, each reachable through its URL pattern.
@@ -48,18 +56,12 @@ fn validates_provider_tables() {
     assert!(!demo.matches(&"https://other.test/chat".parse().unwrap()));
 
     // A key that disagrees with `name` is a typo, not a second provider.
-    let bad_key = load(&DEMO.replace("name = \"demo\"", "name = \"deco\""));
-    let Err(err) = build_providers(&bad_key) else {
-        panic!("key != name must fail");
-    };
-    assert!(matches!(err, uwa_core::UwaError::Config(_)), "{err:?}");
+    let err = load_err(&DEMO.replace("name = \"demo\"", "name = \"deco\""));
+    assert!(err.contains("deco"), "{err}");
 
     // The generic flow needs input + send + assistant selectors.
-    let missing = load(&DEMO.replace("send_button = \"#send\"\n", ""));
-    let Err(err) = build_providers(&missing) else {
-        panic!("missing selector must fail");
-    };
-    assert!(matches!(err, uwa_core::UwaError::Config(_)), "{err:?}");
+    let err = load_err(&DEMO.replace("send_button = \"#send\"\n", ""));
+    assert!(err.contains("send_button"), "{err}");
 }
 
 #[test]

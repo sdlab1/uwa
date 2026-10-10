@@ -102,7 +102,6 @@ async fn run_fixture_flow(fixture_path: &str, selectors_toml: &str) -> String {
 }
 
 #[tokio::test]
-#[ignore = "requires Chromium on ws://127.0.0.1:9222"]
 async fn full_pipeline_against_chat_fixture() {
     if std::env::var("UWA_CHROMIUM").is_err() {
         return;
@@ -124,7 +123,6 @@ async fn full_pipeline_against_chat_fixture() {
 }
 
 #[tokio::test]
-#[ignore = "requires Chromium on ws://127.0.0.1:9222"]
 async fn full_pipeline_against_claude_fixture() {
     if std::env::var("UWA_CHROMIUM").is_err() {
         return;
@@ -145,7 +143,6 @@ async fn full_pipeline_against_claude_fixture() {
 }
 
 #[tokio::test]
-#[ignore = "requires Chromium on ws://127.0.0.1:9222"]
 async fn full_pipeline_against_gemini_fixture() {
     if std::env::var("UWA_CHROMIUM").is_err() {
         return;
@@ -166,7 +163,6 @@ async fn full_pipeline_against_gemini_fixture() {
 }
 
 #[tokio::test]
-#[ignore = "requires Chromium on ws://127.0.0.1:9222"]
 async fn workflow_clicks_send_instead_of_default_path() {
     if std::env::var("UWA_CHROMIUM").is_err() {
         return;

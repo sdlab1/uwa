@@ -5,6 +5,7 @@ use std::time::Duration;
 use uwa_core::Result;
 
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct RetryCfg {
     pub attempts: u32,
     pub base: Duration,
@@ -17,6 +18,30 @@ impl Default for RetryCfg {
             attempts: 3,
             base: Duration::from_millis(100),
             max: Duration::from_secs(2),
+        }
+    }
+}
+
+impl RetryCfg {
+    /// Explicit constructor: `attempts` with the default backoff schedule.
+    ///
+    /// Being `#[non_exhaustive]`, the struct cannot be built with a literal
+    /// from other crates (E0639 — even with `..Default::default()`), so this
+    /// is the sanctioned entry point. Tune the public fields afterwards:
+    ///
+    /// ```rust
+    /// use std::time::Duration;
+    /// use uwa_resilience::RetryCfg;
+    ///
+    /// let mut cfg = RetryCfg::new(2);
+    /// cfg.base = Duration::from_millis(50);
+    /// cfg.max = Duration::from_millis(100);
+    /// assert_eq!(cfg.attempts, 2);
+    /// ```
+    pub fn new(attempts: u32) -> Self {
+        Self {
+            attempts,
+            ..Default::default()
         }
     }
 }

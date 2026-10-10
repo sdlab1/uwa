@@ -183,3 +183,24 @@ pub struct ModelList {
     pub object: &'static str, // "list"
     pub data: Vec<ModelObject>,
 }
+
+/// Shorthand for `Some(MessageContent::Text(..))`.
+///
+/// ```
+/// use uwa_core::{text_content, types::{openai::ChatMessage, Role}};
+///
+/// let m = ChatMessage {
+///     role: Role::User,
+///     content: text_content!("hi"),
+///     name: None,
+///     tool_call_id: None,
+///     tool_calls: None,
+/// };
+/// assert_eq!(m.content_text(), "hi");
+/// ```
+#[macro_export]
+macro_rules! text_content {
+    ($s:expr) => {
+        Some($crate::types::openai::MessageContent::Text(($s).into()))
+    };
+}

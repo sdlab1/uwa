@@ -1,7 +1,6 @@
 //! UWA_CHROMIUM=1 cargo test -p uwa-browser --test media_scan_e2e -- --ignored
 
 #[tokio::test]
-#[ignore = "requires Chromium on http://127.0.0.1:9222"]
 async fn scan_media_detects_video_tag() {
     if std::env::var("UWA_CHROMIUM").is_err() {
         return;
@@ -30,7 +29,6 @@ async fn scan_media_detects_video_tag() {
 }
 
 #[tokio::test]
-#[ignore = "requires Chromium on http://127.0.0.1:9222"]
 async fn audio_capture_roundtrip_on_local_page() {
     if std::env::var("UWA_CHROMIUM").is_err() {
         return;

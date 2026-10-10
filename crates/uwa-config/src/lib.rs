@@ -344,17 +344,23 @@ impl Config {
         Ok(cfg)
     }
 
+    /// Single place where a [`Config`] is declared sound. Everything
+    /// downstream (`build_providers`, wiring, presets) trusts this.
+    ///
+    /// Runs on every `load_from_str`/`load_from_path`.
     pub fn validate(&self) -> Result<()> {
-        if self.server.bind != "127.0.0.1"
-            && self.server.bind != "::1"
-            && self.server.bind != "localhost"
-            && self.server.api_key.is_none()
-        {
-            return Err(UwaError::Config(
-                "refusing to bind non-loopback without server.api_key".into(),
-            ));
+        // 1. Loopback / API-key invariant: an open API is only acceptable
+        //    when the socket cannot be reached from the network.
+        let bind = self.server.bind.as_str();
+        let is_loopback = matches!(bind, "127.0.0.1" | "::1" | "localhost" | "0:0:0:0:0:0:0:1");
+        if !is_loopback && self.server.api_key.is_none() {
+            return Err(UwaError::Config(format!(
+                "server.bind = `{bind}` is not loopback but server.api_key is missing; \
+                 set api_key or change bind to 127.0.0.1"
+            )));
         }
-        // Every alias must point at an existing provider.
+
+        // 2. Every model alias points at a provider that exists.
         for (model, prov) in &self.model_aliases {
             if !self.providers.contains_key(prov) {
                 return Err(UwaError::Config(format!(
@@ -362,21 +368,72 @@ impl Config {
                 )));
             }
         }
-        // Validate groups if present.
-        for (name, g) in &self.groups {
-            g.validate(&self.providers)
-                .map_err(|e| UwaError::Config(format!("group `{name}`: {e}")))?;
-        }
-        // Validate presets per provider.
-        for (name, p) in &self.providers {
+
+        // 3. Provider tables: key == name, patterns present, and the three
+        //    selectors the generic flow cannot work without.
+        for (key, p) in &self.providers {
+            if p.name != *key {
+                return Err(UwaError::Config(format!(
+                    "provider key `{key}` != provider.name `{}`",
+                    p.name
+                )));
+            }
+            if p.url_patterns.is_empty() {
+                return Err(UwaError::Config(format!(
+                    "providers.{key}.url_patterns is empty"
+                )));
+            }
+            for (field, sel) in [
+                ("input", &p.selectors.input),
+                ("send_button", &p.selectors.send_button),
+                ("assistant_message", &p.selectors.assistant_message),
+            ] {
+                if sel.is_none() {
+                    return Err(UwaError::Config(format!(
+                        "providers.{key}.selectors.{field} is required"
+                    )));
+                }
+            }
             if let Some(default) = &p.default_preset {
                 if !p.presets.contains_key(default) {
                     return Err(UwaError::Config(format!(
-                        "provider `{name}` has default_preset `{default}` that does not exist"
+                        "provider `{key}` has default_preset `{default}` that does not exist"
                     )));
                 }
             }
         }
+
+        // 4. Groups reference real providers (and real presets per member).
+        for (name, g) in &self.groups {
+            g.validate(&self.providers)
+                .map_err(|e| UwaError::Config(format!("group `{name}`: {e}")))?;
+        }
+
+        // 5. CDP backend endpoint must be usable.
+        if self.backend.kind == BackendKind::Cdp {
+            validate_cdp_ws_url(&self.backend.cdp.ws_url)?;
+        }
+
+        // 6. Scheduled restart needs a well-formed HH:MM when enabled.
+        if self.scheduled_restart.enabled {
+            let at = self.scheduled_restart.at.as_deref().ok_or_else(|| {
+                UwaError::Config("scheduled_restart.enabled = true but `at` is missing".into())
+            })?;
+            validate_hhmm(at)?;
+        }
+
+        // 7. A enabled proxy needs a parseable address.
+        if self.proxy.enabled {
+            if self.proxy.address.is_empty() {
+                return Err(UwaError::Config(
+                    "proxy.enabled = true but proxy.address is empty".into(),
+                ));
+            }
+            Url::parse(&self.proxy.address).map_err(|e| {
+                UwaError::Config(format!("proxy.address `{}`: {e}", self.proxy.address))
+            })?;
+        }
+
         Ok(())
     }
 
@@ -399,6 +456,82 @@ pub fn url_matches(pattern: &str, url: &Url) -> bool {
     match pattern.split_once('*') {
         None => pattern == u,
         Some((head, tail)) => u.starts_with(head) && (tail.is_empty() || u.ends_with(tail)),
+    }
+}
+
+/// `backend.cdp.ws_url` sanity. Two accepted shapes:
+///
+/// * `http(s)://host:port` — resolved through `/json/version` at connect
+///   time, so no browser GUID is needed.
+/// * `ws://…/devtools/browser/<GUID>` — a direct attach target.
+///
+/// A bare `ws://…/devtools/browser` (no GUID) is rejected: Chrome answers
+/// `404 Not Found` for it, and the failure only surfaces mid-request
+/// (CI lesson #3).
+fn validate_cdp_ws_url(ws: &str) -> Result<()> {
+    let u =
+        Url::parse(ws).map_err(|e| UwaError::Config(format!("backend.cdp.ws_url `{ws}`: {e}")))?;
+    match u.scheme() {
+        "http" | "https" => Ok(()),
+        "ws" | "wss" => {
+            if u.path() == "/devtools/browser" {
+                Err(UwaError::Config(format!(
+                    "backend.cdp.ws_url `{ws}`: bare /devtools/browser without a browser \
+                     GUID is rejected by Chrome (404); use http://host:port and let \
+                     CdpTransport::connect resolve it"
+                )))
+            } else {
+                Ok(())
+            }
+        }
+        other => Err(UwaError::Config(format!(
+            "backend.cdp.ws_url `{ws}`: scheme `{other}` is not supported (http:// or ws://)"
+        ))),
+    }
+}
+
+/// `HH:MM` (24h, UTC) sanity for `scheduled_restart.at`.
+fn validate_hhmm(at: &str) -> Result<()> {
+    let (h, m) = at
+        .split_once(':')
+        .ok_or_else(|| UwaError::Config(format!("scheduled_restart.at `{at}`: expected HH:MM")))?;
+    let h: u32 = h
+        .parse()
+        .map_err(|_| UwaError::Config(format!("scheduled_restart.at `{at}`: bad hour")))?;
+    let m: u32 = m
+        .parse()
+        .map_err(|_| UwaError::Config(format!("scheduled_restart.at `{at}`: bad minute")))?;
+    if h >= 24 || m >= 60 {
+        return Err(UwaError::Config(format!(
+            "scheduled_restart.at `{at}`: out of range"
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod validate_helper_tests {
+    use super::*;
+
+    #[test]
+    fn cdp_ws_url_accepts_http_and_guid_forms() {
+        assert!(validate_cdp_ws_url("http://127.0.0.1:9222").is_ok());
+        assert!(validate_cdp_ws_url("ws://127.0.0.1:9222/devtools/browser/4f1a-9c2d").is_ok());
+    }
+
+    #[test]
+    fn cdp_ws_url_rejects_bare_browser_path() {
+        let e = validate_cdp_ws_url("ws://127.0.0.1:9222/devtools/browser").unwrap_err();
+        assert!(e.to_string().contains("GUID"), "{e}");
+    }
+
+    #[test]
+    fn hhmm_accepts_valid_and_rejects_garbage() {
+        assert!(validate_hhmm("04:00").is_ok());
+        assert!(validate_hhmm("23:59").is_ok());
+        assert!(validate_hhmm("25:99").is_err());
+        assert!(validate_hhmm("4am").is_err());
+        assert!(validate_hhmm("04:60").is_err());
     }
 }
 
@@ -429,6 +562,10 @@ mod tests {
         name = "claude"
         url_patterns = ["https://claude.ai/*"]
         capabilities = { streams = true, tool_calls = true, vision = true }
+        [providers.claude.selectors]
+        input = "div[contenteditable=true]"
+        send_button = "button[aria-label='Send message']"
+        assistant_message = "[data-testid=assistant-message]"
     "#;
 
     #[test]
@@ -543,7 +680,7 @@ mod tests {
             [backend]
             kind = "cdp"
             [backend.cdp]
-            ws_url = "ws://localhost:9999/devtools/browser"
+            ws_url = "ws://localhost:9999/devtools/browser/8f4a1b2e-1234-4c5d-9e8f-a1b2c3d4e5f6"
             idle_ttl_secs = 600
         "#,
         )
@@ -551,7 +688,7 @@ mod tests {
         assert_eq!(cfg.backend.kind, BackendKind::Cdp);
         assert_eq!(
             cfg.backend.cdp.ws_url,
-            "ws://localhost:9999/devtools/browser"
+            "ws://localhost:9999/devtools/browser/8f4a1b2e-1234-4c5d-9e8f-a1b2c3d4e5f6"
         );
         assert_eq!(cfg.backend.cdp.idle_ttl_secs, 600);
     }

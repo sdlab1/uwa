@@ -102,11 +102,9 @@ pub async fn count(page: &dyn Page, selector: &str) -> Result<u32> {
 /// Returns [`UwaError::Timeout`] once `timeout` elapses.
 pub async fn wait_exists(page: &dyn Page, selector: &str, timeout: Duration) -> Result<()> {
     let start = std::time::Instant::now();
-    let probe = uwa_resilience::RetryCfg {
-        attempts: 2,
-        base: Duration::from_millis(50),
-        max: Duration::from_millis(100),
-    };
+    let mut probe = uwa_resilience::RetryCfg::new(2);
+    probe.base = Duration::from_millis(50);
+    probe.max = Duration::from_millis(100);
     loop {
         let hit = uwa_resilience::retry(&probe, || exists(page, selector))
             .await

@@ -111,4 +111,14 @@ mod tests {
         drop(pid);
         let _ = std::fs::remove_file(&path);
     }
+
+    /// The suite creates `uwa-pid-test-{pid}` once per run and only removes
+    /// the files inside — without this sweep the *directories* accumulate
+    /// in /tmp forever. Alphabetically last, runs after the others.
+    #[test]
+    fn zzz_removes_the_temp_dir() {
+        let dir = std::env::temp_dir().join(format!("uwa-pid-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(!dir.exists());
+    }
 }

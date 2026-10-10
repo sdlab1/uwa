@@ -1,14 +1,16 @@
 //! Live CDP smoke test.
 //!
-//! Ignored by default: it needs a Chromium binary (or a running debugger on
-//! `UWA_CDP_URL`). Run with:
+//! Gated on `UWA_CHROMIUM=1` (no Chromium → the tests no-op instead of being
+//! ignored). Run with:
 //!
 //! ```sh
-//! UWA_CHROMIUM=1 cargo test -p uwa-browser -- --ignored --nocapture
+//! UWA_CHROMIUM=1 cargo test -p uwa-browser -- --test-threads=1 --nocapture
 //! ```
 //!
-//! The Chromium it spawns is killed by a `Drop` guard, so a failing or
-//! timing-out run leaves no browser behind.
+//! Leak protection is three layers: a `Drop` guard killpg's the browser on a
+//! normal exit, `PR_SET_PDEATHSIG` makes the kernel kill it if this binary
+//! itself is SIGKILLed (a `Drop` guard cannot run then), and every spawn
+//! first reaps a stale browser left by a previous hard-killed run.
 
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -185,13 +187,96 @@ fn chrome_bin() -> Option<String> {
         .map(|p| p.to_string())
 }
 
+/// Every Chromium this file starts goes through here:
+///
+/// * `process_group(0)` — the browser is its own process-group leader, so
+///   the `Drop` guard can `killpg` the whole tree on a normal exit.
+/// * `PR_SET_PDEATHSIG` — if *this* test binary is killed outright (OOM,
+///   `kill -9`, CI step timeout), no `Drop` ever runs; the kernel then
+///   reaps the browser for us. Without it a hard-killed run leaks a
+///   headless Chromium until the machine reboots.
+fn chrome_command(bin: &str, args: &[String]) -> Command {
+    use std::os::unix::process::CommandExt;
+    let mut cmd = std::process::Command::new(bin);
+    cmd.args(args).process_group(0);
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
+            Ok(())
+        });
+    }
+    Command::from(cmd)
+}
+
+/// Kill a Chromium left over from a previous run that was hard-killed
+/// (its `Drop` guard never ran), and clear its profile.
+///
+/// Matching is deliberately strict — the first argv token must BE a browser
+/// executable basename (`chrome`, `chromium`, …) AND the full cmdline must
+/// carry our profile marker. A mere substring match would kill innocent
+/// processes whose command line happens to mention the marker (a shell
+/// running `mkdir -p /tmp/uwa-cdp-smoke-…`, a pager, an editor). Our own
+/// pid is skipped outright.
+///
+/// Best-effort: on a clean machine this is a no-op.
+fn reap_stale_chrome(marker: &str, profile: &std::path::Path) {
+    const BROWSER_BASENAMES: &[&str] = &[
+        "chrome",
+        "chromium",
+        "chromium-browser",
+        "google-chrome",
+        "google-chrome-stable",
+        "headless_shell",
+        "chrome-headless-shell",
+    ];
+    if let Ok(dir) = std::fs::read_dir("/proc") {
+        for entry in dir.flatten() {
+            let Ok(pid) = entry.file_name().to_string_lossy().parse::<libc::pid_t>() else {
+                continue;
+            };
+            if pid as u32 == std::process::id() {
+                continue;
+            }
+            let Ok(cmdline) = std::fs::read_to_string(entry.path().join("cmdline")) else {
+                continue;
+            };
+            if !cmdline.contains(marker) {
+                continue;
+            }
+            // argv[0] must be a browser executable, not just any process
+            // whose arguments mention the profile.
+            let argv0 = cmdline.split('\0').next().unwrap_or("");
+            // argv0 might be a space-separated string if launched via shell.
+            // Take the first word as the executable path.
+            let argv0 = argv0.split_whitespace().next().unwrap_or("");
+            let basename = argv0.rsplit('/').next().unwrap_or("");
+            if !BROWSER_BASENAMES.contains(&basename) {
+                continue;
+            }
+            // Our own browsers are spawned with `process_group(0)`, so the
+            // browser IS the group leader and this takes the whole renderer
+            // tree down. A browser started some other way is not a leader —
+            // then killpg misses (ESRCH) and the plain kill is the fallback;
+            // its children follow the browser process down.
+            unsafe {
+                if libc::killpg(pid, libc::SIGKILL) != 0 {
+                    libc::kill(pid, libc::SIGKILL);
+                }
+            }
+        }
+    }
+    let _ = std::fs::remove_dir_all(profile);
+}
+
 impl ChromeGuard {
     fn spawn(port: u16) -> Option<Self> {
         let bin = chrome_bin()?;
         let profile = std::env::temp_dir().join(format!("uwa-cdp-smoke-{port}"));
-        let child = Command::new(&bin)
-            .args(chrome_args(&profile, port))
-            .process_group(0)
+        // A previous run may have been hard-killed (OOM / kill -9 / CI
+        // timeout): its guard never dropped and a zombie browser still owns
+        // this port and profile. Clear the decks before spawning.
+        reap_stale_chrome(&format!("uwa-cdp-smoke-{port}"), &profile);
+        let child = chrome_command(&bin, &chrome_args(&profile, port))
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
@@ -298,7 +383,6 @@ async fn wait_for_ws(url: &str, deadline: Duration) -> bool {
 }
 
 #[tokio::test]
-#[ignore = "needs a Chromium binary; run with UWA_CHROMIUM=1 cargo test -p uwa-browser -- --ignored"]
 async fn live_cdp_navigation_and_network_events() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
@@ -575,7 +659,6 @@ fn locked_keyring_is_covered_by_the_launch_args() {
 /// `Drop` is the only thing standing between a failed run and a leaked
 /// browser, so assert it directly: process gone, profile gone, port free.
 #[tokio::test]
-#[ignore = "needs a Chromium binary; run with UWA_CHROMIUM=1 cargo test -p uwa-browser -- --ignored"]
 async fn guard_leaves_no_browser_profile_or_port() {
     if !enabled() {
         eprintln!("skipped: set UWA_CHROMIUM=1 to run the cleanup check");
@@ -621,7 +704,6 @@ async fn guard_leaves_no_browser_profile_or_port() {
 /// fails but the CDP smoke passes (or vice versa), the breakage is in the
 /// browser itself rather than in our transport.
 #[tokio::test]
-#[ignore = "needs a Chromium binary; run with UWA_CHROMIUM=1 cargo test -p uwa-browser -- --ignored"]
 async fn chrome_renders_a_local_page_without_cdp() {
     if !enabled() {
         eprintln!("skipped: set UWA_CHROMIUM=1 to run the Chromium health check");
@@ -643,9 +725,7 @@ async fn chrome_renders_a_local_page_without_cdp() {
     args.push("--dump-dom".into());
     args.push(format!("http://127.0.0.1:{site_port}/index.html"));
 
-    let mut child = Command::new(&bin)
-        .args(&args)
-        .process_group(0)
+    let mut child = chrome_command(&bin, &args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -776,7 +856,6 @@ async fn serve_oopif_site(port: u16) {
 }
 
 #[tokio::test]
-#[ignore = "needs a Chromium binary; run with UWA_CHROMIUM=1 cargo test -p uwa-browser -- --ignored"]
 async fn live_frames_eval_and_oopif_tracking() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
@@ -912,7 +991,6 @@ async fn live_frames_eval_and_oopif_tracking() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-#[ignore = "needs a Chromium binary; run with UWA_CHROMIUM=1 cargo test -p uwa-browser -- --ignored"]
 async fn live_oopif_eval_and_stealth() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
@@ -1079,10 +1157,9 @@ fn chrome_process_count() -> usize {
 ///
 /// For CI, also add a belt-and-suspenders check AFTER the test run:
 /// ```sh
-/// cargo test -p uwa-browser -- --include-ignored --test-threads=1 && ///     [ "$(pgrep -c 'chrome|chromium' || echo 0)" = "0" ]
+/// cargo test -p uwa-browser -- --test-threads=1 && ///     [ "$(pgrep -c 'chrome|chromium' || echo 0)" = "0" ]
 /// ```
 #[tokio::test]
-#[ignore = "needs a Chromium binary; run with UWA_CHROMIUM=1 cargo test -p uwa-browser -- --ignored"]
 async fn zzz_chrome_leak_guard_after_suite() {
     if !enabled() {
         eprintln!("skipped: set UWA_CHROMIUM=1 to run the leak check");

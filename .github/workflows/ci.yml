@@ -75,4 +75,4 @@ jobs:
         env:
           UWA_CHROMIUM: "1"
           UWA_CHROMIUM_WS: "http://127.0.0.1:9222"
-        run: cargo test -p uwa-browser -- --ignored --test-threads=1
+        run: cargo test -p uwa-browser -- --test-threads=1
