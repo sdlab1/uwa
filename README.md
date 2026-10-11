@@ -7,13 +7,12 @@
 
 <p align="center">
   <a href="https://github.com/sdlab1/uwa/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/sdlab1/uwa/ci.yml?branch=main&label=ci"></a>
-  <a href="https://github.com/sdlab1/uwa/releases"><img alt="Release" src="https://img.shields.io/github/v/release/sdlab1/uwa?display_name=tag&sort=semver"></a>
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
   <a href="https://www.rust-lang.org"><img alt="Rust" src="https://img.shields.io/badge/rust-1.75%2B-orange.svg"></a>
 </p>
 
 <p align="center">
-  <img src="docs/demo.gif" alt="Cursor → uwa → ChatGPT in 15 seconds" width="820">
+**Work In Progress** under active developement
 </p>
 
 ---
@@ -212,6 +211,7 @@ points:
 - [Compatibility](docs/COMPATIBILITY.md) — tested clients and versions.
 - [Troubleshooting](docs/TROUBLESHOOTING.md) — the failures people actually hit.
 - [Positioning](docs/POSITIONING.md) — what we're building and what we're not.
+- [Why UWA](docs/why_uwa.md) — architectural deep-dive comparing UWA to typical Python wrappers.
 
 ## License
 
