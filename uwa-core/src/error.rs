@@ -7,7 +7,7 @@ use thiserror::Error;
 
 pub type Result<T, E = UwaError> = std::result::Result<T, E>;
 
-#[derive(Debug, Error)]
+#[derive(Debug, Clone, Error)]
 pub enum UwaError {
     #[error("configuration error: {0}")]
     Config(String),

@@ -21,7 +21,6 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::{json, Value};
-use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
@@ -81,15 +80,27 @@ pub async fn messages(
         .into());
     }
 
-    // Run pipeline.
-    let (text, calls, finish) =
-        crate::routes::chat::pipeline::run_pipeline(&state, &oa_req, &all_specs, None).await?;
-
     let msg_id = format!("msg_{}", uuid::Uuid::new_v4().simple());
 
     if req.stream.unwrap_or(false) {
-        Ok(stream_anthropic(msg_id, req.model, text, calls, finish))
+        let (tx, rx) = mpsc::channel::<crate::routes::chat::pipeline::StreamEvent>(64);
+        let state_task = state.clone();
+        let oa_req_task = oa_req.clone();
+        let specs_clone = all_specs.clone();
+        tokio::spawn(async move {
+            let _ = crate::routes::chat::pipeline::run_pipeline_streaming(
+                &state_task,
+                &oa_req_task,
+                &specs_clone,
+                None,
+                tx,
+            )
+            .await;
+        });
+        Ok(stream_anthropic_from_channel(msg_id, req.model, rx))
     } else {
+        let (text, calls, finish) =
+            crate::routes::chat::pipeline::run_pipeline(&state, &oa_req, &all_specs, None).await?;
         Ok(Json(build_response(
             &req,
             msg_id,
@@ -370,17 +381,16 @@ fn build_response(
 
 // ---------- streaming ----------
 
-fn stream_anthropic(
+fn stream_anthropic_from_channel(
     id: String,
     model: String,
-    text: String,
-    calls: Vec<ToolCall>,
-    finish: FinishReason,
+    mut rx: mpsc::Receiver<crate::routes::chat::pipeline::StreamEvent>,
 ) -> Response {
-    let (tx, rx) = mpsc::channel::<Result<Event, std::convert::Infallible>>(64);
+    use crate::routes::chat::pipeline::StreamEvent;
+
+    let (tx, out_rx) = mpsc::channel::<Result<Event, std::convert::Infallible>>(64);
 
     tokio::spawn(async move {
-        // message_start
         let initial = MessagesResponse {
             id: id.clone(),
             kind: "message".into(),
@@ -394,71 +404,79 @@ fn stream_anthropic(
         let _ = tx
             .send(Ok(sse_event(
                 "message_start",
-                json!({
-                    "type": "message_start",
-                    "message": initial
-                }),
+                json!({ "type": "message_start", "message": initial }),
             )))
             .await;
 
-        let mut index: u32 = 0;
+        let text_index: u32 = 0;
+        let mut text_block_open = false;
+        let mut calls: Vec<ToolCall> = Vec::new();
+        let mut finish = FinishReason::Stop;
 
-        // Text block
-        if !text.is_empty() {
-            let _ = tx
-                .send(Ok(sse_event(
-                    "content_block_start",
-                    json!({
-                        "type": "content_block_start",
-                        "index": index,
-                        "content_block": {"type": "text", "text": ""}
-                    }),
-                )))
-                .await;
-
-            let mut buf = String::new();
-            for ch in text.chars() {
-                buf.push(ch);
-                if buf.chars().count() >= 24 {
+        while let Some(ev) = rx.recv().await {
+            match ev {
+                StreamEvent::Delta(chunk) => {
+                    if !text_block_open {
+                        let _ = tx
+                            .send(Ok(sse_event(
+                                "content_block_start",
+                                json!({
+                                    "type": "content_block_start",
+                                    "index": text_index,
+                                    "content_block": { "type": "text", "text": "" }
+                                }),
+                            )))
+                            .await;
+                        text_block_open = true;
+                    }
                     let _ = tx
                         .send(Ok(sse_event(
                             "content_block_delta",
                             json!({
-                                                "type": "content_block_delta",
-                                "index": index,
-                                "delta": {"type": "text_delta", "text": buf.clone()}
+                                "type": "content_block_delta",
+                                "index": text_index,
+                                "delta": { "type": "text_delta", "text": chunk }
                             }),
                         )))
                         .await;
-                    buf.clear();
-                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                StreamEvent::Done {
+                    finish: f,
+                    tool_calls,
+                } => {
+                    finish = f;
+                    calls = tool_calls;
+                    break;
+                }
+                StreamEvent::Error(e) => {
+                    let _ = tx
+                        .send(Ok(sse_event(
+                            "error",
+                            json!({ "type": "error", "error": { "message": e.to_string() } }),
+                        )))
+                        .await;
+                    let _ = tx
+                        .send(Ok(sse_event(
+                            "message_stop",
+                            json!({ "type": "message_stop" }),
+                        )))
+                        .await;
+                    return;
                 }
             }
-            if !buf.is_empty() {
-                let _ = tx
-                    .send(Ok(sse_event(
-                        "content_block_delta",
-                        json!({
-                            "type": "content_block_delta",
-                            "index": index,
-                            "delta": {"type": "text_delta", "text": buf}
-                        }),
-                    )))
-                    .await;
-            }
+        }
+
+        let mut index = text_index;
+        if text_block_open {
             let _ = tx
                 .send(Ok(sse_event(
                     "content_block_stop",
-                    json!({
-                        "type": "content_block_stop",
-                        "index": index
-                    }),
+                    json!({ "type": "content_block_stop", "index": index }),
                 )))
                 .await;
             index += 1;
         }
 
-        // Tool-use blocks
         for c in &calls {
             let _ = tx
                 .send(Ok(sse_event(
@@ -475,7 +493,6 @@ fn stream_anthropic(
                     }),
                 )))
                 .await;
-
             let partial = serde_json::to_string(&c.arguments).unwrap_or_else(|_| "{}".into());
             let _ = tx
                 .send(Ok(sse_event(
@@ -483,24 +500,19 @@ fn stream_anthropic(
                     json!({
                         "type": "content_block_delta",
                         "index": index,
-                        "delta": {"type": "input_json_delta", "partial_json": partial}
+                        "delta": { "type": "input_json_delta", "partial_json": partial }
                     }),
                 )))
                 .await;
-
             let _ = tx
                 .send(Ok(sse_event(
                     "content_block_stop",
-                    json!({
-                        "type": "content_block_stop",
-                        "index": index
-                    }),
+                    json!({ "type": "content_block_stop", "index": index }),
                 )))
                 .await;
             index += 1;
         }
 
-        // message_delta + message_stop
         let stop_reason = match finish {
             FinishReason::Stop => "end_turn",
             FinishReason::ToolCalls => "tool_use",
@@ -512,22 +524,20 @@ fn stream_anthropic(
                 "message_delta",
                 json!({
                     "type": "message_delta",
-                    "delta": {"stop_reason": stop_reason, "stop_sequence": null},
-                    "usage": {"output_tokens": 0}
+                    "delta": { "stop_reason": stop_reason, "stop_sequence": null },
+                    "usage": { "output_tokens": 0 }
                 }),
             )))
             .await;
         let _ = tx
             .send(Ok(sse_event(
                 "message_stop",
-                json!({
-                    "type": "message_stop"
-                }),
+                json!({ "type": "message_stop" }),
             )))
             .await;
     });
 
-    Sse::new(ReceiverStream::new(rx))
+    Sse::new(ReceiverStream::new(out_rx))
         .keep_alive(KeepAlive::default())
         .into_response()
 }

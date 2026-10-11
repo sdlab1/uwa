@@ -188,12 +188,13 @@ impl OopifRegistry {
 
     /// Returns the root frame target ID for the given target ID.
     ///
-    /// For now, we return the target ID itself as a placeholder.
-    /// In the future, this should walk up the frame tree to find the
-    /// top-level frame's target ID.
-    pub async fn root_frame_target_id(&self, target_id: &TargetId) -> Option<String> {
-        // Placeholder: treat each target as its own root frame.
-        Some(target_id.inner().to_string())
+    /// **Current behavior:** always returns `None`. Walking the frame tree
+    /// to find a top-level ancestor is not implemented — callers should
+    /// fall back to the given `target_id` as their grouping key. When the
+    /// frame tree becomes available per-session, this will resolve
+    /// child-frame events to their page-level root.
+    pub async fn root_frame_target_id(&self, _target_id: &TargetId) -> Option<String> {
+        None
     }
 }
 
@@ -531,6 +532,7 @@ mod tests {
 
         // Test the placeholder implementation
         let result = registry.root_frame_target_id(&target_id).await;
-        assert_eq!(result, Some("target123".to_string()));
+        // Documented placeholder: no frame tree walk yet.
+        assert_eq!(result, None);
     }
 }

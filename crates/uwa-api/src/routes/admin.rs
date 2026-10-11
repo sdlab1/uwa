@@ -363,17 +363,15 @@ pub struct ApplySelectorsRequest {
     pub send_button: Option<String>,
     #[serde(default)]
     pub assistant_message: Option<String>,
-    /// When true: persist to disk. Currently a no-op — the full TOML
-    /// round-trip lives in `/admin/config/reload`.
-    #[serde(default)]
-    pub persist: bool,
 }
 
 #[derive(Debug, Serialize)]
 pub struct ApplySelectorsResponse {
+    /// Always `false`: this endpoint never mutates the running config.
     pub applied: bool,
     pub diff: serde_json::Value,
-    pub persisted_to: Option<String>,
+    /// Human-readable next step.
+    pub hint: &'static str,
 }
 
 pub async fn selector_apply(
@@ -412,23 +410,9 @@ pub async fn selector_apply(
         }
     }
 
-    if !req.persist {
-        return Ok(Json(ApplySelectorsResponse {
-            applied: false,
-            diff: serde_json::Value::Object(diff),
-            persisted_to: None,
-        }));
-    }
-
-    // Persist: the full TOML write-back is deferred to
-    // `/admin/config/reload`, which takes the whole document.
-    tracing::warn!(
-        "selector_apply: persist=true is a no-op; use /admin/config/reload with full TOML"
-    );
-
     Ok(Json(ApplySelectorsResponse {
         applied: false,
         diff: serde_json::Value::Object(diff),
-        persisted_to: None,
+        hint: "Dry-run. Edit uwa.toml and restart uwa to apply selector changes.",
     }))
 }

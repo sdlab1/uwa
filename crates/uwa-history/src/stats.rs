@@ -37,6 +37,12 @@ pub struct ProviderStats {
     pub p95_total_ms: u64,
     pub avg_send_ms: u64,
     pub avg_wait_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avg_ttft_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub p50_ttft_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub p95_ttft_ms: Option<u64>,
     /// Number of distinct tabs used.
     pub tabs_used: u64,
     pub last_seen: Option<SystemTime>,
@@ -55,6 +61,12 @@ pub struct Stats {
     pub avg_total_ms: u64,
     pub p50_total_ms: u64,
     pub p95_total_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avg_ttft_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub p50_ttft_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub p95_ttft_ms: Option<u64>,
     /// Distribution per finish_reason.
     pub finish_reasons: HashMap<String, u64>,
     /// Per-provider breakdown.
@@ -135,6 +147,24 @@ pub fn compute(records: &[RequestRecord], window: StatsWindow) -> Stats {
     s.p50_total_ms = percentile(&durations, 50.0);
     s.p95_total_ms = percentile(&durations, 95.0);
 
+    let mut ttfts: Vec<u64> = Vec::new();
+    let mut per_provider_ttfts: HashMap<String, Vec<u64>> = HashMap::new();
+
+    for r in slice {
+        if let Some(t) = r.timing.ttft_ms {
+            ttfts.push(t);
+            per_provider_ttfts
+                .entry(r.provider.clone())
+                .or_default()
+                .push(t);
+        }
+    }
+    if !ttfts.is_empty() {
+        s.avg_ttft_ms = Some(ttfts.iter().sum::<u64>() / ttfts.len() as u64);
+        s.p50_ttft_ms = percentile_opt(&mut ttfts.clone(), 50.0);
+        s.p95_ttft_ms = percentile_opt(&mut ttfts, 95.0);
+    }
+
     for (name, mut stats) in per_provider {
         let total = stats.total.max(1);
         stats.error_rate = stats.error as f32 / total as f32;
@@ -145,6 +175,14 @@ pub fn compute(records: &[RequestRecord], window: StatsWindow) -> Stats {
         stats.avg_total_ms = avg(&durs);
         stats.p50_total_ms = percentile(&durs, 50.0);
         stats.p95_total_ms = percentile(&durs, 95.0);
+        if let Some(mut v) = per_provider_ttfts.remove(&name) {
+            if !v.is_empty() {
+                let sum: u64 = v.iter().sum();
+                stats.avg_ttft_ms = Some(sum / v.len() as u64);
+                stats.p50_ttft_ms = percentile_opt(&mut v.clone(), 50.0);
+                stats.p95_ttft_ms = percentile_opt(&mut v, 95.0);
+            }
+        }
         stats.tabs_used = s
             .tab_utilization
             .keys()
@@ -190,6 +228,15 @@ fn percentile(v: &[u64], p: f64) -> u64 {
     sorted.sort_unstable();
     let idx = ((p / 100.0) * (sorted.len() as f64 - 1.0)).round() as usize;
     sorted[idx.min(sorted.len() - 1)]
+}
+
+fn percentile_opt(v: &mut [u64], p: f64) -> Option<u64> {
+    if v.is_empty() {
+        return None;
+    }
+    v.sort_unstable();
+    let idx = ((p / 100.0) * (v.len() as f64 - 1.0)).round() as usize;
+    Some(v[idx.min(v.len() - 1)])
 }
 
 #[cfg(test)]

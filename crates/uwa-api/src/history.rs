@@ -65,6 +65,14 @@ impl RequestRecorder {
         self.last_mark = std::time::Instant::now();
     }
 
+    /// Call the first time a non-empty delta arrives from the browser LLM.
+    /// Records time-since-send-end as `ttft_ms`. Idempotent.
+    pub fn mark_first_delta(&mut self) {
+        if self.record.timing.ttft_ms.is_none() {
+            self.record.timing.ttft_ms = Some(self.last_mark.elapsed().as_millis() as u64);
+        }
+    }
+
     /// Call after `wait_response` returns.
     pub fn mark_wait_end(&mut self) {
         let d = self.last_mark.elapsed();

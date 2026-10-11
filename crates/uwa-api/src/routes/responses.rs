@@ -112,7 +112,7 @@ pub async fn create(
     // Same entry the chat route uses, so breaker, semaphore and session
     // pinning all apply unchanged. Bridge semantics: tools come from the
     // client request only.
-    let local_tools = chat::local_tools(&chat_req);
+    let local_tools = chat::local_tools(&chat_req)?;
     let (text, calls, finish) = chat::run_pipeline(&state, &chat_req, &local_tools, None).await?;
 
     let id = RequestId::new();

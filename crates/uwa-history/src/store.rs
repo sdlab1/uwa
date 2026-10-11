@@ -202,6 +202,13 @@ async fn sweep_old(dir: &std::path::Path, retention_days: u32) -> Result<()> {
         if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
             continue;
         }
+        // Never delete today's file, even if its mtime is odd (restored
+        // backup, clock skew). The writer holds it open; sweeping it out
+        // from under the appender is the only failure mode here.
+        let today = date_key(&std::time::SystemTime::now());
+        if path.file_stem().and_then(|s| s.to_str()) == Some(today.as_str()) {
+            continue;
+        }
         let Ok(meta) = entry.metadata().await else {
             continue;
         };

@@ -25,14 +25,16 @@
 //! * **D8** — no orphan `Finisher` import; only `Finisher` cfg.
 
 use async_trait::async_trait;
+use futures::StreamExt;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing;
 use url::Url;
 use uwa_config::ProviderCfg;
-use uwa_core::{Capabilities, Page, Result, SiteProvider, UwaError};
+use uwa_core::{Capabilities, Page, ResponseStream, Result, SiteProvider, UwaError};
 use uwa_extract::dom::DomExtractor;
 use uwa_extract::finisher::FinisherCfg;
+use uwa_extract::net::{DefaultNetExtractor, NetExtractor};
 use uwa_extract::pipeline::{ExtractionOutcome, ExtractionPipeline, PipelineCfg};
 
 use crate::input;
@@ -342,11 +344,13 @@ impl SiteProvider for GenericProvider {
                         .join(format!("uwa-audio-{}.webm", uuid::Uuid::new_v4().simple()));
                     match tokio::fs::write(&path, &bytes).await {
                         Ok(()) => {
-                            tracing::info!(
+                            tracing::warn!(
                                 provider = %self.cfg.name,
                                 file = %path.display(),
                                 bytes = bytes.len(),
-                                "audio captured"
+                                "audio captured to temp file (experimental — \
+                                 not yet wired into the response DTO; \
+                                 set media.attach_audio_to_response = false to silence)"
                             );
                         }
                         Err(e) => {
@@ -394,6 +398,25 @@ impl SiteProvider for GenericProvider {
             "extraction done"
         );
         Ok(outcome.text)
+    }
+
+    async fn wait_response_stream(&self, page: &dyn Page) -> Result<ResponseStream> {
+        let cfg = self.pipeline_cfg()?;
+
+        // DOM-only or no net rules → no real deltas; fall back to buffered.
+        if matches!(cfg.strategy, uwa_core::ExtractionStrategy::DomOnly) || cfg.net.is_none() {
+            let text = self.wait_response(page).await?;
+            return Ok(Box::pin(futures::stream::iter(vec![Ok(text)])));
+        }
+
+        // Network-first: subscribe to the network channel and forward every
+        // decoded delta verbatim. The stream terminates when the extractor
+        // sees `[DONE]`, an idle timeout, or a `Finished` event.
+        let net = DefaultNetExtractor;
+        let rules = cfg.net.as_ref().expect("checked above").clone();
+        let deltas = net.deltas(page, &rules).await?;
+        let s = deltas.map(|d| Ok(d.0));
+        Ok(Box::pin(s))
     }
 
     async fn cancel(&self, page: &dyn Page) -> Result<()> {

@@ -31,16 +31,33 @@
 
 use std::time::Duration;
 
+use futures::StreamExt;
+use tokio::sync::mpsc;
 use uwa_core::types::openai::{ChatCompletionRequest, ChatMessage};
 use uwa_core::types::FinishReason;
 use uwa_core::TabId;
 use uwa_core::{ToolSpec, UwaError};
 use uwa_tools::{
-    build_system_prompt, compose_browser_turn, parse, ToolCall, ToolDefinition, ToolParseOutcome,
+    build_system_prompt, compose_browser_turn, parse, tool_marker_index, ToolCall, ToolDefinition,
+    ToolParseOutcome,
 };
 
 use crate::history::RequestRecorder;
 use crate::state::AppState;
+
+/// One item emitted while a response streams in.
+#[derive(Debug)]
+pub enum StreamEvent {
+    /// Incremental assistant text (already stripped of tool-call markers).
+    Delta(String),
+    /// Final chunk: finish reason + aggregated tool calls.
+    Done {
+        finish: FinishReason,
+        tool_calls: Vec<ToolCall>,
+    },
+    /// Pipeline failure after the stream already started.
+    Error(UwaError),
+}
 
 /// RAII cleanup for multimodal temp files. Runs on every exit path,
 /// including errors and panics that unwind.
@@ -116,6 +133,211 @@ pub async fn run_pipeline_with_hint(
     hint: &crate::routing::RoutingHint,
 ) -> Result<(String, Vec<ToolCall>, FinishReason), UwaError> {
     run_pipeline(state, req, all_specs, hint.tab.as_ref()).await
+}
+
+/// Streaming twin of [`run_pipeline`]. Deltas are pushed onto `tx` as they
+/// arrive; the caller is expected to forward them to the client. The outer
+/// accounting (circuit breaker, history, metrics) is identical to the
+/// buffered path, so a request is recorded exactly once regardless of mode.
+pub async fn run_pipeline_streaming(
+    state: &AppState,
+    req: &ChatCompletionRequest,
+    all_specs: &[ToolSpec],
+    pinned_tab: Option<&TabId>,
+    tx: mpsc::Sender<StreamEvent>,
+) -> Result<(), UwaError> {
+    let provider_cfg = state
+        .config
+        .provider_for_model(&req.model)
+        .ok_or_else(|| UwaError::UnknownModel(req.model.clone()))?;
+
+    let breaker = state.breaker(&provider_cfg.name);
+    breaker.allow()?;
+    let _permit = state.runtime.semaphores.acquire(&provider_cfg.name).await?;
+
+    let mut recorder = RequestRecorder::new(req, &provider_cfg.name, None);
+
+    let result =
+        run_pipeline_streaming_inner(state, req, all_specs, pinned_tab, &mut recorder, &tx).await;
+
+    match &result {
+        Ok((text, calls, finish)) => {
+            breaker.record_success();
+            recorder.finish_success(
+                text,
+                calls.len(),
+                match finish {
+                    FinishReason::Stop => "stop",
+                    FinishReason::ToolCalls => "tool_calls",
+                    FinishReason::Length => "length",
+                    FinishReason::ContentFilter => "content_filter",
+                },
+                "stream",
+            );
+        }
+        Err(e) => {
+            breaker.record_failure();
+            recorder.finish_error(&e.to_string());
+            // Best-effort: the SSE writer is still reading.
+            let _ = tx.send(StreamEvent::Error(e.clone())).await;
+        }
+    }
+
+    if let Some(h) = &state.runtime.history {
+        h.append(recorder.into_record()).await;
+    }
+
+    crate::metrics::circuit_state(
+        &provider_cfg.name,
+        match breaker.state() {
+            uwa_resilience::CircuitState::Closed => "closed",
+            uwa_resilience::CircuitState::HalfOpen => "half_open",
+            uwa_resilience::CircuitState::Open => "open",
+        },
+    );
+    result.map(|_| ())
+}
+
+async fn run_pipeline_streaming_inner(
+    state: &AppState,
+    req: &ChatCompletionRequest,
+    all_specs: &[ToolSpec],
+    pinned_tab: Option<&TabId>,
+    recorder: &mut RequestRecorder,
+    tx: &mpsc::Sender<StreamEvent>,
+) -> Result<(String, Vec<ToolCall>, FinishReason), UwaError> {
+    let provider_cfg = state
+        .config
+        .provider_for_model(&req.model)
+        .ok_or_else(|| UwaError::UnknownModel(req.model.clone()))?;
+    let site = state.providers.get(&provider_cfg.name)?;
+
+    // --- identical setup to the buffered path ---
+    let defs: Vec<ToolDefinition> = all_specs
+        .iter()
+        .map(|s| ToolDefinition::new(s.name.clone(), s.description.clone(), s.parameters.clone()))
+        .collect();
+    let system_injection = if defs.is_empty() {
+        None
+    } else {
+        Some(build_system_prompt(&defs))
+    };
+
+    let cid = uwa_session::conversation_id(&req.messages);
+    let session_handle = match &state.runtime.sessions {
+        Some(sm) => Some(sm.acquire(&cid, state.transport.as_ref()).await?),
+        None => None,
+    };
+
+    let conversation: Vec<ChatMessage> = req.messages.clone();
+    let known_names: Vec<String> = all_specs.iter().map(|s| s.name.clone()).collect();
+    let send_timeout = Duration::from_millis(state.config.server.request_timeout_ms.max(1_000));
+
+    let _attachments = AttachmentGuard(
+        uwa_providers::attachments::extract_attachments(req)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!("attachment extraction failed: {e}");
+                Vec::new()
+            }),
+    );
+
+    let tab = if let Some(t) = pinned_tab {
+        t.clone()
+    } else {
+        match &session_handle {
+            Some(h) => h.tab.clone(),
+            None => {
+                let tabs = state.transport.list_tabs().await?;
+                tabs.into_iter()
+                    .next()
+                    .ok_or_else(|| UwaError::Unavailable("no browser tabs available".into()))?
+            }
+        }
+    };
+    let page = state.transport.page(&tab).await?;
+    recorder.set_tab(tab.as_str());
+
+    let body = build_browser_body(system_injection.as_deref(), &conversation, true);
+
+    recorder.mark_send_start();
+    if _attachments.0.is_empty() {
+        tokio::time::timeout(send_timeout, site.send_message(page.as_ref(), &body))
+            .await
+            .map_err(|_| UwaError::Timeout(send_timeout))??;
+    } else {
+        tokio::time::timeout(
+            send_timeout,
+            site.send_multimodal(page.as_ref(), &body, &_attachments.0),
+        )
+        .await
+        .map_err(|_| UwaError::Timeout(send_timeout))??;
+    }
+    recorder.mark_send_end();
+
+    // --- real streaming ---
+    let mut stream = site.wait_response_stream(page.as_ref()).await?;
+    let mut acc = String::new();
+    let mut emitted_until: usize = 0;
+    let mut ttft_recorded = false;
+
+    while let Some(chunk) = stream.next().await {
+        match chunk {
+            Ok(text) => {
+                if !ttft_recorded && !text.is_empty() {
+                    recorder.mark_first_delta();
+                    ttft_recorded = true;
+                }
+                acc.push_str(&text);
+
+                // Emit up to (but not past) the first tool-call marker so the
+                // client never sees protocol markers in the visible stream.
+                let target_end = tool_marker_index(&acc).unwrap_or(acc.len());
+                if target_end > emitted_until {
+                    let piece = acc[emitted_until..target_end].to_string();
+                    if !piece.is_empty() {
+                        let _ = tx.send(StreamEvent::Delta(piece)).await;
+                    }
+                    emitted_until = target_end;
+                }
+            }
+            Err(e) => return Err(e),
+        }
+    }
+
+    recorder.mark_wait_end();
+    if let Some(h) = &session_handle {
+        h.touch().await;
+    }
+
+    let parsed: ToolParseOutcome = parse(&acc, &known_names);
+    let finish = if parsed.has_calls() {
+        FinishReason::ToolCalls
+    } else {
+        FinishReason::Stop
+    };
+
+    recorder.record_tool_calls(parsed.calls.len());
+    if parsed.has_calls() {
+        recorder.increment_round();
+    }
+
+    // Trailing text (only relevant when no tool call froze the emission point).
+    if !parsed.has_calls() && emitted_until < acc.len() {
+        let piece = acc[emitted_until..].to_string();
+        if !piece.is_empty() {
+            let _ = tx.send(StreamEvent::Delta(piece)).await;
+        }
+    }
+
+    let _ = tx
+        .send(StreamEvent::Done {
+            finish,
+            tool_calls: parsed.calls.clone(),
+        })
+        .await;
+
+    Ok((parsed.text, parsed.calls, finish))
 }
 
 async fn run_pipeline_inner(

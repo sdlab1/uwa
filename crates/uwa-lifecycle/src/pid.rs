@@ -113,16 +113,25 @@ mod tests {
     }
 
     /// Best-effort cleanup of the temp dir created by this suite.
-    /// Other processes may race; we only assert the dir is *empty* after
-    /// removing our own test files, not that it's gone.
+    ///
+    /// Deliberately assert-free: sibling tests (`writes_and_removes`,
+    /// `rejects_live_pid`, `stale_pid_ok`) run in parallel in the same
+    /// process and share this directory, so a file existing at any given
+    /// moment is not a bug — it is a test that has not finished yet.
+    /// Asserting on it made this a timing-dependent flake; cleanup is all
+    /// this hook is for.
     #[test]
     fn zzz_removes_our_temp_files() {
         let dir = std::env::temp_dir().join(format!("uwa-pid-test-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        // If another test just recreated a file, the dir exists but is empty.
-        if dir.exists() {
-            let entries: Vec<_> = std::fs::read_dir(&dir).unwrap().collect();
-            assert!(entries.is_empty(), "dir not empty: {:?}", entries);
+        // A sibling test may be mid-flight with its own file; retry the
+        // sweep a few times to give it a chance to finish, then let go.
+        for _ in 0..40 {
+            let _ = std::fs::remove_dir_all(&dir);
+            if !dir.exists() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
         }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

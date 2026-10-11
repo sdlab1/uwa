@@ -4,8 +4,15 @@
 use crate::error::Result;
 use crate::ids::TabId;
 use async_trait::async_trait;
+use futures::stream::Stream;
 use serde_json::Value;
+use std::pin::Pin;
 use url::Url;
+
+/// Streaming response body: a sequence of text chunks. Ends when the
+/// provider considers the response complete. The caller accumulates the
+/// concatenation as the final text.
+pub type ResponseStream = Pin<Box<dyn Stream<Item = Result<String>> + Send>>;
 
 /// A logical browser page we can drive. Abstracts over `chaser-oxide`.
 #[async_trait]
@@ -121,6 +128,20 @@ pub trait SiteProvider: Send + Sync {
     /// Block until the assistant's answer for the last message is complete.
     /// Returns the extracted, normalized text.
     async fn wait_response(&self, page: &dyn Page) -> Result<String>;
+
+    /// Stream response deltas as they arrive from the browser.
+    ///
+    /// Default implementation buffers via [`wait_response`](Self::wait_response)
+    /// and yields the whole text as one chunk. Providers with a network-first
+    /// extraction strategy override this to emit real deltas — enabling
+    /// token-by-token SSE at the HTTP edge and true TTFT tracking.
+    ///
+    /// Media housekeeping (audio stop, video scan) is not run by this path;
+    /// call `wait_response` when that side effect is needed.
+    async fn wait_response_stream(&self, page: &dyn Page) -> Result<ResponseStream> {
+        let text = self.wait_response(page).await?;
+        Ok(Box::pin(futures::stream::iter(vec![Ok(text)])))
+    }
 
     /// Best-effort cancellation (click "Stop").
     async fn cancel(&self, page: &dyn Page) -> Result<()>;

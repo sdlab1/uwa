@@ -19,6 +19,9 @@ pub struct RequestTiming {
     pub send_ms: u64,
     /// Time inside `wait_response` (extraction + finisher).
     pub wait_ms: u64,
+    /// Time from `send_message` return to the first delta (streaming only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttft_ms: Option<u64>,
     /// Per-round timings when a tool loop happened.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rounds: Vec<RoundTiming>,

@@ -9,6 +9,7 @@ license.workspace = true
 uwa-core.workspace = true
 uwa-config.workspace = true
 uwa-extract.workspace = true
+futures.workspace = true
 uwa-resilience = { path = "../uwa-resilience" }
 async-trait.workspace = true
 serde.workspace = true

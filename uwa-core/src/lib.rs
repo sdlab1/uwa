@@ -24,5 +24,6 @@ pub use error::{Result, UwaError};
 pub use ids::{ConversationId, RequestId, SessionId, TabId};
 pub use net::{ExtractionStrategy, FinisherTuning, NetDecoder, NetRules};
 pub use traits::{
-    Capabilities, MediaKind, MediaResource, NetworkEvent, Page, SiteProvider, ToolSpec, Transport,
+    Capabilities, MediaKind, MediaResource, NetworkEvent, Page, ResponseStream, SiteProvider,
+    ToolSpec, Transport,
 };

@@ -31,16 +31,19 @@ use crate::state::AppState;
 
 pub use pipeline::run_pipeline;
 use pipeline::run_pipeline_with_hint;
+use tokio::sync::mpsc;
 
-/// Extract ToolSpecs from the request's tools field.
-pub fn local_tools(req: &ChatCompletionRequest) -> Vec<ToolSpec> {
+/// Extract `ToolSpec`s from the request's tools field.
+///
+/// Returns [`UwaError::BadRequest`] when the client sent malformed tool
+/// definitions — a 400 is the honest answer, not a panic.
+pub fn local_tools(req: &ChatCompletionRequest) -> Result<Vec<ToolSpec>, UwaError> {
     match &req.tools {
-        Some(arr) => ToolDefinition::from_openai_array(arr)
-            .expect("valid tool definitions")
+        Some(arr) => Ok(ToolDefinition::from_openai_array(arr)?
             .into_iter()
             .map(ToolSpec::from)
-            .collect(),
-        None => Vec::new(),
+            .collect()),
+        None => Ok(Vec::new()),
     }
 }
 
@@ -87,8 +90,6 @@ pub async fn chat_completions(
         .into());
     }
 
-    let (text, calls, finish) = run_pipeline_with_hint(&state, &req, &all_specs, &hint).await?;
-
     let request_id = RequestId::new();
     let created = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -96,10 +97,24 @@ pub async fn chat_completions(
         .unwrap_or(0);
 
     if req.stream.unwrap_or(false) {
-        Ok(stream::stream_response(
-            request_id, req.model, created, text, calls, finish,
-        ))
+        let (tx, rx) = mpsc::channel::<pipeline::StreamEvent>(64);
+        let state_task = state.clone();
+        let req_clone = req.clone();
+        let specs_clone = all_specs.clone();
+        let tab_hint = hint.tab.clone();
+        tokio::spawn(async move {
+            let _ = pipeline::run_pipeline_streaming(
+                &state_task,
+                &req_clone,
+                &specs_clone,
+                tab_hint.as_ref(),
+                tx,
+            )
+            .await;
+        });
+        Ok(stream::stream_response(request_id, req.model, created, rx))
     } else {
+        let (text, calls, finish) = run_pipeline_with_hint(&state, &req, &all_specs, &hint).await?;
         Ok(Json(nonstream::build_non_streaming(
             request_id, req.model, created, text, calls, finish,
         ))

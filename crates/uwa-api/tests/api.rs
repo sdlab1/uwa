@@ -294,7 +294,9 @@ async fn messages_tool_result_history_reaches_the_browser() {
 }
 
 #[tokio::test]
-async fn messages_stream_is_sse_of_bounded_chunks() {
+async fn messages_stream_emits_real_deltas() {
+    // Real streaming: deltas arrive as the pipeline produces them (here:
+    // one buffered chunk from the mock provider — no 24-char re-slicing).
     let answer = "Hello there. This answer is long enough to need several chunks.";
     let (s, _provider) = server_with(answer);
     let r = s
@@ -330,19 +332,17 @@ async fn messages_stream_is_sse_of_bounded_chunks() {
     }
 
     let mut text = String::new();
+    let mut delta_count = 0;
     for line in body.lines() {
         if let Some(data) = line.strip_prefix("data: ") {
             let ev: Value = serde_json::from_str(data).expect("valid event json");
             if ev["type"] == "content_block_delta" && ev["delta"]["type"] == "text_delta" {
-                let chunk = ev["delta"]["text"].as_str().unwrap();
-                assert!(
-                    chunk.chars().count() <= 24,
-                    "chunk longer than 24 chars: {chunk}"
-                );
-                text.push_str(chunk);
+                delta_count += 1;
+                text.push_str(ev["delta"]["text"].as_str().unwrap());
             }
         }
     }
+    assert!(delta_count >= 1, "no text deltas in: {body}");
     assert_eq!(text, answer);
 }
 
