@@ -1,0 +1,42 @@
+[dist]
+# Pin the version so CI is reproducible. Bump deliberately.
+cargo-dist-version = "0.22.0"
+
+# Generate the release workflow we actually want.
+ci = "github"
+pr-run-mode = "plan"
+
+# Installers to publish as release assets.
+installers = ["shell", "powershell", "homebrew"]
+
+# Homebrew: publish into a tap repo (sdlab1/homebrew-tap).
+tap = "sdlab1/homebrew-tap"
+publish-jobs = ["homebrew"]
+
+# Cross-platform targets. musl gets a fully-static Linux binary,
+# which is what runs inside the Docker image; darwin-arm64 covers Apple
+# Silicon; msvc is the canonical Windows ABI.
+targets = [
+  "x86_64-unknown-linux-gnu",
+  "aarch64-unknown-linux-gnu",
+  "x86_64-unknown-linux-musl",
+  "aarch64-unknown-linux-musl",
+  "x86_64-apple-darwin",
+  "aarch64-apple-darwin",
+  "x86_64-pc-windows-msvc",
+]
+
+# Extract the binary; don't ship the whole workspace.
+install-path = "CARGO_HOME"
+install-updater = true
+
+# Keep archives small and predictable.
+archive-format = "tar.xz"
+windows-archive-format = "zip"
+
+# Only build archives + installers; checksums are on by default.
+checksum = "sha256"
+
+# Enable `uwa update` by publishing a `latest.json` manifest we can query.
+[dist.github-releases]
+create-release = true

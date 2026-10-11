@@ -59,8 +59,8 @@ uwa solves those four things by design:
 curl -fsSL https://github.com/sdlab1/uwa/releases/latest/download/install.sh | sh
 ```
 
-Or grab the archive for your platform from
-[Releases](https://github.com/sdlab1/uwa/releases). One binary, no runtime.
+See [docs/INSTALL.md](docs/INSTALL.md) for Homebrew, Scoop, Docker, and
+build-from-source.
 
 **2.** Run:
 
@@ -205,6 +205,7 @@ points:
 
 ## Docs
 
+- [Install](docs/INSTALL.md) — Homebrew, Scoop, Docker, build from source.
 - [Configuration](docs/CONFIG.md) — `uwa.toml`, providers, presets, workflows.
 - [API](docs/API.md) — request/response shapes, error codes, examples.
 - [Streaming](docs/STREAMING.md) — where the tokens come from, TTFT, cancel.

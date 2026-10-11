@@ -1,0 +1,23 @@
+{
+  "version": "0.1.0",
+  "description": "Universal Web API — one local endpoint for the web AIs you're logged into",
+  "homepage": "https://github.com/sdlab1/uwa",
+  "license": "MIT",
+  "architecture": {
+    "64bit": {
+      "url": "https://github.com/sdlab1/uwa/releases/download/v0.1.0/uwa-0.1.0-x86_64-pc-windows-msvc.zip",
+      "hash": "REPLACED_BY_CI"
+    }
+  },
+  "bin": "uwa.exe",
+  "checkver": {
+    "github": "https://github.com/sdlab1/uwa"
+  },
+  "autoupdate": {
+    "architecture": {
+      "64bit": {
+        "url": "https://github.com/sdlab1/uwa/releases/download/v$version/uwa-$version-x86_64-pc-windows-msvc.zip"
+      }
+    }
+  }
+}

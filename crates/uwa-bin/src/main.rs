@@ -38,6 +38,22 @@ enum Command {
         action: commands::daemon::DaemonAction,
     },
 
+    /// Install / uninstall uwa as a system service (systemd, launchd, sc.exe).
+    Service {
+        #[command(subcommand)]
+        action: commands::service::ServiceAction,
+    },
+
+    /// Check for a newer release and (optionally) install it.
+    Update {
+        /// Only print the version comparison; do not download.
+        #[arg(long)]
+        check: bool,
+        /// Reinstall even if the versions match.
+        #[arg(long)]
+        force: bool,
+    },
+
     /// Print resolved config, provider list and detected browser.
     Doctor,
 }
@@ -93,6 +109,8 @@ async fn main() -> anyhow::Result<()> {
             commands::start::run(config_path.clone(), args).await
         }
         Command::Daemon { action } => commands::daemon::run(config_path.clone(), action).await,
+        Command::Service { action } => commands::service::run(action).await,
+        Command::Update { check, force } => commands::update::run(check, force).await,
         Command::Doctor => commands::doctor::run(config_path.clone()).await,
     };
 

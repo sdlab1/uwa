@@ -1,5 +1,13 @@
-# Keep the build context small: neither tests nor notes are needed inside.
 target/
+crates/uwa-api/static/node_modules/
+crates/uwa-api/static/dist/
+crates/uwa-api/static/.vite/
+crates/uwa-api/static/test-results/
+crates/uwa-api/static/playwright-report/
+.uwa/
+logs/
+data/
 .git/
-todo/
-*_dump.md
+.github/
+*.gif
+*.pdf

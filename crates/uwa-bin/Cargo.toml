@@ -4,10 +4,14 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+build = "build.rs"
 
 [[bin]]
 name = "uwa"
 path = "src/main.rs"
+
+[package.metadata.dist]
+name = "uwa"
 
 [features]
 default = ["cdp", "nodriver"]
@@ -38,6 +42,12 @@ serde_json.workspace = true
 futures.workspace = true
 dashmap.workspace = true
 dirs = "5"
+ureq   = { workspace = true }
+sha2   = { workspace = true }
+flate2 = { workspace = true }
+tar    = { workspace = true }
+xz2    = { workspace = true }
+zip    = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
