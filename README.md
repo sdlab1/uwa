@@ -2,7 +2,6 @@
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/banner.svg">
     <source media="(prefers-color-scheme: light)" srcset="docs/banner.svg">
-    <img src="docs/banner.png" alt="uwa — Universal Web API" width="100%">
   </picture>
 </p>
 
