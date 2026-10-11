@@ -32,6 +32,16 @@ never runs them, and never touches your credentials.
 
 ## Why another one of these
 
+> **Why UWA is structurally different** — see [why_uwa.md](docs/why_uwa.md) for 72 detailed points:
+>
+> **а) Architecturally** — one config-driven `GenericProvider` replaces a zoo of per-site classes; declarative workflows, hint-based path routing, and mini-router model groups.
+>
+> **б) Qualitatively** — real token-by-token SSE streaming with true TTFT; finisher with network+DOM+stop-button signals instead of `sleep(5)`; session pinning to specific tabs with per-conversation mutexes; circuit breaker with self-healing half-open probes.
+>
+> **в) Pedantically** — own 100-line JSON Schema validator (no 1MB `jsonschema` crate); `safe_emit_end` holds back partial tool-call markers; `ContentPart::Other` with `#[serde(other)]` for forward compat; Arc strong_count as busy-marker; UTF-8-safe truncation; PID + PGID daemon with graceful drain.
+>
+> **г) Explosively impossible in garbage-Python** — `PR_SET_PDEATHSIG` at the kernel level so killed tests clean up Chrome; panic hook that `killpg(-pgid, SIGKILL)` the whole tree; atomic UI build guard via `AtomicU8`; `uwa update` with SHA256 verification and atomic binary swap; `uwa doctor` one-line diagnostics; `proptest` with 10k-case nightly runs.
+
 Every other "free web AI API" project has at least one of these problems:
 
 - It sniffs tokens / cookies out of the network and replays them — brittle,
