@@ -1,3 +1,5 @@
+![Alt Text](docs/banner.svg)
+
 # uwa — Universal Web API
 
 Point any OpenAI-compatible client (Cursor, Continue, the `openai` Python
