@@ -5,6 +5,7 @@
     { path: '/setup',      label: 'Setup' },
     { path: '/',           label: 'Dashboard' },
     { path: '/playground', label: 'Playground' },
+    { path: '/clients',    label: 'Clients' },
     { path: '/history',    label: 'History' },
     { path: '/sessions',   label: 'Sessions' },
     { path: '/config',     label: 'Config' },

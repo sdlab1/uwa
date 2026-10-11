@@ -7,6 +7,7 @@
   import Dashboard  from './routes/Dashboard.svelte';
   import Setup      from './routes/Setup.svelte';
   import Playground from './routes/Playground.svelte';
+  import Clients    from './routes/Clients.svelte';
   import History    from './routes/History.svelte';
   import Sessions   from './routes/Sessions.svelte';
   import Config     from './routes/Config.svelte';
@@ -17,6 +18,7 @@
     '/': Dashboard,
     '/setup': Setup,
     '/playground': Playground,
+    '/clients': Clients,
     '/history': History,
     '/sessions': Sessions,
     '/config': Config,
