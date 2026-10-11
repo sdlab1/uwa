@@ -32,15 +32,15 @@ never runs them, and never touches your credentials.
 
 ## Why another one of these
 
-> **Why UWA is structurally different** — see [why_uwa.md](docs/why_uwa.md) for 72 detailed points:
+> **Why UWA is structurally different** — see [why_uwa.md](docs/why_uwa.md) for 72 detailed points. Below, 22 concrete reasons you will not find in a typical Python wrapper:
 >
-> **а) Architecturally** — one config-driven `GenericProvider` replaces a zoo of per-site classes; declarative workflows, hint-based path routing, and mini-router model groups.
+> **A. Architecturally (6)** — Single config-driven `GenericProvider` (#1) replaces a zoo of per-site classes; 8-action declarative `Workflow` DSL (#2); bridge semantics — tools parsed not executed (#3); 7 API surfaces not just `/v1/chat/completions` (#4); hint-based path routing with `/url/{domain}/` and `/tab/{tab_id}/` (#17); mini-router model groups with `round_robin`/`failover`/`hash_conversation` (#32). **Python has zero of these.**
 >
-> **б) Qualitatively** — real token-by-token SSE streaming with true TTFT; finisher with network+DOM+stop-button signals instead of `sleep(5)`; session pinning to specific tabs with per-conversation mutexes; circuit breaker with self-healing half-open probes.
+> **B. Qualitatively (4)** — Real token-by-token SSE streaming with live TTFT (#5 vs `sleep(5)` post-hoc); finisher combining stop-button + network + DOM stability + timeout (#6); session-to-tab pinning with per-conversation mutex (#7); circuit breaker with self-healing half-open probe (#9). **Python projects fake or skip all four.**
 >
-> **в) Pedantically** — own 100-line JSON Schema validator (no 1MB `jsonschema` crate); `safe_emit_end` holds back partial tool-call markers; `ContentPart::Other` with `#[serde(other)]` for forward compat; Arc strong_count as busy-marker; UTF-8-safe truncation; PID + PGID daemon with graceful drain.
+> **C. Pedantically (5)** — 80-line JSON Schema validator replacing the 1 MB `jsonschema` crate (#26); `safe_emit_end` preventing partial marker leakage (#23); `ContentPart::Other` with `#[serde(other)]` for forward compat (#72); `Arc::strong_count` as live-handle busy marker so capacity eviction never drops a busy session (#29); `truncate_preview` with UTF-8 boundary safety (#67). **Python would not bother — it works "well enough" until it doesn't.**
 >
-> **г) Explosively impossible in garbage-Python** — `PR_SET_PDEATHSIG` at the kernel level so killed tests clean up Chrome; panic hook that `killpg(-pgid, SIGKILL)` the whole tree; atomic UI build guard via `AtomicU8`; `uwa update` with SHA256 verification and atomic binary swap; `uwa doctor` one-line diagnostics; `proptest` with 10k-case nightly runs.
+> **D. Explosively impossible in this pathetic garbage-Python (7)** — `PR_SET_PDEATHSIG` at the kernel level so `kill -9` tests still clean up Chrome (#45); panic hook calling `killpg(-pgid, SIGKILL)` so a panic doesn't orphan Chromium (#46); `AtomicU8` compare-exchange to prevent parallel `npm install` (#50); `uwa update` with `.sha256` verification + atomic `rename()` swap (#49); `uwa doctor` one-command diagnostics (#48); `proptest` with 10k-case nightly runs covering chunk-invariance and panic-safety (#55); `uwa daemon` managing both PID **and PGID** for tree-wide SIGTERM→SIGKILL with drain (#47). **A Python venv cannot do kernel-level process signals, atomic binary swaps, or compile-time-checked atomic CAS.**
 
 Every other "free web AI API" project has at least one of these problems:
 
