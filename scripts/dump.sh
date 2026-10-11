@@ -48,9 +48,8 @@ TESTS_GROUP=(ALL_TESTS)
 # --- is_source_file: single source of truth for dumpable extensions ----
 is_source_file() {
   case "$1" in
-    # lock files are never source, even if tracked/gitignored
-    *package-lock.json|Cargo.lock) return 1 ;;
-    *.rs|*.toml|*.ts|*.js|*.css|*.sh|*.json|*.html|*.txt|*.snap|*.md|*.svelte) return 0 ;;
+    Cargo.lock) return 1 ;;
+    *.rs|*.toml|*.ts|*.js|*.css|*.sh|*.json|*.html|*.txt|*.snap|*.md|*.svelte|*package-lock.json) return 0 ;;
     *) return 1 ;;
   esac
 }
