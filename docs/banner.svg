@@ -1,0 +1,79 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 360" width="1280" height="360" role="img" aria-labelledby="t d">
+  <title id="t">uwa — Universal Web API</title>
+  <desc id="d">A logged-in browser window bridged into an OpenAI and Anthropic compatible HTTP API, written in Rust.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0b0f14"/>
+      <stop offset="1" stop-color="#16110d"/>
+    </linearGradient>
+    <linearGradient id="bl" gradientUnits="userSpaceOnUse" x1="335" y1="0" x2="560" y2="0">
+      <stop offset="0" stop-color="#4cc9f0"/>
+      <stop offset="1" stop-color="#b8f35d"/>
+    </linearGradient>
+    <linearGradient id="br" gradientUnits="userSpaceOnUse" x1="845" y1="0" x2="975" y2="0">
+      <stop offset="0" stop-color="#b8f35d"/>
+      <stop offset="1" stop-color="#ff8a3d"/>
+    </linearGradient>
+    <linearGradient id="word" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#ffc9a0"/>
+    </linearGradient>
+    <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse">
+      <path d="M32 0H0V32" fill="none" stroke="#ffffff" stroke-opacity="0.04"/>
+    </pattern>
+    <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="6" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <rect width="1280" height="360" rx="20" fill="url(#bg)"/>
+  <rect width="1280" height="360" rx="20" fill="url(#grid)"/>
+
+  <!-- left: the browser you already logged in to -->
+  <g transform="translate(70 70)">
+    <rect width="250" height="190" rx="14" fill="#10161d" stroke="#4cc9f0" stroke-opacity="0.7" stroke-width="2"/>
+    <path d="M0 14a14 14 0 0 1 14-14h222a14 14 0 0 1 14 14v26H0z" fill="#1a2430"/>
+    <circle cx="24" cy="20" r="6" fill="#ff5f56"/>
+    <circle cx="46" cy="20" r="6" fill="#ffbd2e"/>
+    <circle cx="68" cy="20" r="6" fill="#27c93f"/>
+    <rect x="96" y="11" width="130" height="18" rx="9" fill="#0b0f14"/>
+    <rect x="22" y="64" width="140" height="12" rx="6" fill="#4cc9f0" fill-opacity="0.85"/>
+    <rect x="22" y="88" width="196" height="12" rx="6" fill="#ffffff" fill-opacity="0.18"/>
+    <rect x="22" y="112" width="170" height="12" rx="6" fill="#ffffff" fill-opacity="0.18"/>
+    <rect x="22" y="146" width="206" height="26" rx="13" fill="#0b0f14" stroke="#4cc9f0" stroke-opacity="0.5"/>
+    <text x="38" y="164" font-family="ui-monospace,Menlo,Consolas,monospace" font-size="13" fill="#4cc9f0">you're logged in</text>
+  </g>
+  <text x="195" y="300" text-anchor="middle" font-family="ui-monospace,Menlo,Consolas,monospace" font-size="14" fill="#7f8ea0">your browser</text>
+
+  <!-- the bridge: browser -> uwa -> API -->
+  <g filter="url(#glow)" fill="none" stroke-linecap="round" stroke-width="5">
+    <path d="M335 150 C 400 90, 480 90, 560 140" stroke="url(#bl)" stroke-dasharray="2 11"/>
+    <path d="M845 140 C 900 90, 940 100, 975 140" stroke="url(#br)" stroke-dasharray="2 11"/>
+  </g>
+  <path d="M552 128 L566 142 L548 148 Z" fill="#b8f35d"/>
+  <path d="M967 128 L981 144 L962 146 Z" fill="#ff8a3d"/>
+  <text x="440" y="205" text-anchor="middle" font-family="ui-monospace,Menlo,Consolas,monospace" font-size="14" fill="#4cc9f0">CDP</text>
+  <text x="910" y="205" text-anchor="middle" font-family="ui-monospace,Menlo,Consolas,monospace" font-size="14" fill="#ff8a3d">HTTP</text>
+
+  <!-- middle: wordmark -->
+  <text x="590" y="168" font-family="'SF Pro Display','Segoe UI',Inter,Helvetica,Arial,sans-serif" font-size="108" font-weight="800" letter-spacing="-4" fill="url(#word)">uwa</text>
+  <text x="594" y="212" font-family="'SF Pro Display','Segoe UI',Inter,Helvetica,Arial,sans-serif" font-size="26" font-weight="600" fill="#ffc9a0">Universal Web API</text>
+  <text x="594" y="252" font-family="ui-monospace,Menlo,Consolas,monospace" font-size="17" fill="#9fb0c3">Your logged-in browser, as an HTTP API.</text>
+  <text x="594" y="278" font-family="ui-monospace,Menlo,Consolas,monospace" font-size="17" fill="#9fb0c3">Local-first. No keys. Written in Rust.</text>
+
+  <!-- right: the API you point your tools at -->
+  <g transform="translate(990 70)">
+    <rect width="220" height="190" rx="14" fill="#10161d" stroke="#ff8a3d" stroke-opacity="0.75" stroke-width="2"/>
+    <text x="20" y="40" font-family="ui-monospace,Menlo,Consolas,monospace" font-size="15" fill="#ff8a3d">$ curl :8080/v1/</text>
+    <text x="20" y="72" font-family="ui-monospace,Menlo,Consolas,monospace" font-size="14" fill="#ffffff" fill-opacity="0.85">chat/completions</text>
+    <text x="20" y="98" font-family="ui-monospace,Menlo,Consolas,monospace" font-size="14" fill="#ffffff" fill-opacity="0.85">messages</text>
+    <text x="20" y="124" font-family="ui-monospace,Menlo,Consolas,monospace" font-size="14" fill="#ffffff" fill-opacity="0.85">responses</text>
+    <rect x="20" y="146" width="92" height="26" rx="13" fill="#27c93f" fill-opacity="0.18" stroke="#27c93f"/>
+    <text x="66" y="164" text-anchor="middle" font-family="ui-monospace,Menlo,Consolas,monospace" font-size="13" fill="#27c93f">200 OK</text>
+  </g>
+  <text x="1100" y="300" text-anchor="middle" font-family="ui-monospace,Menlo,Consolas,monospace" font-size="14" fill="#7f8ea0">OpenAI / Anthropic API</text>
+
+  <!-- footer: the character -->
+  <text x="640" y="337" text-anchor="middle" font-family="ui-monospace,Menlo,Consolas,monospace" font-size="15" fill="#ffffff" fill-opacity="0.5">zero ignored tests  ·  if it isn't green, it doesn't merge</text>
+</svg>
