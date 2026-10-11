@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # dump.sh — glues project_uwa source into markdown dumps.
-# Default (./dump.sh) → all three dumps: source_dump.md, tests_dump.md, full_dump.md
+# Default (./scripts/dump.sh) → all three dumps: source_dump.md, tests_dump.md, full_dump.md
 # Modes: source, tests, full, percrate, stats, <crate>
 # Collected extensions: *.rs *.toml *.ts *.js *.css *.sh *.json *.html
 # *.txt *.snap (+ *.md only via explicit single-file whitelist in
@@ -13,8 +13,9 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-cd "$SCRIPT_DIR"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"   # this dir (scripts/)
+ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"      # project root
+cd "$ROOT_DIR"
 
 # shellcheck source=colors.sh
 if [[ -f "$SCRIPT_DIR/colors.sh" ]]; then
@@ -47,6 +48,8 @@ TESTS_GROUP=(ALL_TESTS)
 # --- is_source_file: single source of truth for dumpable extensions ----
 is_source_file() {
   case "$1" in
+    # lock files are never source, even if tracked/gitignored
+    *package-lock.json|Cargo.lock) return 1 ;;
     *.rs|*.toml|*.ts|*.js|*.css|*.sh|*.json|*.html|*.txt|*.snap|*.md|*.svelte) return 0 ;;
     *) return 1 ;;
   esac
@@ -196,7 +199,7 @@ build_dump() {
     done < <(collect_files "$g")
   done
 
-  local DUMP_FILE="$SCRIPT_DIR/${mode}_dump.md"
+  local DUMP_FILE="$ROOT_DIR/${mode}_dump.md"
   {
     echo "# ${title}"
     echo ""

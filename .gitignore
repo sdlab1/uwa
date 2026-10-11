@@ -38,6 +38,7 @@ sidecar/.pytest_cache/
 # node.js
 crates/uwa-api/static/node_modules/
 crates/uwa-api/static/dist/
+crates/uwa-api/static/package-lock.json
 
 # start.sh runtime artifacts
 /.uwa/
