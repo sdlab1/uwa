@@ -16,7 +16,7 @@
 
 use anyhow::{bail, Context, Result};
 use clap::Subcommand;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 
 use super::paths;
@@ -121,7 +121,7 @@ mod linux {
             cmd.arg("--user");
         }
         cmd.args(args);
-        Ok(cmd.output().context("run systemctl")?)
+        cmd.output().context("run systemctl")
     }
 
     async fn install(system: bool, config: Option<PathBuf>, no_start: bool) -> Result<()> {

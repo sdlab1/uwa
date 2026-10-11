@@ -63,7 +63,7 @@ static CHILD_PROCESSES_SPAWNED: AtomicBool = AtomicBool::new(false);
 
 /// Register a panic hook to clean up child processes on panic.
 fn set_panic_hook() {
-    std::panic::set_hook(Box::new(|panic_info| {
+    std::panic::set_hook(Box::new(|_panic_info| {
         // Kill any child processes we spawned
         if CHILD_PROCESSES_SPAWNED.load(Ordering::SeqCst) {
             eprintln!("\n[panic] cleaning up child processes...");

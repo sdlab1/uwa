@@ -14,6 +14,8 @@ pub struct ChatCompletionRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_options: Option<StreamOptions>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
@@ -23,6 +25,15 @@ pub struct ChatCompletionRequest {
     pub tool_choice: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct StreamOptions {
+    /// When true, the final `chat.completion.chunk` before `[DONE]` carries
+    /// a `usage` field. OpenAI clients (Cursor, Continue, SDKs) opt into
+    /// this to budget their context.
+    #[serde(default)]
+    pub include_usage: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

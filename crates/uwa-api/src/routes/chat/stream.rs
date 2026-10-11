@@ -20,6 +20,8 @@ pub fn stream_response(
     model: String,
     created: u64,
     mut rx: mpsc::Receiver<StreamEvent>,
+    include_usage: bool,
+    prompt_tokens: u32,
 ) -> Response {
     let (tx, out_rx) = mpsc::channel::<Result<Event, std::convert::Infallible>>(64);
     let stream_id = id.to_string();
@@ -38,10 +40,12 @@ pub fn stream_response(
 
         let mut calls: Vec<ToolCall> = Vec::new();
         let mut finish = FinishReason::Stop;
+        let mut completion_text = String::new();
 
         while let Some(ev) = rx.recv().await {
             match ev {
                 StreamEvent::Delta(text) => {
+                    completion_text.push_str(&text);
                     let _ = tx
                         .send(Ok(sse_chunk(
                             &stream_id,
@@ -126,6 +130,30 @@ pub fn stream_response(
                 Some(finish_str),
             )))
             .await;
+
+        // Optional usage chunk (stream_options.include_usage) — the OpenAI
+        // shape is: empty choices array, populated usage object. Emitted
+        // once, immediately before [DONE].
+        if include_usage {
+            let completion_tokens = uwa_tools::estimate(&completion_text);
+            let usage = json!({
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": prompt_tokens.saturating_add(completion_tokens),
+            });
+            let usage_chunk = json!({
+                "id": stream_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model,
+                "choices": [],
+                "usage": usage,
+            });
+            let _ = tx
+                .send(Ok(Event::default().data(usage_chunk.to_string())))
+                .await;
+        }
+
         let _ = tx.send(Ok(Event::default().data("[DONE]"))).await;
     });
 

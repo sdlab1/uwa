@@ -257,6 +257,19 @@ pub struct ProviderCfg {
     /// model instead of 404. The error still lists the canonical names.
     #[serde(default)]
     pub fallback_model: Option<String>,
+
+    /// Concurrent in-flight requests for this provider. Overrides the
+    /// global default of 2 (four for undefined providers). Higher values
+    /// risk tripping site rate limits; a value of 1 serializes requests
+    /// per provider, which is safest for aggressive sites.
+    #[serde(default = "default_provider_concurrency")]
+    pub max_concurrency: u32,
+
+    /// How many times to ask the browser LLM to re-emit a
+    /// whose arguments failed schema validation. 0 disables retry;
+    /// failures then surface to the client as a 400.
+    #[serde(default = "default_tool_retries")]
+    pub max_tool_retries: u8,
 }
 
 impl ProviderCfg {
@@ -288,6 +301,8 @@ impl ProviderCfg {
             workflow: Default::default(),
             media: MediaCfg::default(),
             fallback_model: None,
+            max_concurrency: default_provider_concurrency(),
+            max_tool_retries: default_tool_retries(),
         }
     }
 
@@ -333,6 +348,12 @@ fn default_port() -> u16 {
 }
 fn default_request_timeout_ms() -> u64 {
     120_000
+}
+fn default_provider_concurrency() -> u32 {
+    2
+}
+fn default_tool_retries() -> u8 {
+    2
 }
 
 impl Config {
@@ -407,6 +428,11 @@ impl Config {
                     )));
                 }
             }
+            if p.max_concurrency == 0 {
+                return Err(UwaError::Config(format!(
+                    "providers.{key}.max_concurrency must be ≥ 1"
+                )));
+            }
         }
 
         // 4. Groups reference real providers (and real presets per member).
@@ -464,6 +490,15 @@ impl Config {
         &self,
         requested: &str,
     ) -> std::result::Result<(&ProviderCfg, String), uwa_core::UwaError> {
+        // Vendor prefixes: Aider and some OpenAI-compatible SDKs prepend
+        // the backend name (`openai/`, `azure/`, `anthropic/`). Strip it
+        // before alias lookup — the config only ever lists canonical names.
+        let requested = requested
+            .split_once('/')
+            .map(|(_, rest)| rest)
+            .filter(|rest| !rest.is_empty())
+            .unwrap_or(requested);
+
         if let Some(p) = self.provider_for_model(requested) {
             return Ok((p, requested.to_string()));
         }
@@ -664,6 +699,39 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("claude-3-opus"));
         assert!(msg.contains("gpt-4o") || msg.contains("claude-3-5-sonnet"));
+    }
+
+    #[test]
+    fn provider_concurrency_defaults_and_overrides() {
+        let cfg = Config::load_from_str(SAMPLE).unwrap();
+        assert_eq!(cfg.providers["chatgpt"].max_concurrency, 2);
+        assert_eq!(cfg.providers["chatgpt"].max_tool_retries, 2);
+
+        let toml = SAMPLE.replace(
+            "[providers.chatgpt.selectors]",
+            "max_concurrency = 4\nmax_tool_retries = 0\n\n[providers.chatgpt.selectors]",
+        );
+        let cfg = Config::load_from_str(&toml).unwrap();
+        assert_eq!(cfg.providers["chatgpt"].max_concurrency, 4);
+        assert_eq!(cfg.providers["chatgpt"].max_tool_retries, 0);
+    }
+
+    #[test]
+    fn zero_concurrency_is_rejected() {
+        let toml = SAMPLE.replace(
+            "[providers.chatgpt.selectors]",
+            "max_concurrency = 0\n\n[providers.chatgpt.selectors]",
+        );
+        let err = Config::load_from_str(&toml).unwrap_err();
+        assert!(err.to_string().contains("max_concurrency"), "{err}");
+    }
+
+    #[test]
+    fn vendor_prefix_is_stripped_before_alias_lookup() {
+        let cfg = Config::load_from_str(SAMPLE).unwrap();
+        let (p, name) = cfg.resolve_model("openai/gpt-4o").unwrap();
+        assert_eq!(p.name, "chatgpt");
+        assert_eq!(name, "gpt-4o");
     }
 
     #[test]

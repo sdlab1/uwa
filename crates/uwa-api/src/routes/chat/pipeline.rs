@@ -37,6 +37,7 @@ use uwa_core::types::openai::{ChatCompletionRequest, ChatMessage};
 use uwa_core::types::FinishReason;
 use uwa_core::TabId;
 use uwa_core::{ToolSpec, UwaError};
+use uwa_tools::emulation::{correction_prompt, validate_calls, ValidationOutcome};
 use uwa_tools::{
     build_system_prompt, compose_browser_turn, parse, safe_emit_end, ToolCall, ToolDefinition,
     ToolParseOutcome,
@@ -448,21 +449,63 @@ async fn run_pipeline_inner(
         h.touch().await;
     }
 
-    let parsed: ToolParseOutcome = parse(&raw, &known_names);
+    // Bridge-with-self-heal: parse; if the model emitted tool calls whose
+    // arguments fail schema validation, ask it to retry — bounded by
+    // `provider.max_tool_retries`. A provider with `max_tool_retries = 0`
+    // keeps the previous behavior and hands invalid calls straight through.
+    let max_retries = provider_cfg.max_tool_retries as usize;
+    let mut attempt: usize = 0;
+    let mut raw = raw;
+    loop {
+        let parsed: ToolParseOutcome = parse(&raw, &known_names);
 
-    if !parsed.has_calls() {
-        // Final answer — no tool calls in the browser response.
-        return Ok((parsed.text, vec![], FinishReason::Stop));
+        if !parsed.has_calls() {
+            return Ok((parsed.text, vec![], FinishReason::Stop));
+        }
+
+        match validate_calls(&parsed.calls, &defs) {
+            ValidationOutcome::Ok | ValidationOutcome::UnknownTools { .. } => {
+                // Unknown tools pass through — the client may know them
+                // from a plugin we don't see.
+                recorder.record_tool_calls(parsed.calls.len());
+                recorder.increment_round();
+                return Ok((parsed.text, parsed.calls, FinishReason::ToolCalls));
+            }
+            ValidationOutcome::Failed { corrections } => {
+                if attempt >= max_retries {
+                    // Out of retries. Surface the last validation error
+                    // to the client so it can be fixed at the source.
+                    return Err(UwaError::BadRequest(format!(
+                        "tool call arguments failed schema validation after {} attempt(s): {}",
+                        attempt + 1,
+                        corrections.join("; ")
+                    )));
+                }
+                attempt += 1;
+                tracing::warn!(
+                    provider = %provider_cfg.name,
+                    attempt,
+                    max = max_retries,
+                    "tool call schema mismatch, retrying: {}",
+                    corrections.join("; ")
+                );
+
+                // Send the correction as a browser turn. The correction
+                // is clearly marked so it isn't mistaken for a user turn
+                // in the visible conversation.
+                let prompt = correction_prompt(&corrections, &defs);
+                recorder.mark_send_start();
+                tokio::time::timeout(send_timeout, site.send_message(page.as_ref(), &prompt))
+                    .await
+                    .map_err(|_| UwaError::Timeout(send_timeout))??;
+                recorder.mark_send_end();
+
+                recorder.mark_send_start();
+                raw = site.wait_response(page.as_ref()).await?;
+                recorder.mark_wait_end();
+            }
+        }
     }
-
-    // Tool calls → return them to the client immediately.
-    //
-    // This is the **bridge invariant**: UWA never executes tools.
-    // The client will run them (via MCP, shell, or anything else) and
-    // re-request with `role:"tool"` messages.
-    recorder.record_tool_calls(parsed.calls.len());
-    recorder.increment_round();
-    Ok((parsed.text, parsed.calls, FinishReason::ToolCalls))
 }
 
 fn build_browser_body(system: Option<&str>, messages: &[ChatMessage], first_round: bool) -> String {

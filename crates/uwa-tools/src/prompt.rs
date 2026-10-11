@@ -2,6 +2,8 @@
 
 use crate::definition::ToolDefinition;
 
+pub use crate::emulation::correction_prompt as tool_correction;
+
 const PREAMBLE: &str = r#"You have access to tools. When you need to call one, emit ONLY blocks in this exact format (no markdown fence, no extra quoting):
 
 <tool_call>

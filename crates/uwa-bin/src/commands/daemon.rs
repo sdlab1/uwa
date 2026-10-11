@@ -94,7 +94,7 @@ async fn start(config_path: PathBuf, cdp: Option<String>, force: bool) -> Result
         }
     }
 
-    let mut child = cmd.spawn().context("spawn daemon")?;
+    let child = cmd.spawn().context("spawn daemon")?;
     let pid = child.id();
     std::fs::write(&pid_path, pid.to_string())
         .with_context(|| format!("write {}", pid_path.display()))?;

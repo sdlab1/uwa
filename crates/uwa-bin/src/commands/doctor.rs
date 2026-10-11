@@ -24,8 +24,11 @@ pub async fn run(config_path: PathBuf) -> Result<()> {
     );
 
     println!("providers:   {}", cfg.providers.len());
-    for name in cfg.providers.keys() {
-        println!("  · {name}");
+    for (name, p) in &cfg.providers {
+        println!(
+            "  · {name}  (concurrency={}, tool_retries={})",
+            p.max_concurrency, p.max_tool_retries
+        );
     }
     println!("models:      {}", cfg.model_aliases.len());
 

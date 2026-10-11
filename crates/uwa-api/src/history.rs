@@ -164,6 +164,7 @@ mod tests {
                 tool_calls: None,
             }],
             stream: None,
+            stream_options: None,
             temperature: None,
             max_tokens: None,
             tools: None,

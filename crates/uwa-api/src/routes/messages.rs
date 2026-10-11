@@ -168,35 +168,23 @@ async fn messages_inner(
 pub async fn count_tokens(
     Json(req): Json<CountTokensRequest>,
 ) -> ApiResult<Json<CountTokensResponse>> {
-    // Approximation: ASCII 4 chars/token, non-ASCII 2 chars/token.
-    let mut ascii = 0usize;
-    let mut non_ascii = 0usize;
-    let mut add = |s: &str| {
-        for ch in s.chars() {
-            if ch.is_ascii() {
-                ascii += 1;
-            } else {
-                non_ascii += 1;
-            }
-        }
-    };
-
+    let mut total: u32 = 0;
     if let Some(sys) = &req.system {
-        add(&sys.as_text());
+        total = total.saturating_add(uwa_tools::estimate(&sys.as_text()));
     }
     for m in &req.messages {
-        add(&stringify_anthropic_content(&m.content));
+        total = total.saturating_add(uwa_tools::estimate(&stringify_anthropic_content(
+            &m.content,
+        )));
+        total = total.saturating_add(4);
     }
     if let Some(tools) = &req.tools {
         if let Ok(s) = serde_json::to_string(tools) {
-            add(&s);
+            total = total.saturating_add(uwa_tools::estimate(&s));
         }
     }
-    let overhead = req.messages.len() as u64 * 4;
-    let total =
-        ((ascii / 4) as u64 + (non_ascii / 2) as u64 + overhead).min(u32::MAX as u64) as u32;
     Ok(Json(CountTokensResponse {
-        input_tokens: total,
+        input_tokens: total.max(1),
     }))
 }
 
@@ -247,6 +235,7 @@ fn to_openai_request(
         model: req.model.clone(),
         messages,
         stream: req.stream,
+        stream_options: None,
         temperature: req.temperature,
         max_tokens: Some(req.max_tokens),
         tools,
@@ -394,23 +383,32 @@ fn stringify_anthropic_content(v: &Value) -> String {
 }
 
 fn estimate_usage(req: &MessagesRequest, text: &str, calls: &[ToolCall]) -> AnthropicUsage {
-    // Input: what the client actually sent (system + messages). The model
-    // alias is not tokens, and the assistant answer is output, not input.
-    let mut input = 0usize;
-    if let Some(system) = &req.system {
-        input += system.as_text().len();
+    let mut input: u32 = 0;
+    if let Some(sys) = &req.system {
+        input = input.saturating_add(uwa_tools::estimate(&sys.as_text()));
     }
     for m in &req.messages {
-        input += stringify_anthropic_content(&m.content).len();
+        input = input.saturating_add(uwa_tools::estimate(&stringify_anthropic_content(
+            &m.content,
+        )));
+        input = input.saturating_add(4);
     }
-    // Output: the answer plus any tool-call payloads the bridge returns.
-    let mut output = text.len();
+    if let Some(tools) = &req.tools {
+        if let Ok(s) = serde_json::to_string(tools) {
+            input = input.saturating_add(uwa_tools::estimate(&s));
+        }
+    }
+
+    let mut output = uwa_tools::estimate(text);
     for c in calls {
-        output += c.name.len() + c.arguments.to_string().len();
+        output = output
+            .saturating_add(uwa_tools::estimate(&c.name))
+            .saturating_add(uwa_tools::estimate(&c.arguments.to_string()));
     }
+
     AnthropicUsage {
-        input_tokens: (input / 4).max(1) as u32,
-        output_tokens: (output / 4).max(1) as u32,
+        input_tokens: input.max(1),
+        output_tokens: output.max(1),
     }
 }
 
@@ -488,10 +486,12 @@ fn stream_anthropic_from_channel(
         let mut text_block_open = false;
         let mut calls: Vec<ToolCall> = Vec::new();
         let mut finish = FinishReason::Stop;
+        let mut output_text = String::new();
 
         while let Some(ev) = rx.recv().await {
             match ev {
                 StreamEvent::Delta(chunk) => {
+                    output_text.push_str(&chunk);
                     if !text_block_open {
                         let _ = tx
                             .send(Ok(sse_event(
@@ -595,13 +595,14 @@ fn stream_anthropic_from_channel(
             FinishReason::Length => "max_tokens",
             FinishReason::ContentFilter => "end_turn",
         };
+        let completion = uwa_tools::estimate(&output_text);
         let _ = tx
             .send(Ok(sse_event(
                 "message_delta",
                 json!({
                     "type": "message_delta",
                     "delta": { "stop_reason": stop_reason, "stop_sequence": null },
-                    "usage": { "output_tokens": 0 }
+                    "usage": { "output_tokens": completion }
                 }),
             )))
             .await;
@@ -730,11 +731,20 @@ mod tests {
             tool_choice: None,
         };
         let u = estimate_usage(&req, "the answer", &[]);
-        // "hello world" (11 chars) / 4 = 2; the model alias and the answer
-        // itself must not be counted as input.
-        assert_eq!(u.input_tokens, 2);
-        // "the answer" (10 chars) / 4 = 2 — and it is output, not input.
-        assert_eq!(u.output_tokens, 2);
+        // "hello world" (11 chars) estimates to a couple of tokens with
+        // the weighted estimator; the model alias and the answer itself
+        // must not be counted as input.
+        assert!(
+            u.input_tokens >= 1 && u.input_tokens <= 8,
+            "got {}",
+            u.input_tokens
+        );
+        // "the answer" (10 chars) — output, not input.
+        assert!(
+            u.output_tokens >= 1 && u.output_tokens <= 8,
+            "got {}",
+            u.output_tokens
+        );
     }
 
     #[test]

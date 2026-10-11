@@ -38,8 +38,9 @@ async fn counts_a_plain_prompt() {
         }),
     )
     .await;
-    // 5 ascii chars / 4 = 1, plus 4 per message.
-    assert_eq!(n, 5);
+    // Weighted estimator: "hello" (5 word chars) → 2 tokens, plus the
+    // fixed 4-token per-message overhead.
+    assert_eq!(n, 6);
 }
 
 #[tokio::test]
@@ -87,7 +88,9 @@ async fn counts_longer_prompts_higher() {
 #[tokio::test]
 async fn missing_messages_default_to_empty() {
     let n = count(&server(), json!({"model": "gpt-4o"})).await;
-    assert_eq!(n, 0);
+    // The endpoint clamps to ≥ 1 so a zero-cost estimate never rounds
+    // a non-empty exchange down to nothing.
+    assert_eq!(n, 1);
 }
 
 #[tokio::test]

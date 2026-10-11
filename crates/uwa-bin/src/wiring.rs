@@ -146,11 +146,16 @@ pub async fn run_with(config_path: PathBuf, cdp_url: &str) -> anyhow::Result<()>
     let history =
         Arc::new(uwa_history::HistoryStore::new(uwa_history::HistoryCfg::default(), true).await?);
 
-    // Semaphores: two slots per configured provider, four by default.
+    // Semaphores: per-provider limit from config, four as the fallback
+    // for any provider that somehow bypassed validation.
     let mut sem = uwa_resilience::semaphore::ProviderSemaphores::new(4);
-    for name in config.providers.keys() {
-        sem = sem.with_limit(name, 2);
+    for (name, p) in &config.providers {
+        sem = sem.with_limit(name, p.max_concurrency as usize);
     }
+    tracing::info!(
+        providers = config.providers.len(),
+        "semaphores configured from provider.max_concurrency"
+    );
 
     let state = AppState::minimal(config.clone(), Arc::new(registry), transport.clone())
         .with_sessions(sessions.clone())

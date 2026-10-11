@@ -152,6 +152,18 @@ pub async fn create(
 
     let id = RequestId::new();
     let created = now_secs();
+    let prompt_tokens = chat::estimate_prompt_tokens(&chat_req);
+    let mut completion_tokens = uwa_tools::estimate(&text);
+    for c in &calls {
+        completion_tokens = completion_tokens
+            .saturating_add(uwa_tools::estimate(&c.name))
+            .saturating_add(uwa_tools::estimate(&c.arguments.to_string()));
+    }
+    let usage = uwa_core::types::openai::Usage {
+        prompt_tokens,
+        completion_tokens,
+        total_tokens: prompt_tokens.saturating_add(completion_tokens),
+    };
     let body = chat::nonstream::build_non_streaming(
         id,
         chat_req.model.clone(),
@@ -159,6 +171,7 @@ pub async fn create(
         text,
         calls,
         finish,
+        usage,
     );
     let body = serde_json::to_value(&body)
         .map_err(|e| UwaError::Internal(format!("serialize chat answer: {e}")))?;
@@ -447,6 +460,7 @@ fn to_chat_request(req: &ResponsesRequest) -> Result<ChatCompletionRequest, UwaE
         model: req.model.clone(),
         messages,
         stream: Some(false), // this endpoint does not stream
+        stream_options: None,
         temperature: req.temperature,
         max_tokens: req.max_output_tokens,
         tools: normalize_tools(req.tools.as_deref()),

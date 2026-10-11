@@ -15,6 +15,7 @@ pub fn build_non_streaming(
     text: String,
     calls: Vec<ToolCall>,
     finish: FinishReason,
+    usage: Usage,
 ) -> ChatCompletionResponse {
     let (content, tool_calls) = if calls.is_empty() {
         (
@@ -52,7 +53,7 @@ pub fn build_non_streaming(
             message,
             finish_reason: Some(finish),
         }],
-        usage: Usage::default(),
+        usage,
     }
 }
 
@@ -81,6 +82,7 @@ mod tests {
             "hello".into(),
             vec![],
             FinishReason::Stop,
+            Usage::default(),
         );
         assert_eq!(r.object, "chat.completion");
         assert_eq!(r.choices[0].finish_reason, Some(FinishReason::Stop));
@@ -101,6 +103,7 @@ mod tests {
             "".into(),
             calls,
             FinishReason::ToolCalls,
+            Usage::default(),
         );
         let tc = r.choices[0].message.tool_calls.as_ref().unwrap();
         assert_eq!(tc.len(), 1);
