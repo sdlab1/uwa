@@ -127,7 +127,11 @@ pub async fn selector_test(
     // Verify the provider exists.
     let cfg = state.config.clone();
     let Some(_provider) = cfg.providers.get(&req.provider) else {
-        return Err(UwaError::UnknownModel(req.provider.clone()).into());
+        return Err(UwaError::UnknownModel(uwa_core::ModelNotFound::new(
+            req.provider.clone(),
+            vec![],
+        ))
+        .into());
     };
 
     // Pick a tab: explicit or first available.
@@ -338,7 +342,11 @@ pub async fn selector_generate(
     // Verify the provider exists.
     let cfg = state.config.clone();
     let Some(_provider) = cfg.providers.get(&req.provider) else {
-        return Err(UwaError::UnknownModel(req.provider.clone()).into());
+        return Err(UwaError::UnknownModel(uwa_core::ModelNotFound::new(
+            req.provider.clone(),
+            vec![],
+        ))
+        .into());
     };
 
     let tabs = state.transport.list_tabs().await?;
@@ -379,10 +387,9 @@ pub async fn selector_apply(
     Json(req): Json<ApplySelectorsRequest>,
 ) -> ApiResult<Json<ApplySelectorsResponse>> {
     let cfg = state.config.clone();
-    let p = cfg
-        .providers
-        .get(&req.provider)
-        .ok_or_else(|| UwaError::UnknownModel(req.provider.clone()))?;
+    let p = cfg.providers.get(&req.provider).ok_or_else(|| {
+        UwaError::UnknownModel(uwa_core::ModelNotFound::new(req.provider.clone(), vec![]))
+    })?;
 
     let mut diff = serde_json::Map::new();
     if let Some(v) = &req.input {

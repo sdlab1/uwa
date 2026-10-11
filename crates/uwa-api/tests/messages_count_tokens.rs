@@ -4,7 +4,7 @@ use axum_test::TestServer;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use uwa_testkit::{
-    config::{config_with_key, TEST_AUTH_HEADER},
+    config::{config_with_key, config_with_key_lan, TEST_AUTH_HEADER},
     AppBuilder, MockProvider, MockTransport,
 };
 
@@ -91,8 +91,14 @@ async fn missing_messages_default_to_empty() {
 }
 
 #[tokio::test]
-async fn needs_the_api_key() {
-    server()
+async fn needs_the_api_key_off_loopback() {
+    // Loopback binds accept any key; off-loopback the key is enforced.
+    let app = AppBuilder::new()
+        .with_config(config_with_key_lan())
+        .with_transport(Arc::new(MockTransport::with_n_tabs(1)))
+        .with_provider(Arc::new(MockProvider::new("chatgpt").with_answer("unused")))
+        .build();
+    app.server
         .post("/v1/messages/count_tokens")
         .json(&json!({"model": "gpt-4o", "messages": []}))
         .await

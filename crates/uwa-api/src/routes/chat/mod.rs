@@ -55,17 +55,14 @@ pub async fn chat_completions(
 ) -> ApiResult<Response> {
     let hint = crate::routing::resolve_hint(&state, &hint).await?;
 
-    // Resolve provider: hint first, then model_aliases.
-    let provider_name = match hint.provider.as_deref() {
-        Some(p) => p.to_string(),
-        None => state
-            .config
-            .provider_for_model(&req.model)
-            .ok_or_else(|| UwaError::UnknownModel(req.model.clone()))?
-            .name
-            .clone(),
+    // Hint override wins; otherwise the alias table + fallback_model.
+    let (site, effective_model) = if let Some(p) = hint.provider.as_deref() {
+        let site = state.providers.get(p)?;
+        (site, req.model.clone())
+    } else {
+        let (prov_cfg, resolved) = state.config.resolve_model(&req.model)?;
+        (state.providers.get(&prov_cfg.name)?, resolved)
     };
-    let site = state.providers.get(&provider_name)?;
 
     let tool_choice_disabled = matches!(
         req.tool_choice.as_ref().and_then(Value::as_str),
@@ -90,6 +87,13 @@ pub async fn chat_completions(
         .into());
     }
 
+    // Route the resolved model through the pipeline so the fallback works
+    // in both the buffered and streaming paths.
+    let req = ChatCompletionRequest {
+        model: effective_model.clone(),
+        ..req
+    };
+
     let request_id = RequestId::new();
     let created = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -112,12 +116,22 @@ pub async fn chat_completions(
             )
             .await;
         });
-        Ok(stream::stream_response(request_id, req.model, created, rx))
-    } else {
-        let (text, calls, finish) = run_pipeline_with_hint(&state, &req, &all_specs, &hint).await?;
-        Ok(Json(nonstream::build_non_streaming(
-            request_id, req.model, created, text, calls, finish,
-        ))
-        .into_response())
+        return Ok(stream::stream_response(
+            request_id,
+            effective_model,
+            created,
+            rx,
+        ));
     }
+
+    let (text, calls, finish) = run_pipeline_with_hint(&state, &req, &all_specs, &hint).await?;
+    Ok(Json(nonstream::build_non_streaming(
+        request_id,
+        effective_model,
+        created,
+        text,
+        calls,
+        finish,
+    ))
+    .into_response())
 }

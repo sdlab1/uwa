@@ -38,7 +38,7 @@ use uwa_core::types::FinishReason;
 use uwa_core::TabId;
 use uwa_core::{ToolSpec, UwaError};
 use uwa_tools::{
-    build_system_prompt, compose_browser_turn, parse, tool_marker_index, ToolCall, ToolDefinition,
+    build_system_prompt, compose_browser_turn, parse, safe_emit_end, ToolCall, ToolDefinition,
     ToolParseOutcome,
 };
 
@@ -61,6 +61,13 @@ pub enum StreamEvent {
 
 /// RAII cleanup for multimodal temp files. Runs on every exit path,
 /// including errors and panics that unwind.
+fn unknown_model(state: &AppState, model: &str) -> UwaError {
+    UwaError::UnknownModel(uwa_core::ModelNotFound::new(
+        model,
+        state.config.available_models(),
+    ))
+}
+
 struct AttachmentGuard(Vec<uwa_core::types::Attachment>);
 
 impl Drop for AttachmentGuard {
@@ -79,7 +86,7 @@ pub async fn run_pipeline(
     let provider_cfg = state
         .config
         .provider_for_model(&req.model)
-        .ok_or_else(|| UwaError::UnknownModel(req.model.clone()))?;
+        .ok_or_else(|| unknown_model(state, &req.model))?;
 
     let breaker = state.breaker(&provider_cfg.name);
     breaker.allow()?;
@@ -149,11 +156,22 @@ pub async fn run_pipeline_streaming(
     let provider_cfg = state
         .config
         .provider_for_model(&req.model)
-        .ok_or_else(|| UwaError::UnknownModel(req.model.clone()))?;
+        .ok_or_else(|| unknown_model(state, &req.model))?;
 
     let breaker = state.breaker(&provider_cfg.name);
-    breaker.allow()?;
-    let _permit = state.runtime.semaphores.acquire(&provider_cfg.name).await?;
+    // Early exits must reach the SSE writer as an error event; otherwise the
+    // dropped sender looks like a normal (empty) completion to the client.
+    if let Err(e) = breaker.allow() {
+        let _ = tx.send(StreamEvent::Error(e.clone())).await;
+        return Err(e);
+    }
+    let _permit = match state.runtime.semaphores.acquire(&provider_cfg.name).await {
+        Ok(p) => p,
+        Err(e) => {
+            let _ = tx.send(StreamEvent::Error(e.clone())).await;
+            return Err(e);
+        }
+    };
 
     let mut recorder = RequestRecorder::new(req, &provider_cfg.name, None);
 
@@ -209,7 +227,7 @@ async fn run_pipeline_streaming_inner(
     let provider_cfg = state
         .config
         .provider_for_model(&req.model)
-        .ok_or_else(|| UwaError::UnknownModel(req.model.clone()))?;
+        .ok_or_else(|| unknown_model(state, &req.model))?;
     let site = state.providers.get(&provider_cfg.name)?;
 
     // --- identical setup to the buffered path ---
@@ -292,7 +310,7 @@ async fn run_pipeline_streaming_inner(
 
                 // Emit up to (but not past) the first tool-call marker so the
                 // client never sees protocol markers in the visible stream.
-                let target_end = tool_marker_index(&acc).unwrap_or(acc.len());
+                let target_end = safe_emit_end(&acc);
                 if target_end > emitted_until {
                     let piece = acc[emitted_until..target_end].to_string();
                     if !piece.is_empty() {
@@ -350,7 +368,7 @@ async fn run_pipeline_inner(
     let provider_cfg = state
         .config
         .provider_for_model(&req.model)
-        .ok_or_else(|| UwaError::UnknownModel(req.model.clone()))?;
+        .ok_or_else(|| unknown_model(state, &req.model))?;
     let site = state.providers.get(&provider_cfg.name)?;
 
     // Tool-defs → system prompt. Empty when the client sent no tools.

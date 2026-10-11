@@ -131,3 +131,22 @@ fn tool_calls_serialize_and_deserialize() {
     let back: uwa_tools::ToolCall = serde_json::from_str(&s).unwrap();
     assert_eq!(back, call);
 }
+
+#[test]
+fn safe_emit_end_holds_back_partial_markers() {
+    use uwa_tools::safe_emit_end;
+    let full_marker = "<tool_call>";
+    // Complete marker: stop right before it.
+    assert_eq!(safe_emit_end("ab<tool_call>cd"), 2);
+    // Partial marker at the tail is held back.
+    assert_eq!(safe_emit_end("ok <tool_"), 3);
+    assert_eq!(safe_emit_end("ok ```"), 3);
+    assert_eq!(safe_emit_end("ok <"), 3);
+    // Plain text, including multibyte, streams fully.
+    assert_eq!(safe_emit_end("plain"), 5);
+    assert_eq!(safe_emit_end("h\u{e9}llo"), "h\u{e9}llo".len());
+    // A lone backtick-pair is not a marker prefix long enough to matter, but
+    // holding it back is harmless; it must never exceed the buffer.
+    assert!(safe_emit_end("``") <= 2);
+    let _ = full_marker;
+}

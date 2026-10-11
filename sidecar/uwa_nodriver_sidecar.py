@@ -154,23 +154,31 @@ class Sidecar:
         frame_id = params["frame_id"]
         js = params["js"]
 
-        # Create an isolated world for the frame, then evaluate in it.
+        # Create an isolated world for the frame, then evaluate in *that*
+        # world. (Regression: the world used to be created and then ignored —
+        # `tab.evaluate` ran in the top-level context, so `frame_id` had no
+        # effect and cross-origin frames returned the main page's result.)
         world = await tab.send(
             cdp.page.create_isolated_world(frame_id=frame_id, world_name="uwa-eval")
         )
-        result = await tab.evaluate(
-            js, await_promise=True, return_by_value=True
+        result = await tab.send(
+            cdp.runtime.evaluate(
+                expression=js,
+                await_promise=True,
+                return_by_value=True,
+                context_id=world.context_id,
+            )
         )
-        # Unwrap RemoteObject.
-        if hasattr(result, "value"):
-            value = result.value
-        elif isinstance(result, tuple) and len(result) == 2:
+        # Unwrap the CDP result: either a (RemoteObject, ExceptionDetails)
+        # tuple or a response object with .result / .exception_details.
+        if isinstance(result, tuple) and len(result) == 2:
             remote, exc = result
-            if exc is not None:
-                raise RuntimeError(f"eval_in_frame error: {exc.text}")
-            value = remote.value if hasattr(remote, "value") else remote
         else:
-            value = result
+            remote = getattr(result, "result", result)
+            exc = getattr(result, "exception_details", None)
+        if exc is not None:
+            raise RuntimeError(f"eval_in_frame error: {exc.text}")
+        value = remote.value if hasattr(remote, "value") else remote
         return {"value": value}
 
     async def frames_list(self, params: dict[str, Any]) -> dict[str, Any]:

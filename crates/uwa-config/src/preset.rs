@@ -152,7 +152,7 @@ fn merge_selectors(top: &Selectors, preset: &Selectors) -> Selectors {
         stop_button: preset
             .stop_button
             .clone()
-            .or_else(|| top.send_button.clone()),
+            .or_else(|| top.stop_button.clone()),
         assistant_message: preset
             .assistant_message
             .clone()
@@ -249,5 +249,30 @@ mod tests {
         let p = &cfg.providers["x"];
         assert!(p.effective(Some("bogus")).is_err());
         assert!(p.effective(Some("pro")).is_ok());
+    }
+
+    #[test]
+    fn stop_button_falls_back_to_top_level_stop_button() {
+        let cfg = Config::load_from_str(
+            r####"
+            [server]
+            bind = "127.0.0.1"
+            port = 8080
+            [providers.x]
+            name = "x"
+            url_patterns = ["https://x/*"]
+            capabilities = { streams = true, tool_calls = false, vision = false }
+            [providers.x.selectors]
+            input = "#i"
+            send_button = "#s"
+            stop_button = "#stop"
+            assistant_message = "#a"
+            [providers.x.presets.pro.selectors]
+            input = "#pro"
+            "####,
+        )
+        .unwrap();
+        let eff = cfg.providers["x"].effective(Some("pro")).unwrap();
+        assert_eq!(eff.selectors.stop_button.as_deref(), Some("#stop"));
     }
 }

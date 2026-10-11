@@ -92,6 +92,9 @@ pub enum MediaKind {
 #[derive(Debug, Clone)]
 pub enum NetworkEvent {
     ResponseBody {
+        /// CDP request id, so a `Finished` for the same request can be told
+        /// apart from an unrelated one (favicon, XHR, …).
+        request_id: String,
         url: String,
         body: String,
         mime: String,

@@ -20,7 +20,7 @@ pub mod traits;
 pub mod types;
 pub mod workflow;
 
-pub use error::{Result, UwaError};
+pub use error::{ModelNotFound, Result, UwaError};
 pub use ids::{ConversationId, RequestId, SessionId, TabId};
 pub use net::{ExtractionStrategy, FinisherTuning, NetDecoder, NetRules};
 pub use traits::{

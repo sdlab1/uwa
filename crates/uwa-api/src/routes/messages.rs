@@ -17,6 +17,7 @@
 //! streaming requires network-first extraction and is out of scope for MVP.
 
 use axum::extract::State;
+use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -37,15 +38,57 @@ use crate::state::AppState;
 
 // ---------- top-level handler ----------
 
+/// `/v1/messages` must answer in the **Anthropic** error shape — clients
+/// (Claude Code, the SDKs) parse `{"type":"error","error":{…}}`, not the
+/// OpenAI envelope the rest of the API uses.
 pub async fn messages(
     State(state): State<AppState>,
+    crate::routing::HintExtractor(hint): crate::routing::HintExtractor,
     Json(req): Json<MessagesRequest>,
-) -> ApiResult<Response> {
-    // Validate model early.
-    let provider_cfg = state
-        .config
-        .provider_for_model(&req.model)
-        .ok_or_else(|| UwaError::UnknownModel(req.model.clone()))?;
+) -> Response {
+    match messages_inner(state, hint, req).await {
+        Ok(resp) => resp,
+        Err(e) => anthropic_error_response(&e),
+    }
+}
+
+fn anthropic_error_body(e: &UwaError) -> Value {
+    let (_status, kind, _code) = e.openai_shape();
+    json!({
+        "type": "error",
+        "error": {
+            "type": kind,
+            "message": e.to_string(),
+        }
+    })
+}
+
+fn anthropic_error_response(e: &UwaError) -> Response {
+    let (status, _kind, _code) = e.openai_shape();
+    let status = StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    (status, Json(anthropic_error_body(e))).into_response()
+}
+
+async fn messages_inner(
+    state: AppState,
+    hint: crate::routing::RoutingHint,
+    req: MessagesRequest,
+) -> Result<Response, UwaError> {
+    // /url/{domain} and /tab/{id} route hints apply here too.
+    let hint = crate::routing::resolve_hint(&state, &hint).await?;
+
+    // Validate model early: alias table + fallback_model — unless a routing
+    // hint pinned the provider explicitly.
+    let (provider_cfg, effective_model) = if let Some(p) = hint.provider.as_deref() {
+        let cfg = state
+            .config
+            .providers
+            .get(p)
+            .ok_or_else(|| UwaError::NoProviderForUrl(p.to_string()))?;
+        (cfg, req.model.clone())
+    } else {
+        state.config.resolve_model(&req.model)?
+    };
     let site = state.providers.get(&provider_cfg.name)?;
 
     let tool_choice_disabled = match &req.tool_choice {
@@ -62,7 +105,9 @@ pub async fn messages(
     };
 
     // Convert to OpenAI.
-    let oa_req = to_openai_request(&req, tool_choice_disabled)?;
+    let mut oa_req = to_openai_request(&req, tool_choice_disabled)?;
+    // Route the resolved model through the pipeline so the fallback works.
+    oa_req.model = effective_model.clone();
 
     // Collect tool specs — client tools only (bridge semantics).
     let all_specs: Vec<ToolSpec> = match &oa_req.tools {
@@ -76,8 +121,7 @@ pub async fn messages(
         return Err(UwaError::BadRequest(format!(
             "model `{}` does not support tool calls",
             req.model
-        ))
-        .into());
+        )));
     }
 
     let msg_id = format!("msg_{}", uuid::Uuid::new_v4().simple());
@@ -87,24 +131,30 @@ pub async fn messages(
         let state_task = state.clone();
         let oa_req_task = oa_req.clone();
         let specs_clone = all_specs.clone();
+        let tab_hint = hint.tab.clone();
         tokio::spawn(async move {
             let _ = crate::routes::chat::pipeline::run_pipeline_streaming(
                 &state_task,
                 &oa_req_task,
                 &specs_clone,
-                None,
+                tab_hint.as_ref(),
                 tx,
             )
             .await;
         });
-        Ok(stream_anthropic_from_channel(msg_id, req.model, rx))
+        Ok(stream_anthropic_from_channel(msg_id, effective_model, rx))
     } else {
-        let (text, calls, finish) =
-            crate::routes::chat::pipeline::run_pipeline(&state, &oa_req, &all_specs, None).await?;
+        let (text, calls, finish) = crate::routes::chat::pipeline::run_pipeline(
+            &state,
+            &oa_req,
+            &all_specs,
+            hint.tab.as_ref(),
+        )
+        .await?;
         Ok(Json(build_response(
             &req,
             msg_id,
-            req.model.clone(),
+            effective_model,
             text,
             calls,
             finish,
@@ -172,7 +222,7 @@ fn to_openai_request(
     }
 
     for m in &req.messages {
-        messages.push(convert_message(m));
+        messages.extend(convert_message(m));
     }
 
     let tools = match (&req.tools, tool_choice_disabled) {
@@ -210,10 +260,15 @@ fn to_openai_request(
 /// We may need to emit *multiple* OpenAI messages for one Anthropic message:
 // e.g. `user` containing both `text` and `tool_result` blocks becomes
 //   `role:user` + `role:tool`.
-fn convert_message(m: &AnthropicMessage) -> ChatMessage {
+//
+// **One output message per tool_result**: OpenAI requires each tool result
+// to be its own `role:"tool"` message keyed by `tool_call_id`. The old
+// code collapsed N tool_results into one message, overwriting every id
+// but the last — a multi-tool assistant turn could never be answered.
+fn convert_message(m: &AnthropicMessage) -> Vec<ChatMessage> {
     // Simple string content.
     if let Value::String(s) = &m.content {
-        return ChatMessage {
+        return vec![ChatMessage {
             role: match m.role.as_str() {
                 "assistant" => Role::Assistant,
                 "system" => Role::System,
@@ -223,13 +278,32 @@ fn convert_message(m: &AnthropicMessage) -> ChatMessage {
             name: None,
             tool_call_id: None,
             tool_calls: None,
-        };
+        }];
     }
 
     let blocks = m.content.as_array().cloned().unwrap_or_default();
+    let base_role = match m.role.as_str() {
+        "assistant" => Role::Assistant,
+        "system" => Role::System,
+        _ => Role::User,
+    };
+
+    let mut out: Vec<ChatMessage> = Vec::new();
     let mut text_parts: Vec<String> = Vec::new();
     let mut tool_calls: Vec<ToolCallRef> = Vec::new();
-    let mut tool_call_id: Option<String> = None;
+
+    let flush_text = |out: &mut Vec<ChatMessage>, text_parts: &mut Vec<String>| {
+        if !text_parts.is_empty() {
+            out.push(ChatMessage {
+                role: base_role,
+                content: Some(MessageContent::Text(text_parts.join("\n"))),
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            });
+            text_parts.clear();
+        }
+    };
 
     for b in &blocks {
         match b.get("type").and_then(Value::as_str) {
@@ -260,52 +334,51 @@ fn convert_message(m: &AnthropicMessage) -> ChatMessage {
                 });
             }
             Some("tool_result") => {
-                tool_call_id = b
+                // Text accumulated so far belongs before the tool results.
+                flush_text(&mut out, &mut text_parts);
+                let id = b
                     .get("tool_use_id")
                     .and_then(Value::as_str)
-                    .map(String::from);
+                    .unwrap_or("")
+                    .to_string();
+                let mut result_text = String::new();
                 match b.get("content") {
-                    Some(Value::String(s)) => text_parts.push(s.clone()),
+                    Some(Value::String(s)) => result_text.push_str(s),
                     Some(Value::Array(inner)) => {
-                        for x in inner {
-                            if let Some(t) = x.get("text").and_then(Value::as_str) {
-                                text_parts.push(t.to_string());
-                            }
-                        }
+                        let parts: Vec<&str> = inner
+                            .iter()
+                            .filter_map(|x| x.get("text").and_then(Value::as_str))
+                            .collect();
+                        result_text.push_str(&parts.join("\n"));
                     }
                     _ => {}
                 }
+                out.push(ChatMessage {
+                    role: Role::Tool,
+                    content: (!result_text.is_empty()).then_some(MessageContent::Text(result_text)),
+                    name: None,
+                    tool_call_id: Some(id),
+                    tool_calls: None,
+                });
             }
             _ => {}
         }
     }
 
-    // Decide role: pure tool_result → OpenAI tool message.
-    let role = if tool_call_id.is_some() && tool_calls.is_empty() {
-        Role::Tool
+    // Assistant tool_use blocks ride on one assistant message (OpenAI shape).
+    if !tool_calls.is_empty() {
+        out.push(ChatMessage {
+            role: Role::Assistant,
+            content: (!text_parts.is_empty()).then(|| MessageContent::Text(text_parts.join("\n"))),
+            name: None,
+            tool_call_id: None,
+            tool_calls: Some(tool_calls),
+        });
     } else {
-        match m.role.as_str() {
-            "assistant" => Role::Assistant,
-            "system" => Role::System,
-            _ => Role::User,
-        }
-    };
-
-    ChatMessage {
-        role,
-        content: if text_parts.is_empty() {
-            None
-        } else {
-            Some(MessageContent::Text(text_parts.join("\n")))
-        },
-        name: None,
-        tool_call_id,
-        tool_calls: if tool_calls.is_empty() {
-            None
-        } else {
-            Some(tool_calls)
-        },
+        flush_text(&mut out, &mut text_parts);
     }
+
+    out
 }
 
 fn stringify_anthropic_content(v: &Value) -> String {
@@ -321,13 +394,16 @@ fn stringify_anthropic_content(v: &Value) -> String {
 }
 
 fn estimate_usage(req: &MessagesRequest, text: &str, calls: &[ToolCall]) -> AnthropicUsage {
-    let mut input = req.model.len() + text.len();
+    // Input: what the client actually sent (system + messages). The model
+    // alias is not tokens, and the assistant answer is output, not input.
+    let mut input = 0usize;
     if let Some(system) = &req.system {
         input += system.as_text().len();
     }
     for m in &req.messages {
         input += stringify_anthropic_content(&m.content).len();
     }
+    // Output: the answer plus any tool-call payloads the bridge returns.
     let mut output = text.len();
     for c in calls {
         output += c.name.len() + c.arguments.to_string().len();
@@ -561,7 +637,7 @@ mod tests {
             role: "user".into(),
             content: json!("hello"),
         };
-        let oa = convert_message(&m);
+        let oa = &convert_message(&m)[0];
         assert_eq!(oa.role, Role::User);
         assert!(matches!(oa.content, Some(MessageContent::Text(ref s)) if s == "hello"));
     }
@@ -575,9 +651,9 @@ mod tests {
                 {"type": "tool_use", "id": "toolu_1", "name": "w", "input": {"city": "NYC"}}
             ]),
         };
-        let oa = convert_message(&m);
+        let oa = &convert_message(&m)[0];
         assert_eq!(oa.role, Role::Assistant);
-        let tc = oa.tool_calls.unwrap();
+        let tc = oa.tool_calls.clone().unwrap();
         assert_eq!(tc[0].function.name, "w");
         assert!(tc[0].function.arguments.contains("NYC"));
     }
@@ -590,10 +666,75 @@ mod tests {
                 {"type": "tool_result", "tool_use_id": "t1", "content": "22C sunny"}
             ]),
         };
-        let oa = convert_message(&m);
+        let oa = &convert_message(&m)[0];
         assert_eq!(oa.role, Role::Tool);
         assert_eq!(oa.tool_call_id.as_deref(), Some("t1"));
         assert!(matches!(oa.content, Some(MessageContent::Text(ref s)) if s == "22C sunny"));
+    }
+
+    #[test]
+    fn multiple_tool_results_stay_separate_messages() {
+        // Regression: N tool_results in one user message used to collapse
+        // into a single role:tool with only the last id — multi-tool turns
+        // could never be answered.
+        let m = AnthropicMessage {
+            role: "user".into(),
+            content: json!([
+                {"type": "tool_result", "tool_use_id": "t1", "content": "22C"},
+                {"type": "tool_result", "tool_use_id": "t2", "content": "rain"},
+                {"type": "text", "text": "and go on"}
+            ]),
+        };
+        let out = convert_message(&m);
+        assert_eq!(out.len(), 3, "{out:?}");
+        assert_eq!(out[0].role, Role::Tool);
+        assert_eq!(out[0].tool_call_id.as_deref(), Some("t1"));
+        assert!(matches!(out[0].content, Some(MessageContent::Text(ref s)) if s == "22C"));
+        assert_eq!(out[1].role, Role::Tool);
+        assert_eq!(out[1].tool_call_id.as_deref(), Some("t2"));
+        assert!(matches!(out[1].content, Some(MessageContent::Text(ref s)) if s == "rain"));
+        assert_eq!(out[2].role, Role::User);
+        assert!(matches!(out[2].content, Some(MessageContent::Text(ref s)) if s == "and go on"));
+    }
+
+    #[test]
+    fn anthropic_error_shape_matches_sdk_expectations() {
+        // Regression: /v1/messages used to answer with the OpenAI envelope.
+        let e = UwaError::UnknownModel(uwa_core::ModelNotFound::new("nope", vec![]));
+        let body = anthropic_error_body(&e);
+        assert_eq!(body["type"], "error");
+        assert_eq!(body["error"]["type"], "invalid_request_error");
+        assert!(body["error"]["message"].as_str().unwrap().contains("nope"));
+        assert!(body.get("error").unwrap().get("code").is_none());
+
+        // The HTTP wrapper carries the mapped status.
+        let resp = anthropic_error_response(&e);
+        assert_eq!(resp.status(), 404);
+    }
+
+    #[test]
+    fn usage_input_excludes_model_and_output() {
+        // Regression: input_tokens used to include the model alias and the
+        // assistant's own answer.
+        let req = MessagesRequest {
+            model: "gpt-4o".into(),
+            max_tokens: 10,
+            system: None,
+            messages: vec![AnthropicMessage {
+                role: "user".into(),
+                content: json!("hello world"), // 11 chars -> ~2 tokens
+            }],
+            stream: None,
+            temperature: None,
+            tools: None,
+            tool_choice: None,
+        };
+        let u = estimate_usage(&req, "the answer", &[]);
+        // "hello world" (11 chars) / 4 = 2; the model alias and the answer
+        // itself must not be counted as input.
+        assert_eq!(u.input_tokens, 2);
+        // "the answer" (10 chars) / 4 = 2 — and it is output, not input.
+        assert_eq!(u.output_tokens, 2);
     }
 
     #[test]

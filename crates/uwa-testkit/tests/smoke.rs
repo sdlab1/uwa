@@ -1,7 +1,7 @@
 use serde_json::json;
 use std::sync::Arc;
 use uwa_testkit::{
-    config::{config_with_key, TEST_AUTH_HEADER},
+    config::{config_with_key_lan, TEST_AUTH_HEADER},
     AppBuilder, MockPage, MockProvider, MockTransport,
 };
 
@@ -51,9 +51,11 @@ async fn app_builder_runs_a_chat_turn() {
 }
 
 #[tokio::test]
-async fn keyed_config_requires_bearer() {
+async fn keyed_config_requires_bearer_off_loopback() {
+    // Loopback binds accept any key by design; off-loopback the
+    // configured key is enforced.
     let app = AppBuilder::new()
-        .with_config(config_with_key())
+        .with_config(config_with_key_lan())
         .with_provider(Arc::new(MockProvider::new("chatgpt").with_answer("hi")))
         .build();
     let anon = app

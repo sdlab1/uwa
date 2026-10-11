@@ -84,6 +84,11 @@ impl NodriverTransport {
                 match name {
                     "network.response" => {
                         let _ = tx.send(NetworkEvent::ResponseBody {
+                            request_id: data
+                                .get("request_id")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string(),
                             url: data
                                 .get("url")
                                 .and_then(|v| v.as_str())
@@ -103,6 +108,11 @@ impl NodriverTransport {
                         let body = data.get("body").and_then(|v| v.as_str()).unwrap_or("");
                         if !body.is_empty() {
                             let _ = tx.send(NetworkEvent::ResponseBody {
+                                request_id: data
+                                    .get("request_id")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string(),
                                 url: String::new(),
                                 body: body.to_string(),
                                 mime: String::new(),

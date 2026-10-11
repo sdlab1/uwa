@@ -125,6 +125,41 @@ async fn max_sessions_evicts_oldest() {
 }
 
 #[tokio::test]
+async fn distinct_conversations_spread_across_tabs() {
+    // Regression: fresh sessions used to always take tabs.iter().next(),
+    // funneling every conversation onto the browser's first tab.
+    let sm = SessionManager::new(cfg(60_000, 8));
+    let t = tabs(2);
+    let a = sm.acquire(&cid("c1"), &t).await.unwrap();
+    let b = sm.acquire(&cid("c2"), &t).await.unwrap();
+    assert_ne!(
+        a.tab, b.tab,
+        "two idle pools of conversations must not share the only two tabs"
+    );
+    drop((a, b));
+}
+
+#[tokio::test]
+async fn over_capacity_never_evicts_a_busy_session() {
+    // Regression: capacity eviction used to remove entries with live
+    // handles, silently forking a mid-flight conversation onto another tab.
+    let sm = SessionManager::new(cfg(60_000, 1));
+    let t = tabs(2);
+    let busy = sm.acquire(&cid("busy"), &t).await.unwrap();
+    let tab_of_busy = busy.tab.clone();
+
+    // At capacity with the only session busy: the manager must grow past
+    // the cap rather than evicting the live lease.
+    let other = sm.acquire(&cid("other"), &t).await.unwrap();
+    assert!(sm.entries.contains_key(&cid("busy")));
+    assert!(sm.entries.contains_key(&cid("other")));
+    assert_eq!(busy.tab, tab_of_busy, "the live lease keeps its tab");
+
+    drop(busy);
+    drop(other);
+}
+
+#[tokio::test]
 async fn list_reports_sessions() {
     let sm = SessionManager::new(cfg(60_000, 8));
     let t = tabs(1);

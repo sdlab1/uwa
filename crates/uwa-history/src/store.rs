@@ -113,15 +113,9 @@ impl HistoryStore {
     pub async fn append(&self, mut rec: RequestRecord) {
         // Truncate long previews.
         let cap = self.inner.cfg.max_preview_bytes;
-        if rec.request.user_preview.len() > cap {
-            rec.request.user_preview.truncate(cap);
-            rec.request.user_preview.push('…');
-        }
+        truncate_preview(&mut rec.request.user_preview, cap);
         if let Some(r) = &mut rec.response {
-            if r.text_preview.len() > cap {
-                r.text_preview.truncate(cap);
-                r.text_preview.push('…');
-            }
+            truncate_preview(&mut r.text_preview, cap);
         }
 
         // Ring buffer.
@@ -306,5 +300,39 @@ mod tests {
         let rec = &store.recent(1).await[0];
         assert!(rec.request.user_preview.len() < 100);
         assert!(rec.request.user_preview.ends_with('…'));
+    }
+}
+
+/// Truncate `s` to at most `cap` bytes without splitting a UTF-8 character,
+/// appending an ellipsis when anything was cut.
+fn truncate_preview(s: &mut String, cap: usize) {
+    if s.len() <= cap {
+        return;
+    }
+    let mut cut = cap;
+    while cut > 0 && !s.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    s.truncate(cut);
+    s.push('…');
+}
+
+#[cfg(test)]
+mod truncate_tests {
+    use super::truncate_preview;
+
+    #[test]
+    fn does_not_split_multibyte_chars() {
+        let mut s = "é".repeat(600); // 2 bytes each
+        truncate_preview(&mut s, 1023); // odd cap lands mid-char
+        assert!(s.ends_with('…'));
+        assert!(s.len() <= 1023 + '…'.len_utf8());
+    }
+
+    #[test]
+    fn short_strings_untouched() {
+        let mut s = String::from("hi");
+        truncate_preview(&mut s, 10);
+        assert_eq!(s, "hi");
     }
 }

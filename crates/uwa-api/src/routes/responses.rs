@@ -10,11 +10,17 @@
 //! Reference: <https://platform.openai.com/docs/api-reference/responses>
 
 use axum::extract::State;
+use axum::response::sse::{Event, KeepAlive, Sse};
+use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
 
-use uwa_core::types::openai::{ChatCompletionRequest, ChatMessage, MessageContent};
+use uwa_core::types::openai::{
+    ChatCompletionRequest, ChatMessage, FunctionCall, MessageContent, ToolCallRef,
+};
 use uwa_core::types::Role;
 use uwa_core::{RequestId, UwaError};
 
@@ -106,13 +112,42 @@ pub struct ResponsesUsage {
 pub async fn create(
     State(state): State<AppState>,
     Json(req): Json<ResponsesRequest>,
-) -> ApiResult<Json<ResponsesResponse>> {
+) -> ApiResult<Response> {
     let chat_req = to_chat_request(&req)?;
 
     // Same entry the chat route uses, so breaker, semaphore and session
     // pinning all apply unchanged. Bridge semantics: tools come from the
     // client request only.
     let local_tools = chat::local_tools(&chat_req)?;
+
+    // Codex (and the SDKs) drive this endpoint with SSE: without it the
+    // tool loop cannot show progress and some clients refuse the body.
+    if req.stream.unwrap_or(false) {
+        let (tx, rx) = mpsc::channel::<chat::pipeline::StreamEvent>(64);
+        let state_task = state.clone();
+        let req_task = chat_req.clone();
+        let specs_task = local_tools.clone();
+        tokio::spawn(async move {
+            let _ = chat::pipeline::run_pipeline_streaming(
+                &state_task,
+                &req_task,
+                &specs_task,
+                None,
+                tx,
+            )
+            .await;
+        });
+        let input_chars: usize = chat_req
+            .messages
+            .iter()
+            .map(|m| match &m.content {
+                Some(MessageContent::Text(s)) => s.len(),
+                _ => 0,
+            })
+            .sum();
+        return Ok(stream_response(chat_req.model.clone(), input_chars, rx));
+    }
+
     let (text, calls, finish) = chat::run_pipeline(&state, &chat_req, &local_tools, None).await?;
 
     let id = RequestId::new();
@@ -128,7 +163,167 @@ pub async fn create(
     let body = serde_json::to_value(&body)
         .map_err(|e| UwaError::Internal(format!("serialize chat answer: {e}")))?;
 
-    Ok(Json(reshape(&chat_req.model, &body)))
+    Ok(Json(reshape(&chat_req.model, &body)).into_response())
+}
+
+/// Responses-API SSE: `response.created` → `response.output_text.delta`*
+/// → (`response.output_item.added` for function calls) → `response.completed`
+/// with the full response object. Terminates on `event: response.completed`.
+fn stream_response(
+    model: String,
+    input_chars: usize,
+    mut rx: mpsc::Receiver<chat::pipeline::StreamEvent>,
+) -> Response {
+    let (tx, out_rx) = mpsc::channel::<Result<Event, std::convert::Infallible>>(64);
+    tokio::spawn(async move {
+        let resp_id = format!("resp_{}", uuid::Uuid::new_v4().simple());
+        let created = now_secs();
+        let mut acc = String::new();
+
+        let _ = tx
+            .send(Ok(Event::default().event("response.created").data(
+                json!({
+                    "type": "response.created",
+                    "response": {
+                        "id": resp_id,
+                        "object": "response",
+                        "created_at": created,
+                        "model": model,
+                        "status": "in_progress",
+                        "output": [],
+                    }
+                })
+                .to_string(),
+            )))
+            .await;
+
+        let mut finish_reason = "stop";
+        let mut calls: Vec<uwa_tools::ToolCall> = Vec::new();
+
+        while let Some(ev) = rx.recv().await {
+            match ev {
+                chat::pipeline::StreamEvent::Delta(text) => {
+                    acc.push_str(&text);
+                    let _ = tx
+                        .send(Ok(Event::default()
+                            .event("response.output_text.delta")
+                            .data(
+                                json!({
+                                    "type": "response.output_text.delta",
+                                    "delta": text,
+                                })
+                                .to_string(),
+                            )))
+                        .await;
+                }
+                chat::pipeline::StreamEvent::Done { finish, tool_calls } => {
+                    finish_reason = match finish {
+                        uwa_core::types::FinishReason::Stop => "stop",
+                        uwa_core::types::FinishReason::ToolCalls => "tool_calls",
+                        uwa_core::types::FinishReason::Length => "length",
+                        uwa_core::types::FinishReason::ContentFilter => "content_filter",
+                    };
+                    calls = tool_calls;
+                    break;
+                }
+                chat::pipeline::StreamEvent::Error(e) => {
+                    let _ = tx
+                        .send(Ok(Event::default().event("response.failed").data(
+                            json!({
+                                "type": "response.failed",
+                                "response": { "id": resp_id, "error": e.to_string() },
+                            })
+                            .to_string(),
+                        )))
+                        .await;
+                    return;
+                }
+            }
+        }
+
+        for c in &calls {
+            let _ = tx
+                .send(Ok(Event::default()
+                    .event("response.output_item.added")
+                    .data(
+                        json!({
+                            "type": "response.output_item.added",
+                            "output_index": 0,
+                            "item": {
+                                "type": "function_call",
+                                "call_id": c.id,
+                                "name": c.name,
+                                "arguments": serde_json::to_string(&c.arguments)
+                                    .unwrap_or_else(|_| "{}".into()),
+                                "status": "completed",
+                            }
+                        })
+                        .to_string(),
+                    )))
+                .await;
+        }
+
+        let output_chars = acc.len()
+            + calls
+                .iter()
+                .map(|c| c.name.len() + c.arguments.to_string().len())
+                .sum::<usize>();
+        let in_tok = (input_chars / 4).max(1) as u64;
+        let out_tok = (output_chars / 4).max(1) as u64;
+        let _ = tx
+            .send(Ok(Event::default().event("response.completed").data(
+                json!({
+                    "type": "response.completed",
+                    "response": {
+                        "id": resp_id,
+                        "object": "response",
+                        "created_at": created,
+                        "model": model,
+                        "status": "completed",
+                        "output": build_stream_output(&acc, &calls),
+                        "usage": {
+                            "input_tokens": in_tok,
+                            "output_tokens": out_tok,
+                            "total_tokens": in_tok + out_tok,
+                        },
+                        "finish_reason": finish_reason,
+                    }
+                })
+                .to_string(),
+            )))
+            .await;
+    });
+
+    Sse::new(ReceiverStream::new(out_rx))
+        .keep_alive(KeepAlive::default())
+        .into_response()
+}
+
+/// Streaming variant of the response `output` array: message text plus
+/// function-call items, in plain-JSON form (the SSE writer ships it inside
+/// the `response.completed` event).
+fn build_stream_output(acc: &str, calls: &[uwa_tools::ToolCall]) -> Vec<Value> {
+    let mut out: Vec<Value> = Vec::new();
+    if !acc.is_empty() {
+        out.push(json!({
+            "type": "message",
+            "id": format!("msg_{}", uuid::Uuid::new_v4().simple()),
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": acc, "annotations": []}],
+        }));
+    }
+    for c in calls {
+        out.push(json!({
+            "type": "function_call",
+            "id": format!("fc_{}", uuid::Uuid::new_v4().simple()),
+            "call_id": c.id,
+            "name": c.name,
+            "arguments": serde_json::to_string(&c.arguments).unwrap_or_else(|_| "{}".into()),
+            "status": "completed",
+        }));
+    }
+    out
 }
 
 fn now_secs() -> u64 {
@@ -153,6 +348,65 @@ fn to_chat_request(req: &ResponsesRequest) -> Result<ChatCompletionRequest, UwaE
         Value::String(s) => messages.push(ChatMessage::text(Role::User, s.clone())),
         Value::Array(items) => {
             for item in items {
+                // Responses-vocabulary items first. Codex sends
+                // `{"type":"function_call", ...}` / `{"type":"function_call_output"}`
+                // instead of Chat-Completions roles — dropping them broke the
+                // whole tool loop: the site never saw the results.
+                match item.get("type").and_then(Value::as_str) {
+                    Some("function_call") => {
+                        messages.push(ChatMessage {
+                            role: Role::Assistant,
+                            content: Some(MessageContent::Text(String::new())),
+                            name: None,
+                            tool_call_id: None,
+                            tool_calls: Some(vec![ToolCallRef {
+                                id: item
+                                    .get("call_id")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or_default()
+                                    .to_string(),
+                                kind: "function".into(),
+                                function: FunctionCall {
+                                    name: item
+                                        .get("name")
+                                        .and_then(Value::as_str)
+                                        .unwrap_or_default()
+                                        .to_string(),
+                                    arguments: item
+                                        .get("arguments")
+                                        .and_then(Value::as_str)
+                                        .unwrap_or("{}")
+                                        .to_string(),
+                                },
+                            }]),
+                        });
+                        continue;
+                    }
+                    Some("function_call_output") => {
+                        messages.push(ChatMessage {
+                            role: Role::Tool,
+                            content: Some(MessageContent::Text(
+                                item.get("output")
+                                    .map(|o| match o {
+                                        Value::String(s) => s.clone(),
+                                        other => other.to_string(),
+                                    })
+                                    .unwrap_or_default(),
+                            )),
+                            name: None,
+                            tool_call_id: Some(
+                                item.get("call_id")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or_default()
+                                    .to_string(),
+                            ),
+                            tool_calls: None,
+                        });
+                        continue;
+                    }
+                    _ => {}
+                }
+
                 let role = match item.get("role").and_then(Value::as_str).unwrap_or("user") {
                     "assistant" => Role::Assistant,
                     "system" | "developer" => Role::System,
@@ -195,7 +449,7 @@ fn to_chat_request(req: &ResponsesRequest) -> Result<ChatCompletionRequest, UwaE
         stream: Some(false), // this endpoint does not stream
         temperature: req.temperature,
         max_tokens: req.max_output_tokens,
-        tools: req.tools.clone(),
+        tools: normalize_tools(req.tools.as_deref()),
         tool_choice: req.tool_choice.clone(),
         user: req.user.clone(),
     })
@@ -204,6 +458,36 @@ fn to_chat_request(req: &ResponsesRequest) -> Result<ChatCompletionRequest, UwaE
 /// Flatten a Responses content value: a string, or an array of parts. Every
 /// part flavour the API defines — `input_text`, `output_text`, `refusal` —
 /// carries its text under `text`, so one lookup covers all of them.
+/// The Responses API declares tools **flat** (`{"type":"function","name":…,
+/// "parameters":…}`); Chat Completions nests them under `.function`. Codex
+/// sends the flat shape and `ToolDefinition::from_openai_array` rejected
+/// it — normalize to the nested form before conversion.
+fn normalize_tools(tools: Option<&[Value]>) -> Option<Vec<Value>> {
+    let tools = tools?;
+    Some(
+        tools
+            .iter()
+            .map(|t| {
+                if t.get("type").and_then(Value::as_str) == Some("function")
+                    && t.get("function").is_none()
+                    && t.get("name").is_some()
+                {
+                    json!({
+                        "type": "function",
+                        "function": {
+                            "name": t["name"],
+                            "description": t.get("description").cloned().unwrap_or(Value::Null),
+                            "parameters": t.get("parameters").cloned().unwrap_or(json!({})),
+                        }
+                    })
+                } else {
+                    t.clone()
+                }
+            })
+            .collect(),
+    )
+}
+
 fn content_text(v: Option<&Value>) -> String {
     match v {
         Some(Value::String(s)) => s.clone(),
@@ -435,6 +719,60 @@ mod tests {
             }
             other => panic!("expected function_call, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn function_call_output_round_trips_as_tool_message() {
+        // Regression (Codex loop): `function_call` and `function_call_output`
+        // items used to be dropped — the site never saw the tool results and
+        // the loop could never close.
+        let c = to_chat_request(&req(json!([
+            {"type": "message", "role": "user", "content": "weather?"},
+            {"type": "function_call", "call_id": "call_1", "name": "get_weather", "arguments": "{\"city\":\"NYC\"}"},
+            {"type": "function_call_output", "call_id": "call_1", "output": "22C"}
+        ])))
+        .expect("converts");
+        assert_eq!(c.messages.len(), 3);
+        assert_eq!(c.messages[0].role, Role::User);
+
+        let assistant = &c.messages[1];
+        assert_eq!(assistant.role, Role::Assistant);
+        let tc = assistant.tool_calls.as_ref().expect("tool_calls");
+        assert_eq!(tc[0].id, "call_1");
+        assert_eq!(tc[0].function.name, "get_weather");
+
+        let tool = &c.messages[2];
+        assert_eq!(tool.role, Role::Tool);
+        assert_eq!(tool.tool_call_id.as_deref(), Some("call_1"));
+        assert!(matches!(&tool.content, Some(MessageContent::Text(s)) if s == "22C"));
+    }
+
+    #[test]
+    fn flat_tools_are_normalized_to_the_nested_form() {
+        // The Responses API declares tools flat; the chat layer nests them.
+        let mut r = req(json!("hi"));
+        r.tools = Some(vec![json!({
+            "type": "function",
+            "name": "get_weather",
+            "description": "lookup",
+            "parameters": {"type": "object"},
+        })]);
+        let c = to_chat_request(&r).expect("converts");
+        let tools = c.tools.clone().expect("tools");
+        assert_eq!(tools[0]["function"]["name"], "get_weather");
+        // And the chat layer can now parse them.
+        assert!(!chat::local_tools(&c).expect("parse").is_empty());
+    }
+
+    #[test]
+    fn non_output_content_in_function_call_output_is_stringified() {
+        let c = to_chat_request(&req(json!([
+            {"type": "function_call_output", "call_id": "c1", "output": {"ok": true}}
+        ])))
+        .expect("converts");
+        let tool = &c.messages[0];
+        assert_eq!(tool.role, Role::Tool);
+        assert!(matches!(&tool.content, Some(MessageContent::Text(s)) if s.contains("ok")));
     }
 
     #[test]

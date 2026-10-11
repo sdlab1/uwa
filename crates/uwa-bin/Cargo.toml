@@ -37,6 +37,10 @@ axum.workspace = true
 serde_json.workspace = true
 futures.workspace = true
 dashmap.workspace = true
+dirs = "5"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 
 [dev-dependencies]

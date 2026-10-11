@@ -29,6 +29,7 @@ async fn chatgpt_cumulative_becomes_incremental() {
 
     let tx = page.network_sender();
     tx.send(NetworkEvent::ResponseBody {
+        request_id: "r1".into(),
         url: "https://chatgpt.com/backend-api/f/conversation".into(),
         body: concat!(
             "data: {\"v\":{\"message\":{\"content\":{\"parts\":[\"Hel\"]}}}}\n\n",
@@ -58,6 +59,7 @@ async fn claude_text_deltas_pass_through() {
 
     let tx = page.network_sender();
     tx.send(NetworkEvent::ResponseBody {
+        request_id: "r1".into(),
         url: "https://claude.ai/api/xxx".into(),
         body: concat!(
             "data: {\"type\":\"message_start\"}\n\n",
@@ -89,6 +91,7 @@ async fn gemini_batchexecute_cumulative_diffed() {
     let f1 = "[[\"wrb.fr\", null, \"{\\\"candidates\\\":[{\\\"content\\\":{\\\"parts\\\":[{\\\"text\\\":\\\"Hel\\\"}]}}]}\"]]";
     let f2 = "[[\"wrb.fr\", null, \"{\\\"candidates\\\":[{\\\"content\\\":{\\\"parts\\\":[{\\\"text\\\":\\\"Hello\\\"}]}}]}\"]]";
     tx.send(NetworkEvent::ResponseBody {
+        request_id: "r1".into(),
         url: "https://gemini.google.com/batchexecute".into(),
         body: format!("data: {f1}\n\ndata: {f2}\n\ndata: [DONE]\n\n"),
         mime: "text/event-stream".into(),
@@ -114,6 +117,7 @@ async fn unknown_site_name_yields_nothing() {
 
     let tx = page.network_sender();
     tx.send(NetworkEvent::ResponseBody {
+        request_id: "r1".into(),
         url: "https://x.com/api/stream".into(),
         body: "data: {}\n\n".into(),
         mime: "text/event-stream".into(),

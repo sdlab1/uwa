@@ -46,6 +46,8 @@ pub struct SessionInfo {
 pub struct SessionManager {
     entries: dashmap::DashMap<ConversationId, Arc<SessionEntry>>,
     cfg: SessionCfg,
+    /// Round-robin cursor for tab picking on fresh sessions.
+    rr: AtomicU64,
 }
 
 /// RAII lease on a conversation's tab. Serializes work per conversation.
@@ -78,6 +80,7 @@ impl SessionManager {
         Self {
             entries: dashmap::DashMap::new(),
             cfg,
+            rr: AtomicU64::new(0),
         }
     }
 
@@ -105,10 +108,24 @@ impl SessionManager {
 
         self.evict_if_over_capacity().await;
         let tabs = transport.list_tabs().await?;
-        let tab = tabs
-            .into_iter()
-            .next()
-            .ok_or_else(|| UwaError::Unavailable("no browser tabs available".into()))?;
+        if tabs.is_empty() {
+            return Err(UwaError::Unavailable("no browser tabs available".into()));
+        }
+
+        // Pick the least-leased tab (spread conversations across the pool),
+        // rotating the scan order so ties don't funnel everyone onto tab #0.
+        let mut lease_count: std::collections::HashMap<TabId, usize> =
+            std::collections::HashMap::new();
+        for e in self.entries.iter() {
+            *lease_count.entry(e.value().tab.clone()).or_default() += 1;
+        }
+        let offset = (self.rr.fetch_add(1, Ordering::Relaxed) % tabs.len() as u64) as usize;
+        let tab = tabs[offset..]
+            .iter()
+            .chain(tabs[..offset].iter())
+            .min_by_key(|t| lease_count.get(*t).copied().unwrap_or(0))
+            .expect("tabs is non-empty")
+            .clone();
 
         let fresh = Arc::new(SessionEntry {
             tab: tab.clone(),
@@ -169,16 +186,23 @@ impl SessionManager {
                 .iter()
                 .map(|e| (e.key().clone(), e.value().clone()))
                 .collect();
-            let mut ages: Vec<(ConversationId, Instant)> = Vec::new();
+            let mut ages: Vec<(ConversationId, Instant, usize)> = Vec::new();
             for (cid, entry) in snapshot {
-                ages.push((cid, *entry.last_used.lock().await));
+                // Never evict a session with a live handle — its conversation
+                // is mid-flight and the lease would silently fork onto
+                // another tab. Refs here: map + snapshot = 2; holders add 1+.
+                let busy = Arc::strong_count(&entry) > 2;
+                if busy {
+                    continue;
+                }
+                ages.push((cid, *entry.last_used.lock().await, 0));
             }
-            ages.sort_by_key(|(_, t)| *t);
+            ages.sort_by_key(|(_, t, _)| *t);
             match ages.into_iter().next() {
-                Some((id, _)) => {
+                Some((id, _, _)) => {
                     self.entries.remove(&id);
                 }
-                None => return,
+                None => return, // everything busy: grow past capacity instead
             }
         }
     }

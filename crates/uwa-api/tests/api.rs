@@ -7,7 +7,7 @@ use uwa_resilience::circuit::CircuitState;
 use uwa_resilience::semaphore::ProviderSemaphores;
 use uwa_session::{SessionCfg, SessionManager};
 use uwa_testkit::{
-    config::{config_with_key, TEST_AUTH_HEADER},
+    config::{config_with_key, config_with_key_lan, TEST_AUTH_HEADER},
     AppBuilder, MockProvider, MockTransport,
 };
 
@@ -74,9 +74,31 @@ async fn healthz_is_open() {
 }
 
 #[tokio::test]
-async fn requires_api_key_when_configured() {
+async fn requires_api_key_off_loopback() {
+    // Loopback binds accept any key (see `loopback_accepts_any_key` in
+    // responses.rs); off-loopback the configured key is enforced.
+    let provider = std::sync::Arc::new(MockProvider::new("chatgpt").with_answer("hi"));
+    let app = AppBuilder::new()
+        .with_config(config_with_key_lan())
+        .with_transport(std::sync::Arc::new(MockTransport::with_n_tabs(1)))
+        .with_provider(provider.clone())
+        .build();
+    app.server
+        .get("/v1/models")
+        .await
+        .assert_status_unauthorized();
+}
+
+#[tokio::test]
+async fn loopback_accepts_any_key_when_configured() {
+    // Regression for the #1 wild failure: local clients with placeholder
+    // keys. `server()`'s config HAS an api_key — and it must not matter
+    // on 127.0.0.1.
     let s = server("hi");
-    s.get("/v1/models").await.assert_status_unauthorized();
+    s.get("/v1/models")
+        .add_header("Authorization", "Bearer dummy-key")
+        .await
+        .assert_status_ok();
 }
 
 #[tokio::test]

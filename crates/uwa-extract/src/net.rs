@@ -268,6 +268,7 @@ impl NetExtractor for DefaultNetExtractor {
             let idle = Duration::from_millis(rules.idle_timeout_ms);
             let mut sse = SseParser::new();
             let mut active_url: Option<String> = None;
+            let mut active_request: Option<String> = None;
 
             loop {
                 let ev = match tokio::time::timeout(idle, rx.recv()).await {
@@ -276,11 +277,17 @@ impl NetExtractor for DefaultNetExtractor {
                     Err(_) => break,     // idle
                 };
                 match ev {
-                    NetworkEvent::ResponseBody { url, body, mime } => {
+                    NetworkEvent::ResponseBody {
+                        request_id,
+                        url,
+                        body,
+                        mime,
+                    } => {
                         if !rules.matches(&url, &mime) {
                             continue;
                         }
                         active_url = Some(url.clone());
+                        active_request = Some(request_id.clone());
                         if mime.contains("event-stream") {
                             for frame in sse.feed(&body) {
                                 if let Some(s) = decode_sse_frame(
@@ -312,7 +319,13 @@ impl NetExtractor for DefaultNetExtractor {
                             }
                         }
                     }
-                    NetworkEvent::Finished { request_id: _ } => {
+                    NetworkEvent::Finished { request_id } => {
+                        // Only the request whose body we are decoding may end
+                        // the stream — an unrelated `Finished` (favicon, XHR)
+                        // used to kill the response mid-flight.
+                        if active_request.as_deref() != Some(request_id.as_str()) {
+                            continue;
+                        }
                         if active_url.is_some() {
                             if let Some(tail) = sse.finish() {
                                 if let Some(s) = decode_sse_frame(

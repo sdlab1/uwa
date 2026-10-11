@@ -468,7 +468,9 @@ async fn live_cdp_navigation_and_network_events() {
             match tokio::time::timeout(remaining, rx.recv()).await {
                 Ok(Ok(ev)) => {
                     let desc = match &ev {
-                        NetworkEvent::ResponseBody { url, body, mime } => {
+                        NetworkEvent::ResponseBody {
+                            url, body, mime, ..
+                        } => {
                             format!("body {url} ({mime}) {} bytes", body.len())
                         }
                         NetworkEvent::Finished { request_id } => {
@@ -476,7 +478,10 @@ async fn live_cdp_navigation_and_network_events() {
                         }
                     };
                     seen.push(desc);
-                    if let NetworkEvent::ResponseBody { url, body, mime } = ev {
+                    if let NetworkEvent::ResponseBody {
+                        url, body, mime, ..
+                    } = ev
+                    {
                         if url.contains("data.json") {
                             assert!(body.contains("smoke-body"), "body = {body:?}");
                             assert!(mime.contains("json"), "mime = {mime}");

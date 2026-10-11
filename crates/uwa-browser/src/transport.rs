@@ -607,7 +607,12 @@ async fn resolve_body(
         .await
         .unwrap_or_else(|| owner.clone());
     let tx = bus.sender_for_root_frame(root_frame_id).await;
-    let _ = tx.send(NetworkEvent::ResponseBody { url, body, mime });
+    let _ = tx.send(NetworkEvent::ResponseBody {
+        request_id: req.to_string(),
+        url,
+        body,
+        mime,
+    });
     let _ = tx.send(NetworkEvent::Finished {
         request_id: req.to_string(),
     });

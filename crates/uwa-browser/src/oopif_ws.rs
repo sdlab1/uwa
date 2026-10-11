@@ -131,7 +131,7 @@ pub async fn resolve_ws_url(debug_url: &str, target_id: &str) -> Result<String> 
     let targets: Vec<Value> = serde_json::from_str(body.trim()).map_err(|e| {
         UwaError::Transport(format!(
             "parse /json/list: {e} (body: {}...)",
-            &body[..body.len().min(200)]
+            body.chars().take(200).collect::<String>()
         ))
     })?;
 

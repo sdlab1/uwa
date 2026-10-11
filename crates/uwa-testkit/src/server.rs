@@ -7,7 +7,7 @@ use uwa_core::{SiteProvider, Transport};
 use uwa_resilience::semaphore::ProviderSemaphores;
 use uwa_session::SessionManager;
 
-use crate::config::{config_with_key, default_config, TEST_AUTH_HEADER};
+use crate::config::{config_with_key_lan, default_config, TEST_AUTH_HEADER};
 use crate::transport::MockTransport;
 
 /// Wrap an [`AppState`] in an [`axum_test::TestServer`].
@@ -45,8 +45,10 @@ impl AppBuilder {
 
     /// Use [`config_with_key`]: requests must then carry `Authorization:
     /// Bearer k` (see [`TestApp::auth`]).
+    /// Key enforcement ON — off-loopback, so the middleware actually
+    /// checks the key (loopback binds accept any key by design).
     pub fn with_key_auth(mut self) -> Self {
-        self.config = config_with_key();
+        self.config = config_with_key_lan();
         self
     }
 

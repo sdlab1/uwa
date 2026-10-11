@@ -252,6 +252,11 @@ pub struct ProviderCfg {
     /// Audio capture + video detection.
     #[serde(default)]
     pub media: MediaCfg,
+    /// When set, an unknown model name that shares this provider's stem
+    /// (e.g. `deepseek-flash` against `deepseek-chat`) is routed to this
+    /// model instead of 404. The error still lists the canonical names.
+    #[serde(default)]
+    pub fallback_model: Option<String>,
 }
 
 impl ProviderCfg {
@@ -282,6 +287,7 @@ impl ProviderCfg {
             stealth: false,
             workflow: Default::default(),
             media: MediaCfg::default(),
+            fallback_model: None,
         }
     }
 
@@ -442,6 +448,49 @@ impl Config {
         self.providers.get(prov)
     }
 
+    /// Every model name this config serves (aliases), sorted.
+    pub fn available_models(&self) -> Vec<String> {
+        let mut v: Vec<String> = self.model_aliases.keys().cloned().collect();
+        v.sort();
+        v
+    }
+
+    /// Look up a model alias; on miss, try the provider stem fallback.
+    ///
+    /// Returns `(provider, resolved_model_name)`. `resolved_model_name` is
+    /// what the caller should pass back in the response so the client sees
+    /// which model actually answered.
+    pub fn resolve_model(
+        &self,
+        requested: &str,
+    ) -> std::result::Result<(&ProviderCfg, String), uwa_core::UwaError> {
+        if let Some(p) = self.provider_for_model(requested) {
+            return Ok((p, requested.to_string()));
+        }
+
+        // Stem fallback: "deepseek-flash" → provider whose name matches the
+        // stem, if it declares `fallback_model`.
+        let stem = requested
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .next()
+            .unwrap_or("")
+            .to_lowercase();
+        if !stem.is_empty() {
+            for p in self.providers.values() {
+                if !p.name.to_lowercase().starts_with(&stem) {
+                    continue;
+                }
+                if let Some(fb) = &p.fallback_model {
+                    return Ok((p, fb.clone()));
+                }
+            }
+        }
+
+        Err(uwa_core::UwaError::UnknownModel(
+            uwa_core::ModelNotFound::new(requested, self.available_models()),
+        ))
+    }
+
     pub fn provider_for_url(&self, url: &Url) -> Option<&ProviderCfg> {
         self.providers
             .values()
@@ -574,6 +623,47 @@ mod tests {
         assert_eq!(cfg.server.port, 8080);
         assert!(cfg.provider_for_model("gpt-4o").is_some());
         assert!(cfg.provider_for_model("unknown").is_none());
+    }
+
+    #[test]
+    fn resolve_model_hits_alias_exactly() {
+        let cfg = Config::load_from_str(SAMPLE).unwrap();
+        let (p, name) = cfg.resolve_model("gpt-4o").unwrap();
+        assert_eq!(p.name, "chatgpt");
+        assert_eq!(name, "gpt-4o");
+    }
+
+    #[test]
+    fn resolve_model_falls_back_when_provider_declares_it() {
+        let toml = r####"
+            [server]
+            bind = "127.0.0.1"
+            port = 8080
+            [model_aliases]
+            "deepseek-chat" = "deepseek"
+            [providers.deepseek]
+            name = "deepseek"
+            url_patterns = ["https://chat.deepseek.com/*"]
+            capabilities = { streams = true, tool_calls = true, vision = false }
+            fallback_model = "deepseek-chat"
+            [providers.deepseek.selectors]
+            input = "#i"
+            send_button = "#s"
+            assistant_message = "#a"
+        "####;
+        let cfg = Config::load_from_str(toml).unwrap();
+        let (p, name) = cfg.resolve_model("deepseek-flash").unwrap();
+        assert_eq!(p.name, "deepseek");
+        assert_eq!(name, "deepseek-chat");
+    }
+
+    #[test]
+    fn resolve_model_unknown_without_fallback_reports_candidates() {
+        let cfg = Config::load_from_str(SAMPLE).unwrap();
+        let err = cfg.resolve_model("claude-3-opus").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("claude-3-opus"));
+        assert!(msg.contains("gpt-4o") || msg.contains("claude-3-5-sonnet"));
     }
 
     #[test]

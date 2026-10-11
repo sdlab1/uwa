@@ -28,6 +28,14 @@ pub async fn require_api_key(
     req: Request,
     next: Next,
 ) -> Result<Response, ApiError> {
+    // Loopback: the socket isn't reachable off-box, so we accept any key.
+    // A local client (Cursor, Continue, curl) can use a placeholder string
+    // and never has to match `[server].api_key`. This is the #1 cause of
+    // "Authorization: Bearer dummy-key" failures in the wild.
+    if is_loopback_bind(&state.config.server.bind) {
+        return Ok(next.run(req).await);
+    }
+
     let Some(expected) = state.config.server.api_key.as_deref() else {
         return Ok(next.run(req).await);
     };
@@ -88,4 +96,26 @@ fn percent_decode(s: &str) -> Option<String> {
         }
     }
     String::from_utf8(out).ok()
+}
+
+fn is_loopback_bind(bind: &str) -> bool {
+    matches!(
+        bind,
+        "127.0.0.1" | "::1" | "localhost" | "0:0:0:0:0:0:0:1" | "127.0.0.0/8"
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recognizes_loopback_binds() {
+        for b in ["127.0.0.1", "::1", "localhost", "0:0:0:0:0:0:0:1"] {
+            assert!(is_loopback_bind(b), "{b}");
+        }
+        for b in ["0.0.0.0", "192.168.1.5", "example.com", ""] {
+            assert!(!is_loopback_bind(b), "{b}");
+        }
+    }
 }

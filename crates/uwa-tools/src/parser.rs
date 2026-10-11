@@ -220,6 +220,31 @@ pub fn tool_marker_index(buf: &str) -> Option<usize> {
     }
 }
 
+/// Byte index up to which `buf` can be streamed to the client without risk of
+/// leaking part of a tool-call marker.
+///
+/// If a complete marker is present this is its start. Otherwise a trailing
+/// suffix that is a proper prefix of a marker (e.g. `"<tool_"`) is held back
+/// until more data arrives; the caller flushes any held tail at end of stream.
+pub fn safe_emit_end(buf: &str) -> usize {
+    if let Some(i) = tool_marker_index(buf) {
+        return i;
+    }
+    const MARKERS: [&str; 2] = ["<tool_call>", "```tool_call"];
+    let mut hold = 0usize;
+    for m in MARKERS {
+        // Longest proper prefix of `m` that `buf` ends with.
+        for len in (1..m.len()).rev() {
+            if len <= buf.len() && buf.is_char_boundary(buf.len() - len) && buf.ends_with(&m[..len])
+            {
+                hold = hold.max(len);
+                break;
+            }
+        }
+    }
+    buf.len() - hold
+}
+
 /// Convenience: parse using definitions (not just names).
 pub fn parse_with_defs(text: &str, defs: &[ToolDefinition]) -> ToolParseOutcome {
     let names: Vec<String> = defs.iter().map(|d| d.name.clone()).collect();

@@ -373,6 +373,7 @@ mod tests {
     #[tokio::test]
     async fn network_events_reach_subscribers() {
         let p = MockPage::new().with_network_events(vec![NetworkEvent::ResponseBody {
+            request_id: "r1".into(),
             url: "https://x".into(),
             body: "data".into(),
             mime: "text/event-stream".into(),

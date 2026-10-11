@@ -49,6 +49,11 @@ struct Inner {
     failures: VecDeque<Instant>,
     opened_at: Option<Instant>,
     half_open_in_flight: usize,
+    /// When the current half-open probe slot was handed out. A probe that
+    /// is cancelled mid-flight (client disconnect, task abort) never calls
+    /// `record_*`, and without a deadline the slot would be held forever —
+    /// the breaker would be stuck in half-open with nothing in flight.
+    half_open_probe_at: Option<Instant>,
 }
 
 pub struct CircuitBreaker {
@@ -67,6 +72,7 @@ impl CircuitBreaker {
                 failures: VecDeque::new(),
                 opened_at: None,
                 half_open_in_flight: 0,
+                half_open_probe_at: None,
             }),
         }
     }
@@ -87,6 +93,7 @@ impl CircuitBreaker {
                     if now.duration_since(opened) >= self.cfg.cooldown {
                         inner.state = CircuitState::HalfOpen;
                         inner.half_open_in_flight = 1;
+                        inner.half_open_probe_at = Some(now);
                         Ok(())
                     } else {
                         Err(UwaError::Unavailable(format!(
@@ -96,8 +103,19 @@ impl CircuitBreaker {
                     }
                 }
                 CircuitState::HalfOpen => {
-                    if inner.half_open_in_flight < self.cfg.half_open_max_calls {
-                        inner.half_open_in_flight += 1;
+                    // A probe slot older than the cooldown means the probe
+                    // was cancelled without a verdict — reclaim it instead
+                    // of rejecting forever.
+                    let stale = inner
+                        .half_open_probe_at
+                        .is_some_and(|t| t.elapsed() >= self.cfg.cooldown);
+                    if stale || inner.half_open_in_flight < self.cfg.half_open_max_calls {
+                        inner.half_open_in_flight = if stale {
+                            1
+                        } else {
+                            inner.half_open_in_flight + 1
+                        };
+                        inner.half_open_probe_at = Some(now);
                         Ok(())
                     } else {
                         Err(UwaError::Unavailable(format!(
@@ -116,6 +134,7 @@ impl CircuitBreaker {
             inner.failures.clear();
             inner.opened_at = None;
             inner.half_open_in_flight = 0;
+            inner.half_open_probe_at = None;
         });
     }
 
@@ -126,6 +145,7 @@ impl CircuitBreaker {
                 inner.state = CircuitState::Open;
                 inner.opened_at = Some(now);
                 inner.half_open_in_flight = 0;
+                inner.half_open_probe_at = None;
                 return;
             }
             inner.failures.push_back(now);
@@ -200,6 +220,29 @@ mod tests {
         cb.record_success();
         assert_eq!(cb.state(), CircuitState::Closed);
         assert!(cb.allow().is_ok());
+    }
+
+    #[tokio::test]
+    async fn cancelled_probe_does_not_stick_half_open() {
+        // allow() hands out the single half-open slot; the call is then
+        // cancelled (client disconnect / task aborted) and record_* never
+        // runs. The slot must self-release after the probe deadline.
+        let cb = cb();
+        cb.record_failure();
+        cb.record_failure();
+        cb.record_failure();
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        assert!(cb.allow().is_ok(), "cooldown elapsed, probe allowed");
+        // ... probe is cancelled here — no record_success/record_failure ...
+        assert!(
+            cb.allow().is_err(),
+            "slot is still held before the probe deadline"
+        );
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        assert!(
+            cb.allow().is_ok(),
+            "a cancelled probe must not stick half-open forever"
+        );
     }
 
     #[tokio::test]

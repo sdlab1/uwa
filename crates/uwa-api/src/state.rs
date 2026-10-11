@@ -105,10 +105,9 @@ impl ProviderRegistry {
     }
 
     pub fn get(&self, name: &str) -> Result<Arc<dyn SiteProvider>> {
-        self.by_name
-            .get(name)
-            .cloned()
-            .ok_or_else(|| UwaError::UnknownModel(name.to_string()))
+        self.by_name.get(name).cloned().ok_or_else(|| {
+            UwaError::UnknownModel(uwa_core::ModelNotFound::new(name.to_string(), vec![]))
+        })
     }
 
     pub fn is_empty(&self) -> bool {

@@ -97,7 +97,13 @@ impl<'a> WorkflowRunner<'a> {
             }
 
             Action::Wait { seconds } => {
-                let d = Duration::from_secs_f32((*seconds).max(0.0));
+                // NaN/negative -> 0, inf/huge -> 1h (from_secs_f32 panics on those).
+                let secs = if seconds.is_nan() {
+                    0.0
+                } else {
+                    seconds.clamp(0.0, 3600.0)
+                };
+                let d = Duration::from_secs_f32(secs);
                 tokio::time::sleep(d).await;
                 Ok(())
             }

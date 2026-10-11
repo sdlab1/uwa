@@ -36,6 +36,15 @@ pub fn default_config() -> Arc<Config> {
 }
 
 /// Same as [`default_config`] but requires `Authorization: Bearer k`.
+/// Same as [`config_with_key`] but bound off-loopback, so the key-gate
+/// middleware actually enforces the key (loopback binds accept any key).
+pub fn config_with_key_lan() -> Arc<Config> {
+    let cfg = config_with_key();
+    let mut inner = Arc::try_unwrap(cfg).unwrap_or_else(|_| unreachable!("fresh Arc"));
+    inner.server.bind = "192.168.1.5".to_string();
+    Arc::new(inner)
+}
+
 pub fn config_with_key() -> Arc<Config> {
     Arc::new(
         Config::load_from_str(

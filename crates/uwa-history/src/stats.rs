@@ -136,11 +136,16 @@ pub fn compute(records: &[RequestRecord], window: StatsWindow) -> Stats {
                 _ => {}
             }
         }
-        entry.last_seen = Some(r.started_at);
-        per_provider_durations
-            .entry(r.provider.clone())
-            .or_default()
-            .push(r.timing.total_ms);
+        entry.last_seen = Some(match entry.last_seen {
+            Some(prev) if prev >= r.started_at => prev,
+            _ => r.started_at,
+        });
+        if r.timing.total_ms > 0 {
+            per_provider_durations
+                .entry(r.provider.clone())
+                .or_default()
+                .push(r.timing.total_ms);
+        }
     }
 
     s.avg_total_ms = avg(&durations);
@@ -315,5 +320,33 @@ mod tests {
         }
         let s = compute(&recs, StatsWindow::Last50);
         assert_eq!(s.total, 50);
+    }
+
+    #[test]
+    fn per_provider_ignores_zero_durations() {
+        // Pending/sub-ms records must not drag provider latency down.
+        // `mark_success` recomputes timing, so set the duration afterwards.
+        let mut slow = rec("a", RequestStatus::Success, 0);
+        slow.timing.total_ms = 1000;
+        let recs = vec![
+            rec("a", RequestStatus::Pending, 0),
+            rec("a", RequestStatus::Pending, 0),
+            slow,
+        ];
+        let s = compute(&recs, StatsWindow::All);
+        let a = s.providers.iter().find(|p| p.provider == "a").unwrap();
+        assert_eq!(a.avg_total_ms, s.avg_total_ms);
+        assert_eq!(a.avg_total_ms, 1000);
+    }
+
+    #[test]
+    fn last_seen_is_newest_regardless_of_order() {
+        let mut old = rec("a", RequestStatus::Success, 10);
+        let new = rec("a", RequestStatus::Success, 10);
+        old.started_at = new.started_at - std::time::Duration::from_secs(60);
+        let newest = new.started_at;
+        // Newest-first, as HistoryStore::recent returns.
+        let s = compute(&[new, old], StatsWindow::All);
+        assert_eq!(s.providers[0].last_seen, Some(newest));
     }
 }
