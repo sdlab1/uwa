@@ -141,18 +141,18 @@ That's it. On loopback, any API key works — you don't need to match
 
 ## Compatibility
 
-| Client | Endpoint | Status | Config |
-|---|---|---|---|
-| Cursor | `/v1/chat/completions` | ✅ tested | Dashboard → Clients |
-| Continue (VS Code / JetBrains) | `/v1/chat/completions` | ✅ tested | Dashboard → Clients |
-| Codex CLI | `/v1/responses` | ✅ tested | Dashboard → Clients |
-| Claude Code | `/v1/messages` | ✅ tested | Dashboard → Clients |
-| Aider | `/v1/chat/completions` | ✅ tested | Dashboard → Clients |
-| ZCode | `/v1/chat/completions` | ✅ tested | Dashboard → Clients |
-| AutoClaw | `/v1/chat/completions` | ✅ tested | Dashboard → Clients |
-| `openai` Python SDK | both | ✅ tested | `base_url="http://127.0.0.1:8080/v1"` |
-| `anthropic` Python SDK | `/v1/messages` | ✅ tested | `base_url="http://127.0.0.1:8080"` |
-| `curl` | both | ✅ tested | see below |
+| Client | Endpoint | Config |
+|---|---|---|
+| Cursor | `/v1/chat/completions` | Dashboard → Clients |
+| Continue (VS Code / JetBrains) | `/v1/chat/completions` | Dashboard → Clients |
+| Codex CLI | `/v1/responses` | Dashboard → Clients |
+| Claude Code | `/v1/messages` | Dashboard → Clients |
+| Aider | `/v1/chat/completions` | Dashboard → Clients |
+| ZCode | `/v1/chat/completions` | Dashboard → Clients |
+| AutoClaw | `/v1/chat/completions` | Dashboard → Clients |
+| `openai` Python SDK | both | `base_url="http://127.0.0.1:8080/v1"` |
+| `anthropic` Python SDK | `/v1/messages` | `base_url="http://127.0.0.1:8080"` |
+| `curl` | both | see below |
 
 Compatibility means: the client's full request round-trips through uwa
 and the answer lands in the editor without a manual step. Every row above
