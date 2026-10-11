@@ -34,11 +34,15 @@
     }
   }
 
-  function testState(name: string, info: ProviderInfo): TestState {
+  /** Toggle the inline selector-test panel. Mutating $state here is legal:
+   * event handlers run outside the render phase (unlike {@const} in the
+   * template, which Svelte 5 rejects with `state_unsafe_mutation`). */
+  function toggleTest(name: string, info: ProviderInfo): void {
     if (!tests[name]) {
       tests[name] = { open: false, selector: info.selectors.input ?? '', result: null, running: false };
     }
-    return tests[name]!;
+    const t = tests[name]!;
+    t.open = !t.open;
   }
 
   async function runTest(name: string) {
@@ -55,9 +59,12 @@
     }
   }
 
-  function genState(name: string): GenState {
+  /** Toggle the autogen scan panel; lazily kick off the first scan. */
+  function toggleGen(name: string): void {
     if (!gens[name]) gens[name] = { open: false, analysis: null, running: false };
-    return gens[name]!;
+    const g = gens[name]!;
+    g.open = !g.open;
+    if (g.open && !g.analysis) void runGenerate(name);
   }
 
   async function runGenerate(name: string) {
@@ -92,8 +99,8 @@
   </div>
 {:else}
   {#each Object.entries(providers) as [name, info] (name)}
-    {@const t = testState(name, info)}
-    {@const g = genState(name)}
+    {@const t = tests[name]}
+    {@const g = gens[name]}
     <div class="card">
       <div class="card-head">
         <div>
@@ -103,10 +110,8 @@
           </div>
         </div>
         <div class="flex gap-1">
-          <button class="ghost-btn" onclick={() => (t.open = !t.open)}>test selector</button>
-          <button class="ghost-btn" onclick={() => { g.open = !g.open; if (g.open && !g.analysis) void runGenerate(name); }}>
-            scan
-          </button>
+          <button class="ghost-btn" onclick={() => toggleTest(name, info)}>test selector</button>
+          <button class="ghost-btn" onclick={() => toggleGen(name)}>scan</button>
         </div>
       </div>
 
@@ -121,7 +126,7 @@
         ['max ctx', info.capabilities.max_context_tokens ?? '—'],
       ]} />
 
-      {#if t.open}
+      {#if t && t.open}
         <div class="mt-3 p-3 border border-border rounded-sm bg-panel2">
           <div class="flex items-center gap-2">
             <input
@@ -153,7 +158,7 @@
         </div>
       {/if}
 
-      {#if g.open}
+      {#if g && g.open}
         <div class="mt-3 p-3 border border-border rounded-sm bg-panel2">
           <div class="flex items-center justify-between mb-2">
             <span class="text-[12px] muted">Auto-generated candidates from the live page.</span>

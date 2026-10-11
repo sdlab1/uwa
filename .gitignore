@@ -48,3 +48,8 @@ crates/uwa-api/static/dist/
 
 # vite cache
 crates/uwa-api/static/.vite/
+
+# playwright
+crates/uwa-api/static/test-results/
+crates/uwa-api/static/playwright-report/
+crates/uwa-api/static/.playwright/

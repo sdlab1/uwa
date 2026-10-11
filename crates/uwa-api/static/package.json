@@ -8,9 +8,14 @@
     "dev": "vite",
     "watch": "vite build --watch",
     "typecheck": "svelte-check --tsconfig ./tsconfig.json --threshold error",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "pretest:e2e": "npm run build",
+    "test:e2e": "playwright test",
+    "test:e2e:ui": "playwright test --ui",
+    "test:e2e:debug": "playwright test --debug"
   },
   "devDependencies": {
+    "@playwright/test": "^1.49.0",
     "@sveltejs/vite-plugin-svelte": "^4.0.1",
     "@tsconfig/svelte": "^5.0.4",
     "autoprefixer": "^10.4.20",

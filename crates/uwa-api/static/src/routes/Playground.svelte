@@ -93,9 +93,12 @@
   function ensureActive(): ChatSession {
     let s = active;
     if (!s) {
-      s = newSession(model || models[0]?.id || 'gpt-4o');
-      sessions = [s, ...sessions];
-      activeId = s.id;
+      const created = newSession(model || models[0]?.id || 'gpt-4o');
+      sessions = [created, ...sessions];
+      activeId = created.id;
+      // Re-read through the $state proxy: `created` is a plain object and
+      // mutations through it would not trigger reactive updates.
+      s = sessions[0]!;
     }
     return s;
   }
@@ -215,7 +218,9 @@
     } finally {
       abort = null;
       s.updatedAt = Date.now();
-      scheduleSave();
+      // Save synchronously: a page reload right after the turn must not
+      // lose it to the 250ms debounce.
+      saveSessions($state.snapshot(sessions));
       pinned = true;
     }
   }
