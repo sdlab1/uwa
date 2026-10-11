@@ -187,3 +187,86 @@ async def test_eval_in_frame_raises_on_exception_details():
     s._tabs["tab_2"] = FailingTab()
     with pytest.raises(RuntimeError, match="boom"):
         await s.eval_in_frame({"tab": "tab_2", "frame_id": "F1", "js": "x"})
+
+
+# ---- signal cleanup: a SIGTERM'd sidecar must kill its browser --------
+#
+# Regression: the default SIGTERM disposition killed the interpreter
+# without running `main()`'s `finally`, so every Chrome process the sidecar
+# had started kept running. The handler must call `browser.stop()`.
+
+def test_force_cleanup_sync_stops_browser():
+    from uwa_nodriver_sidecar import force_cleanup_sync
+
+    s = Sidecar()
+    stopped = []
+
+    class FakeBrowser:
+        def stop(self):
+            stopped.append(True)
+
+    s.browser = FakeBrowser()
+    force_cleanup_sync(s)
+    assert stopped == [True]
+    assert s.browser is None
+
+
+def test_sigterm_kills_browser_in_subprocess():
+    """End-to-end: spawn a python child that mimics main()'s signal
+    wiring with a fake browser, SIGTERM it, and verify the browser's
+    `stop()` ran before the child died."""
+    import os
+    import signal
+    import subprocess
+    import time
+
+    code = """
+import os, signal, sys, time
+sys.path.insert(0, {path!r})
+from uwa_nodriver_sidecar import Sidecar, install_signal_cleanup
+
+s = Sidecar()
+stopped = []
+class FakeBrowser:
+    def stop(self):
+        stopped.append(True)
+        with open({marker!r}, "w") as f:
+            f.write("stopped")
+s.browser = FakeBrowser()
+install_signal_cleanup(s)
+# Tell the parent we are ready.
+with open({ready!r}, "w") as f:
+    f.write("ready")
+while True:
+    time.sleep(0.05)
+""".format(
+        path=str(Path(__file__).parent.parent),
+        marker=sys.argv[-2],
+        ready=sys.argv[-1],
+    )
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as td:
+        marker = os.path.join(td, "marker")
+        ready = os.path.join(td, "ready")
+        proc = subprocess.Popen(
+            [sys.executable, "-c", code, marker, ready],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            for _ in range(200):
+                if os.path.exists(ready):
+                    break
+                if proc.poll() is not None:
+                    pytest.fail(f"child exited early: {proc.returncode}")
+                time.sleep(0.05)
+            else:
+                pytest.fail("child never became ready")
+            proc.send_signal(signal.SIGTERM)
+            rc = proc.wait(timeout=5)
+            assert rc == -signal.SIGTERM, rc  # default disposition after cleanup
+            assert os.path.exists(marker), "browser.stop() was not called"
+        finally:
+            if proc.poll() is None:
+                proc.kill()

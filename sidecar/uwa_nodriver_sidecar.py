@@ -33,6 +33,9 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import os
+import signal
+import subprocess
 import sys
 import traceback
 from typing import Any
@@ -346,8 +349,52 @@ class Sidecar:
                 traceback.print_exc(file=sys.stderr)
 
 
+def force_cleanup_sync(sidecar: "Sidecar") -> None:
+    """Kill the browser from a signal handler. `browser.stop()` is
+    synchronous, so this is safe to call from the handler directly —
+    without it, a SIGTERM'd sidecar leaks every Chrome process it started
+    (the `finally` in `main()` never runs when the default handler kills
+    the interpreter outright)."""
+    try:
+        b = sidecar.browser
+        if b is not None:
+            b.stop()
+    except Exception:
+        pass
+    sidecar.browser = None
+
+
+def force_kill_chrome_tree(sidecar: "Sidecar" | None = None) -> None:
+    """Aggressively kill Chrome/Chromium processes spawned by this sidecar.
+    Uses a targeted approach to avoid killing the user's other Chrome instances.
+    """
+    try:
+        # On Linux/macOS, try to kill processes in our process group first
+        if sys.platform.startswith("linux") or sys.platform == "darwin":
+            # Get our process group ID
+            pgid = os.getpgrp()
+            if pgid > 0:
+                # Send SIGKILL to entire process group (negative PID = PGID)
+                # This kills the sidecar + all child processes (including Chrome)
+                os.killpg(pgid, signal.SIGKILL)
+    except Exception:
+        pass
+
+
+def install_signal_cleanup(sidecar: "Sidecar") -> None:
+    def _on_signal(signum, _frame):
+        force_cleanup_sync(sidecar)
+        # Default disposition: terminate the interpreter.
+        signal.signal(signum, signal.SIG_DFL)
+        os.kill(os.getpid(), signum)
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(sig, _on_signal)
+
+
 async def main() -> None:
     sidecar = Sidecar()
+    install_signal_cleanup(sidecar)
     try:
         await sidecar.run()
     finally:
@@ -355,6 +402,8 @@ async def main() -> None:
             await sidecar.shutdown()
         except Exception:
             pass
+        # Last-resort cleanup: kill any remaining Chrome processes
+        force_kill_chrome_tree(sidecar)
 
 
 if __name__ == "__main__":

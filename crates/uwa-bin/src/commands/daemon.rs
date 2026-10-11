@@ -48,6 +48,7 @@ pub async fn run(config_path: PathBuf, action: DaemonAction) -> Result<()> {
 async fn start(config_path: PathBuf, cdp: Option<String>, force: bool) -> Result<()> {
     paths::ensure_home()?;
     let pid_path = paths::pid_file();
+    let pgid_path = paths::pgid_file();
 
     if let Some(pid) = read_pid(&pid_path) {
         if process_alive(pid) {
@@ -59,6 +60,8 @@ async fn start(config_path: PathBuf, cdp: Option<String>, force: bool) -> Result
         }
         let _ = std::fs::remove_file(&pid_path);
     }
+    // Clean up old pgid file
+    let _ = std::fs::remove_file(&pgid_path);
 
     let log = paths::daemon_log();
     let log_file = std::fs::OpenOptions::new()
@@ -79,6 +82,7 @@ async fn start(config_path: PathBuf, cdp: Option<String>, force: bool) -> Result
     cmd.stderr(log_file_err);
 
     // Detach: setsid on Unix so the child survives this shell.
+    // We also capture the process group ID to kill the entire tree on stop.
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -90,10 +94,18 @@ async fn start(config_path: PathBuf, cdp: Option<String>, force: bool) -> Result
         }
     }
 
-    let child = cmd.spawn().context("spawn daemon")?;
+    let mut child = cmd.spawn().context("spawn daemon")?;
     let pid = child.id();
     std::fs::write(&pid_path, pid.to_string())
         .with_context(|| format!("write {}", pid_path.display()))?;
+
+    // On Unix, the PID after setsid is also the process group ID (PGID).
+    // Store it so we can kill the entire process tree on stop.
+    #[cfg(unix)]
+    {
+        std::fs::write(&pgid_path, pid.to_string())
+            .with_context(|| format!("write {}", pgid_path.display()))?;
+    }
 
     eprintln!("→ daemon started (pid {pid})");
     eprintln!("  logs: {}", log.display());
@@ -103,28 +115,58 @@ async fn start(config_path: PathBuf, cdp: Option<String>, force: bool) -> Result
 
 fn stop() -> Result<()> {
     let pid_path = paths::pid_file();
+    let pgid_path = paths::pgid_file();
     let Some(pid) = read_pid(&pid_path) else {
         println!("not running");
         return Ok(());
     };
     if !process_alive(pid) {
         let _ = std::fs::remove_file(&pid_path);
+        let _ = std::fs::remove_file(&pgid_path);
         println!("not running (stale pid file removed)");
         return Ok(());
     }
-    let _ = send_signal(pid, libc_sigterm());
-    // Give it up to 15 s to exit cleanly.
-    for _ in 0..30 {
-        if !process_alive(pid) {
-            let _ = std::fs::remove_file(&pid_path);
-            println!("stopped (pid {pid})");
-            return Ok(());
+
+    // On Unix: kill the entire process group (daemon + any child Chrome processes)
+    #[cfg(unix)]
+    {
+        if let Ok(pgid_str) = std::fs::read_to_string(&pgid_path) {
+            if let Ok(pgid) = pgid_str.trim().parse::<libc::pid_t>() {
+                // SIGTERM the whole process group
+                let _ = unsafe { libc::kill(-pgid, libc::SIGTERM) };
+                // Wait for process group to die
+                for _ in 0..30 {
+                    if !process_alive(pid) {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                }
+                // SIGKILL the process group if still alive
+                if process_alive(pid) {
+                    let _ = unsafe { libc::kill(-pgid, libc::SIGKILL) };
+                }
+            }
         }
-        std::thread::sleep(std::time::Duration::from_millis(500));
     }
-    let _ = send_signal(pid, 9);
+
+    #[cfg(windows)]
+    {
+        let _ = send_signal(pid, libc_sigterm());
+        // Give it up to 15 s to exit cleanly.
+        for _ in 0..30 {
+            if !process_alive(pid) {
+                let _ = std::fs::remove_file(&pid_path);
+                println!("stopped (pid {pid})");
+                return Ok(());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+        let _ = send_signal(pid, 9);
+    }
+
     let _ = std::fs::remove_file(&pid_path);
-    println!("killed (pid {pid})");
+    let _ = std::fs::remove_file(&pgid_path);
+    println!("stopped (pid {pid})");
     Ok(())
 }
 

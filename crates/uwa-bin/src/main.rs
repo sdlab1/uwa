@@ -7,6 +7,7 @@ mod wiring;
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Parser)]
 #[command(version, about = "Universal Web API — Rust bridge")]
@@ -41,8 +42,36 @@ enum Command {
     Doctor,
 }
 
+// Track whether we're in a context where we spawned child processes
+static CHILD_PROCESSES_SPAWNED: AtomicBool = AtomicBool::new(false);
+
+/// Register a panic hook to clean up child processes on panic.
+fn set_panic_hook() {
+    std::panic::set_hook(Box::new(|panic_info| {
+        // Kill any child processes we spawned
+        if CHILD_PROCESSES_SPAWNED.load(Ordering::SeqCst) {
+            eprintln!("\n[panic] cleaning up child processes...");
+            #[cfg(unix)]
+            {
+                // Kill the entire process group (negative PID = PGID)
+                let pgid = unsafe { libc::getpgrp() };
+                if pgid > 0 {
+                    let _ = unsafe { libc::kill(-pgid, libc::SIGKILL) };
+                }
+            }
+            #[cfg(windows)]
+            {
+                // On Windows we can't easily kill the process tree from a panic hook
+                // without external tools. Best effort: exit immediately.
+            }
+        }
+    }));
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    set_panic_hook();
+
     // stdout belongs to the MCP stdio transport; logs go to stderr.
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
@@ -59,10 +88,14 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or(Command::Start(commands::start::StartArgs::default()));
 
     let result = match command {
-        Command::Start(args) => commands::start::run(config_path.clone(), args).await,
+        Command::Start(args) => {
+            CHILD_PROCESSES_SPAWNED.store(true, Ordering::SeqCst);
+            commands::start::run(config_path.clone(), args).await
+        }
         Command::Daemon { action } => commands::daemon::run(config_path.clone(), action).await,
         Command::Doctor => commands::doctor::run(config_path.clone()).await,
     };
 
+    CHILD_PROCESSES_SPAWNED.store(false, Ordering::SeqCst);
     result.with_context(|| format!("uwa failed for config {config_path:?}"))
 }

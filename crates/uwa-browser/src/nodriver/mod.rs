@@ -206,4 +206,8 @@ impl Transport for NodriverTransport {
         let _ = self.nodriver_tab_id(tab).await?;
         Ok(())
     }
+
+    async fn shutdown(&self) -> Result<()> {
+        self.shutdown().await
+    }
 }

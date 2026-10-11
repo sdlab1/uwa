@@ -178,6 +178,11 @@ pub async fn run_with(config_path: PathBuf, cdp_url: &str) -> anyhow::Result<()>
         Ok(Err(_)) | Err(_) => tracing::warn!("http did not drain within 15s"),
     }
 
+    // Gracefully shut down the transport (closes tabs, stops sidecars).
+    if let Err(e) = transport.shutdown().await {
+        tracing::warn!("transport shutdown: {e}");
+    }
+
     // Give in-flight conversations a moment before the tabs go away.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     while !sessions.is_empty() && tokio::time::Instant::now() < deadline {

@@ -79,12 +79,37 @@ pub fn cdp_ready(cdp_url: &str) -> bool {
     };
     use std::io::{Read, Write};
     let _ = sock.set_read_timeout(Some(Duration::from_millis(300)));
-    let _ = sock.write_all(
-        format!("GET /json/version HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n")
-            .as_bytes(),
-    );
-    let mut buf = [0u8; 128];
-    let _ = sock.read(&mut buf);
+    let _ = sock.set_write_timeout(Some(Duration::from_millis(300)));
+    if sock
+        .write_all(
+            format!("GET /json/version HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n")
+                .as_bytes(),
+        )
+        .is_err()
+    {
+        return false;
+    }
+    // Read until EOF/timeout (up to 4 KB): real Chromium's /json/version
+    // puts `webSocketDebuggerUrl` well past the first TCP segment — a
+    // single 128-byte read misses it.
+    let mut buf = Vec::with_capacity(1024);
+    let mut chunk = [0u8; 512];
+    let deadline = Instant::now() + Duration::from_millis(400);
+    loop {
+        if Instant::now() > deadline {
+            break;
+        }
+        match sock.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => {
+                buf.extend_from_slice(&chunk[..n]);
+                if buf.len() > 4096 {
+                    break;
+                }
+            }
+            Err(_) => break, // timeout / closed
+        }
+    }
     buf.windows(11).any(|w| w == b"webSocketDe")
 }
 
@@ -143,4 +168,58 @@ pub fn ensure_cdp(cdp_url: &str, launch_if_needed: bool) -> Result<(String, Opti
     Err(anyhow!(
         "Chromium started but never exposed CDP at {cdp_url}"
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Serve one HTTP response on an ephemeral port, then return the port.
+    /// The response mirrors Chromium's /json/version closely enough for
+    /// [`cdp_ready`]: headers first, `webSocketDebuggerUrl` in the body —
+    /// *after* the first 128 bytes, which is exactly where the old
+    /// single-read implementation missed it.
+    fn serve_cdp_once(body: &str) -> u16 {
+        use std::io::Write as _;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let body = body.to_string();
+        std::thread::spawn(move || {
+            if let Ok((mut sock, _)) = listener.accept() {
+                let mut req = [0u8; 256];
+                let _ = std::io::Read::read(&mut sock, &mut req);
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                     X-Pad: {}{}\r\nConnection: close\r\n\r\n{body}",
+                    "a".repeat(200),
+                    ""
+                );
+                let _ = sock.write_all(resp.as_bytes());
+            }
+        });
+        port
+    }
+
+    #[test]
+    fn cdp_ready_finds_marker_past_the_first_segment() {
+        let port = serve_cdp_once(
+            "{\"Browser\":\"Chrome/128\",\"webSocketDebuggerUrl\":\"ws://127.0.0.1/devtools/browser/x\"}",
+        );
+        assert!(
+            cdp_ready(&format!("http://127.0.0.1:{port}")),
+            "marker must be found"
+        );
+    }
+
+    #[test]
+    fn cdp_ready_rejects_non_cdp_http() {
+        let port = serve_cdp_once("{\"status\":\"ok\"}");
+        assert!(!cdp_ready(&format!("http://127.0.0.1:{port}")));
+    }
+
+    #[test]
+    fn cdp_ready_rejects_dead_ports() {
+        // Port 1 on loopback: nothing listens there in a test container.
+        assert!(!cdp_ready("http://127.0.0.1:1"));
+    }
 }

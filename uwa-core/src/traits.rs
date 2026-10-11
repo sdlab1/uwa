@@ -167,6 +167,11 @@ pub trait Transport: Send + Sync {
     async fn page(&self, tab: &TabId) -> Result<Box<dyn Page>>;
     async fn list_tabs(&self) -> Result<Vec<TabId>>;
     async fn health(&self, tab: &TabId) -> Result<()>;
+    /// Graceful shutdown: close tabs, stop sidecars, release resources.
+    /// Default implementation is a no-op for mock/test transports.
+    async fn shutdown(&self) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// One tool definition, decoupled from MCP/OpenAI formats.

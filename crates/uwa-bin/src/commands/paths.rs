@@ -18,6 +18,10 @@ pub fn pid_file() -> PathBuf {
     uwa_home().join("uwa.pid")
 }
 
+pub fn pgid_file() -> PathBuf {
+    uwa_home().join("uwa.pgid")
+}
+
 pub fn daemon_log() -> PathBuf {
     uwa_home().join("daemon.log")
 }

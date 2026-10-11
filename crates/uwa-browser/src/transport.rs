@@ -12,8 +12,8 @@ use chromiumoxide::cdp::browser_protocol::network::{
 };
 use chromiumoxide::cdp::browser_protocol::page::EventFrameAttached;
 use chromiumoxide::cdp::browser_protocol::target::{
-    EventAttachedToTarget, EventDetachedFromTarget, EventTargetCreated, EventTargetDestroyed,
-    TargetId as CdpTargetId,
+    CloseTargetParams, EventAttachedToTarget, EventDetachedFromTarget, EventTargetCreated,
+    EventTargetDestroyed, TargetId as CdpTargetId,
 };
 use chromiumoxide::cdp::js_protocol::runtime::EvaluateParams;
 use chromiumoxide::js::Evaluation;
@@ -55,6 +55,25 @@ impl Drop for CdpTransport {
 }
 
 impl CdpTransport {
+    /// Gracefully shut down the transport: close all tabs and stop the handler.
+    pub async fn shutdown(&self) -> Result<()> {
+        // Close all managed tabs
+        for tab in self.pool.list() {
+            if let Some(target_id) = self.target_ids.lock().await.get(&tab) {
+                // Try to close the tab gracefully via CDP Target.closeTarget
+                let _ = self
+                    .browser
+                    .execute(CloseTargetParams::new(target_id.clone()))
+                    .await;
+            }
+        }
+        // Give tabs a moment to close
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        // Drop the browser connection (handler task will stop)
+        // The Arc<Browser> drop will close the WebSocket
+        Ok(())
+    }
+
     /// Connect to a Chromium exposing CDP. `ws_url` may be an `http(s)` URL
     /// (resolved via `/json/version`) or a direct `ws://` debugger URL.
     pub async fn connect(
@@ -276,6 +295,10 @@ impl uwa_core::Transport for CdpTransport {
         let page = get_page_retry(&self.browser, &target_id).await?;
         eval_on(&page, "1").await?;
         Ok(())
+    }
+
+    async fn shutdown(&self) -> Result<()> {
+        CdpTransport::shutdown(self).await
     }
 }
 
