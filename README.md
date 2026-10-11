@@ -32,33 +32,82 @@ never runs them, and never touches your credentials.
 
 ## Why another one of these
 
-> **Why UWA is structurally different** — see [why_uwa.md](docs/why_uwa.md) for 72 detailed points. Below, 22 concrete reasons you will not find in a typical Python wrapper:
->
-> **A. Architecturally (6)** — Single config-driven `GenericProvider` (#1) replaces a zoo of per-site classes; 8-action declarative `Workflow` DSL (#2); bridge semantics — tools parsed not executed (#3); 7 API surfaces not just `/v1/chat/completions` (#4); hint-based path routing with `/url/{domain}/` and `/tab/{tab_id}/` (#17); mini-router model groups with `round_robin`/`failover`/`hash_conversation` (#32). **Python has zero of these.**
->
-> **B. Qualitatively (4)** — Real token-by-token SSE streaming with live TTFT (#5 vs `sleep(5)` post-hoc); finisher combining stop-button + network + DOM stability + timeout (#6); session-to-tab pinning with per-conversation mutex (#7); circuit breaker with self-healing half-open probe (#9). **Python projects fake or skip all four.**
->
-> **C. Pedantically (5)** — 80-line JSON Schema validator replacing the 1 MB `jsonschema` crate (#26); `safe_emit_end` preventing partial marker leakage (#23); `ContentPart::Other` with `#[serde(other)]` for forward compat (#72); `Arc::strong_count` as live-handle busy marker so capacity eviction never drops a busy session (#29); `truncate_preview` with UTF-8 boundary safety (#67). **Python would not bother — it works "well enough" until it doesn't.**
->
-> **D. Systems-level guarantees Rust provides that CPython cannot (7)** — `PR_SET_PDEATHSIG` at the kernel level so `kill -9` tests still clean up Chrome (#45); panic hook calling `killpg(-pgid, SIGKILL)` so a panic doesn't orphan Chromium (#46); `AtomicU8` compare-exchange to prevent parallel `npm install` (#50); `uwa update` with `.sha256` verification + atomic `rename()` swap (#49); `uwa doctor` one-command diagnostics (#48); `proptest` with 10k-case nightly runs covering chunk-invariance and panic-safety (#55); `uwa daemon` managing both PID **and PGID** for tree-wide SIGTERM→SIGKILL with drain (#47). **A Python venv cannot do kernel-level process signals, atomic binary swaps, or compile-time-checked atomic CAS.**
+Most "free web AI API" projects converge on the same four design choices — and each one is a bug you eventually get to meet:
 
-Every other "free web AI API" project has at least one of these problems:
+| The typical playbook | Why it fails in practice | What uwa does instead |
+|---|---|---|
+| **Sniff tokens / cookies** from network traffic and replay them | Trivially blocked; breaks on every site update | **Never acquires credentials.** uwa drives a real tab and reads its DOM + CDP events — there is no token to leak because none is ever captured |
+| **Log in, then restart the daemon** so auth state gets picked up | Session state lives in process memory, not the browser | **No restart.** You log in *in the tab uwa is already driving* — the login is live by construction |
+| **Insert a proxy layer** between your client and the site | Every hop is a place for bugs, and one more thing to keep updated | **No extra hop.** uwa *is* the tab's client — nothing sits between it and your API call |
+| **Ship a Python venv** you keep alive by hand | Dependency drift, manual supervision, silent crashes | **One static Rust binary.** `uwa start` finds Chromium, launches it on a dedicated profile, and serves — no venv, no runtime, no supervisor |
 
-- It sniffs tokens / cookies out of the network and replays them — brittle,
-  breaks on every site update, and trivially blocked.
-- It asks you to log in, then restart the daemon so the auth state is picked up.
-- It installs a proxy layer between your client and the site, adding a
-  hop where bugs live.
-- It ships as a Python venv you have to keep alive.
+That covers the symptoms. The structural difference runs deeper — and it is not a matter of taste: [why_uwa.md](docs/why_uwa.md) walks through **72 points, each citing a file, line and function** from the actual source. **22 of them are things you will not find in a typical Python wrapper.**
 
-uwa solves those four things by design:
+<details open>
+<summary><strong>A &middot; Architecturally (6)</strong> — the shape of the system</summary>
 
-| Problem | uwa |
-|---|---|
-| **Token capture** | Never. uwa reads the DOM and CDP events of a live tab. |
-| **Restart after login** | Never. You log in *in the tab uwa is already driving*. |
-| **Extra hop** | None. uwa is the client of the tab, nothing sits between the tab and your API call. |
-| **Runtime** | One Rust binary. `uwa start` finds Chromium, launches it, and serves. |
+| # | Guarantee | Source |
+|---|---|---|
+| 1 | **One `GenericProvider`.** All site-specific behavior — selectors, capabilities, finisher tuning, workflows — is TOML *data*, not code. Adding a site is a config edit + a fixture HTML file | `crates/uwa-providers/src/generic.rs` |
+| 2 | **Declarative workflow DSL** — `CLICK`, `FILL_INPUT`, `WAIT`, `STREAM_WAIT`, `KEY_PRESS`, `IF/ELSE`, `GROUP`, `CAPTURE`: a site scenario described in config, not hardcoded steps | `uwa-core/src/workflow.rs` |
+| 3 | **Bridge semantics for tools** — client schemas injected into the prompt, replies parsed back into OpenAI `tool_calls`; uwa never executes tools, and unknown ones are passed through to your client | `crates/uwa-tools/src/parser.rs`, `schema.rs` |
+| 4 | **7 API surfaces** — OpenAI Chat Completions *and* Responses, Anthropic Messages *and* `count_tokens`, plus models / provider-status / pool introspection | `crates/uwa-api/src/routes/` |
+| 17 | **Path-based routing** — `/url/{domain}/v1/...` routes by site, `/tab/{tab_id}/v1/...` pins a specific tab, `X-UWA-Provider` overrides per-request | `crates/uwa-api/src/routing.rs` |
+| 32 | **Model groups as a mini-router** — `round_robin`, `failover`, `hash_conversation`, with per-member `(provider, preset)` validation | `crates/uwa-config/src/groups.rs` |
+
+*Python equivalent: none of the six — a new site there means a new class and new code paths.*
+
+</details>
+
+<details>
+<summary><strong>B &middot; Qualitatively (4)</strong> — behavior under load, not in demos</summary>
+
+| # | Guarantee | Source |
+|---|---|---|
+| 5 | **Real streaming** — per-site SSE decoders (ChatGPT cumulative&rarr;diff, Claude `content_block_delta`, Gemini `batchexecute` + XSSI-strip) produce actual token deltas; TTFT is measured, not simulated | `crates/uwa-extract/src/net.rs`, `parsers/` |
+| 6 | **Finisher instead of `sleep(5)`** — completion is four independent signals: stop-button gone two polls in a row, network `Finished`, DOM stable, hard timeout — bounded by `min_wait`/`max_wait` | `crates/uwa-extract/src/finisher.rs` |
+| 7 | **Sessions pinned to tabs** — `conversation_id` maps to one tab, per-conversation mutex, capacity eviction that never drops a live handle, idle TTL, dead-tab recovery | `crates/uwa-session/src/manager.rs` |
+| 9 | **Self-healing circuit breaker** — rolling-window failure counting, half-open probes that *self-release* when the caller disconnects, configurable parallel probes | `crates/uwa-resilience/src/circuit.rs` |
+
+*Python equivalent: post-hoc chunking of a finished answer, `wait_for_selector` + `sleep`, one global tab, crash on the first timeout.*
+
+</details>
+
+<details>
+<summary><strong>C &middot; Pedantically (5)</strong> — edge cases nobody notices until production</summary>
+
+| # | Guarantee | Source |
+|---|---|---|
+| 23 | **`safe_emit_end`** — the stream stops at a byte index that provably cannot leak half a tool-call marker, with UTF-8 boundaries respected | `crates/uwa-tools/src/parser.rs:229` |
+| 26 | **80-line schema validator** — covers `type`/`properties`/`required`/`enum`/`items`, ignores unknown keywords; skips the ~1 MB `jsonschema` dependency | `crates/uwa-tools/src/schema.rs` |
+| 29 | **`Arc::strong_count` as a busy marker** — capacity eviction checks refcounts, so a session with a live handle is never dropped mid-tool-loop | `crates/uwa-session/src/manager.rs` |
+| 67 | **UTF-8-safe preview truncation** — multibyte characters are never split (tested by `does_not_split_multibyte_chars`) | `crates/uwa-history/src/store.rs` |
+| 72 | **`ContentPart::Other` via `#[serde(other)]`** — unknown content types deserialize to a placeholder instead of failing the request: forward-compatible with types that do not exist yet | `uwa-core/src/types/openai.rs:90` |
+
+*Python equivalent: "works well enough" — until the first multibyte character, clock skew, or schema evolution.*
+
+</details>
+
+<details>
+<summary><strong>D &middot; Systems-level guarantees CPython cannot express (7)</strong></summary>
+
+| # | Guarantee | Source |
+|---|---|---|
+| 45 | **`PR_SET_PDEATHSIG`** — the kernel itself kills Chromium if the parent test binary dies, so even `kill -9` (OOM, CI timeout) cleans up the browser | `crates/uwa-browser/tests/cdp_smoke.rs` |
+| 46 | **Panic hook kills the process group** — `killpg(-pgid, SIGKILL)`: a panic never orphans a running Chrome | `crates/uwa-bin/src/main.rs` |
+| 47 | **Daemon tracks PID *and* PGID** — stop is SIGTERM to the whole group, 15 s grace, then SIGKILL; `setsid` on spawn; drain before shutdown | `crates/uwa-bin/src/commands/daemon.rs` |
+| 48 | **`uwa doctor`** — one command prints config, bind, key status, providers, models, detected Chromium and CDP readiness | `crates/uwa-bin/src/commands/doctor.rs` |
+| 49 | **`uwa update`** — downloads from GitHub Releases, verifies the `.sha256` sidecar, atomically `rename()`s the running binary (kernel holds the inode) | `crates/uwa-bin/src/commands/update.rs` |
+| 50 | **`AtomicU8` build guard** — `compare_exchange` prevents two concurrent `npm install`s; 600 s budget; 503 until dist exists | `crates/uwa-bin/src/main.rs` |
+| 55 | **`proptest` property tests** — chunk-invariance of the SSE parser, tool-call round-trips, panic-freedom on arbitrary input; nightly runs at 10,000 cases via `PROPTEST_CASES` | `crates/uwa-extract/tests/proptest_net.rs` |
+
+*A Python venv has no kernel-level child reaping, cannot atomically replace its own interpreter binary, and its "constants" are dictionary entries. These are runtime capabilities, not code style.*
+
+</details>
+
+**The numbers behind the claims** — 13 workspace crates &middot; 496 tests &middot; 10 providers in one `config.example.toml` &middot; one static binary &middot; every claim above cites a file you can open right now.
+
+For the full argument, all 72 points: **[docs/why_uwa.md](docs/why_uwa.md)**.
 
 ## Quickstart
 
