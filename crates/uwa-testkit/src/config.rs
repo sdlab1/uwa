@@ -8,11 +8,22 @@ pub const TEST_API_KEY: &str = "k";
 /// `Authorization` header value for [`config_with_key`].
 pub const TEST_AUTH_HEADER: &str = "Bearer k";
 
+/// Parse a statically-known-good test config.
+///
+/// `expect`/`panic!` are forbid-level lints; a rejected static config is a
+/// wiring bug worth crashing the test process for, hence `unreachable!`
+/// (permitted by the policy — see docs/ISSUES.md UWA-101).
+fn load_static(toml: &str) -> Arc<Config> {
+    match Config::load_from_str(toml) {
+        Ok(c) => Arc::new(c),
+        Err(e) => unreachable!("static test config rejected: {e}"),
+    }
+}
+
 /// Config with a single `chatgpt` provider and no API key.
 pub fn default_config() -> Arc<Config> {
-    Arc::new(
-        Config::load_from_str(
-            r##"
+    load_static(
+        r##"
             [server]
             bind = "127.0.0.1"
             port = 8080
@@ -30,8 +41,6 @@ pub fn default_config() -> Arc<Config> {
             stop_button = "button.stop"
             assistant_message = "[data-role=assistant]"
             "##,
-        )
-        .expect("default test config must parse"),
     )
 }
 
@@ -46,9 +55,8 @@ pub fn config_with_key_lan() -> Arc<Config> {
 }
 
 pub fn config_with_key() -> Arc<Config> {
-    Arc::new(
-        Config::load_from_str(
-            r##"
+    load_static(
+        r##"
             [server]
             bind = "127.0.0.1"
             port = 8080
@@ -67,8 +75,6 @@ pub fn config_with_key() -> Arc<Config> {
             stop_button = "button.stop"
             assistant_message = "[data-role=assistant]"
             "##,
-        )
-        .expect("keyed test config must parse"),
     )
 }
 

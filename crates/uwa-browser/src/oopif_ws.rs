@@ -82,7 +82,9 @@ pub async fn resolve_ws_url(debug_url: &str, target_id: &str) -> Result<String> 
                 "connection closed before headers".into(),
             ));
         }
-        buf.extend_from_slice(&chunk[..n]);
+        if let Some(bytes) = chunk.get(..n) {
+            buf.extend_from_slice(bytes);
+        }
         if buf.windows(4).any(|w| w == b"\r\n\r\n") {
             break; // Headers complete.
         }
@@ -92,11 +94,14 @@ pub async fn resolve_ws_url(debug_url: &str, target_id: &str) -> Result<String> 
     }
 
     // Phase 2: parse Content-Length and read the body.
-    let header_end = buf
-        .windows(4)
-        .position(|w| w == b"\r\n\r\n")
-        .expect("checked above");
-    let headers = String::from_utf8_lossy(&buf[..header_end]);
+    // Re-found defensively: phase 1 proved it exists, and an explicit
+    // error keeps the forbid-level `expect_used` lint out.
+    let Some(header_end) = buf.windows(4).position(|w| w == b"\r\n\r\n") else {
+        return Err(UwaError::Transport(
+            "connection closed before headers".into(),
+        ));
+    };
+    let headers = String::from_utf8_lossy(buf.get(..header_end).unwrap_or(&[]));
     let content_length: usize = headers
         .lines()
         .find(|l| l.to_ascii_lowercase().starts_with("content-length:"))
@@ -104,8 +109,8 @@ pub async fn resolve_ws_url(debug_url: &str, target_id: &str) -> Result<String> 
         .and_then(|v| v.trim().parse().ok())
         .unwrap_or(0);
 
-    let body_start = header_end + 4;
-    let needed = body_start + content_length;
+    let body_start = header_end.saturating_add(4);
+    let needed = body_start.saturating_add(content_length);
 
     // Phase 3: read until we have the full body.
     while buf.len() < needed {
@@ -116,7 +121,9 @@ pub async fn resolve_ws_url(debug_url: &str, target_id: &str) -> Result<String> 
         if n == 0 {
             break; // Server closed early; use what we have.
         }
-        buf.extend_from_slice(&chunk[..n]);
+        if let Some(bytes) = chunk.get(..n) {
+            buf.extend_from_slice(bytes);
+        }
         if buf.len() > 64 * 1024 {
             break; // Hard cap.
         }
@@ -167,7 +174,7 @@ pub async fn inject_stealth(ws_url: &str, pack: &StealthPack) -> Result<()> {
 
     // 1. Enable Page domain (required for addScriptToEvaluateOnNewDocument).
     let id = next_id;
-    next_id += 1;
+    next_id = next_id.saturating_add(1);
     let cmd = json!({"id": id, "method": "Page.enable", "params": {}});
     write
         .send(Message::Text(cmd.to_string()))
@@ -181,7 +188,7 @@ pub async fn inject_stealth(ws_url: &str, pack: &StealthPack) -> Result<()> {
             continue;
         }
         let id = next_id;
-        next_id += 1;
+        next_id = next_id.saturating_add(1);
         let wrapped = format!("(function(){{try{{{}}}catch(_e){{}}}})();", script.js);
         let cmd = json!({
             "id": id,

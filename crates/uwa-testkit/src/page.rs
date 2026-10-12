@@ -56,7 +56,7 @@ impl MockPage {
         let (net_tx, _) = broadcast::channel(256);
         Self {
             inner: Arc::new(Inner {
-                url: Mutex::new("about:blank".parse().expect("static url")),
+                url: Mutex::new(crate::static_url("about:blank")),
                 html: Mutex::new(Html::Fixed(String::new())),
                 script: Mutex::new(Vec::new()),
                 default: Mutex::new(Value::Bool(false)),
@@ -69,12 +69,16 @@ impl MockPage {
     }
 
     pub fn with_url(self, u: &str) -> Self {
-        *self.inner.url.lock().expect("url lock") = u.parse().expect("bad url");
+        // A malformed literal degrades to about:blank — the test's own URL
+        // assertions catch the mistake loudly enough.
+        *crate::lock(&self.inner.url) = u
+            .parse()
+            .unwrap_or_else(|_| crate::static_url("about:blank"));
         self
     }
 
     pub fn with_html(self, h: &str) -> Self {
-        *self.inner.html.lock().expect("html lock") = Html::Fixed(h.into());
+        *crate::lock(&self.inner.html) = Html::Fixed(h.into());
         self
     }
 
@@ -86,7 +90,7 @@ impl MockPage {
         S: Into<String>,
     {
         let q: VecDeque<String> = seq.into_iter().map(Into::into).collect();
-        *self.inner.html.lock().expect("html lock") = Html::Sequence(q);
+        *crate::lock(&self.inner.html) = Html::Sequence(q);
         self
     }
 
@@ -105,26 +109,22 @@ impl MockPage {
     }
 
     fn push_rule(&self, pattern: &str, values: Vec<Value>, repeat: bool) {
-        self.inner
-            .script
-            .lock()
-            .expect("script lock")
-            .push(ScriptRule {
-                pattern: pattern.into(),
-                values: values.into(),
-                repeat,
-            });
+        crate::lock(&self.inner.script).push(ScriptRule {
+            pattern: pattern.into(),
+            values: values.into(),
+            repeat,
+        });
     }
 
     /// Answer for `eval` when no [`expect`](Self::expect) matches.
     pub fn expect_default(self, value: Value) -> Self {
-        *self.inner.default.lock().expect("default lock") = value;
+        *crate::lock(&self.inner.default) = value;
         self
     }
 
     /// Make `wait_for_selector` fail with [`UwaError::Timeout`].
     pub fn expect_wait_timeout(self) -> Self {
-        *self.inner.wait_selector.lock().expect("wait lock") = Err("timeout".into());
+        *crate::lock(&self.inner.wait_selector) = Err("timeout".into());
         self
     }
 
@@ -132,11 +132,7 @@ impl MockPage {
     /// call, which replays them to the fresh subscriber (a `broadcast` does
     /// not deliver messages sent before `subscribe`).
     pub fn with_network_events(self, events: Vec<NetworkEvent>) -> Self {
-        self.inner
-            .net_pending
-            .lock()
-            .expect("pending lock")
-            .extend(events);
+        crate::lock(&self.inner.net_pending).extend(events);
         self
     }
 
@@ -148,7 +144,7 @@ impl MockPage {
 
     /// Every `eval`/`click`/`type_text` recorded so far.
     pub fn log(&self) -> Vec<String> {
-        self.inner.log.lock().expect("log lock").clone()
+        crate::lock(&self.inner.log).clone()
     }
 }
 
@@ -161,23 +157,22 @@ impl Default for MockPage {
 #[async_trait]
 impl Page for MockPage {
     async fn goto(&self, url: &Url) -> Result<()> {
-        *self.inner.url.lock().expect("url lock") = url.clone();
+        *crate::lock(&self.inner.url) = url.clone();
         Ok(())
     }
 
     async fn url(&self) -> Result<Url> {
-        Ok(self.inner.url.lock().expect("url lock").clone())
+        Ok(crate::lock(&self.inner.url).clone())
     }
 
     async fn eval(&self, js: &str) -> Result<Value> {
-        self.inner
-            .log
-            .lock()
-            .expect("log lock")
-            .push(js.to_string());
-        let mut script = self.inner.script.lock().expect("script lock");
+        crate::lock(&self.inner.log).push(js.to_string());
+        let mut script = crate::lock(&self.inner.script);
         if let Some(idx) = script.iter().position(|r| js.contains(r.pattern.as_str())) {
-            let rule = &mut script[idx];
+            let Some(rule) = script.get_mut(idx) else {
+                // Unreachable: the index came from this very vec.
+                unreachable!("script rule vanished mid-iteration");
+            };
             let v = rule.values.front().cloned().unwrap_or(Value::Null);
             if rule.values.len() > 1 {
                 rule.values.pop_front();
@@ -186,33 +181,29 @@ impl Page for MockPage {
             }
             return Ok(v);
         }
-        Ok(self.inner.default.lock().expect("default lock").clone())
+        Ok(crate::lock(&self.inner.default).clone())
     }
 
     /// The stealth pack registers pre-load scripts here; recorded as
     /// `early:<js>` so tests can tell them apart from [`eval`](Page::eval).
     async fn eval_early(&self, js: &str) -> Result<()> {
-        self.inner
-            .log
-            .lock()
-            .expect("log lock")
-            .push(format!("early:{js}"));
+        crate::lock(&self.inner.log).push(format!("early:{js}"));
         Ok(())
     }
 
     async fn wait_for_selector(&self, _sel: &str, timeout: Duration) -> Result<()> {
-        match &*self.inner.wait_selector.lock().expect("wait lock") {
+        match &*crate::lock(&self.inner.wait_selector) {
             Ok(()) => Ok(()),
             Err(_) => Err(UwaError::Timeout(timeout)),
         }
     }
 
     async fn html(&self) -> Result<String> {
-        match &mut *self.inner.html.lock().expect("html lock") {
+        match &mut *crate::lock(&self.inner.html) {
             Html::Fixed(s) => Ok(s.clone()),
             Html::Sequence(q) => {
                 if q.len() > 1 {
-                    Ok(q.pop_front().expect("non-empty"))
+                    Ok(q.pop_front().unwrap_or_default())
                 } else {
                     Ok(q.front().cloned().unwrap_or_default())
                 }
@@ -221,26 +212,18 @@ impl Page for MockPage {
     }
 
     async fn click(&self, selector: &str) -> Result<()> {
-        self.inner
-            .log
-            .lock()
-            .expect("log lock")
-            .push(format!("click:{selector}"));
+        crate::lock(&self.inner.log).push(format!("click:{selector}"));
         Ok(())
     }
 
     async fn type_text(&self, selector: &str, text: &str) -> Result<()> {
-        self.inner
-            .log
-            .lock()
-            .expect("log lock")
-            .push(format!("type:{selector}={text}"));
+        crate::lock(&self.inner.log).push(format!("type:{selector}={text}"));
         Ok(())
     }
 
     async fn network_events(&self) -> Result<broadcast::Receiver<NetworkEvent>> {
         let rx = self.inner.net_tx.subscribe();
-        let pending = std::mem::take(&mut *self.inner.net_pending.lock().expect("pending lock"));
+        let pending = std::mem::take(&mut *crate::lock(&self.inner.net_pending));
         for e in pending {
             let _ = self.inner.net_tx.send(e);
         }
@@ -250,22 +233,14 @@ impl Page for MockPage {
     /// Record the capture intent so tests can assert the provider drove
     /// it. The real JS lives in `uwa-browser::media_capture`.
     async fn start_audio_capture(&self) -> Result<()> {
-        self.inner
-            .log
-            .lock()
-            .expect("log lock")
-            .push("audio_capture:start".into());
+        crate::lock(&self.inner.log).push("audio_capture:start".into());
         Ok(())
     }
 
     /// Mirrors [`MockPage::start_audio_capture`]: records the call and
     /// returns whatever `expect_default` scripts (None by default).
     async fn stop_audio_capture(&self) -> Result<Option<Vec<u8>>> {
-        self.inner
-            .log
-            .lock()
-            .expect("log lock")
-            .push("audio_capture:stop".into());
+        crate::lock(&self.inner.log).push("audio_capture:stop".into());
         let scripted = self.eval("stop_audio_capture").await?;
         match scripted {
             Value::Array(chunks) => {
@@ -288,11 +263,7 @@ impl Page for MockPage {
     /// Mirrors [`MockPage::start_audio_capture`]: records the call and
     /// returns whatever `expect_default` scripts.
     async fn scan_media(&self) -> Result<Vec<MediaResource>> {
-        self.inner
-            .log
-            .lock()
-            .expect("log lock")
-            .push("media_scan".into());
+        crate::lock(&self.inner.log).push("media_scan".into());
         let scripted = self.eval("scan_media").await?;
         Ok(serde_json::from_value(scripted).unwrap_or_default())
     }

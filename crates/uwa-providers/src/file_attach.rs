@@ -30,9 +30,9 @@ pub async fn attach_file_via_dom(page: &dyn Page, selector: &str, path: &Path) -
             return {{ ok: true }};
         }})()
         "#,
-        sel = serde_json::to_string(selector).unwrap(),
-        content = serde_json::to_string(&content).unwrap(),
-        name = serde_json::to_string(name).unwrap(),
+        sel = serde_json::to_string(selector).unwrap_or_else(|_| format!("{selector:?}")),
+        content = serde_json::to_string(&content).unwrap_or_default(),
+        name = serde_json::to_string(name).unwrap_or_else(|_| format!("{name:?}")),
     );
 
     let v = page.eval(&js).await?;
@@ -61,7 +61,8 @@ pub async fn attach_file_via_dragdrop(page: &dyn Page, path: &Path) -> Result<()
             return {{ ok: true }};
         }})()
         "#,
-        p = serde_json::to_string(&abs.to_string_lossy().to_string()).unwrap(),
+        p = serde_json::to_string(&abs.to_string_lossy().to_string())
+            .unwrap_or_else(|_| format!("{:?}", abs.to_string_lossy())),
     );
     page.eval(&js).await?;
     Ok(())

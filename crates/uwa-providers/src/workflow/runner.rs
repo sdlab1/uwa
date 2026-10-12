@@ -127,7 +127,7 @@ impl<'a> WorkflowRunner<'a> {
                         document.activeElement?.dispatchEvent(ev);
                         return true;
                     }})()"#,
-                    k = serde_json::to_string(key).unwrap(),
+                    k = serde_json::to_string(key).unwrap_or_else(|_| format!("{key:?}")),
                 );
                 page.eval(&js).await?;
                 Ok(())
@@ -192,7 +192,7 @@ impl<'a> WorkflowRunner<'a> {
                         const el = document.querySelector({sel});
                         return el ? (el.innerText || el.textContent || '') : '';
                     }})()"#,
-                    sel = serde_json::to_string(&sel).unwrap(),
+                    sel = serde_json::to_string(&sel).unwrap_or_else(|_| format!("{sel:?}")),
                 );
                 let v = page.eval(&js).await?;
                 Ok(v.as_str().unwrap_or("").to_string())
@@ -204,8 +204,8 @@ impl<'a> WorkflowRunner<'a> {
                         const el = document.querySelector({sel});
                         return el ? (el.getAttribute({a}) || '') : '';
                     }})()"#,
-                    sel = serde_json::to_string(&sel).unwrap(),
-                    a = serde_json::to_string(attr).unwrap(),
+                    sel = serde_json::to_string(&sel).unwrap_or_else(|_| format!("{sel:?}")),
+                    a = serde_json::to_string(attr).unwrap_or_else(|_| format!("{attr:?}")),
                 );
                 let v = page.eval(&js).await?;
                 Ok(v.as_str().unwrap_or("").to_string())
@@ -236,7 +236,7 @@ impl<'a> WorkflowRunner<'a> {
                     const el = els[els.length - 1];
                     return el.innerText || el.textContent || '';
                 }})()"#,
-                sel = serde_json::to_string(selector).unwrap(),
+                sel = serde_json::to_string(selector).unwrap_or_else(|_| format!("{selector:?}")),
             );
             let text = page
                 .eval(&js)

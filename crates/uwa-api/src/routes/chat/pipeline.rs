@@ -559,11 +559,11 @@ async fn run_pipeline_inner(
                     // to the client so it can be fixed at the source.
                     return Err(UwaError::BadRequest(format!(
                         "tool call arguments failed schema validation after {} attempt(s): {}",
-                        attempt + 1,
+                        attempt.saturating_add(1),
                         corrections.join("; ")
                     )));
                 }
-                attempt += 1;
+                attempt = attempt.saturating_add(1);
                 tracing::warn!(
                     provider = %provider_cfg.name,
                     attempt,

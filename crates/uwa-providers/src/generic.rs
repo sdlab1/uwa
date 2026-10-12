@@ -403,17 +403,21 @@ impl SiteProvider for GenericProvider {
     async fn wait_response_stream(&self, page: &dyn Page) -> Result<ResponseStream> {
         let cfg = self.pipeline_cfg()?;
 
-        // DOM-only or no net rules → no real deltas; fall back to buffered.
-        if matches!(cfg.strategy, uwa_core::ExtractionStrategy::DomOnly) || cfg.net.is_none() {
+        // DOM-only strategy → no real deltas; fall back to buffered.
+        if matches!(cfg.strategy, uwa_core::ExtractionStrategy::DomOnly) {
             let text = self.wait_response(page).await?;
             return Ok(Box::pin(futures::stream::iter(vec![Ok(text)])));
         }
 
         // Network-first: subscribe to the network channel and forward every
         // decoded delta verbatim. The stream terminates when the extractor
-        // sees `[DONE]`, an idle timeout, or a `Finished` event.
+        // sees `[DONE]`, an idle timeout, or a `Finished` event. No net
+        // rules → buffered fallback (let-else instead of guard + expect).
+        let Some(rules) = cfg.net.clone() else {
+            let text = self.wait_response(page).await?;
+            return Ok(Box::pin(futures::stream::iter(vec![Ok(text)])));
+        };
         let net = DefaultNetExtractor;
-        let rules = cfg.net.as_ref().expect("checked above").clone();
         let deltas = net.deltas(page, &rules).await?;
         let s = deltas.map(|d| Ok(d.0));
         Ok(Box::pin(s))

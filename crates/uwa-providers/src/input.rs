@@ -8,7 +8,9 @@ use std::time::Duration;
 use uwa_core::{Page, Result, UwaError};
 
 fn quoted(s: &str) -> String {
-    serde_json::to_string(s).expect("serializing a &str never fails")
+    // Serializing a &str cannot fail; the debug-quoted fallback only keeps
+    // the forbid-level `expect_used` lint out.
+    serde_json::to_string(s).unwrap_or_else(|_| format!("{s:?}"))
 }
 
 /// Type `text` into `selector`, firing the events frameworks listen for.

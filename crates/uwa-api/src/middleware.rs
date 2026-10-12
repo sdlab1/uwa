@@ -80,19 +80,16 @@ fn urldecode(s: &str) -> String {
 fn percent_decode(s: &str) -> Option<String> {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' {
-            if i + 2 >= bytes.len() {
-                return None;
-            }
-            let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).ok()?;
-            let v = u8::from_str_radix(hex, 16).ok()?;
+    let mut hex_iter = bytes.iter().copied();
+    while let Some(b) = hex_iter.next() {
+        if b == b'%' {
+            // Two hex digits must follow, else the escape is malformed.
+            let hex = [hex_iter.next()?, hex_iter.next()?];
+            let hex_str = std::str::from_utf8(&hex).ok()?;
+            let v = u8::from_str_radix(hex_str, 16).ok()?;
             out.push(v);
-            i += 3;
         } else {
-            out.push(bytes[i]);
-            i += 1;
+            out.push(b);
         }
     }
     String::from_utf8(out).ok()

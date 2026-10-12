@@ -556,7 +556,7 @@ fn stream_anthropic_from_channel(
                     json!({ "type": "content_block_stop", "index": index }),
                 )))
                 .await;
-            index += 1;
+            index = index.saturating_add(1);
         }
 
         for c in &calls {
@@ -592,7 +592,7 @@ fn stream_anthropic_from_channel(
                     json!({ "type": "content_block_stop", "index": index }),
                 )))
                 .await;
-            index += 1;
+            index = index.saturating_add(1);
         }
 
         let stop_reason = match finish {

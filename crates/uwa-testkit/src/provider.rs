@@ -39,7 +39,7 @@ impl MockProvider {
     }
 
     pub fn with_answer(self, a: &str) -> Self {
-        *self.answer.lock().expect("answer lock") = a.into();
+        *crate::lock(&self.answer) = a.into();
         self
     }
 
@@ -51,39 +51,34 @@ impl MockProvider {
     /// Make [`wait_response`](SiteProvider::wait_response) fail instead of
     /// answering — what a broken provider looks like to the pipeline.
     pub fn with_error(self, msg: &str) -> Self {
-        *self.error.lock().expect("error lock") = Some(msg.into());
+        *crate::lock(&self.error) = Some(msg.into());
         self
     }
 
     /// How long [`wait_response`](SiteProvider::wait_response) sleeps first.
     pub fn with_delay(self, d: Duration) -> Self {
-        *self.delay.lock().expect("delay lock") = Some(d);
+        *crate::lock(&self.delay) = Some(d);
         self
     }
 
     /// Flip [`matches`](SiteProvider::matches) at runtime.
     pub fn set_matches(&self, v: bool) {
-        *self.matches.lock().expect("matches lock") = v;
+        *crate::lock(&self.matches) = v;
     }
 
     /// Replace the answer at runtime (e.g. between two turns).
     pub fn set_answer(&self, a: &str) {
-        *self.answer.lock().expect("answer lock") = a.into();
+        *crate::lock(&self.answer) = a.into();
     }
 
     /// Everything typed into the provider, oldest first.
     pub fn sent(&self) -> Vec<String> {
-        self.sent.lock().expect("sent lock").clone()
+        crate::lock(&self.sent).clone()
     }
 
     /// The last prompt that reached the provider, if any.
     pub fn sent_last(&self) -> String {
-        self.sent
-            .lock()
-            .expect("sent lock")
-            .last()
-            .cloned()
-            .unwrap_or_default()
+        crate::lock(&self.sent).last().cloned().unwrap_or_default()
     }
 }
 
@@ -94,23 +89,23 @@ impl SiteProvider for MockProvider {
     }
 
     fn matches(&self, _url: &Url) -> bool {
-        *self.matches.lock().expect("matches lock")
+        *crate::lock(&self.matches)
     }
 
     async fn send_message(&self, _page: &dyn Page, text: &str) -> Result<()> {
-        self.sent.lock().expect("sent lock").push(text.to_string());
+        crate::lock(&self.sent).push(text.to_string());
         Ok(())
     }
 
     async fn wait_response(&self, _page: &dyn Page) -> Result<String> {
-        if let Some(msg) = self.error.lock().expect("error lock").clone() {
+        if let Some(msg) = crate::lock(&self.error).clone() {
             return Err(UwaError::Unavailable(msg));
         }
-        let delay = *self.delay.lock().expect("delay lock");
+        let delay = *crate::lock(&self.delay);
         if let Some(d) = delay {
             tokio::time::sleep(d).await;
         }
-        Ok(self.answer.lock().expect("answer lock").clone())
+        Ok(crate::lock(&self.answer).clone())
     }
 
     async fn cancel(&self, _page: &dyn Page) -> Result<()> {

@@ -67,9 +67,16 @@ impl TabPool {
         if ids.is_empty() {
             return Err(UwaError::Unavailable("no tabs in pool".into()));
         }
-        let start = self.rr.fetch_add(1, Ordering::Relaxed) % ids.len();
-        for offset in 0..ids.len() {
-            let id = &ids[(start + offset) % ids.len()];
+        // Rotate the scan start each call; no raw modulo/indexing
+        // (forbid-level lints) — iterate the rotated halves instead.
+        let fetched = self.rr.fetch_add(1, Ordering::Relaxed);
+        let start = fetched.checked_rem(ids.len()).unwrap_or(0);
+        let rotated = ids
+            .get(start..)
+            .unwrap_or(&[])
+            .iter()
+            .chain(ids.get(..start).unwrap_or(&[]).iter());
+        for id in rotated {
             let Some(entry) = self.tabs.get(id).map(|e| e.clone()) else {
                 continue;
             };

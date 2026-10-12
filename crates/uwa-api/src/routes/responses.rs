@@ -267,7 +267,7 @@ fn stream_response(
                     .data(
                         json!({
                             "type": "response.output_item.added",
-                            "output_index": index_base + i as u32,
+                            "output_index": index_base.saturating_add(i as u32),
                             "item": {
                                 "type": "function_call",
                                 "call_id": c.id,
@@ -282,12 +282,12 @@ fn stream_response(
                 .await;
         }
 
-        let output_chars = acc.len()
-            + calls
-                .iter()
-                .map(|c| c.name.len() + c.arguments.to_string().len())
-                .sum::<usize>();
-        let in_tok = (input_chars / 4).max(1) as u64;
+        let call_chars: usize = calls
+            .iter()
+            .map(|c| c.name.len().saturating_add(c.arguments.to_string().len()))
+            .sum();
+        let output_chars = acc.len().saturating_add(call_chars);
+        let in_tok = (input_chars / 4).max(1) as u64; // constant divisor: lint-safe
         let out_tok = (output_chars / 4).max(1) as u64;
         let _ = tx
             .send(Ok(Event::default().event("response.completed").data(
@@ -303,7 +303,7 @@ fn stream_response(
                         "usage": {
                             "input_tokens": in_tok,
                             "output_tokens": out_tok,
-                            "total_tokens": in_tok + out_tok,
+                            "total_tokens": in_tok.saturating_add(out_tok),
                         },
                         "finish_reason": finish_reason,
                     }

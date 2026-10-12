@@ -54,10 +54,7 @@ impl MockTransport {
         let id = TabId::new();
         println!("MockTransport: generated tab id: {}", id.as_str());
         self.tabs.push(id.clone());
-        self.healthy
-            .lock()
-            .expect("healthy lock")
-            .insert(id.clone());
+        crate::lock(&self.healthy).insert(id.clone());
         self.pages.insert(id, page);
         self
     }
@@ -65,23 +62,17 @@ impl MockTransport {
     /// Same, but for a tab id the test already holds.
     pub fn with_page(mut self, id: TabId, page: Arc<MockPage>) -> Self {
         self.tabs.push(id.clone());
-        self.healthy
-            .lock()
-            .expect("healthy lock")
-            .insert(id.clone());
+        crate::lock(&self.healthy).insert(id.clone());
         self.pages.insert(id, page);
         self
     }
 
     pub fn mark_unhealthy(&self, id: &TabId) {
-        self.healthy.lock().expect("healthy lock").remove(id);
+        crate::lock(&self.healthy).remove(id);
     }
 
     pub fn mark_healthy(&self, id: &TabId) {
-        self.healthy
-            .lock()
-            .expect("healthy lock")
-            .insert(id.clone());
+        crate::lock(&self.healthy).insert(id.clone());
     }
 
     pub fn tab_ids(&self) -> Vec<TabId> {
@@ -121,7 +112,7 @@ impl Transport for MockTransport {
     }
 
     async fn health(&self, tab: &TabId) -> Result<()> {
-        if self.healthy.lock().expect("healthy lock").contains(tab) {
+        if crate::lock(&self.healthy).contains(tab) {
             Ok(())
         } else {
             Err(UwaError::TabNotFound(tab.to_string()))

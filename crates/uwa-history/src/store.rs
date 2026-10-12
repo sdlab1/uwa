@@ -188,7 +188,7 @@ async fn sweep_old(dir: &std::path::Path, retention_days: u32) -> Result<()> {
         .map_err(|e| UwaError::Config(format!("read_dir: {e}")))?;
     let cutoff = std::time::SystemTime::now()
         .checked_sub(std::time::Duration::from_secs(
-            retention_days as u64 * 86_400,
+            (retention_days as u64).saturating_mul(86_400),
         ))
         .unwrap_or(std::time::UNIX_EPOCH);
     while let Ok(Some(entry)) = entries.next_entry().await {
@@ -311,7 +311,7 @@ fn truncate_preview(s: &mut String, cap: usize) {
     }
     let mut cut = cap;
     while cut > 0 && !s.is_char_boundary(cut) {
-        cut -= 1;
+        cut = cut.saturating_sub(1);
     }
     s.truncate(cut);
     s.push('…');

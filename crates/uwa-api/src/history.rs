@@ -54,7 +54,11 @@ impl RequestRecorder {
     /// Call after `send_message` returns.
     pub fn mark_send_end(&mut self) {
         let d = self.last_mark.elapsed();
-        self.record.timing.send_ms += d.as_millis() as u64;
+        self.record.timing.send_ms = self
+            .record
+            .timing
+            .send_ms
+            .saturating_add(d.as_millis() as u64);
         self.record
             .timing
             .rounds
@@ -78,7 +82,11 @@ impl RequestRecorder {
     /// Call after `wait_response` returns.
     pub fn mark_wait_end(&mut self) {
         let d = self.last_mark.elapsed();
-        self.record.timing.wait_ms += d.as_millis() as u64;
+        self.record.timing.wait_ms = self
+            .record
+            .timing
+            .wait_ms
+            .saturating_add(d.as_millis() as u64);
         if let Some(last) = self.record.timing.rounds.last_mut() {
             last.wait_ms = d.as_millis() as u64;
         }
@@ -91,7 +99,7 @@ impl RequestRecorder {
     }
 
     pub fn increment_round(&mut self) {
-        self.record.tools_rounds += 1;
+        self.record.tools_rounds = self.record.tools_rounds.saturating_add(1);
     }
 
     pub fn record_tool_calls(&mut self, n: usize) {

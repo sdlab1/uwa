@@ -104,7 +104,7 @@ pub async fn probe_selector(page: &dyn Page, selector: &str) -> Result<(u32, Opt
                 return {{ ok: false, error: String(e) }};
             }}
         }})()"#,
-        sel = serde_json::to_string(selector).unwrap(),
+        sel = serde_json::to_string(selector).unwrap_or_else(|_| format!("{selector:?}")),
     );
     let v = page.eval(&js).await?;
     if v.get("ok").and_then(Value::as_bool) != Some(true) {

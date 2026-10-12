@@ -204,6 +204,10 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/admin/selector-apply", post(routes::admin::selector_apply))
         .route("/admin/conformance", get(routes::admin::conformance))
+        .route(
+            "/admin/providers/registry",
+            get(routes::admin::provider_registry),
+        )
         .route("/admin/sessions", get(routes::admin::sessions))
         .route(
             "/admin/sessions/recover",
@@ -237,7 +241,8 @@ pub fn router(state: AppState) -> Router {
         .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::permissive())
         .layer(tower_http::timeout::TimeoutLayer::new(Duration::from_secs(
-            state.config.server.request_timeout_ms / 1000 + 5,
+            // Constant divisor is lint-safe; the +5 grace must saturate.
+            (state.config.server.request_timeout_ms / 1000).saturating_add(5),
         )))
         .with_state(state)
 }

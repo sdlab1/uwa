@@ -102,7 +102,7 @@ pub async fn fetch_blob(page: &dyn Page, url: &str) -> Result<Vec<u8>> {
                 return {{ ok: false, error: String(e) }};
             }}
         }})()"#,
-        u = serde_json::to_string(url).unwrap(),
+        u = serde_json::to_string(url).unwrap_or_else(|_| format!("{url:?}")),
     );
     let v = page.eval(&js).await?;
     if v.get("ok").and_then(Value::as_bool) != Some(true) {

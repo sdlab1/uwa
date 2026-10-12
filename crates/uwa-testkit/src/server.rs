@@ -15,7 +15,13 @@ use crate::transport::MockTransport;
 /// Panics if the router itself cannot be built — that is a wiring bug, not
 /// a test outcome.
 pub fn test_server(state: AppState) -> axum_test::TestServer {
-    axum_test::TestServer::new(router(state)).expect("router builds")
+    match axum_test::TestServer::new(router(state)) {
+        Ok(s) => s,
+        // The router is assembled from pure constructors: a failure here is
+        // a wiring bug worth crashing the test process for (expect/panic
+        // are forbid-level; unreachable! is permitted — UWA-101).
+        Err(e) => unreachable!("router failed to build: {e}"),
+    }
 }
 
 /// Builds an [`AppState`] out of pieces; every `with_*` is optional.

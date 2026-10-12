@@ -100,22 +100,36 @@ library constructor must not abort the daemon on schema drift).
 ## ⬜ Open
 
 ### UWA-101 🟡 Forbid-lint debt in the remaining lib code (88 violations)
-Status after this cycle (lib targets, `cargo clippy -p <crate> --lib`):
+
+**Update (this change): closed for 13 of 14 crates.** `uwa-history` (24),
+`uwa-browser` (14), `uwa-providers` (12), `uwa-api` (19), `uwa-testkit`
+(46) are now clean — 115 violations removed in this pass, all behavior
+locked by the existing suites (0 failures). The only crate left is
+`uwa-conformance` (18, owned by the conformance feature work) and
+`uwa-bin`'s binary target, which cannot be lint-checked until its
+dependency `uwa-conformance` compiles under the lints.
+
+Recurring patterns that closed the debt (copy for conformance):
+- mutex guards: a `lock()` helper recovering from poisoning
+  (`unwrap_or_else(|p| p.into_inner())`) — testkit, circuit breaker,
+  site parsers;
+- counters/budgets: `saturating_add`/`saturating_sub`/`checked_rem`;
+- container access: `get()`/`get_mut()`/iterators instead of `v[i]`;
+- float division: UFCS `std::ops::Div::div(a, b)` (f32 has no
+  `checked_div`; the lint flags the `/` operator, not the call);
+- serialization of `&str`/enums: `unwrap_or_else(|_| format!("{x:?}"))`;
+- statically-known-good data (test configs, URLs): a last-resort
+  `unreachable!("…")` — permitted by the policy (the forbid list covers
+  unwrap/expect/panic/todo/unimplemented, not unreachable) and used only
+  where failure truly means a wiring bug (testkit config/server).
+
+Open remainder:
 
 | Crate | Errors | Files |
 |-------|-------:|-------|
-| `uwa-history` | 24 | `stats.rs` (percentile/average arithmetic + indexing), `store.rs` (2) |
-| `uwa-testkit` | 24 | mixed unwrap/expect/arithmetic |
-| `uwa-browser` | 13 | mixed |
-| `uwa-providers` | 13 | mixed |
-| `uwa-api` | 13 | mixed |
-| `uwa-bin` | 1 | daemon.rs test-support helper |
+| `uwa-conformance` | 18 | `score.rs` (arithmetic), `checks.rs`/`scenarios.rs` (indexing/unwrap) |
+| `uwa-bin` (bin target) | ? | blocked until `uwa-conformance` is clean |
 
-Approach that worked so far (copy it): pure helpers + `get()`/iterators +
-`saturating_*`/`checked_*` + `unwrap_or`-with-explicit-fallback; for
-build scripts `die()` → `process::exit(101)`. Suggested order:
-`uwa-bin` (1) → `history` (isolated stats math, easy to lock with
-tests) → `api` → `providers` → `browser` → `testkit`.
 No behavioral regressions so far; keep it that way per crate.
 
 ### UWA-102 🟡 `http_ok` cannot speak TLS
