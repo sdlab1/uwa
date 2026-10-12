@@ -57,6 +57,9 @@ enum Command {
     /// Tool-calling conformance suite: run the corpus, generate reports.
     Conformance(commands::conformance::ConformanceArgs),
 
+    /// Provider selector registry: list, show, diff, update, canary.
+    Providers(commands::providers::ProvidersArgs),
+
     /// Print resolved config, provider list and detected browser.
     Doctor,
 }
@@ -115,6 +118,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Service { action } => commands::service::run(action).await,
         Command::Update { check, force } => commands::update::run(check, force).await,
         Command::Conformance(args) => commands::conformance::run(args).await,
+        Command::Providers(args) => commands::providers::run(args).await,
         Command::Doctor => commands::doctor::run(config_path.clone()).await,
     };
 

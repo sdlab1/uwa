@@ -214,6 +214,23 @@ includes a **Test selector** field that runs the configured CSS against
 the live tab, so you can confirm a selector still matches without leaving
 the browser.
 
+Selectors for the built-in providers also ship in `providers/*.toml` and
+are refreshed independently of the binary. `uwa providers update` pulls
+the latest verified copy into `~/.uwa/providers/`; the user's `uwa.toml`
+always wins per-field.
+
+```bash
+uwa providers list                # what's in the registry
+uwa providers show chatgpt        # merged view, per field
+uwa providers update              # fetch + verify SHA256
+```
+
+A nightly canary runs each provider's selectors against a live browser
+and files an issue when one stops matching —
+[docs/CANARY.md](docs/CANARY.md) has the current status. The registry
+schema, merge rules, and the fallback story are in
+[docs/PROVIDERS.md](docs/PROVIDERS.md).
+
 ## Dashboard
 
 Everything is at `http://127.0.0.1:8080`:
@@ -284,6 +301,7 @@ points:
 - [Streaming](docs/STREAMING.md) — where the tokens come from, TTFT, cancel.
 - [Compatibility](docs/COMPATIBILITY.md) — tested clients and versions.
 - [Conformance](docs/CONFORMANCE.md) — tool-calling conformance across providers.
+- [Providers](docs/PROVIDERS.md) — selector registry, merge rules, self-heal.
 - [Troubleshooting](docs/TROUBLESHOOTING.md) — the failures people actually hit.
 - [Positioning](docs/POSITIONING.md) — what we're building and what we're not.
 - [Why UWA](docs/why_uwa.md) — architectural deep-dive comparing UWA to typical Python wrappers.

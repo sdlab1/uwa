@@ -91,7 +91,7 @@ fn fetch_latest_tag() -> Result<String> {
     Ok(rest[..end].to_string())
 }
 
-fn http_get_string(url: &str) -> Result<String> {
+pub(crate) fn http_get_string(url: &str) -> Result<String> {
     let resp = ureq::get(url)
         .set("user-agent", concat!("uwa/", env!("UWA_VERSION")))
         .call()
@@ -144,7 +144,7 @@ fn verify_sha256(archive: &std::path::Path, sum_file: &std::path::Path) -> Resul
     Ok(())
 }
 
-fn hex(bytes: &[u8]) -> String {
+pub(crate) fn hex(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut s = String::with_capacity(bytes.len() * 2);
     for b in bytes {

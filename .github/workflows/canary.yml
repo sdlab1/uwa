@@ -1,0 +1,128 @@
+name: canary
+
+on:
+  schedule:
+    - cron: '23 5 * * *' # 05:23 UTC daily
+  workflow_dispatch:
+
+concurrency:
+  group: canary
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  canary:
+    # Gate on a repository variable so forks and PRs never hit the
+    # real sites. Owners set `UWA_CANARY_ENABLED=true` and
+    # `UWA_TEST_LOGIN_COOKIES` (a base64 Chromium Cookies file) once.
+    if: github.repository == 'sdlab1/uwa' && vars.UWA_CANARY_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-node@v4
+        with: { node-version: '20' }
+
+      - name: Install Chromium
+        run: sudo apt-get update && sudo apt-get install -y chromium-browser
+
+      - name: Build
+        run: |
+          cargo build --release -p uwa-bin
+          (cd crates/uwa-api/static && npm ci --silent && npm run --silent build)
+
+      - name: Restore Chromium profile
+        env:
+          COOKIES: ${{ secrets.UWA_TEST_LOGIN_COOKIES }}
+        run: |
+          mkdir -p "$HOME/.uwa/chromium-profile"
+          echo "$COOKIES" | base64 -d > "$HOME/.uwa/chromium-profile/Cookies" || true
+
+      - name: Prepare config
+        run: |
+          cp crates/uwa-bin/config.example.toml uwa.toml
+          sed -i 's/^api_key.*/api_key = "canary"/' uwa.toml
+
+      - name: Launch Chromium and open provider tabs
+        run: |
+          /usr/bin/chromium-browser \
+            --headless=new --no-sandbox --disable-gpu \
+            --remote-debugging-port=9222 \
+            --user-data-dir="$HOME/.uwa/chromium-profile" \
+            --no-first-run --password-store=basic \
+            "https://chatgpt.com/" \
+            "https://claude.ai/" \
+            "https://gemini.google.com/" \
+            "https://chat.deepseek.com/" \
+            >/dev/null 2>&1 &
+          for i in $(seq 1 60); do
+            curl -sf http://127.0.0.1:9222/json/version >/dev/null && break
+            sleep 0.5
+          done
+          # Give the tabs a moment to actually render.
+          sleep 5
+
+      - name: Run canary
+        env:
+          UWA_CHROMIUM_WS: http://127.0.0.1:9222
+        run: |
+          ./target/release/uwa providers canary --markdown | tee /tmp/canary.md
+
+      - name: Copy JSON report into the repo
+        run: |
+          mkdir -p docs/canary
+          cp "$HOME/.uwa/canary/latest.json" docs/canary/latest.json
+          cp /tmp/canary.md docs/CANARY.md
+
+      - name: Commit results
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "chore(canary): nightly selector health"
+          file_pattern: |
+            docs/CANARY.md
+            docs/canary/latest.json
+          branch: main
+
+      - name: Open issue on a broken provider
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            let body = 'The canary run finished with a failing status.';
+            try {
+              const raw = fs.readFileSync(`${process.env.HOME}/.uwa/canary/latest.json`, 'utf8');
+              const report = JSON.parse(raw);
+              const broken = report.providers.filter(p => p.status === 'broken');
+              const degraded = report.providers.filter(p => p.status === 'degraded');
+              if (broken.length) {
+                body += `\n\n### Broken (${broken.length})\n`;
+                for (const b of broken) {
+                  body += `- \`${b.name}\` (registry ${b.registry_version})\n`;
+                }
+              }
+              if (degraded.length) {
+                body += `\n\n### Degraded (${degraded.length})\n`;
+                for (const d of degraded) {
+                  body += `- \`${d.name}\`: fallbacks used — ${d.fallbacks_used.join(', ')}\n`;
+                }
+              }
+            } catch (e) {
+              body += `\n\nCould not read report: ${e}`;
+            }
+            body += `\n\nSee ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `canary: selector health check failed (${new Date().toISOString().slice(0, 10)})`,
+              body,
+              labels: ['canary']
+            });

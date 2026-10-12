@@ -516,7 +516,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn overlay_ignores_schema_drift_in_capabilities() {
         // A malformed capabilities block degrades to the defaults with a
         // log line, never a panic.

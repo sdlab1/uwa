@@ -5,14 +5,11 @@
 
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Args, Subcommand};
-use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
 use uwa_config::registry::Registry;
-use uwa_config::{Config, ProviderCfg, RegistryEntry};
-use uwa_core::Transport;
+use uwa_config::{Config, ProviderCfg};
 
 use super::paths;
 use super::update::{hex, http_get_string};
@@ -51,6 +48,8 @@ enum ProvidersAction {
     /// Fetch the latest registry from GitHub, verify each entry against
     /// the manifest's SHA256, and write to `~/.uwa/providers/`.
     Update {
+        #[arg(long, env = "UWA_CONFIG", default_value = "uwa.toml")]
+        config: PathBuf,
         /// Skip verification (do not).
         #[arg(long)]
         no_verify: bool,
@@ -80,15 +79,19 @@ fn default_canary_path() -> PathBuf {
 
 pub async fn run(args: ProvidersArgs) -> Result<()> {
     match args.action {
-        ProvidersAction::List { config } => list(config),
-        ProvidersAction::Show { name, config } => show(name, config),
-        ProvidersAction::Diff { name, config } => diff(name, config),
-        ProvidersAction::Update { no_verify, dry_run } => update(no_verify, dry_run).await,
+        ProvidersAction::List { config } => list(&config),
+        ProvidersAction::Show { name, config } => show(&name, &config),
+        ProvidersAction::Diff { name, config } => diff(&name, &config),
+        ProvidersAction::Update {
+            config,
+            no_verify,
+            dry_run,
+        } => update(&config, no_verify, dry_run).await,
         ProvidersAction::Canary {
             config,
             out,
             markdown,
-        } => canary(config, out, markdown).await,
+        } => canary(&config, &out, markdown).await,
     }
 }
 
@@ -96,9 +99,9 @@ pub async fn run(args: ProvidersArgs) -> Result<()> {
 // list
 // ---------------------------------------------------------------------------
 
-fn list(config_path: PathBuf) -> Result<()> {
+fn list(config_path: &std::path::Path) -> Result<()> {
     let registry = Registry::load();
-    let cfg = load_or_empty(&config_path);
+    let cfg = load_or_empty(config_path);
 
     let mut overridden: Vec<String> = Vec::new();
     if let Some(cfg) = cfg.as_ref() {
@@ -113,15 +116,16 @@ fn list(config_path: PathBuf) -> Result<()> {
     if let Some(m) = registry.manifest() {
         println!("manifest version: {}", m.registry_version);
     }
-    if let Some(dir) = registry.cache_dir() {
-        println!("cache dir:        {}", dir.display());
-    } else {
-        println!("cache dir:        (none; using built-in)");
+    match registry.cache_dir() {
+        Some(dir) => println!("cache dir:        {}", dir.display()),
+        None => println!("cache dir:        (none; using built-in)"),
     }
     println!();
-    println!("{:<16} {:<14} {}", "provider", "version", "status");
+    println!("{:<16} {:<14} status", "provider", "version");
     for name in registry.names() {
-        let entry = registry.get(&name).expect("listed name exists");
+        let Some(entry) = registry.get(&name) else {
+            continue;
+        };
         let status = if overridden.contains(&name) {
             "user overrides some fields"
         } else if cfg
@@ -162,36 +166,28 @@ fn is_overridden(p: &ProviderCfg) -> bool {
 // show
 // ---------------------------------------------------------------------------
 
-fn show(name: String, config_path: PathBuf) -> Result<()> {
+fn show(name: &str, config_path: &std::path::Path) -> Result<()> {
     let registry = Registry::load();
     let entry = registry
-        .get(&name)
+        .get(name)
         .ok_or_else(|| anyhow!("provider `{name}` is not in the registry"))?;
 
-    let user = load_user_only(&config_path)?.providers.get(&name).cloned();
+    let user = load_user_only(config_path)?.providers.get(name).cloned();
 
     println!("provider: {name}");
     println!("registry version: {}", entry.meta.version);
     println!();
 
-    print_field("input", entry, user.as_ref(), |p| p.selectors.input.clone());
-    print_field("send_button", entry, user.as_ref(), |p| {
-        p.selectors.send_button.clone()
-    });
-    print_field("stop_button", entry, user.as_ref(), |p| {
-        p.selectors.stop_button.clone()
-    });
-    print_field("assistant_message", entry, user.as_ref(), |p| {
-        p.selectors.assistant_message.clone()
-    });
-    print_field("conversation_root", entry, user.as_ref(), |p| {
-        p.selectors.conversation_root.clone()
-    });
+    print_field("input", entry, user.as_ref());
+    print_field("send_button", entry, user.as_ref());
+    print_field("stop_button", entry, user.as_ref());
+    print_field("assistant_message", entry, user.as_ref());
+    print_field("conversation_root", entry, user.as_ref());
 
     println!();
     println!("alternates:");
     for field in ["input", "send_button", "stop_button", "assistant_message"] {
-        let alts = registry.alternates_for(&name, field);
+        let alts = registry.alternates_for(name, field);
         if alts.is_empty() {
             println!("  {field}: —");
         } else {
@@ -210,21 +206,9 @@ fn show(name: String, config_path: PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn print_field(
-    name: &str,
-    entry: &RegistryEntry,
-    user: Option<&ProviderCfg>,
-    get: impl Fn(&ProviderCfg) -> Option<String>,
-) {
-    let registry_val = match name {
-        "input" => entry.selectors.input.clone(),
-        "send_button" => entry.selectors.send_button.clone(),
-        "stop_button" => entry.selectors.stop_button.clone(),
-        "assistant_message" => entry.selectors.assistant_message.clone(),
-        "conversation_root" => entry.selectors.conversation_root.clone(),
-        _ => None,
-    };
-    let user_val = user.and_then(&get);
+fn print_field(name: &str, entry: &uwa_config::RegistryEntry, user: Option<&ProviderCfg>) {
+    let registry_val = selector_field(entry, name);
+    let user_val = user.and_then(|p| selector_field_user(p, name));
     let (source, value) = match (user_val.as_ref(), registry_val.as_ref()) {
         (Some(u), Some(r)) if u != r => ("user", Some(u.clone())),
         (Some(_), Some(r)) => ("user (=registry)", Some(r.clone())),
@@ -240,17 +224,41 @@ fn print_field(
     );
 }
 
+fn selector_field(entry: &uwa_config::RegistryEntry, field: &str) -> Option<String> {
+    let s = &entry.selectors;
+    match field {
+        "input" => s.input.clone(),
+        "send_button" => s.send_button.clone(),
+        "stop_button" => s.stop_button.clone(),
+        "assistant_message" => s.assistant_message.clone(),
+        "conversation_root" => s.conversation_root.clone(),
+        _ => None,
+    }
+}
+
+fn selector_field_user(p: &ProviderCfg, field: &str) -> Option<String> {
+    let s = &p.selectors;
+    match field {
+        "input" => s.input.clone(),
+        "send_button" => s.send_button.clone(),
+        "stop_button" => s.stop_button.clone(),
+        "assistant_message" => s.assistant_message.clone(),
+        "conversation_root" => s.conversation_root.clone(),
+        _ => None,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // diff
 // ---------------------------------------------------------------------------
 
-fn diff(name: String, config_path: PathBuf) -> Result<()> {
+fn diff(name: &str, config_path: &std::path::Path) -> Result<()> {
     let registry = Registry::load();
     let entry = registry
-        .get(&name)
+        .get(name)
         .ok_or_else(|| anyhow!("provider `{name}` is not in the registry"))?;
 
-    let user_only = load_user_only(&config_path)?.providers.get(&name).cloned();
+    let user_only = load_user_only(config_path)?.providers.get(name).cloned();
 
     let mut any = false;
     let mut print = |field: &str, user: Option<String>, registry_val: Option<String>| {
@@ -318,17 +326,9 @@ fn diff(name: String, config_path: PathBuf) -> Result<()> {
 fn load_user_only(path: &std::path::Path) -> Result<Config> {
     // A fresh registry with no entries: the merge becomes a no-op, so
     // the resulting config is exactly what the user's TOML says.
-    // Validation still runs; a user config that relies on the registry
-    // for selectors will fail here — that's the point: diff shows what
-    // the *user* actually wrote.
-    let empty = Registry::from_builtin();
-    let raw =
-        std::fs::read_to_string(path).with_context(|| format!("loading {}", path.display()))?;
-    let de = toml::Deserializer::new(&raw);
-    let cfg: Config =
-        serde_path_to_error::deserialize(de).map_err(|e| anyhow!("{}: {}", e.path(), e.inner()))?;
-    let _ = empty;
-    Ok(cfg)
+    let empty = Registry::default();
+    Config::load_from_path_with_registry(path, &empty)
+        .with_context(|| format!("loading {}", path.display()))
 }
 
 // ---------------------------------------------------------------------------
@@ -339,7 +339,7 @@ const MANIFEST_URL: &str =
     "https://raw.githubusercontent.com/sdlab1/uwa/main/providers/manifest.toml";
 const RAW_BASE: &str = "https://raw.githubusercontent.com/sdlab1/uwa/main/providers";
 
-async fn update(no_verify: bool, dry_run: bool) -> Result<()> {
+async fn update(config_path: &std::path::Path, no_verify: bool, dry_run: bool) -> Result<()> {
     let builtin = Registry::from_builtin();
     let cache_dir = paths::uwa_home().join("providers");
     std::fs::create_dir_all(&cache_dir)?;
@@ -353,17 +353,17 @@ async fn update(no_verify: bool, dry_run: bool) -> Result<()> {
     for (name, m) in &manifest.providers {
         let current = builtin
             .get(name)
-            .map(|e| e.meta.version.as_str())
-            .unwrap_or("(none)");
-        let newer = m.version.as_str() > current;
-        planned.push((name.clone(), current.to_string(), m.version.clone(), newer));
+            .map(|e| e.meta.version.clone())
+            .unwrap_or_else(|| "(none)".into());
+        let newer = m.version.as_str() > current.as_str();
+        planned.push((name.clone(), current, m.version.clone(), newer));
     }
     planned.sort_by(|a, b| a.0.cmp(&b.0));
 
     println!();
     println!(
-        "{:<16} {:<14} {:<14} {}",
-        "provider", "current", "registry", "action"
+        "{:<16} {:<14} {:<14} action",
+        "provider", "current", "registry"
     );
     for (name, cur, reg, newer) in &planned {
         let action = if *newer {
@@ -375,6 +375,7 @@ async fn update(no_verify: bool, dry_run: bool) -> Result<()> {
         };
         println!("{:<16} {:<14} {:<14} {}", name, cur, reg, action);
     }
+    let _ = config_path; // reserved: per-provider auth for live checks
 
     if dry_run {
         println!();
@@ -387,15 +388,14 @@ async fn update(no_verify: bool, dry_run: bool) -> Result<()> {
         if !*newer {
             continue;
         }
-        let m = manifest
-            .providers
-            .get(name)
-            .ok_or_else(|| anyhow!("manifest changed mid-run"))?;
+        let Some(m) = manifest.providers.get(name) else {
+            bail!("manifest changed mid-run");
+        };
         let url = format!("{RAW_BASE}/{}", m.file);
         println!("→ fetching {url}");
         let body = http_get_string(&url)?;
         if !no_verify {
-            let actual = sha256_hex(body.as_bytes());
+            let actual = hex(&sha256(body.as_bytes()));
             if actual != m.sha256 {
                 bail!(
                     "checksum mismatch for `{name}`: expected {}, got {}",
@@ -407,7 +407,7 @@ async fn update(no_verify: bool, dry_run: bool) -> Result<()> {
         let path = cache_dir.join(&m.file);
         std::fs::write(&path, body).with_context(|| format!("write {}", path.display()))?;
         println!("  ✓ {name} → {version}");
-        updated += 1;
+        updated = updated.saturating_add(1);
     }
 
     // Write the manifest last so a partial update is not "valid".
@@ -424,38 +424,36 @@ async fn update(no_verify: bool, dry_run: bool) -> Result<()> {
     Ok(())
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
+fn sha256(bytes: &[u8]) -> [u8; 32] {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
     h.update(bytes);
-    hex(&h.finalize())
+    h.finalize().into()
 }
 
 // ---------------------------------------------------------------------------
 // canary
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct CanaryReport {
     pub generated_at: String,
     pub uwa_version: String,
     pub providers: Vec<CanaryEntry>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct CanaryEntry {
     pub name: String,
     pub registry_version: String,
-    /// `ok` (all primary selectors matched), `degraded` (fallback used
-    /// for at least one), `broken` (nothing matched), `unavailable`
-    /// (no tab for the provider's URL).
+    /// `ok` / `degraded` / `broken` / `unavailable`.
     pub status: String,
-    pub checks: BTreeMap<String, CanaryCheck>,
+    pub checks: std::collections::BTreeMap<String, CanaryCheck>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fallbacks_used: Vec<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct CanaryCheck {
     pub primary: String,
     pub matched: u32,
@@ -466,10 +464,14 @@ pub struct CanaryCheck {
     pub error: Option<String>,
 }
 
-async fn canary(config_path: PathBuf, out: PathBuf, markdown: bool) -> Result<()> {
+async fn canary(
+    config_path: &std::path::Path,
+    out: &std::path::Path,
+    markdown: bool,
+) -> Result<()> {
     let registry = Registry::load();
     let config = std::sync::Arc::new(
-        Config::load_from_path_with_registry(&config_path, &registry)
+        Config::load_from_path_with_registry(config_path, &registry)
             .with_context(|| format!("loading {}", config_path.display()))?,
     );
 
@@ -478,7 +480,7 @@ async fn canary(config_path: PathBuf, out: PathBuf, markdown: bool) -> Result<()
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| "http://127.0.0.1:9222".into());
 
-    let transport: std::sync::Arc<dyn Transport> = std::sync::Arc::new(
+    let transport: std::sync::Arc<dyn uwa_core::Transport> = std::sync::Arc::new(
         uwa_browser::CdpTransport::connect(&cdp, Duration::from_secs(300), None)
             .await
             .with_context(|| format!("connect Chromium at {cdp}"))?,
@@ -505,10 +507,7 @@ async fn canary(config_path: PathBuf, out: PathBuf, markdown: bool) -> Result<()
         // Find a tab whose URL matches the provider.
         let matching = tab_urls.iter().find_map(|(tab, url)| {
             let parsed = url::Url::parse(url).ok()?;
-            if p.url_patterns
-                .iter()
-                .any(|pat| uwa_config::url_matches(pat, &parsed))
-            {
+            if p.url_patterns.iter().any(|pat| url_matches(pat, &parsed)) {
                 Some(tab.clone())
             } else {
                 None
@@ -526,7 +525,7 @@ async fn canary(config_path: PathBuf, out: PathBuf, markdown: bool) -> Result<()
         };
 
         let page = transport.page(&tab).await?;
-        let mut checks = BTreeMap::new();
+        let mut checks = std::collections::BTreeMap::new();
         let mut fallbacks = Vec::new();
         let mut all_ok = true;
         let mut any_ok = false;
@@ -537,7 +536,9 @@ async fn canary(config_path: PathBuf, out: PathBuf, markdown: bool) -> Result<()
                 "send_button" => p.selectors.send_button.clone(),
                 _ => p.selectors.assistant_message.clone(),
             };
-            let Some(primary) = primary else { continue };
+            let Some(primary) = primary else {
+                continue;
+            };
 
             // Try the primary first, then fallbacks, in order.
             let mut matched = 0u32;
@@ -563,7 +564,7 @@ async fn canary(config_path: PathBuf, out: PathBuf, markdown: bool) -> Result<()
                 }
             }
 
-            let ok = matched > 0 && matched_selector.as_deref() == Some(&primary);
+            let ok = matched > 0 && matched_selector.as_deref() == Some(primary.as_str());
             if matched > 0 {
                 any_ok = true;
             }
@@ -608,8 +609,8 @@ async fn canary(config_path: PathBuf, out: PathBuf, markdown: bool) -> Result<()
     if let Some(parent) = out.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(&out, serde_json::to_string_pretty(&report)?)
-        .with_context(|| format!("write {}", out.display()))?;
+    let json = serde_json::to_string_pretty(&report)?;
+    std::fs::write(out, json).with_context(|| format!("write {}", out.display()))?;
     println!("→ wrote {}", out.display());
 
     if markdown {
@@ -627,6 +628,14 @@ async fn eval_selector(page: &dyn uwa_core::Page, selector: &str) -> Result<u32>
     Ok(v.as_u64().unwrap_or(0) as u32)
 }
 
+fn url_matches(pattern: &str, url: &url::Url) -> bool {
+    let u = url.as_str();
+    match pattern.split_once('*') {
+        None => pattern == u,
+        Some((head, tail)) => u.starts_with(head) && (tail.is_empty() || u.ends_with(tail)),
+    }
+}
+
 fn now_iso() -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -637,8 +646,7 @@ fn now_iso() -> String {
     let hh = rem / 3600;
     let mm = (rem % 3600) / 60;
     let ss = rem % 60;
-    // Minimal date from epoch days; see uwa-conformance::score for the
-    // full version. We don't need calendar months for a machine timestamp.
+    // Machine timestamp without a chrono dependency (see uwa-conformance).
     format!("epoch+{days}dT{hh:02}:{mm:02}:{ss:02}Z")
 }
 
