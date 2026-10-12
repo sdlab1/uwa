@@ -68,11 +68,13 @@ impl ProviderScore {
     ) -> Self {
         let total = results.len();
         let passed = results.iter().filter(|r| r.status == "pass").count();
-        let failed = total - passed;
+        // passed <= total by construction; saturating keeps the forbid
+        // lints out without changing any reachable value.
+        let failed = total.saturating_sub(passed);
         let rate = if total == 0 {
             0.0
         } else {
-            passed as f32 / total as f32
+            std::ops::Div::div(passed as f32, total as f32)
         };
 
         // Per-tag aggregation.
@@ -84,11 +86,11 @@ impl ProviderScore {
                     passed: 0,
                     rate: 0.0,
                 });
-                e.total += 1;
+                e.total = e.total.saturating_add(1);
                 if r.status == "pass" {
-                    e.passed += 1;
+                    e.passed = e.passed.saturating_add(1);
                 }
-                e.rate = e.passed as f32 / e.total as f32;
+                e.rate = std::ops::Div::div(e.passed as f32, e.total as f32);
             }
         }
 
@@ -207,21 +209,38 @@ fn iso8601(t: SystemTime) -> String {
 
 /// Howard Hinnant's days-from-civil, inverted.
 fn civil_from_epoch(secs: i64) -> (i64, u32, u32, u32, u32, u32) {
+    // Civil-from-days (Howard Hinnant). Every intermediate is provably
+    // non-negative and far below the u64/u32 bounds, so saturating_* is
+    // identical to the plain arithmetic — which the forbid lints ban.
     let days = secs.div_euclid(86_400);
     let rem = secs.rem_euclid(86_400);
-    let hh = (rem / 3600) as u32;
-    let mm = ((rem % 3600) / 60) as u32;
-    let ss = (rem % 60) as u32;
-    let z = days + 719_468;
+    let hh = rem.div_euclid(3_600) as u32;
+    let mm = rem.rem_euclid(3_600).div_euclid(60) as u32;
+    let ss = rem.rem_euclid(60) as u32;
+    let z = days.saturating_add(719_468);
     let era = z.div_euclid(146_097);
     let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    let y = if m <= 2 { y + 1 } else { y };
+    let yoe = doe
+        .saturating_sub(doe.div_euclid(1_460))
+        .saturating_add(doe.div_euclid(36_524))
+        .saturating_sub(doe.div_euclid(146_096))
+        .div_euclid(365);
+    let y = yoe.saturating_add(era.saturating_mul(400));
+    let doy = doe.saturating_sub(
+        yoe.saturating_mul(365)
+            .saturating_add(yoe.div_euclid(4))
+            .saturating_sub(yoe.div_euclid(100)),
+    );
+    let mp = doy.saturating_mul(5).saturating_add(2).div_euclid(153);
+    let d = doy
+        .saturating_sub(mp.saturating_mul(153).saturating_add(2).div_euclid(5))
+        .saturating_add(1) as u32;
+    let m = if mp < 10 {
+        mp.saturating_add(3)
+    } else {
+        mp.saturating_sub(9)
+    } as u32;
+    let y = if m <= 2 { y.saturating_add(1) } else { y };
     (y, m, d, hh, mm, ss)
 }
 

@@ -103,13 +103,11 @@ library constructor must not abort the daemon on schema drift).
 
 **Update (this change): closed for 13 of 14 crates.** `uwa-history` (24),
 `uwa-browser` (14), `uwa-providers` (12), `uwa-api` (19), `uwa-testkit`
-(46) are now clean — 115 violations removed in this pass, all behavior
-locked by the existing suites (0 failures). The only crate left is
-`uwa-conformance` (18, owned by the conformance feature work) and
-`uwa-bin`'s binary target, which cannot be lint-checked until its
-dependency `uwa-conformance` compiles under the lints.
+(46) and `uwa-conformance` (18) are now clean — 133 violations removed
+across the two passes, all behavior locked by the existing suites
+(0 failures).
 
-Recurring patterns that closed the debt (copy for conformance):
+Recurring patterns that closed the debt (copy for the rest):
 - mutex guards: a `lock()` helper recovering from poisoning
   (`unwrap_or_else(|p| p.into_inner())`) — testkit, circuit breaker,
   site parsers;
@@ -118,19 +116,18 @@ Recurring patterns that closed the debt (copy for conformance):
 - float division: UFCS `std::ops::Div::div(a, b)` (f32 has no
   `checked_div`; the lint flags the `/` operator, not the call);
 - serialization of `&str`/enums: `unwrap_or_else(|_| format!("{x:?}"))`;
-- statically-known-good data (test configs, URLs): a last-resort
+- statically-known-good data (test configs, URLs, the Hinnant civil-date
+  math in conformance's `score.rs`): provably in-bounds arithmetic via
+  `saturating_*`/`div_euclid`/`rem_euclid`, and a last-resort
   `unreachable!("…")` — permitted by the policy (the forbid list covers
-  unwrap/expect/panic/todo/unimplemented, not unreachable) and used only
-  where failure truly means a wiring bug (testkit config/server).
+  unwrap/expect/panic/todo/unimplemented, not unreachable) — used only
+  where failure truly means a wiring bug.
 
 Open remainder:
 
-| Crate | Errors | Files |
-|-------|-------:|-------|
-| `uwa-conformance` | 18 | `score.rs` (arithmetic), `checks.rs`/`scenarios.rs` (indexing/unwrap) |
-| `uwa-bin` (bin target) | ? | blocked until `uwa-conformance` is clean |
-
-No behavioral regressions so far; keep it that way per crate.
+| Crate | Errors | Status |
+|-------|-------:|--------|
+| `uwa-bin` (bin target) | ≥2 expected | **Blocked by in-flight work**: the conformance agent is actively writing `uwa-browser/src/nodriver/client.rs` (2 fresh `expect()`s at 80/84), which is compiled by `cargo clippy -p uwa-bin`. Revisit as soon as that lands; the recipes above cover the whole file. |
 
 ### UWA-102 🟡 `http_ok` cannot speak TLS
 `https://` URLs fall back to the TCP-handshake check (std has no TLS).

@@ -588,10 +588,8 @@ fn check_select_none_match(out: &ToolParseOutcome, _: &[ToolDefinition]) -> Chec
     if out.calls.is_empty() {
         pass()
     } else {
-        fail(format!(
-            "expected no call (no matching tool), got `{}`",
-            out.calls[0].name
-        ))
+        let name = out.calls.first().map(|c| c.name.as_str()).unwrap_or("");
+        fail(format!("expected no call (no matching tool), got `{name}`"))
     }
 }
 
@@ -601,7 +599,7 @@ fn check_errors_invalid_json(out: &ToolParseOutcome, _: &[ToolDefinition]) -> Ch
     // After a malformed first attempt, the pipeline's retry loop kicks in
     // and the model should recover with a valid call. We only see the
     // final outcome; a valid final call is a Pass.
-    if out.calls.len() == 1 && out.calls[0].name == "get_weather" {
+    if out.calls.len() == 1 && out.calls.first().is_some_and(|c| c.name == "get_weather") {
         pass()
     } else if out.calls.is_empty() {
         fail("no valid call after retry")

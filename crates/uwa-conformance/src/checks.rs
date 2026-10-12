@@ -35,7 +35,11 @@ where
     if out.calls.len() > 1 {
         return fail(format!("expected 1 tool call, got {}", out.calls.len()));
     }
-    match f(&out.calls[0]) {
+    let Some(call) = out.calls.first() else {
+        // Unreachable: the emptiness guard above just ran.
+        return fail("expected 1 tool call, got 0");
+    };
+    match f(call) {
         Ok(()) => pass(),
         Err(e) => fail(e),
     }
@@ -76,13 +80,14 @@ pub fn exactly_one_name<'a>(
     calls: &'a [ToolCall],
     name: &'static str,
 ) -> Result<&'a ToolCall, String> {
-    if calls.len() != 1 {
-        return Err(format!("expected 1 call, got {}", calls.len()));
+    let call = match calls.first() {
+        Some(c) if calls.len() == 1 => c,
+        _ => return Err(format!("expected 1 call, got {}", calls.len())),
+    };
+    if call.name != name {
+        return Err(format!("expected `{name}`, got `{}`", call.name));
     }
-    if calls[0].name != name {
-        return Err(format!("expected `{name}`, got `{}`", calls[0].name));
-    }
-    Ok(&calls[0])
+    Ok(call)
 }
 
 /// Argument accessors — each returns a compact error suitable for the
