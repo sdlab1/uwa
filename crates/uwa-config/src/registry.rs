@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::{ExtractionStrategy, ProviderCfg, Selectors};
-use uwa_core::{Capabilities, NetRules, UwaError};
+use uwa_core::{NetRules, UwaError};
 
 include!(concat!(env!("OUT_DIR"), "/registry_generated.rs"));
 
@@ -380,6 +380,7 @@ fn cache_dir_from_env() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use uwa_core::Capabilities;
 
     #[test]
     fn builtin_registry_parses() {
