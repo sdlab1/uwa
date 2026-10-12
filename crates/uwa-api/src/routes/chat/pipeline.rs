@@ -36,10 +36,10 @@ use tokio::sync::mpsc;
 use uwa_core::types::openai::{ChatCompletionRequest, ChatMessage};
 use uwa_core::types::FinishReason;
 use uwa_core::TabId;
-use uwa_core::{ToolSpec, UwaError};
+use uwa_core::{Page, SiteProvider, ToolSpec, UwaError};
 use uwa_tools::emulation::{correction_prompt, validate_calls, ValidationOutcome};
 use uwa_tools::{
-    build_system_prompt, compose_browser_turn, parse, safe_emit_end, ToolCall, ToolDefinition,
+    build_system_prompt, compose_browser_turn, parse, safe_emit_end_for, ToolCall, ToolDefinition,
     ToolParseOutcome,
 };
 
@@ -62,8 +62,6 @@ pub enum StreamEvent {
     Error(UwaError),
 }
 
-/// RAII cleanup for multimodal temp files. Runs on every exit path,
-/// including errors and panics that unwind.
 fn unknown_model(state: &AppState, model: &str) -> UwaError {
     UwaError::UnknownModel(uwa_core::ModelNotFound::new(
         model,
@@ -71,6 +69,28 @@ fn unknown_model(state: &AppState, model: &str) -> UwaError {
     ))
 }
 
+/// Why the streaming turn ended early.
+enum Abort {
+    /// The consumer of the stream went away. Not the provider's fault: it
+    /// must not count against the circuit breaker, and nobody is left to
+    /// receive an error event.
+    ClientGone,
+    Failed(UwaError),
+}
+
+impl From<UwaError> for Abort {
+    fn from(e: UwaError) -> Self {
+        Abort::Failed(e)
+    }
+}
+
+/// Push one event to the client; a closed channel means the client left.
+async fn emit(tx: &mpsc::Sender<StreamEvent>, ev: StreamEvent) -> Result<(), Abort> {
+    tx.send(ev).await.map_err(|_| Abort::ClientGone)
+}
+
+/// RAII cleanup for multimodal temp files. Runs on every exit path,
+/// including errors and panics that unwind.
 struct AttachmentGuard(Vec<uwa_core::types::Attachment>);
 
 impl Drop for AttachmentGuard {
@@ -191,6 +211,17 @@ pub async fn run_pipeline_streaming(
     let result =
         run_pipeline_streaming_inner(state, req, all_specs, pinned_tab, &mut recorder, &tx).await;
 
+    let result: Result<_, UwaError> = match result {
+        Ok(v) => Ok(v),
+        Err(Abort::Failed(e)) => Err(e),
+        Err(Abort::ClientGone) => {
+            // Neutral for the breaker (neither success nor failure): the
+            // provider did nothing wrong. The permit is released on return.
+            recorder.finish_error("client disconnected");
+            Err(UwaError::Unavailable("client disconnected".into()))
+        }
+    };
+
     match &result {
         Ok((text, calls, finish)) => {
             breaker.record_success();
@@ -206,6 +237,7 @@ pub async fn run_pipeline_streaming(
                 "stream",
             );
         }
+        Err(UwaError::Unavailable(m)) if m == "client disconnected" => {}
         Err(e) => {
             breaker.record_failure();
             recorder.finish_error(&e.to_string());
@@ -246,7 +278,7 @@ async fn run_pipeline_streaming_inner(
     pinned_tab: Option<&TabId>,
     recorder: &mut RequestRecorder,
     tx: &mpsc::Sender<StreamEvent>,
-) -> Result<(String, Vec<ToolCall>, FinishReason), UwaError> {
+) -> Result<(String, Vec<ToolCall>, FinishReason), Abort> {
     let provider_cfg = state
         .config
         .provider_for_model(&req.model)
@@ -352,27 +384,36 @@ async fn run_pipeline_streaming_inner(
     let mut emitted_until: usize = 0;
     let mut ttft_recorded = false;
 
-    while let Some(chunk) = stream.next().await {
-        match chunk {
-            Ok(text) => {
-                if !ttft_recorded && !text.is_empty() {
-                    recorder.mark_first_delta();
-                    ttft_recorded = true;
-                }
-                acc.push_str(&text);
-
-                // Emit up to (but not past) the first tool-call marker so the
-                // client never sees protocol markers in the visible stream.
-                let target_end = safe_emit_end(&acc);
-                if target_end > emitted_until {
-                    let piece = acc[emitted_until..target_end].to_string();
-                    if !piece.is_empty() {
-                        let _ = tx.send(StreamEvent::Delta(piece)).await;
-                    }
-                    emitted_until = target_end;
-                }
+    loop {
+        // Race the next chunk against the client going away, so a slow or
+        // silent stretch (e.g. a tool call being generated, nothing to
+        // forward) still notices a disconnect and stops the browser.
+        let chunk = tokio::select! {
+            c = stream.next() => c,
+            () = tx.closed() => {
+                let _ = site.cancel(page.as_ref()).await;
+                return Err(Abort::ClientGone);
             }
-            Err(e) => return Err(e),
+        };
+        let Some(chunk) = chunk else { break };
+        let text = chunk?;
+        if !ttft_recorded && !text.is_empty() {
+            recorder.mark_first_delta();
+            ttft_recorded = true;
+        }
+        acc.push_str(&text);
+
+        // Emit up to (but not past) anything that may be a tool call, in
+        // any format `parse` understands, so the client never sees
+        // protocol markers or call JSON in the visible stream.
+        let target_end = safe_emit_end_for(&acc, &known_names);
+        if target_end > emitted_until {
+            let piece = acc[emitted_until..target_end].to_string();
+            if !piece.is_empty() && tx.send(StreamEvent::Delta(piece)).await.is_err() {
+                let _ = site.cancel(page.as_ref()).await;
+                return Err(Abort::ClientGone);
+            }
+            emitted_until = target_end;
         }
     }
 
@@ -381,34 +422,50 @@ async fn run_pipeline_streaming_inner(
         h.touch().await;
     }
 
-    let parsed: ToolParseOutcome = parse(&acc, &known_names);
-    let finish = if parsed.has_calls() {
-        FinishReason::ToolCalls
+    let first: ToolParseOutcome = parse(&acc, &known_names);
+    let (text, calls, finish) = if first.has_calls() {
+        // Same validation + self-heal as the buffered path. The retry
+        // reply is not streamed: only its verdict (calls, or plain text)
+        // reaches the client.
+        let (text, calls, finish) = resolve_tool_calls(
+            site.as_ref(),
+            page.as_ref(),
+            provider_cfg,
+            &defs,
+            &known_names,
+            send_timeout,
+            recorder,
+            acc,
+        )
+        .await?;
+        if calls.is_empty() && !text.is_empty() {
+            emit(tx, StreamEvent::Delta(text.clone())).await?;
+        }
+        (text, calls, finish)
     } else {
-        FinishReason::Stop
+        // Trailing text no tool call froze out of the stream.
+        if emitted_until < acc.len() {
+            let piece = acc[emitted_until..].to_string();
+            emit(tx, StreamEvent::Delta(piece)).await?;
+        }
+        (first.text, Vec::new(), FinishReason::Stop)
     };
 
-    recorder.record_tool_calls(parsed.calls.len());
-    if parsed.has_calls() {
+    if !calls.is_empty() {
+        recorder.record_tool_calls(calls.len());
         recorder.increment_round();
     }
 
-    // Trailing text (only relevant when no tool call froze the emission point).
-    if !parsed.has_calls() && emitted_until < acc.len() {
-        let piece = acc[emitted_until..].to_string();
-        if !piece.is_empty() {
-            let _ = tx.send(StreamEvent::Delta(piece)).await;
-        }
-    }
-
-    let _ = tx
-        .send(StreamEvent::Done {
+    emit(
+        tx,
+        StreamEvent::Done {
             finish,
-            tool_calls: parsed.calls.clone(),
-        })
-        .await;
+            tool_calls: calls.clone(),
+        },
+    )
+    .await?;
 
-    Ok((parsed.text, parsed.calls, finish))
+    Ok((text, calls, finish))
 }
 
 async fn run_pipeline_inner(
@@ -531,23 +588,49 @@ async fn run_pipeline_inner(
         h.touch().await;
     }
 
-    // Bridge-with-self-heal: parse; if the model emitted tool calls whose
-    // arguments fail schema validation, ask it to retry — bounded by
-    // `provider.max_tool_retries`. A provider with `max_tool_retries = 0`
-    // keeps the previous behavior and hands invalid calls straight through.
+    resolve_tool_calls(
+        site.as_ref(),
+        page.as_ref(),
+        provider_cfg,
+        &defs,
+        &known_names,
+        send_timeout,
+        recorder,
+        raw,
+    )
+    .await
+}
+
+/// Bridge-with-self-heal, shared by the buffered and streaming paths.
+///
+/// Parses `raw`; if the model emitted tool calls whose arguments fail schema
+/// validation, asks it to retry - bounded by `provider.max_tool_retries`. A
+/// provider with `max_tool_retries = 0` keeps the previous behavior and
+/// hands invalid calls straight through... after surfacing an error once the
+/// (zero) budget is spent.
+#[allow(clippy::too_many_arguments)]
+async fn resolve_tool_calls(
+    site: &dyn SiteProvider,
+    page: &dyn Page,
+    provider_cfg: &uwa_config::ProviderCfg,
+    defs: &[ToolDefinition],
+    known_names: &[String],
+    send_timeout: Duration,
+    recorder: &mut RequestRecorder,
+    mut raw: String,
+) -> Result<(String, Vec<ToolCall>, FinishReason), UwaError> {
     let max_retries = provider_cfg.max_tool_retries as usize;
     let mut attempt: usize = 0;
-    let mut raw = raw;
     loop {
-        let parsed: ToolParseOutcome = parse(&raw, &known_names);
+        let parsed: ToolParseOutcome = parse(&raw, known_names);
 
         if !parsed.has_calls() {
             return Ok((parsed.text, vec![], FinishReason::Stop));
         }
 
-        match validate_calls(&parsed.calls, &defs) {
+        match validate_calls(&parsed.calls, defs) {
             ValidationOutcome::Ok | ValidationOutcome::UnknownTools { .. } => {
-                // Unknown tools pass through — the client may know them
+                // Unknown tools pass through - the client may know them
                 // from a plugin we don't see.
                 recorder.record_tool_calls(parsed.calls.len());
                 recorder.increment_round();
@@ -572,18 +655,17 @@ async fn run_pipeline_inner(
                     corrections.join("; ")
                 );
 
-                // Send the correction as a browser turn. The correction
-                // is clearly marked so it isn't mistaken for a user turn
-                // in the visible conversation.
-                let prompt = correction_prompt(&corrections, &defs);
+                // The correction is clearly marked so it isn't mistaken
+                // for a user turn in the visible conversation.
+                let prompt = correction_prompt(&corrections, defs);
                 recorder.mark_send_start();
-                tokio::time::timeout(send_timeout, site.send_message(page.as_ref(), &prompt))
+                tokio::time::timeout(send_timeout, site.send_message(page, &prompt))
                     .await
                     .map_err(|_| UwaError::Timeout(send_timeout))??;
                 recorder.mark_send_end();
 
                 recorder.mark_send_start();
-                raw = site.wait_response(page.as_ref()).await?;
+                raw = site.wait_response(page).await?;
                 recorder.mark_wait_end();
             }
         }

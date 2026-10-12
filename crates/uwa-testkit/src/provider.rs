@@ -1,6 +1,8 @@
 //! Programmable [`SiteProvider`].
 
 use async_trait::async_trait;
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use url::Url;
@@ -18,6 +20,15 @@ pub struct MockProvider {
     matches: Arc<Mutex<bool>>,
     /// Everything `send_message` received, in order.
     sent: Arc<Mutex<Vec<String>>>,
+    /// Scripted answers, one per `wait_response` (the last one repeats).
+    script: Arc<Mutex<VecDeque<String>>>,
+    /// When set, `wait_response_stream` yields these chunks one by one.
+    chunks: Arc<Mutex<Option<Vec<String>>>>,
+    chunk_delay: Arc<Mutex<Duration>>,
+    /// How many chunks the pipeline actually pulled from the stream.
+    polled: Arc<AtomicUsize>,
+    /// How many times `cancel` ("click Stop") was called.
+    cancels: Arc<AtomicUsize>,
 }
 
 impl MockProvider {
@@ -35,7 +46,44 @@ impl MockProvider {
             },
             matches: Arc::new(Mutex::new(true)),
             sent: Arc::new(Mutex::new(Vec::new())),
+            script: Arc::new(Mutex::new(VecDeque::new())),
+            chunks: Arc::new(Mutex::new(None)),
+            chunk_delay: Arc::new(Mutex::new(Duration::ZERO)),
+            polled: Arc::new(AtomicUsize::new(0)),
+            cancels: Arc::new(AtomicUsize::new(0)),
         }
+    }
+
+    /// Answer each successive `wait_response` with the next item; the last
+    /// item repeats. Models a browser LLM that corrects itself on retry.
+    pub fn with_answers<I, S>(self, answers: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        *crate::lock(&self.script) = answers.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Stream the answer as these chunks, `delay` apart.
+    pub fn with_chunks<I, S>(self, chunks: I, delay: Duration) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        *crate::lock(&self.chunks) = Some(chunks.into_iter().map(Into::into).collect());
+        *crate::lock(&self.chunk_delay) = delay;
+        self
+    }
+
+    /// Chunks pulled from the response stream so far.
+    pub fn polled_chunks(&self) -> usize {
+        self.polled.load(Ordering::SeqCst)
+    }
+
+    /// Number of `cancel` calls so far.
+    pub fn cancel_count(&self) -> usize {
+        self.cancels.load(Ordering::SeqCst)
     }
 
     pub fn with_answer(self, a: &str) -> Self {
@@ -105,10 +153,44 @@ impl SiteProvider for MockProvider {
         if let Some(d) = delay {
             tokio::time::sleep(d).await;
         }
+        {
+            // Scripted answer sequence (added by the conformance work):
+            // pop until one is left, then keep returning it.
+            let mut script = crate::lock(&self.script);
+            if script.len() > 1 {
+                if let Some(next) = script.pop_front() {
+                    return Ok(next);
+                }
+            } else if let Some(only) = script.front() {
+                return Ok(only.clone());
+            }
+        }
         Ok(crate::lock(&self.answer).clone())
     }
 
+    async fn wait_response_stream(&self, page: &dyn Page) -> Result<uwa_core::ResponseStream> {
+        let chunks = crate::lock(&self.chunks).clone();
+        let Some(chunks) = chunks else {
+            let text = self.wait_response(page).await?;
+            return Ok(Box::pin(futures::stream::iter(vec![Ok(text)])));
+        };
+        let delay = *crate::lock(&self.chunk_delay);
+        let polled = self.polled.clone();
+        Ok(Box::pin(futures::stream::unfold(
+            (chunks.into_iter(), polled),
+            move |(mut it, polled)| async move {
+                let next = it.next()?;
+                if !delay.is_zero() {
+                    tokio::time::sleep(delay).await;
+                }
+                polled.fetch_add(1, Ordering::SeqCst);
+                Some((Ok(next), (it, polled)))
+            },
+        )))
+    }
+
     async fn cancel(&self, _page: &dyn Page) -> Result<()> {
+        self.cancels.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 

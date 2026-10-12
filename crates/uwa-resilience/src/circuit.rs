@@ -132,6 +132,12 @@ impl CircuitBreaker {
 
     pub fn record_success(&self) {
         self.with(|inner| {
+            // A verdict from a call admitted *before* the trip is stale: it
+            // must not close an Open circuit. Only a half-open probe (or
+            // ordinary Closed traffic) may.
+            if inner.state == CircuitState::Open {
+                return;
+            }
             inner.state = CircuitState::Closed;
             inner.failures.clear();
             inner.opened_at = None;
@@ -143,6 +149,12 @@ impl CircuitBreaker {
     pub fn record_failure(&self) {
         self.with(|inner| {
             let now = Instant::now();
+            // Stragglers admitted before the trip keep failing while Open;
+            // they must neither pile up in the window nor restart the
+            // cooldown clock.
+            if inner.state == CircuitState::Open {
+                return;
+            }
             if inner.state == CircuitState::HalfOpen {
                 inner.state = CircuitState::Open;
                 inner.opened_at = Some(now);
@@ -343,5 +355,74 @@ mod tests {
         cb.record_success();
         assert_eq!(cb.state(), CircuitState::Closed);
         assert!(cb.allow().is_ok());
+    }
+
+    // ---- regressions: late verdicts from calls admitted before the trip ----
+
+    fn tripped(cooldown: Duration) -> CircuitBreaker {
+        let cb = CircuitBreaker::new(
+            "test",
+            CircuitCfg {
+                failure_threshold: 2,
+                rolling_window: Duration::from_secs(60),
+                cooldown,
+                half_open_max_calls: 1,
+            },
+        );
+        cb.record_failure();
+        cb.record_failure();
+        assert_eq!(cb.state(), CircuitState::Open);
+        cb
+    }
+
+    #[test]
+    fn late_success_does_not_close_an_open_breaker() {
+        // A request admitted while Closed finishes after the breaker
+        // tripped. Its success says nothing about the provider's *current*
+        // health; only a half-open probe may close the circuit.
+        let cb = tripped(Duration::from_secs(60));
+        cb.record_success();
+        assert_eq!(cb.state(), CircuitState::Open);
+        assert!(cb.allow().is_err());
+    }
+
+    #[test]
+    fn late_failures_do_not_extend_the_cooldown() {
+        let cb = tripped(Duration::from_millis(120));
+        std::thread::sleep(Duration::from_millis(80));
+        // Stragglers from before the trip keep failing; the cooldown clock
+        // must not restart.
+        cb.record_failure();
+        cb.record_failure();
+        std::thread::sleep(Duration::from_millis(60));
+        assert!(
+            cb.allow().is_ok(),
+            "cooldown restarted by late failures: still open after 140ms"
+        );
+    }
+
+    #[test]
+    fn late_success_during_half_open_from_old_call_keeps_probe_semantics() {
+        // Half-open with the probe in flight: a straggler's success must not
+        // be mistaken for the probe's verdict... but a probe success still
+        // closes. (Single-slot breaker: any success in half-open is the
+        // verdict we have, so this documents the accepted behaviour.)
+        let cb = tripped(Duration::from_millis(30));
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(cb.allow().is_ok());
+        cb.record_success();
+        assert_eq!(cb.state(), CircuitState::Closed);
+    }
+
+    #[test]
+    fn reading_state_does_not_hand_out_probe_slots() {
+        let cb = tripped(Duration::from_millis(30));
+        std::thread::sleep(Duration::from_millis(50));
+        // Polling (metrics gauge) must not consume or invent probe slots.
+        for _ in 0..5 {
+            assert_eq!(cb.state(), CircuitState::HalfOpen);
+        }
+        assert!(cb.allow().is_ok(), "first probe must be admitted");
+        assert!(cb.allow().is_err(), "only one probe at a time");
     }
 }

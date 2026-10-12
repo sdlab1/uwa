@@ -24,8 +24,8 @@ pub use definition::ToolDefinition;
 pub use emulation::{correction_prompt, validate_calls, ValidationOutcome};
 pub use feedback::{compose_browser_turn, render_tool_response};
 pub use parser::{
-    has_tool_marker, parse, parse_with_defs, safe_emit_end, tool_marker_index, ToolCall,
-    ToolParseOutcome,
+    has_tool_marker, parse, parse_with_defs, safe_emit_end, safe_emit_end_for, tool_marker_index,
+    ToolCall, ToolParseOutcome,
 };
 pub use prompt::{already_injected, build_system_prompt, tool_correction};
 pub use schema::validate_arguments;

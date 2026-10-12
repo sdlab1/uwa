@@ -28,7 +28,7 @@ pub fn stream_response(
 
     tokio::spawn(async move {
         // Role chunk first (OpenAI convention).
-        let _ = tx
+        if tx
             .send(Ok(sse_chunk(
                 &stream_id,
                 created,
@@ -36,7 +36,11 @@ pub fn stream_response(
                 json!({"role": "assistant"}),
                 None,
             )))
-            .await;
+            .await
+            .is_err()
+        {
+            return; // client gone: drop `rx` so the producer stops
+        }
 
         let mut calls: Vec<ToolCall> = Vec::new();
         let mut finish = FinishReason::Stop;
@@ -47,7 +51,7 @@ pub fn stream_response(
             match ev {
                 StreamEvent::Delta(text) => {
                     completion_text.push_str(&text);
-                    let _ = tx
+                    if tx
                         .send(Ok(sse_chunk(
                             &stream_id,
                             created,
@@ -55,7 +59,11 @@ pub fn stream_response(
                             json!({ "content": text }),
                             None,
                         )))
-                        .await;
+                        .await
+                        .is_err()
+                    {
+                        return; // client gone: drop `rx` so the producer stops
+                    }
                 }
                 StreamEvent::Done {
                     finish: f,
@@ -79,10 +87,16 @@ pub fn stream_response(
                         }],
                         "error": { "message": e.to_string() }
                     });
-                    let _ = tx
+                    if tx
                         .send(Ok(Event::default().data(payload.to_string())))
-                        .await;
-                    let _ = tx.send(Ok(Event::default().data("[DONE]"))).await;
+                        .await
+                        .is_err()
+                    {
+                        return; // client gone: drop `rx` so the producer stops
+                    }
+                    if tx.send(Ok(Event::default().data("[DONE]"))).await.is_err() {
+                        return; // client gone: drop `rx` so the producer stops
+                    }
                     return;
                 }
             }
@@ -103,10 +117,16 @@ pub fn stream_response(
                 }],
                 "error": { "message": "stream producer dropped before completion" }
             });
-            let _ = tx
+            if tx
                 .send(Ok(Event::default().data(payload.to_string())))
-                .await;
-            let _ = tx.send(Ok(Event::default().data("[DONE]"))).await;
+                .await
+                .is_err()
+            {
+                return; // client gone: drop `rx` so the producer stops
+            }
+            if tx.send(Ok(Event::default().data("[DONE]"))).await.is_err() {
+                return; // client gone: drop `rx` so the producer stops
+            }
             return;
         }
 
@@ -128,7 +148,7 @@ pub fn stream_response(
                     })
                 })
                 .collect();
-            let _ = tx
+            if tx
                 .send(Ok(sse_chunk(
                     &stream_id,
                     created,
@@ -136,7 +156,11 @@ pub fn stream_response(
                     json!({ "tool_calls": wire }),
                     None,
                 )))
-                .await;
+                .await
+                .is_err()
+            {
+                return; // client gone: drop `rx` so the producer stops
+            }
         }
 
         let finish_str = match finish {
@@ -145,7 +169,7 @@ pub fn stream_response(
             FinishReason::Length => "length",
             FinishReason::ContentFilter => "content_filter",
         };
-        let _ = tx
+        if tx
             .send(Ok(sse_chunk(
                 &stream_id,
                 created,
@@ -153,7 +177,11 @@ pub fn stream_response(
                 json!({}),
                 Some(finish_str),
             )))
-            .await;
+            .await
+            .is_err()
+        {
+            return; // client gone: drop `rx` so the producer stops
+        }
 
         // Optional usage chunk (stream_options.include_usage) — the OpenAI
         // shape is: empty choices array, populated usage object. Emitted
@@ -173,11 +201,16 @@ pub fn stream_response(
                 "choices": [],
                 "usage": usage,
             });
-            let _ = tx
+            if tx
                 .send(Ok(Event::default().data(usage_chunk.to_string())))
-                .await;
+                .await
+                .is_err()
+            {
+                return; // client gone: drop `rx` so the producer stops
+            }
         }
 
+        // Last frame: nothing follows, so a failed send needs no early exit.
         let _ = tx.send(Ok(Event::default().data("[DONE]"))).await;
     });
 
@@ -249,6 +282,45 @@ mod tests {
         assert!(frames
             .iter()
             .any(|f| f.json()["choices"][0]["delta"]["content"] == "hello"));
+    }
+
+    #[tokio::test]
+    async fn client_gone_closes_the_producer_channel() {
+        // The HTTP client disconnects: the SSE body is dropped. The writer
+        // must notice and drop its receiver, so the pipeline (which holds
+        // the browser tab and a provider permit) sees a closed channel
+        // instead of generating into the void.
+        let (tx, rx) = mpsc::channel(16);
+        let resp = stream_response(RequestId::new(), "gpt-4o".into(), 1_000, rx, false, 3);
+        drop(resp);
+        tx.send(StreamEvent::Delta("x".into())).await.ok();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(tx.is_closed(), "writer kept the receiver alive");
+    }
+
+    #[test]
+    fn sse_chunk_carries_the_openai_chunk_shape() {
+        // Event has no accessors; its Debug output holds the wire payload.
+        let dbg = format!(
+            "{:?}",
+            sse_chunk(
+                "req_1",
+                100,
+                "gpt-4o",
+                json!({"content": "hi"}),
+                Some("stop")
+            )
+        );
+        for needle in [
+            "chat.completion.chunk",
+            "req_1",
+            "gpt-4o",
+            "content",
+            "finish_reason",
+            "stop",
+        ] {
+            assert!(dbg.contains(needle), "missing {needle} in {dbg}");
+        }
     }
 
     #[tokio::test]
