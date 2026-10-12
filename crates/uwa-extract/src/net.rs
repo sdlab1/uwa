@@ -32,6 +32,8 @@ pub struct SseParser {
     buf: String,
     cur_event: Option<String>,
     cur_data: Vec<String>,
+    /// UTF-8 BOMs only ever appear once, at stream start (UWA-106).
+    bom_pending: bool,
 }
 
 impl SseParser {
@@ -42,7 +44,15 @@ impl SseParser {
     /// Feed a chunk. Returns all complete frames that became available.
     /// Partial data is buffered until a blank line terminator arrives.
     pub fn feed(&mut self, chunk: &str) -> Vec<SseFrame> {
-        self.buf.push_str(chunk);
+        // Some servers open the stream with a UTF-8 BOM; without this strip
+        // it would glue itself onto the first field name (`\u{feff}event`).
+        if self.bom_pending && !chunk.is_empty() {
+            self.bom_pending = false;
+            self.buf
+                .push_str(chunk.strip_prefix('\u{feff}').unwrap_or(chunk));
+        } else {
+            self.buf.push_str(chunk);
+        }
         let mut out = Vec::new();
         while let Some(nl) = self.buf.find('\n') {
             let line = self.buf[..nl].trim_end_matches('\r').to_string();
@@ -531,6 +541,19 @@ mod tests {
         assert!(p.feed("data:  tail").is_empty());
         let f = p.finish().unwrap();
         assert_eq!(f.data, " tail");
+    }
+
+    #[test]
+    fn sse_strips_utf8_bom_at_stream_start() {
+        // UWA-106: some servers open the stream with a BOM; without the
+        // strip it would glue onto the first field name.
+        let mut p = SseParser::new();
+        let frames = p.feed("\u{feff}event: message\ndata: hi\n\n");
+        assert_eq!(frames[0].event.as_deref(), Some("message"));
+        assert_eq!(frames[0].data, "hi");
+        // Stripped once, at stream start only.
+        let frames = p.feed("data: second\n\n");
+        assert_eq!(frames[0].data, "second");
     }
 
     #[test]

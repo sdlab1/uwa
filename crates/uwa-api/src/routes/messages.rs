@@ -142,7 +142,12 @@ async fn messages_inner(
             )
             .await;
         });
-        Ok(stream_anthropic_from_channel(msg_id, effective_model, rx))
+        Ok(stream_anthropic_from_channel(
+            msg_id,
+            effective_model,
+            estimate_input_tokens(&req),
+            rx,
+        ))
     } else {
         let (text, calls, finish) = crate::routes::chat::pipeline::run_pipeline(
             &state,
@@ -390,6 +395,25 @@ fn stringify_anthropic_content(v: &Value) -> String {
 }
 
 fn estimate_usage(req: &MessagesRequest, text: &str, calls: &[ToolCall]) -> AnthropicUsage {
+    let input = estimate_input_tokens(req);
+
+    let mut output = uwa_tools::estimate(text);
+    for c in calls {
+        output = output
+            .saturating_add(uwa_tools::estimate(&c.name))
+            .saturating_add(uwa_tools::estimate(&c.arguments.to_string()));
+    }
+
+    AnthropicUsage {
+        input_tokens: input,
+        output_tokens: output.max(1),
+    }
+}
+
+/// Estimated prompt size — the input half of [`estimate_usage`], reused by
+/// the streaming writer: Anthropic's `message_delta.usage` carries
+/// cumulative `input_tokens` + `output_tokens` (UWA-104).
+fn estimate_input_tokens(req: &MessagesRequest) -> u32 {
     let mut input: u32 = 0;
     if let Some(sys) = &req.system {
         input = input.saturating_add(uwa_tools::estimate(&sys.as_text()));
@@ -405,18 +429,7 @@ fn estimate_usage(req: &MessagesRequest, text: &str, calls: &[ToolCall]) -> Anth
             input = input.saturating_add(uwa_tools::estimate(&s));
         }
     }
-
-    let mut output = uwa_tools::estimate(text);
-    for c in calls {
-        output = output
-            .saturating_add(uwa_tools::estimate(&c.name))
-            .saturating_add(uwa_tools::estimate(&c.arguments.to_string()));
-    }
-
-    AnthropicUsage {
-        input_tokens: input.max(1),
-        output_tokens: output.max(1),
-    }
+    input.max(1)
 }
 
 // ---------- non-streaming response ----------
@@ -465,6 +478,7 @@ fn build_response(
 fn stream_anthropic_from_channel(
     id: String,
     model: String,
+    input_tokens: u32,
     mut rx: mpsc::Receiver<crate::routes::chat::pipeline::StreamEvent>,
 ) -> Response {
     use crate::routes::chat::pipeline::StreamEvent;
@@ -608,7 +622,10 @@ fn stream_anthropic_from_channel(
                 json!({
                     "type": "message_delta",
                     "delta": { "stop_reason": stop_reason, "stop_sequence": null },
-                    "usage": { "output_tokens": completion }
+                    "usage": {
+                        "input_tokens": input_tokens,
+                        "output_tokens": completion
+                    }
                 }),
             )))
             .await;
@@ -907,7 +924,7 @@ mod tests {
         drive: impl FnOnce(mpsc::Sender<crate::routes::chat::pipeline::StreamEvent>),
     ) -> Vec<crate::routes::sse_testing::SseFrame> {
         let (tx, rx) = mpsc::channel(16);
-        let resp = stream_anthropic_from_channel("msg_1".into(), "claude".into(), rx);
+        let resp = stream_anthropic_from_channel("msg_1".into(), "claude".into(), 7, rx);
         drive(tx);
         crate::routes::sse_testing::collect(resp).await
     }
@@ -971,6 +988,9 @@ mod tests {
         assert_eq!(frames[8].json()["index"], 2);
 
         assert_eq!(frames[11].json()["delta"]["stop_reason"], "tool_use");
+        // Anthropic's message_delta.usage carries cumulative input_tokens
+        // alongside output_tokens (UWA-104).
+        assert_eq!(frames[11].json()["usage"]["input_tokens"], 7);
         assert!(frames[12].json()["type"] == "message_stop");
     }
 

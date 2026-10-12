@@ -97,6 +97,35 @@ library constructor must not abort the daemon on schema drift).
 
 ---
 
+### UWA-104 ✅ `/v1/messages` stream `message_delta.usage` now carries `input_tokens`
+Anthropic sends cumulative `input_tokens` + `output_tokens` there; we
+sent only `output_tokens`. Fixed here: `estimate_input_tokens()` (the
+input half of `estimate_usage`, shared with the buffered path) is
+threaded into `stream_anthropic_from_channel` and emitted in
+`message_delta.usage`. Test: `anthropic_stream_happy_path_two_tool_calls`
+asserts `usage.input_tokens`.
+
+### UWA-106 ✅ `SseParser` strips a UTF-8 BOM at stream start
+A leading `\u{feff}` used to glue onto the first field name. Fixed here:
+one `strip_prefix('\u{feff}')` on the first non-empty `feed()`, tracked
+by a `bom_pending` flag so it applies exactly once. Test:
+`sse_strips_utf8_bom_at_stream_start`.
+
+### UWA-107 ✅ `daemon status` explains an unreadable config
+`if let Ok(cfg)` silently dropped the whole `health:` row. Fixed here:
+`match` prints `health: config unreadable ({e}); daemon liveness unknown`
+— the daemon may be fine on a config the CLI rejects, so the row stays
+honest instead of disappearing.
+
+### UWA-109 ✅ Registry overlay fills `capabilities` from built-in entries
+`Registry::overlay()` now applies the entry's `[capabilities]` block
+(parsed via `serde_json::from_value::<Capabilities>`, schema drift
+logged and skipped) when the provider carries none of its own — a
+fully-default `Capabilities` is the "user left it unset" signal, and any
+explicit user flag counts as intent and wins. Tests:
+`overlay_fills_default_capabilities_from_the_registry`,
+`overlay_keeps_user_capabilities`, `overlay_ignores_schema_drift_in_capabilities`.
+
 ## ⬜ Open
 
 ### UWA-101 🟡 Forbid-lint debt in the remaining lib code (88 violations)
@@ -125,9 +154,7 @@ Recurring patterns that closed the debt (copy for the rest):
 
 Open remainder:
 
-| Crate | Errors | Status |
-|-------|-------:|--------|
-| `uwa-bin` (bin target) | — | **Blocked by the concurrent agent's in-flight `commands/providers.rs`** (untracked, does not compile yet: `cannot find attribute serde`). Its other files are expected to be mostly clean — the daemon module already went through the same recipes. Revisit when the providers command lands; the recipes above cover everything. |
+| `uwa-bin` (bin target) | — | **Blocked by the environment, not by code debt**: `uwa-bin` is the only crate using clap's derive API, and generated `Args`/`Subcommand`/`Parser` code carries internal `#[allow(clippy::restriction)]` — incompatible with the `-F` forbid from the sandbox config (E0453). Options: change the sandbox `-F` to `-D` (allow-overridable), port `uwa-bin` to clap's builder API, or exclude it from clippy runs. The hand-written daemon module itself already passes the recipes. |
 
 ### UWA-102 🟡 `http_ok` cannot speak TLS
 `https://` URLs fall back to the TCP-handshake check (std has no TLS).
@@ -144,24 +171,10 @@ of restarted. Fix: compare `st_dev`/`st_ino` (`std::os::unix::fs::MetadataExt`)
 between polls and restart on inode change. Tests would need a
 rename-and-recreate fixture.
 
-### UWA-104 ⚪ `/v1/messages` stream `message_delta.usage` lacks `input_tokens`
-Anthropic sends cumulative `input_tokens` + `output_tokens` there; we
-send only `output_tokens`. No client observed to break. Fix: thread the
-estimated input count into `stream_anthropic_from_channel`.
-
 ### UWA-105 ⚪ `/v1/responses` `response.completed` carries a non-standard `finish_reason`
 The Responses API has no such field inside the response object. Harmless
 (additive), but a spec-perfect writer would drop it and put the signal
 into `status`/`incomplete_details`.
-
-### UWA-106 ⚪ `SseParser` does not strip a UTF-8 BOM
-A leading `\u{feff}` would land in the first field value. No known
-vendor sends one. Fix: one `strip_prefix('\u{feff}')` on the first
-`feed()`.
-
-### UWA-107 ⚪ `daemon status` silently skips the health line when the config fails to parse
-`if let Ok(cfg) = …` — a broken TOML prints no `health:` row and no
-explanation. Fix: `match` and print `health: config unreadable ({e})`.
 
 ### UWA-108 🟡 Forbid lints vs test code (`--all-targets` debt)
 The cycle cleaned **lib** targets. Test modules across the workspace
@@ -171,10 +184,3 @@ stays red even where the lib is clean. Either (a) port tests to
 `unwrap_or`/`assert!`-style, or (b) declare `#![cfg_attr(test,
 allow(clippy::unwrap_used, clippy::expect_used))]` per crate as an
 explicit, documented policy decision.
-
-### UWA-109 ⚪ Registry overlay does not fill `capabilities` from built-in entries
-`Registry::overlay()` fills `url_patterns`, `selectors`, `net`,
-`selectors_version` — but not `capabilities`, so a user overriding a
-registered provider gets serde defaults (all features off) instead of
-the entry's advertised capabilities. Fix: one more block in `overlay()`
-+ a test mirroring `registry_fills_missing_selectors_for_known_provider`.

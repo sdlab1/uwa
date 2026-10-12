@@ -185,14 +185,21 @@ fn status(config_path: PathBuf) -> Result<()> {
     println!("log:      {}", paths::daemon_log().display());
 
     // Best-effort: read the port out of the TOML and probe /healthz.
-    if let Ok(cfg) = uwa_config::Config::load_from_path(&config_path) {
-        let port = cfg.server.port;
-        let url = format!("http://127.0.0.1:{port}/healthz");
-        if http_ok(&url) {
-            println!("health:   ok ({url})");
-            println!("dashboard http://127.0.0.1:{port}/");
-        } else {
-            println!("health:   no response ({url})");
+    match uwa_config::Config::load_from_path(&config_path) {
+        Ok(cfg) => {
+            let port = cfg.server.port;
+            let url = format!("http://127.0.0.1:{port}/healthz");
+            if http_ok(&url) {
+                println!("health:   ok ({url})");
+                println!("dashboard http://127.0.0.1:{port}/");
+            } else {
+                println!("health:   no response ({url})");
+            }
+        }
+        // The daemon may still be fine on a config the CLI cannot parse
+        // with the same rules; say so instead of dropping the row silently.
+        Err(e) => {
+            println!("health:   config unreadable ({e}); daemon liveness unknown");
         }
     }
     Ok(())

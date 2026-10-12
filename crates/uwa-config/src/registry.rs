@@ -289,6 +289,24 @@ impl Registry {
         if provider.selectors_version.is_none() {
             provider.selectors_version = Some(entry.meta.version.clone());
         }
+        // Capabilities (UWA-109): fill only when the provider carries none
+        // of its own — `Capabilities` is not Option, so a fully-default
+        // value is the "user left it unset" signal; any explicit user flag
+        // counts as intent and wins.
+        let caps = &provider.capabilities;
+        let user_set_any =
+            caps.streams || caps.tool_calls || caps.vision || caps.max_context_tokens.is_some();
+        if !user_set_any {
+            if let Some(raw) = &entry.capabilities {
+                match serde_json::from_value::<uwa_core::Capabilities>(raw.clone()) {
+                    Ok(caps) => provider.capabilities = caps,
+                    Err(e) => tracing::warn!(
+                        name = %name,
+                        "registry entry capabilities do not match the schema, ignoring: {e}"
+                    ),
+                }
+            }
+        }
     }
 
     /// Fallback candidates for a named field of a named provider.
@@ -439,6 +457,70 @@ mod tests {
         p.url_patterns = vec!["https://user.test/*".into()];
         reg.overlay("p", &mut p);
         assert_eq!(p.url_patterns, vec!["https://user.test/*".to_string()]);
+    }
+
+    fn entry_with_capabilities(caps: serde_json::Value) -> RegistryEntry {
+        RegistryEntry {
+            meta: RegistryMeta {
+                name: "p".into(),
+                version: "1.0.0".into(),
+                schema: 1,
+                updated_at: String::new(),
+            },
+            url_patterns: vec![],
+            selectors: Selectors::default(),
+            alternates: Alternates::default(),
+            net: None,
+            extraction: None,
+            capabilities: Some(caps),
+        }
+    }
+
+    #[test]
+    fn overlay_fills_default_capabilities_from_the_registry() {
+        // UWA-109: a registered provider with a capabilities block gets it
+        // applied when the user config left capabilities untouched.
+        let mut reg = Registry::default();
+        reg.entries.insert(
+            "p".into(),
+            entry_with_capabilities(serde_json::json!({
+                "streams": true, "tool_calls": true, "vision": false
+            })),
+        );
+        let mut p = ProviderCfg::default_for_test("p");
+        reg.overlay("p", &mut p);
+        assert!(p.capabilities.streams);
+        assert!(p.capabilities.tool_calls);
+        assert!(!p.capabilities.vision);
+    }
+
+    #[test]
+    fn overlay_keeps_user_capabilities() {
+        // Any explicit user flag counts as intent and wins.
+        let mut reg = Registry::default();
+        reg.entries.insert(
+            "p".into(),
+            entry_with_capabilities(serde_json::json!({"streams": true})),
+        );
+        let mut p = ProviderCfg::default_for_test("p");
+        p.capabilities.tool_calls = true; // user intent
+        reg.overlay("p", &mut p);
+        assert!(p.capabilities.tool_calls);
+        assert!(!p.capabilities.streams, "registry must not leak in");
+    }
+
+    #[test]
+    fn overlay_ignores_schema_drift_in_capabilities() {
+        // A malformed capabilities block degrades to the defaults with a
+        // log line, never a panic.
+        let mut reg = Registry::default();
+        reg.entries.insert(
+            "p".into(),
+            entry_with_capabilities(serde_json::json!({"streams": "yes please"})),
+        );
+        let mut p = ProviderCfg::default_for_test("p");
+        reg.overlay("p", &mut p);
+        assert!(!p.capabilities.streams);
     }
 
     #[test]
