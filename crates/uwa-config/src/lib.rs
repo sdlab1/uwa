@@ -20,10 +20,14 @@ use uwa_core::{Capabilities, UwaError};
 pub mod features;
 pub mod groups;
 pub mod preset;
+pub mod registry;
 
 pub use features::{FilePasteCfg, MediaCfg, PromptPaddingCfg, ProxyCfg};
 pub use groups::{GroupCfg, GroupMember, GroupStrategy};
 pub use preset::{EffectiveProviderCfg, PresetCfg};
+pub use registry::{
+    Alternates, Candidates, ManifestEntry, Registry, RegistryEntry, RegistryManifest,
+};
 
 pub type Result<T> = std::result::Result<T, UwaError>;
 
@@ -213,7 +217,12 @@ fn default_drain_secs() -> u64 {
 pub struct ProviderCfg {
     pub name: String,
     /// URL patterns (glob-ish: `https://chatgpt.com/*`).
+    /// Defaults to empty so the registry overlay can fill it for a
+    /// registered provider (parse → overlay → validate; validation still
+    /// rejects an empty pattern list when nothing filled it).
+    #[serde(default)]
     pub url_patterns: Vec<String>,
+    #[serde(default)]
     pub capabilities: Capabilities,
     /// Selectors — everything DOM-related lives here, never in code.
     #[serde(default)]
@@ -370,17 +379,43 @@ fn default_pinning() -> bool {
 
 impl Config {
     pub fn load_from_path(p: impl AsRef<Path>) -> Result<Self> {
-        let text = std::fs::read_to_string(p.as_ref())
-            .map_err(|e| UwaError::Config(format!("read {}: {e}", p.as_ref().display())))?;
-        Self::load_from_str(&text)
+        let registry = Registry::load();
+        Self::load_from_path_with_registry(p, &registry)
     }
 
     pub fn load_from_str(s: &str) -> Result<Self> {
+        let registry = Registry::load();
+        Self::load_from_str_with_registry(s, &registry)
+    }
+
+    /// Same as [`load_from_path`], but with a caller-supplied registry.
+    /// Tests pass [`Registry::from_builtin`] to make assertions
+    /// independent of the user's cache directory.
+    pub fn load_from_path_with_registry(p: impl AsRef<Path>, registry: &Registry) -> Result<Self> {
+        let text = std::fs::read_to_string(p.as_ref())
+            .map_err(|e| UwaError::Config(format!("read {}: {e}", p.as_ref().display())))?;
+        Self::load_from_str_with_registry(&text, registry)
+    }
+
+    /// Parse, overlay the registry, validate. Overlay happens **before**
+    /// validation so a user config that omits a selector the registry
+    /// provides still passes.
+    pub fn load_from_str_with_registry(s: &str, registry: &Registry) -> Result<Self> {
         let de = toml::Deserializer::new(s);
-        let cfg: Config = serde_path_to_error::deserialize(de)
+        let mut cfg: Config = serde_path_to_error::deserialize(de)
             .map_err(|e| UwaError::Config(format!("{}: {}", e.path(), e.inner())))?;
+        cfg.apply_registry(registry);
         cfg.validate()?;
         Ok(cfg)
+    }
+
+    /// Overlay the registry onto every provider the user config mentions.
+    /// Providers the user config does not mention are never added — the
+    /// registry is a source of overrides, not a source of providers.
+    pub fn apply_registry(&mut self, registry: &Registry) {
+        for (name, p) in self.providers.iter_mut() {
+            registry.overlay(name, p);
+        }
     }
 
     /// Single place where a [`Config`] is declared sound. Everything
@@ -757,6 +792,49 @@ mod tests {
         let (p, name) = cfg.resolve_model("openai/gpt-4o").unwrap();
         assert_eq!(p.name, "chatgpt");
         assert_eq!(name, "gpt-4o");
+    }
+
+    #[test]
+    fn rejects_provider_missing_send_button_when_registry_has_no_entry() {
+        // `demo` is not a registered name, so nothing fills the gap.
+        let toml = r####"
+        [server]
+        bind = "127.0.0.1"
+        port = 8080
+        [providers.demo]
+        name = "demo"
+        url_patterns = ["https://demo.test/*"]
+        capabilities = { streams = true, tool_calls = false, vision = false }
+        [providers.demo.selectors]
+        input = "#prompt"
+        assistant_message = ".assistant"
+        "####;
+        let err = Config::load_from_str_with_registry(toml, &Registry::from_builtin())
+            .expect_err("missing send_button must be rejected");
+        assert!(err.to_string().contains("send_button"), "{err}");
+    }
+
+    #[test]
+    fn registry_fills_missing_selectors_for_known_provider() {
+        // `chatgpt` is registered, so the user only has to override what
+        // they actually want to change.
+        let toml = r####"
+        [server]
+        bind = "127.0.0.1"
+        port = 8080
+        [providers.chatgpt]
+        name = "chatgpt"
+        [providers.chatgpt.selectors]
+        input = "#custom-input"
+        "####;
+        let cfg = Config::load_from_str_with_registry(toml, &Registry::from_builtin())
+            .expect("registry fills the rest");
+        let p = &cfg.providers["chatgpt"];
+        assert_eq!(p.selectors.input.as_deref(), Some("#custom-input"));
+        // Filled in from the registry.
+        assert!(p.selectors.send_button.is_some());
+        assert!(p.selectors.assistant_message.is_some());
+        assert!(p.selectors_version.is_some());
     }
 
     #[test]

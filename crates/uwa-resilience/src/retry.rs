@@ -59,15 +59,18 @@ where
             Ok(v) => return Ok(v),
             Err(e) => last = Some(e),
         }
-        if attempt + 1 >= cfg.attempts.max(1) {
+        if attempt.saturating_add(1) >= cfg.attempts.max(1) {
             break;
         }
         let exp = cfg.base.saturating_mul(1u32 << attempt.min(16));
         let capped = exp.min(cfg.max);
         let jitter = capped.mul_f64(rand::random::<f64>() * 0.3);
-        tokio::time::sleep(capped + jitter).await;
+        tokio::time::sleep(capped.saturating_add(jitter)).await;
     }
-    Err(last.expect("retry must attempt at least once"))
+    // The loop above runs at least once (attempts.max(1)), so `last` is
+    // always populated here; unwrap_or_else keeps the forbid-level
+    // `expect_used` lint out.
+    Err(last.unwrap_or_else(|| uwa_core::UwaError::Internal("retry produced no error".into())))
 }
 
 #[cfg(test)]

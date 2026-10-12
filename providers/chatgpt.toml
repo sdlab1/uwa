@@ -1,0 +1,63 @@
+# ChatGPT web UI — selector registry entry.
+#
+# `selectors` holds the current primary values. `alternates` holds
+# fallback candidates tried in order when the primary matches 0 elements;
+# `uwa-api`'s /admin/selector-test reports which one matched and the
+# Config page offers a one-click apply. Alternates never silently replace
+# the primary — the pipeline keeps using what the config says until the
+# user or the registry updates.
+
+# Top-level keys: everything under `[meta]` belongs to that table, so the
+# patterns must live above it for the registry overlay to see them.
+url_patterns = [
+    "https://chatgpt.com/*",
+    "https://chat.openai.com/*",
+]
+
+[meta]
+name        = "chatgpt"
+version     = "2026.01.15"
+schema      = 1
+updated_at  = "2026-01-15T00:00:00Z"
+
+[selectors]
+input             = "#prompt-textarea"
+send_button       = "[data-testid=send-button]"
+stop_button       = "[data-testid=stop-button]"
+assistant_message = "[data-message-author-role=assistant]"
+conversation_root = "main"
+
+[alternates.input]
+candidates = [
+    "#prompt-textarea",
+    "div[contenteditable=true][data-lexical-editor]",
+    "textarea[placeholder]",
+    "form textarea",
+]
+
+[alternates.send_button]
+candidates = [
+    "[data-testid=send-button]",
+    "button[aria-label*='Send']",
+    "button[type=submit]",
+]
+
+[alternates.assistant_message]
+candidates = [
+    "[data-message-author-role=assistant]",
+    "article[data-testid^=conversation-turn]:has(.markdown)",
+    ".markdown.prose",
+]
+
+[net]
+url_contains    = ["/backend-api/conversation"]
+mime_contains   = ["text/event-stream"]
+idle_timeout_ms = 30000
+[net.decoder]
+kind = "site"
+name = "chatgpt"
+
+[capabilities]
+streams     = true
+tool_calls  = true
+vision      = false

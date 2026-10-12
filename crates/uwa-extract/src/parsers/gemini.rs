@@ -68,7 +68,7 @@ impl SiteStreamParser for GeminiParser {
         if latest.is_empty() {
             return None;
         }
-        let mut last = self.last_full.lock().unwrap();
+        let mut last = self.last_full.lock().unwrap_or_else(|p| p.into_inner());
         if latest == last.as_str() {
             return Some(String::new());
         }

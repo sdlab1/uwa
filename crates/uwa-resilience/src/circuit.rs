@@ -78,7 +78,9 @@ impl CircuitBreaker {
     }
 
     fn with<R>(&self, f: impl FnOnce(&mut Inner) -> R) -> R {
-        let mut g = self.inner.lock().expect("circuit mutex poisoned");
+        // Recover from poisoning: the guarded state is plain counters, and
+        // a panicked caller must not wedge the breaker forever.
+        let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         f(&mut g)
     }
 
@@ -113,7 +115,7 @@ impl CircuitBreaker {
                         inner.half_open_in_flight = if stale {
                             1
                         } else {
-                            inner.half_open_in_flight + 1
+                            inner.half_open_in_flight.saturating_add(1)
                         };
                         inner.half_open_probe_at = Some(now);
                         Ok(())

@@ -1,0 +1,42 @@
+# DeepSeek web UI — selector registry entry.
+
+url_patterns = ["https://chat.deepseek.com/*"]
+
+[meta]
+name       = "deepseek"
+version    = "2026.01.15"
+schema     = 1
+updated_at = "2026-01-15T00:00:00Z"
+
+
+[selectors]
+input             = "textarea#chat-input"
+send_button       = "div[role=button].send"
+stop_button       = "div[role=button].stop"
+assistant_message = "[data-role=assistant]"
+
+[alternates.input]
+candidates = [
+    "textarea#chat-input",
+    "textarea[placeholder]",
+    "div[contenteditable=true]",
+]
+
+[alternates.send_button]
+candidates = [
+    "div[role=button].send",
+    "button[type=submit]",
+    "button[aria-label*='Send']",
+]
+
+[alternates.assistant_message]
+candidates = [
+    "[data-role=assistant]",
+    ".ds-markdown",
+    "[class*=assistant]",
+]
+
+[capabilities]
+streams    = true
+tool_calls = true
+vision     = false

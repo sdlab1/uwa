@@ -22,13 +22,14 @@ pub fn estimate(text: &str) -> u32 {
     }
     let mut units: u64 = 0;
     for ch in text.chars() {
-        units += if ch.is_ascii_alphanumeric() || ch == ' ' || ch == '\n' {
+        let weight: u64 = if ch.is_ascii_alphanumeric() || ch == ' ' || ch == '\n' {
             1
         } else if ch.is_ascii() {
             2
         } else {
             5
         };
+        units = units.saturating_add(weight);
     }
     // Round up so a single character doesn't collapse to 0.
     units.div_ceil(4).max(1) as u32

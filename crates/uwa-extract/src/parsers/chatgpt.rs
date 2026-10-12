@@ -55,7 +55,7 @@ impl SiteStreamParser for ChatGptParser {
             .pointer("/v/message/content/parts/0")
             .and_then(Value::as_str)
         {
-            let mut last = self.last_full.lock().unwrap();
+            let mut last = self.last_full.lock().unwrap_or_else(|p| p.into_inner());
             return Some(diff(text, &mut last));
         }
 

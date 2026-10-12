@@ -137,7 +137,7 @@ pub fn json_path_str(root: &Value, path: &str) -> Option<String> {
                     }
                 }
                 Segment::Wildcard => {
-                    wildcards += 1;
+                    wildcards = wildcards.saturating_add(1);
                     match v {
                         Value::Object(map) => next.extend(map.values()),
                         Value::Array(arr) => next.extend(arr.iter()),
@@ -155,7 +155,10 @@ pub fn json_path_str(root: &Value, path: &str) -> Option<String> {
     if parts.is_empty() {
         None
     } else if wildcards == 0 {
-        Some(parts.into_iter().next().unwrap())
+        // Exactly one survivor through every segment — `next()` cannot be
+        // `None` here, and returning it directly keeps the forbid-level
+        // `unwrap_used` lint happy.
+        parts.into_iter().next()
     } else {
         Some(parts.join("\n"))
     }
@@ -177,46 +180,52 @@ enum Segment {
     Wildcard,
 }
 
+/// Parse `a.b[0].c` / `a.*.b` into segments. Char-driven (`char_indices`),
+/// not byte-driven: multi-byte keys are first-class, and no raw byte
+/// offsets/slicing survive (satisfies the forbid-level `indexing_slicing`
+/// and `arithmetic_side_effects` lints). An unclosed `[` is a `None`.
 fn parse_path(path: &str) -> Option<Vec<Segment>> {
     if path.is_empty() {
         return None;
     }
     let mut out = Vec::new();
-    let bytes = path.as_bytes();
-    let mut i = 0;
     let mut cur = String::new();
-    while i < bytes.len() {
-        match bytes[i] {
-            b'.' => {
+    let mut chars = path.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '.' => {
                 if !cur.is_empty() {
                     out.push(make_seg(&cur));
                     cur.clear();
                 }
-                i += 1;
             }
-            b'[' => {
+            '[' => {
                 if !cur.is_empty() {
                     out.push(make_seg(&cur));
                     cur.clear();
                 }
-                let end = path[i..].find(']')?;
-                let inner = &path[i + 1..i + end];
+                // Collect the bracket content until the matching `]`; a
+                // missing closer is a malformed path.
+                let mut inner = String::new();
+                let mut closed = false;
+                for ch in chars.by_ref() {
+                    if ch == ']' {
+                        closed = true;
+                        break;
+                    }
+                    inner.push(ch);
+                }
+                if !closed {
+                    return None;
+                }
                 if inner == "*" {
                     out.push(Segment::Wildcard);
                 } else {
                     let idx: usize = inner.parse().ok()?;
                     out.push(Segment::Index(idx));
                 }
-                i += end + 1;
             }
-            _ => {
-                // Decode a whole UTF-8 scalar: `bytes[i] as char` mangled
-                // every non-ASCII key — each byte became its own bogus
-                // `char`, so a key like `помощь` never matched.
-                let ch = path[i..].chars().next()?;
-                cur.push(ch);
-                i += ch.len_utf8();
-            }
+            _ => cur.push(c),
         }
     }
     if !cur.is_empty() {

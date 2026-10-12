@@ -1,0 +1,39 @@
+# Signed index of provider selector entries.
+#
+# `uwa providers update` fetches this file and compares it against the
+# built-in copy that ships with the binary. When a provider's version in
+# this manifest is newer, its entry file is downloaded and verified
+# against the SHA256 recorded here before it replaces the cached copy.
+#
+# The registry is authoritative only for fields the user config leaves
+# unset; per-field overrides in `uwa.toml` always win. See
+# `docs/PROVIDERS.md` for the merge rules.
+
+schema = 1
+registry_version = "2026.01.15"
+generated_at = "2026-01-15T00:00:00Z"
+min_uwa_version = "0.1.0"
+
+[providers.chatgpt]
+file    = "chatgpt.toml"
+version = "2026.01.15"
+sha256  = "PLACEHOLDER_CHATGPT"
+notes   = "Refresh input selector after the Jan-2026 UI change."
+
+[providers.claude]
+file    = "claude.toml"
+version = "2026.01.15"
+sha256  = "PLACEHOLDER_CLAUDE"
+notes   = "Add div.ProseMirror as alternate input."
+
+[providers.gemini]
+file    = "gemini.toml"
+version = "2026.01.15"
+sha256  = "PLACEHOLDER_GEMINI"
+notes   = "Update send-button aria label."
+
+[providers.deepseek]
+file    = "deepseek.toml"
+version = "2026.01.15"
+sha256  = "PLACEHOLDER_DEEPSEEK"
+notes   = "Initial registry entry."

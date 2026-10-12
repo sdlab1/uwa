@@ -117,15 +117,29 @@ impl SessionManager {
         let mut lease_count: std::collections::HashMap<TabId, usize> =
             std::collections::HashMap::new();
         for e in self.entries.iter() {
-            *lease_count.entry(e.value().tab.clone()).or_default() += 1;
+            let count = lease_count.entry(e.value().tab.clone()).or_default();
+            *count = count.saturating_add(1);
         }
-        let offset = (self.rr.fetch_add(1, Ordering::Relaxed) % tabs.len() as u64) as usize;
-        let tab = tabs[offset..]
+        // Rotate the scan order without raw modulo/slicing (forbid-level
+        // lints): checked_rem + get() with an explicit empty fallback.
+        let offset = u64::try_from(tabs.len())
+            .ok()
+            .and_then(|len| self.rr.fetch_add(1, Ordering::Relaxed).checked_rem(len))
+            .unwrap_or(0) as usize;
+        let rotated = tabs
+            .get(offset..)
+            .unwrap_or(&[])
             .iter()
-            .chain(tabs[..offset].iter())
+            .chain(tabs.get(..offset).unwrap_or(&[]).iter());
+        // `tabs` is checked non-empty above, so `min_by_key` always finds a
+        // tab; the match keeps the forbid-level `expect_used` lint out.
+        let tab = match rotated
             .min_by_key(|t| lease_count.get(*t).copied().unwrap_or(0))
-            .expect("tabs is non-empty")
-            .clone();
+            .cloned()
+        {
+            Some(t) => t,
+            None => return Err(UwaError::Unavailable("no browser tabs available".into())),
+        };
 
         let fresh = Arc::new(SessionEntry {
             tab: tab.clone(),

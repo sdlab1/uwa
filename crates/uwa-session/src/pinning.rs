@@ -110,11 +110,20 @@ pub fn decide(
     // The client's history must extend what we saw before, byte for byte.
     // Any divergence (edited message, truncated history, new conversation
     // reusing the same tab) forces a full replay.
-    if hash_messages(&messages[..state.messages_seen]) != state.prefix_hash {
+    // Slicing a Vec by a runtime index is a forbid-level lint; `get()`
+    // returning None (seen-count past the current history) is by definition
+    // a divergence → full replay.
+    let Some(prefix) = messages.get(..state.messages_seen) else {
+        return PinDecision::Full;
+    };
+    if hash_messages(prefix) != state.prefix_hash {
         return PinDecision::Full;
     }
-    PinDecision::Delta {
-        messages: messages[state.messages_seen..].to_vec(),
+    match messages.get(state.messages_seen..) {
+        Some(rest) => PinDecision::Delta {
+            messages: rest.to_vec(),
+        },
+        None => PinDecision::Full,
     }
 }
 
@@ -152,7 +161,7 @@ impl PinningStore {
         let mut g = self.inner.write().await;
         let before = g.len();
         g.retain(|_, s| now.duration_since(s.last_updated) < ttl);
-        before - g.len()
+        before.saturating_sub(g.len())
     }
 
     pub async fn len(&self) -> usize {

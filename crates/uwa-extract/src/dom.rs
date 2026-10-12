@@ -51,7 +51,11 @@ impl DomExtractor {
                 let stop_present: bool = page
                     .eval(&format!(
                         "!!document.querySelector({})",
-                        serde_json::to_string(stop_sel).unwrap()
+                        // `to_string` of a &str cannot fail; the fallback
+                        // (Rust debug-quoted string) only keeps the JS valid
+                        // in an impossible branch — and avoids the forbid-
+                        // level `unwrap_used` lint.
+                        serde_json::to_string(stop_sel).unwrap_or_else(|_| format!("{stop_sel:?}"))
                     ))
                     .await
                     .ok()

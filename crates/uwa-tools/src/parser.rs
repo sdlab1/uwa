@@ -92,18 +92,20 @@ fn scan_xml(
 ) {
     const OPEN: &str = "<tool_call>";
     const CLOSE: &str = "</tool_call>";
-    let mut i = 0;
-    while let Some(rel) = text[i..].find(OPEN) {
-        let start = i + rel;
-        let body_start = start + OPEN.len();
-        let Some(rel_end) = text[body_start..].find(CLOSE) else {
+    let mut i = 0usize;
+    while let Some(rel) = text.get(i..).and_then(|s| s.find(OPEN)) {
+        let start = i.saturating_add(rel);
+        let body_start = start.saturating_add(OPEN.len());
+        let Some(rel_end) = text.get(body_start..).and_then(|s| s.find(CLOSE)) else {
             break;
         };
-        let body_end = body_start + rel_end;
-        let end = body_end + CLOSE.len();
-        if let Some(call) = parse_call_json(&text[body_start..body_end], known) {
-            out.push(call);
-            consumed.push(start..end);
+        let body_end = body_start.saturating_add(rel_end);
+        let end = body_end.saturating_add(CLOSE.len());
+        if let Some(slice) = text.get(body_start..body_end) {
+            if let Some(call) = parse_call_json(slice, known) {
+                out.push(call);
+                consumed.push(start..end);
+            }
         }
         i = end;
     }
@@ -119,23 +121,25 @@ fn scan_fence(
     consumed: &mut Vec<Range<usize>>,
 ) {
     let opener = format!("```{tag}");
-    let mut i = 0;
-    while let Some(rel) = text[i..].find(&opener) {
-        let start = i + rel;
-        let after_open = start + opener.len();
+    let mut i = 0usize;
+    while let Some(rel) = text.get(i..).and_then(|s| s.find(&opener)) {
+        let start = i.saturating_add(rel);
+        let after_open = start.saturating_add(opener.len());
         // Skip to end of first line (allow trailing whitespace/newline)
-        let body_start = match text[after_open..].find('\n') {
-            Some(nl) => after_open + nl + 1,
+        let body_start = match text.get(after_open..).and_then(|s| s.find('\n')) {
+            Some(nl) => after_open.saturating_add(nl).saturating_add(1),
             None => break,
         };
-        let Some(rel_close) = text[body_start..].find("```") else {
+        let Some(rel_close) = text.get(body_start..).and_then(|s| s.find("```")) else {
             break;
         };
-        let body_end = body_start + rel_close;
-        let end = body_end + 3;
-        if let Some(call) = parse_call_json(&text[body_start..body_end], known) {
-            out.push(call);
-            consumed.push(start..end);
+        let body_end = body_start.saturating_add(rel_close);
+        let end = body_end.saturating_add(3);
+        if let Some(slice) = text.get(body_start..body_end) {
+            if let Some(call) = parse_call_json(slice, known) {
+                out.push(call);
+                consumed.push(start..end);
+            }
         }
         i = end;
     }
@@ -154,7 +158,7 @@ fn scan_bare(
     let mut offset = 0usize;
     for line in text.split_inclusive('\n') {
         let start = offset;
-        let end = offset + line.len();
+        let end = offset.saturating_add(line.len());
         offset = end;
 
         let trimmed = line.trim();
@@ -235,14 +239,16 @@ pub fn safe_emit_end(buf: &str) -> usize {
     for m in MARKERS {
         // Longest proper prefix of `m` that `buf` ends with.
         for len in (1..m.len()).rev() {
-            if len <= buf.len() && buf.is_char_boundary(buf.len() - len) && buf.ends_with(&m[..len])
+            if len <= buf.len()
+                && buf.is_char_boundary(buf.len().saturating_sub(len))
+                && buf.ends_with(&m[..len])
             {
                 hold = hold.max(len);
                 break;
             }
         }
     }
-    buf.len() - hold
+    buf.len().saturating_sub(hold)
 }
 
 /// Convenience: parse using definitions (not just names).

@@ -61,8 +61,8 @@ impl ExtractionPipeline {
     }
 
     pub async fn run(&self, page: &dyn Page, cfg: &PipelineCfg) -> Result<ExtractionOutcome> {
-        // 1. DOM-only path.
-        if matches!(cfg.strategy, ExtractionStrategy::DomOnly) || cfg.net.is_none() {
+        // 1. DOM-only strategy — even when net rules exist.
+        if matches!(cfg.strategy, ExtractionStrategy::DomOnly) {
             let finisher = Finisher::new(cfg.finisher.clone());
             let finish = finisher.wait(page).await?;
             let text = cfg.dom.wait_and_extract(page).await?;
@@ -74,7 +74,18 @@ impl ExtractionPipeline {
         }
 
         // 2. Network-first: race the net stream against a wall-clock bound.
-        let rules = cfg.net.as_ref().unwrap();
+        // Falls back to the DOM path when no net rules are configured
+        // (`let-else` instead of the old is_some-guard + unwrap).
+        let Some(rules) = cfg.net.as_ref() else {
+            let finisher = Finisher::new(cfg.finisher.clone());
+            let finish = finisher.wait(page).await?;
+            let text = cfg.dom.wait_and_extract(page).await?;
+            return Ok(ExtractionOutcome {
+                text,
+                source: ExtractionSource::Dom,
+                finish,
+            });
+        };
         let mut stream = self.net.deltas(page, rules).await?;
         let finisher = Finisher::new(cfg.finisher.clone());
 

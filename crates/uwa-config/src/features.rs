@@ -90,7 +90,7 @@ impl PromptPaddingCfg {
         if !self.enabled || self.segments_per_side == 0 {
             return body.to_string();
         }
-        let mut out = String::with_capacity(body.len() + 512);
+        let mut out = String::with_capacity(body.len().saturating_add(512));
         for _ in 0..self.segments_per_side {
             out.push_str(&self.marker_text);
             if self.randomize {

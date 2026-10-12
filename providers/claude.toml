@@ -1,0 +1,50 @@
+# Claude web UI — selector registry entry.
+
+url_patterns = ["https://claude.ai/*"]
+
+[meta]
+name       = "claude"
+version    = "2026.01.15"
+schema     = 1
+updated_at = "2026-01-15T00:00:00Z"
+
+
+[selectors]
+input             = "div[contenteditable=true]"
+send_button       = "button[aria-label='Send message']"
+stop_button       = "button[aria-label='Stop']"
+assistant_message = "[data-testid=assistant-message]"
+
+[alternates.input]
+candidates = [
+    "div[contenteditable=true]",
+    "div.ProseMirror",
+    "div[role=textbox]",
+]
+
+[alternates.send_button]
+candidates = [
+    "button[aria-label='Send message']",
+    "button[aria-label*='Send']",
+    "button[type=submit]",
+]
+
+[alternates.assistant_message]
+candidates = [
+    "[data-testid=assistant-message]",
+    "div.font-claude-message",
+    "[data-is-streaming]",
+]
+
+[net]
+url_contains    = ["/api/"]
+mime_contains   = ["text/event-stream"]
+idle_timeout_ms = 30000
+[net.decoder]
+kind = "site"
+name = "claude"
+
+[capabilities]
+streams    = true
+tool_calls = true
+vision     = true

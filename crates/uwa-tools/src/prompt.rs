@@ -18,7 +18,7 @@ You may emit several <tool_call> blocks. Any text outside <tool_call> blocks is 
 Do not invent tool names. Use only the tools listed below."#;
 
 pub fn build_system_prompt(tools: &[ToolDefinition]) -> String {
-    let mut s = String::with_capacity(512 + tools.len() * 256);
+    let mut s = String::with_capacity(512usize.saturating_add(tools.len().saturating_mul(256)));
     s.push_str(PREAMBLE);
     s.push_str("\n\nAvailable tools (JSON Schema):\n");
     for t in tools {

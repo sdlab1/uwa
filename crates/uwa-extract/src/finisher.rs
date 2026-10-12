@@ -94,7 +94,7 @@ impl Finisher {
                 let present: bool = page
                     .eval(&format!(
                         "!!document.querySelector({})",
-                        serde_json::to_string(sel).unwrap()
+                        serde_json::to_string(sel).unwrap_or_else(|_| format!("{sel:?}"))
                     ))
                     .await
                     .ok()

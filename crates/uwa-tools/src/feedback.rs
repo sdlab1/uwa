@@ -25,10 +25,10 @@ pub fn compose_browser_turn(messages: &[ChatMessage]) -> String {
     let start = messages
         .iter()
         .rposition(|m| m.role == Role::Assistant)
-        .map(|i| i + 1)
+        .and_then(|i| i.checked_add(1))
         .unwrap_or(0);
     let mut out = String::new();
-    for m in &messages[start..] {
+    for m in messages.get(start..).unwrap_or(&[]) {
         let chunk = match m.role {
             // A system message is part of the turn: without this it would be
             // silently dropped on its way to the browser.

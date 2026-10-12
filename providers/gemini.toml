@@ -1,0 +1,50 @@
+# Gemini web UI — selector registry entry.
+
+url_patterns = ["https://gemini.google.com/*"]
+
+[meta]
+name       = "gemini"
+version    = "2026.01.15"
+schema     = 1
+updated_at = "2026-01-15T00:00:00Z"
+
+
+[selectors]
+input             = "div.ql-editor"
+send_button       = "button.send-button"
+stop_button       = "button.stop-button"
+assistant_message = "model-response"
+
+[alternates.input]
+candidates = [
+    "div.ql-editor",
+    "rich-textarea .ql-editor",
+    "textarea[aria-label*='prompt']",
+]
+
+[alternates.send_button]
+candidates = [
+    "button.send-button",
+    "button[aria-label='Send message']",
+    "button[type=submit]",
+]
+
+[alternates.assistant_message]
+candidates = [
+    "model-response",
+    "message-content",
+    "[data-test-id=model-response]",
+]
+
+[net]
+url_contains    = ["batchexecute"]
+mime_contains   = ["application/json", "text/plain", "text/event-stream"]
+idle_timeout_ms = 30000
+[net.decoder]
+kind = "site"
+name = "gemini"
+
+[capabilities]
+streams    = true
+tool_calls = false
+vision     = true

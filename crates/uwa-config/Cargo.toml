@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+build = "build.rs"
 
 [features]
 default = []
@@ -18,3 +19,8 @@ toml.workspace = true
 serde_path_to_error.workspace = true
 thiserror.workspace = true
 url.workspace = true
+# Used by the generated registry (serde_json::Value in capabilities,
+# tracing::warn! on skipped entries) — the 33-scenario registry commit
+# referenced them without declaring the dependencies.
+serde_json.workspace = true
+tracing.workspace = true
