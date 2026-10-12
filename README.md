@@ -288,6 +288,17 @@ points:
 - [Positioning](docs/POSITIONING.md) — what we're building and what we're not.
 - [Why UWA](docs/why_uwa.md) — architectural deep-dive comparing UWA to typical Python wrappers.
 
+## Maintenance & known issues
+
+Hardening history (wire-fidelity fixes in the streaming adapters, the
+daemon probe and log follower, and the forbid-level clippy campaign) is
+written up in [BRIDGE-HARDENING](docs/BRIDGE-HARDENING.md), and the live
+issue tracker — closed items with their root causes, open ones with
+repro and suggested fixes — is [ISSUES](docs/ISSUES.md). Known-open
+highlights: 88 lint violations left in six crates' lib code
+(UWA-101), `https://` health probes are connect-only (UWA-102), and the
+registry overlay does not fill `capabilities` yet (UWA-109).
+
 ## License
 
 MIT.
