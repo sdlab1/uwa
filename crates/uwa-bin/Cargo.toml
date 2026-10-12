@@ -30,6 +30,8 @@ uwa-session = { path = "../uwa-session" }
 uwa-resilience = { path = "../uwa-resilience" }
 uwa-lifecycle = { path = "../uwa-lifecycle" }
 uwa-history = { path = "../uwa-history" }
+uwa-conformance = { path = "../uwa-conformance" }
+uwa-tools = { path = "../uwa-tools" }
 
 tokio.workspace = true
 anyhow.workspace = true

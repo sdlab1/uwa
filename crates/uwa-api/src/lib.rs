@@ -203,6 +203,7 @@ pub fn router(state: AppState) -> Router {
             post(routes::admin::selector_generate),
         )
         .route("/admin/selector-apply", post(routes::admin::selector_apply))
+        .route("/admin/conformance", get(routes::admin::conformance))
         .route("/admin/sessions", get(routes::admin::sessions))
         .route(
             "/admin/sessions/recover",

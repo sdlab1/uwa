@@ -1,0 +1,106 @@
+name: conformance-nightly
+
+on:
+  schedule:
+    - cron: '17 3 * * *'   # 03:17 UTC daily
+  workflow_dispatch:
+
+concurrency:
+  group: conformance-nightly
+  cancel-in-progress: false
+
+jobs:
+  live:
+    # Gate on a repository variable so forks and PRs never hit the real
+    # sites. Owners set `UWA_CONFORMANCE_PROVIDERS` (comma-separated
+    # provider names) and `UWA_TEST_LOGIN_COOKIES` (a backup of the
+    # Chromium profile cookies) as repo secrets.
+    if: github.repository == 'sdlab1/uwa' && vars.UWA_CONFORMANCE_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-node@v4
+        with: { node-version: '20' }
+
+      - name: Install Chromium
+        run: sudo apt-get update && sudo apt-get install -y chromium-browser
+
+      - name: Build
+        run: |
+          cargo build --release -p uwa-bin
+          (cd crates/uwa-api/static && npm ci --silent && npm run --silent build)
+
+      - name: Restore Chromium profile
+        env:
+          COOKIES: ${{ secrets.UWA_TEST_LOGIN_COOKIES }}
+        run: |
+          mkdir -p "$HOME/.uwa/chromium-profile"
+          echo "$COOKIES" | base64 -d > "$HOME/.uwa/chromium-profile/Cookies" || true
+
+      - name: Launch Chromium
+        env:
+          UWA_CHROME_BIN: /usr/bin/chromium-browser
+        run: |
+          /usr/bin/chromium-browser \
+            --headless=new --no-sandbox --disable-gpu \
+            --remote-debugging-port=9222 \
+            --user-data-dir="$HOME/.uwa/chromium-profile" \
+            --no-first-run --password-store=basic \
+            about:blank &
+          for i in $(seq 1 40); do
+            curl -sf http://127.0.0.1:9222/json/version >/dev/null && break
+            sleep 0.25
+          done
+
+      - name: Prepare config
+        run: |
+          cp crates/uwa-bin/config.example.toml uwa.toml
+          # A key is optional on loopback; the conformance CLI hits the
+          # pipeline in-process anyway.
+          sed -i 's/^api_key.*/api_key = "conformance"/' uwa.toml
+
+      - name: Run conformance
+        env:
+          UWA_CHROMIUM_WS: http://127.0.0.1:9222
+        run: |
+          PROVIDERS="${{ vars.UWA_CONFORMANCE_PROVIDERS }}"
+          ARGS=""
+          IFS=',' read -ra LIST <<< "$PROVIDERS"
+          for p in "${LIST[@]}"; do ARGS="$ARGS --provider $p"; done
+          ./target/release/uwa conformance run $ARGS --markdown \
+            > /tmp/conformance.md
+
+      - name: Copy JSON report
+        run: cp "$HOME/.uwa/conformance/latest.json" docs/conformance/latest.json
+
+      - name: Regenerate Markdown
+        run: ./target/release/uwa conformance report --input docs/conformance/latest.json
+
+      - name: Commit results
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "chore(conformance): nightly refresh"
+          file_pattern: |
+            docs/CONFORMANCE.md
+            docs/conformance/latest.json
+          branch: main
+
+      - name: Open issue on regression
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `conformance: nightly run failed (${new Date().toISOString().slice(0,10)})`,
+              body: 'See the workflow run for details.\n\n'
+                + `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              labels: ['conformance']
+            });

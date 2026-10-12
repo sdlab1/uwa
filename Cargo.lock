@@ -3039,6 +3039,7 @@ dependencies = [
  "uwa-api",
  "uwa-browser",
  "uwa-config",
+ "uwa-conformance",
  "uwa-core",
  "uwa-history",
  "uwa-lifecycle",
@@ -3047,6 +3048,7 @@ dependencies = [
  "uwa-session",
  "uwa-stealth",
  "uwa-testkit",
+ "uwa-tools",
  "xz2",
  "zip",
 ]
@@ -3084,6 +3086,20 @@ dependencies = [
  "toml",
  "url",
  "uwa-core",
+]
+
+[[package]]
+name = "uwa-conformance"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "uwa-core",
+ "uwa-tools",
 ]
 
 [[package]]

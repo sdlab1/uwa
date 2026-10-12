@@ -10,6 +10,7 @@
     { path: '/sessions',   label: 'Sessions' },
     { path: '/config',     label: 'Config' },
     { path: '/logs',       label: 'Logs' },
+    { path: '/conformance', label: 'Conformance' },
     { path: '/debug',      label: 'Debug' },
   ];
 </script>

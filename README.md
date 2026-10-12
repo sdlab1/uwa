@@ -158,6 +158,21 @@ Compatibility means: the client's full request round-trips through uwa
 and the answer lands in the editor without a manual step. Every row above
 is covered by an end-to-end test in `verify.sh`.
 
+## Conformance
+
+Tool-calling success rate across providers, measured end-to-end through
+the real pipeline (browser, injection, parsing, retries). The table below
+is regenerated nightly; a per-scenario breakdown lives on the
+`Conformance` page in the dashboard.
+
+<!-- CONFORMANCE-BEGIN -->
+_See [docs/CONFORMANCE.md](docs/CONFORMANCE.md) for the current table._
+<!-- CONFORMANCE-END -->
+
+The corpus is 30 scenarios across 7 tags — see
+[docs/CONFORMANCE.md](docs/CONFORMANCE.md) for the exact list, the
+pass/fail rules, and how to add a scenario.
+
 ## Endpoints
 
 | Endpoint | Shape |
@@ -268,6 +283,7 @@ points:
 - [API](docs/API.md) — request/response shapes, error codes, examples.
 - [Streaming](docs/STREAMING.md) — where the tokens come from, TTFT, cancel.
 - [Compatibility](docs/COMPATIBILITY.md) — tested clients and versions.
+- [Conformance](docs/CONFORMANCE.md) — tool-calling conformance across providers.
 - [Troubleshooting](docs/TROUBLESHOOTING.md) — the failures people actually hit.
 - [Positioning](docs/POSITIONING.md) — what we're building and what we're not.
 - [Why UWA](docs/why_uwa.md) — architectural deep-dive comparing UWA to typical Python wrappers.

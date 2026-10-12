@@ -423,3 +423,40 @@ pub async fn selector_apply(
         hint: "Dry-run. Edit uwa.toml and restart uwa to apply selector changes.",
     }))
 }
+
+/// `GET /admin/conformance` — the last persisted conformance report.
+///
+/// The CLI writes to `<uwa_home>/conformance/latest.json`; this reads it
+/// back. When the file is absent (a fresh install that never ran the
+/// suite), returns an empty report shape so the UI can render a hint
+/// instead of a 404.
+pub async fn conformance() -> ApiResult<Json<serde_json::Value>> {
+    let path = uwa_home_file("conformance/latest.json");
+    match tokio::fs::read_to_string(&path).await {
+        Ok(raw) => {
+            let v: serde_json::Value = serde_json::from_str(&raw)
+                .map_err(|e| UwaError::Internal(format!("conformance json: {e}")))?;
+            Ok(Json(v))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Json(serde_json::json!({
+            "generated_at": serde_json::Value::Null,
+            "uwa_version": serde_json::Value::Null,
+            "scenarios_total": 0,
+            "runs": [],
+            "hint": "run `uwa conformance run --provider <name>` to populate this report"
+        }))),
+        Err(e) => Err(UwaError::Internal(format!("read conformance report: {e}")).into()),
+    }
+}
+
+fn uwa_home_file(rel: &str) -> std::path::PathBuf {
+    let home = std::env::var("UWA_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::env::var("HOME")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|_| std::path::PathBuf::from("."))
+                .join(".uwa")
+        });
+    home.join(rel)
+}

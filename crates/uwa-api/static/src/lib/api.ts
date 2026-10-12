@@ -202,3 +202,25 @@ export function streamLogs(
   src.onerror = (e) => onError?.(e);
   return () => src.close();
 }
+
+// ---------- Conformance ----------
+
+export interface ConformanceRun {
+  provider: string;
+  started_at: string;
+  finished_at: string;
+  scenarios_total: number;
+  passed: number;
+  failed: number;
+  success_rate: number;
+  by_tag: Record<string, { total: number; passed: number; rate: number }>;
+  failures: Array<{ id: string; name: string; reason?: string }>;
+}
+export interface ConformanceReport {
+  generated_at: string | null;
+  uwa_version: string | null;
+  scenarios_total: number;
+  runs: ConformanceRun[];
+  hint?: string;
+}
+export const getConformance = () => request<ConformanceReport>('/admin/conformance');

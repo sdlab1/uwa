@@ -13,6 +13,7 @@
   import Config     from './routes/Config.svelte';
   import Logs       from './routes/Logs.svelte';
   import Debug      from './routes/Debug.svelte';
+  import Conformance from './routes/Conformance.svelte';
 
   const routes: Record<string, any> = {
     '/': Dashboard,
@@ -24,6 +25,7 @@
     '/config': Config,
     '/logs': Logs,
     '/debug': Debug,
+    '/conformance': Conformance,
   };
 
   let path = $state('/');
