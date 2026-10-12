@@ -60,7 +60,7 @@ impl NodriverTransport {
             Arc::new(Mutex::new(HashMap::new()));
 
         // Event pump: forward sidecar events to per-tab broadcast channels.
-        let event_rx = client.take_event_receiver();
+        let event_rx = client.take_event_receiver()?;
         let net_buses_for_pump = net_buses.clone();
         let event_task = tokio::spawn(async move {
             let mut rx = event_rx;

@@ -75,13 +75,17 @@ impl SidecarClient {
         Ok(client)
     }
 
-    /// Take the event receiver (one-shot; panics if called twice).
-    pub fn take_event_receiver(&self) -> mpsc::Receiver<Value> {
+    /// Take the event receiver. One-shot by contract: a second take is an
+    /// error surfaced to the caller, not a panic (forbid-level lints ban
+    /// expect/panic, and a wiring bug must be reported, not aborted).
+    pub fn take_event_receiver(&self) -> Result<mpsc::Receiver<Value>> {
         let mut guard = self
             .event_rx
             .try_lock()
-            .expect("take_event_receiver: lock poisoned");
-        guard.take().expect("take_event_receiver already taken")
+            .map_err(|_| UwaError::Internal("event receiver lock is busy".into()))?;
+        guard
+            .take()
+            .ok_or_else(|| UwaError::Internal("take_event_receiver called twice".into()))
     }
 
     /// Send a JSON-RPC request and await the response.

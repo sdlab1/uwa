@@ -127,7 +127,7 @@ Open remainder:
 
 | Crate | Errors | Status |
 |-------|-------:|--------|
-| `uwa-bin` (bin target) | ≥2 expected | **Blocked by in-flight work**: the conformance agent is actively writing `uwa-browser/src/nodriver/client.rs` (2 fresh `expect()`s at 80/84), which is compiled by `cargo clippy -p uwa-bin`. Revisit as soon as that lands; the recipes above cover the whole file. |
+| `uwa-bin` (bin target) | — | **Blocked by the concurrent agent's in-flight `commands/providers.rs`** (untracked, does not compile yet: `cannot find attribute serde`). Its other files are expected to be mostly clean — the daemon module already went through the same recipes. Revisit when the providers command lands; the recipes above cover everything. |
 
 ### UWA-102 🟡 `http_ok` cannot speak TLS
 `https://` URLs fall back to the TCP-handshake check (std has no TLS).
