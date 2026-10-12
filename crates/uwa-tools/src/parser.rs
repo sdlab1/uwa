@@ -41,6 +41,49 @@ pub fn parse(text: &str, known_tools: &[String]) -> ToolParseOutcome {
     }
 }
 
+/// The text a streaming emitter still owes the client when `raw` contained
+/// tool calls (UWA-110).
+///
+/// The emitter freezes at the first block (`safe_emit_end_for`), so the
+/// pre-block prefix already streamed; everything *between* and *after* the
+/// blocks is delivered here, byte-exact from the same scan `parse` uses.
+/// Empty when there are no calls or no remainder.
+pub fn unstreamed_text(raw: &str, known_tools: &[String]) -> String {
+    let (calls, mut consumed) = scan_all(raw, known_tools);
+    if calls.is_empty() {
+        return String::new();
+    }
+    consumed.sort_by_key(|r| r.start);
+    let mut compacted: Vec<Range<usize>> = Vec::with_capacity(consumed.len());
+    for r in consumed {
+        match compacted.last_mut() {
+            Some(prev) if r.start <= prev.end => prev.end = prev.end.max(r.end),
+            _ => compacted.push(r),
+        }
+    }
+    let mut out = String::new();
+    let mut cursor = 0usize;
+    for (i, r) in compacted.iter().enumerate() {
+        if i == 0 {
+            // Everything before the first block already streamed.
+            cursor = r.end;
+            continue;
+        }
+        if r.start > cursor {
+            if let Some(piece) = raw.get(cursor..r.start) {
+                out.push_str(piece);
+            }
+        }
+        cursor = cursor.max(r.end);
+    }
+    if cursor < raw.len() {
+        if let Some(piece) = raw.get(cursor..) {
+            out.push_str(piece);
+        }
+    }
+    out
+}
+
 /// Run every strategy; returns the calls and the byte ranges they occupy.
 fn scan_all(text: &str, known: &[String]) -> (Vec<ToolCall>, Vec<Range<usize>>) {
     let mut calls = Vec::new();

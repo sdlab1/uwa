@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::{ExtractionStrategy, ProviderCfg, Selectors};
-use uwa_core::{NetRules, UwaError};
+use uwa_core::{Capabilities, NetRules, UwaError};
 
 include!(concat!(env!("OUT_DIR"), "/registry_generated.rs"));
 
@@ -502,13 +502,19 @@ mod tests {
             "p".into(),
             entry_with_capabilities(serde_json::json!({"streams": true})),
         );
+        // Use a provider with ALL capabilities at default (false/None)
+        // so that setting one explicitly demonstrates intent.
         let mut p = ProviderCfg::default_for_test("p");
+        // Reset capabilities to default (all false/None) so we can test
+        // that setting one explicitly prevents registry overlay.
+        p.capabilities = Capabilities::default();
         p.capabilities.tool_calls = true; // user intent
         reg.overlay("p", &mut p);
         assert!(p.capabilities.tool_calls);
         assert!(!p.capabilities.streams, "registry must not leak in");
     }
 
+    #[test]
     #[test]
     fn overlay_ignores_schema_drift_in_capabilities() {
         // A malformed capabilities block degrades to the defaults with a
@@ -519,6 +525,7 @@ mod tests {
             entry_with_capabilities(serde_json::json!({"streams": "yes please"})),
         );
         let mut p = ProviderCfg::default_for_test("p");
+        p.capabilities = Capabilities::default();
         reg.overlay("p", &mut p);
         assert!(!p.capabilities.streams);
     }

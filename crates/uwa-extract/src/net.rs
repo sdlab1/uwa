@@ -38,7 +38,10 @@ pub struct SseParser {
 
 impl SseParser {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            bom_pending: true,
+            ..Default::default()
+        }
     }
 
     /// Feed a chunk. Returns all complete frames that became available.

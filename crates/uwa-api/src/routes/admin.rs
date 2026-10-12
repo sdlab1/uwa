@@ -449,6 +449,41 @@ pub async fn conformance() -> ApiResult<Json<serde_json::Value>> {
     }
 }
 
+/// Returns a JSON-serializable representation of the provider registry.
+/// Used by the `/admin/providers/registry` endpoint.
+pub async fn provider_registry() -> ApiResult<Json<serde_json::Value>> {
+    let registry = uwa_config::Registry::load();
+    let manifest = registry.manifest().map(|m| {
+        serde_json::json!({
+            "registry_version": m.registry_version,
+            "generated_at": m.generated_at,
+            "min_uwa_version": m.min_uwa_version,
+        })
+    });
+    let cache = registry
+        .cache_dir()
+        .map(|p| p.to_string_lossy().to_string());
+
+    let mut entries = serde_json::Map::new();
+    for name in registry.names() {
+        if let Some(e) = registry.get(&name) {
+            entries.insert(
+                name.clone(),
+                serde_json::json!({
+                    "version": e.meta.version,
+                    "updated_at": e.meta.updated_at,
+                }),
+            );
+        }
+    }
+
+    Ok(Json(serde_json::json!({
+        "manifest": manifest,
+        "cache_dir": cache,
+        "entries": entries,
+    })))
+}
+
 fn uwa_home_file(rel: &str) -> std::path::PathBuf {
     let home = std::env::var("UWA_HOME")
         .map(std::path::PathBuf::from)

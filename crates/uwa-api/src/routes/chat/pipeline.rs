@@ -427,6 +427,11 @@ async fn run_pipeline_streaming_inner(
         // Same validation + self-heal as the buffered path. The retry
         // reply is not streamed: only its verdict (calls, or plain text)
         // reaches the client.
+        let heal_needed = !matches!(
+            validate_calls(&first.calls, &defs),
+            ValidationOutcome::Ok | ValidationOutcome::UnknownTools { .. }
+        );
+        let raw_snapshot = acc.clone();
         let (text, calls, finish) = resolve_tool_calls(
             site.as_ref(),
             page.as_ref(),
@@ -440,6 +445,17 @@ async fn run_pipeline_streaming_inner(
         .await?;
         if calls.is_empty() && !text.is_empty() {
             emit(tx, StreamEvent::Delta(text.clone())).await?;
+        } else if !calls.is_empty() && !heal_needed {
+            // UWA-110: the model's text outside the call blocks belongs to
+            // the answer. The pre-block prefix already streamed; deliver
+            // the between/after-block remainder, byte-exact from the same
+            // scan. Skipped when self-heal replaced the original answer —
+            // that text never streamed and stitching it after the old
+            // prefix would garble the visible output.
+            let tail = uwa_tools::unstreamed_text(&raw_snapshot, &known_names);
+            if !tail.is_empty() {
+                emit(tx, StreamEvent::Delta(tail)).await?;
+            }
         }
         (text, calls, finish)
     } else {
