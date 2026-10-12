@@ -46,6 +46,8 @@ use uwa_tools::{
 use crate::history::RequestRecorder;
 use crate::state::AppState;
 
+use uwa_session::pinning::{decide, hash_messages, hash_system, ConversationState, PinDecision};
+
 /// One item emitted while a response streams in.
 #[derive(Debug)]
 pub enum StreamEvent {
@@ -120,7 +122,17 @@ pub async fn run_pipeline(
 
     // Persist to history (non-blocking when no store configured).
     if let Some(h) = &state.runtime.history {
-        h.append(recorder.into_record()).await;
+        let rec = recorder.into_record();
+        // Capture pin_mode for metrics before the record moves into the store.
+        if let Some(mode) = rec.response.as_ref().and_then(|r| r.pin_mode.clone()) {
+            metrics::counter!(
+                "uwa_pinning_decision_total",
+                "provider" => rec.provider.clone(),
+                "mode" => mode,
+            )
+            .increment(1);
+        }
+        h.append(rec).await;
     }
 
     crate::metrics::circuit_state(
@@ -203,7 +215,17 @@ pub async fn run_pipeline_streaming(
     }
 
     if let Some(h) = &state.runtime.history {
-        h.append(recorder.into_record()).await;
+        let rec = recorder.into_record();
+        // Capture pin_mode for metrics before the record moves into the store.
+        if let Some(mode) = rec.response.as_ref().and_then(|r| r.pin_mode.clone()) {
+            metrics::counter!(
+                "uwa_pinning_decision_total",
+                "provider" => rec.provider.clone(),
+                "mode" => mode,
+            )
+            .increment(1);
+        }
+        h.append(rec).await;
     }
 
     crate::metrics::circuit_state(
@@ -277,7 +299,24 @@ async fn run_pipeline_streaming_inner(
     let page = state.transport.page(&tab).await?;
     recorder.set_tab(tab.as_str());
 
-    let body = build_browser_body(system_injection.as_deref(), &conversation, true);
+    let (body, pin_mode, _system_used) = plan_browser_turn(
+        state,
+        provider_cfg,
+        &cid,
+        &tab,
+        system_injection.as_deref(),
+        &conversation,
+    )
+    .await;
+    recorder.set_pin_mode(pin_mode);
+
+    tracing::debug!(
+        provider = %provider_cfg.name,
+        pin_mode,
+        system_len = system_injection.as_deref().map(str::len).unwrap_or(0),
+        body_len = body.len(),
+        "sending turn to browser"
+    );
 
     recorder.mark_send_start();
     if _attachments.0.is_empty() {
@@ -293,6 +332,19 @@ async fn run_pipeline_streaming_inner(
         .map_err(|_| UwaError::Timeout(send_timeout))??;
     }
     recorder.mark_send_end();
+
+    // Commit pin state *after* the successful send: a failure here would
+    // leave us thinking the browser saw a turn it never got.
+    commit_pin_state(
+        state,
+        provider_cfg,
+        cid.clone(),
+        &tab,
+        system_injection.as_deref(),
+        &conversation,
+        pin_mode,
+    )
+    .await;
 
     // --- real streaming ---
     let mut stream = site.wait_response_stream(page.as_ref()).await?;
@@ -424,7 +476,24 @@ async fn run_pipeline_inner(
     let page = state.transport.page(&tab).await?;
     recorder.set_tab(tab.as_str());
 
-    let body = build_browser_body(system_injection.as_deref(), &conversation, true);
+    let (body, pin_mode, _system_used) = plan_browser_turn(
+        state,
+        provider_cfg,
+        &cid,
+        &tab,
+        system_injection.as_deref(),
+        &conversation,
+    )
+    .await;
+    recorder.set_pin_mode(pin_mode);
+
+    tracing::debug!(
+        provider = %provider_cfg.name,
+        pin_mode,
+        system_len = system_injection.as_deref().map(str::len).unwrap_or(0),
+        body_len = body.len(),
+        "sending turn to browser"
+    );
 
     recorder.mark_send_start();
     if _attachments.0.is_empty() {
@@ -440,6 +509,19 @@ async fn run_pipeline_inner(
         .map_err(|_| UwaError::Timeout(send_timeout))??;
     }
     recorder.mark_send_end();
+
+    // Commit pin state *after* the successful send: a failure here would
+    // leave us thinking the browser saw a turn it never got.
+    commit_pin_state(
+        state,
+        provider_cfg,
+        cid.clone(),
+        &tab,
+        system_injection.as_deref(),
+        &conversation,
+        pin_mode,
+    )
+    .await;
 
     recorder.mark_send_start();
     let raw = site.wait_response(page.as_ref()).await?;
@@ -506,6 +588,99 @@ async fn run_pipeline_inner(
             }
         }
     }
+}
+
+/// Plan what to send to the browser this turn. Returns `(body, pin_mode)`.
+///
+/// `pin_mode` is `"full"` or `"delta"`, recorded for diagnostics. Delta
+/// means: no system prompt, and only the new messages since the last
+/// successful send in this conversation.
+async fn plan_browser_turn(
+    state: &AppState,
+    provider_cfg: &uwa_config::ProviderCfg,
+    cid: &uwa_core::ConversationId,
+    tab: &TabId,
+    system_injection: Option<&str>,
+    conversation: &[ChatMessage],
+) -> (String, &'static str, bool) {
+    let system_hash = hash_system(system_injection);
+
+    // Disabled at the provider level, or no store wired — always full.
+    if !provider_cfg.conversation_pinning {
+        return (
+            build_browser_body(system_injection, conversation, true),
+            "full",
+            system_injection.is_some(),
+        );
+    }
+    let Some(store) = state.runtime.pinning.as_ref() else {
+        return (
+            build_browser_body(system_injection, conversation, true),
+            "full",
+            system_injection.is_some(),
+        );
+    };
+
+    let stored = store.get(cid).await;
+    match decide(stored.as_ref(), tab, conversation, system_hash) {
+        PinDecision::Full => (
+            build_browser_body(system_injection, conversation, true),
+            "full",
+            system_injection.is_some(),
+        ),
+        PinDecision::Delta { messages } => (
+            // No system prompt on a delta — the browser has it from an
+            // earlier turn, and re-injecting would duplicate the schemas
+            // in the prompt.
+            build_browser_body(None, &messages, false),
+            "delta",
+            false,
+        ),
+    }
+}
+
+/// Persist the outcome of a successful send so the next turn can delta.
+async fn commit_pin_state(
+    state: &AppState,
+    provider_cfg: &uwa_config::ProviderCfg,
+    cid: uwa_core::ConversationId,
+    tab: &TabId,
+    system_injection: Option<&str>,
+    conversation: &[ChatMessage],
+    pin_mode: &str,
+) {
+    if !provider_cfg.conversation_pinning {
+        return;
+    }
+    let Some(store) = state.runtime.pinning.as_ref() else {
+        return;
+    };
+
+    // On a Delta send we didn't inject the system prompt this turn, but
+    // the browser still has it from before, so `system_hash` stays what
+    // was previously sent. Only when we sent it fresh does it update.
+    let system_hash = if pin_mode == "delta" {
+        store
+            .get(&cid)
+            .await
+            .map(|s| s.system_hash)
+            .unwrap_or_else(|| hash_system(system_injection))
+    } else {
+        hash_system(system_injection)
+    };
+
+    store
+        .put(
+            cid,
+            ConversationState {
+                tab: tab.clone(),
+                prefix_hash: hash_messages(conversation),
+                messages_seen: conversation.len(),
+                system_hash,
+                last_updated: std::time::Instant::now(),
+            },
+        )
+        .await;
 }
 
 fn build_browser_body(system: Option<&str>, messages: &[ChatMessage], first_round: bool) -> String {

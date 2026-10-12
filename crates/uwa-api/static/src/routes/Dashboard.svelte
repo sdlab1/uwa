@@ -274,6 +274,16 @@
       {/if}
     </Card>
 
+    <Card title="Pinning" subtitle="delta vs full sends">
+      <p class="text-[12px] muted m-0">
+        Enabled by default: a repeat turn in the same conversation sends
+        only the new messages — no re-injected tool schemas. Per-request
+        mode is on the Debug page (Slowest requests &rarr; Pin column).
+        Disable per provider with
+        <code>conversation_pinning = false</code>.
+      </p>
+    </Card>
+
     <PoolPanel bind:this={poolRef} />
   </div>
 

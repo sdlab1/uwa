@@ -35,7 +35,12 @@ export interface HistoryRecord {
   status: 'success' | 'error' | 'pending' | string;
   started_at: { secs_since_epoch: number; nanos_since_epoch: number } | null;
   error: string | null;
-  response: { text_preview: string; finish_reason: string; tool_calls: number } | null;
+  response: {
+    text_preview: string;
+    finish_reason: string;
+    tool_calls: number;
+    pin_mode?: string | null;
+  } | null;
   request: { user_preview: string; messages: number; tools: number; stream: boolean };
   timing: {
     total_ms: number; send_ms: number; wait_ms: number; acquisition_ms: number;

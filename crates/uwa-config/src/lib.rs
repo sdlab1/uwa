@@ -270,6 +270,14 @@ pub struct ProviderCfg {
     /// failures then surface to the client as a 400.
     #[serde(default = "default_tool_retries")]
     pub max_tool_retries: u8,
+
+    /// When true (default), UWA stores what each tab has already seen and
+    /// sends only the new turn on repeat requests. Skips the system prompt
+    /// (tool schemas) on the second and later turns of a conversation.
+    /// Safe to disable; the only cost is a few hundred characters of
+    /// re-injection per round.
+    #[serde(default = "default_pinning")]
+    pub conversation_pinning: bool,
 }
 
 impl ProviderCfg {
@@ -303,6 +311,7 @@ impl ProviderCfg {
             fallback_model: None,
             max_concurrency: default_provider_concurrency(),
             max_tool_retries: default_tool_retries(),
+            conversation_pinning: default_pinning(),
         }
     }
 
@@ -354,6 +363,9 @@ fn default_provider_concurrency() -> u32 {
 }
 fn default_tool_retries() -> u8 {
     2
+}
+fn default_pinning() -> bool {
+    true
 }
 
 impl Config {
@@ -724,6 +736,19 @@ mod tests {
         );
         let err = Config::load_from_str(&toml).unwrap_err();
         assert!(err.to_string().contains("max_concurrency"), "{err}");
+    }
+
+    #[test]
+    fn conversation_pinning_defaults_true_and_can_be_disabled() {
+        let cfg = Config::load_from_str(SAMPLE).unwrap();
+        assert!(cfg.providers["chatgpt"].conversation_pinning);
+
+        let toml = SAMPLE.replace(
+            "[providers.chatgpt.selectors]",
+            "conversation_pinning = false\n\n[providers.chatgpt.selectors]",
+        );
+        let cfg = Config::load_from_str(&toml).unwrap();
+        assert!(!cfg.providers["chatgpt"].conversation_pinning);
     }
 
     #[test]

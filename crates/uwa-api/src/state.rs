@@ -31,6 +31,9 @@ pub struct RuntimeServices {
     pub semaphores: Arc<ProviderSemaphores>,
     pub breakers: Arc<DashMap<String, Arc<CircuitBreaker>>>,
     pub history: Option<Arc<uwa_history::HistoryStore>>,
+    /// Conversation pinning state. `Some` by default: it's a safe
+    /// optimization that also disables cleanly per-provider via config.
+    pub pinning: Option<Arc<uwa_session::PinningStore>>,
 }
 
 impl Default for RuntimeServices {
@@ -40,6 +43,9 @@ impl Default for RuntimeServices {
             semaphores: Arc::new(ProviderSemaphores::new(4)),
             breakers: Arc::new(DashMap::new()),
             history: None,
+            pinning: Some(Arc::new(uwa_session::PinningStore::new(
+                std::time::Duration::from_secs(30 * 60),
+            ))),
         }
     }
 }
@@ -76,6 +82,20 @@ impl AppState {
     pub fn with_history(mut self, h: Arc<uwa_history::HistoryStore>) -> Self {
         let mut rt = (*self.runtime).clone();
         rt.history = Some(h);
+        self.runtime = Arc::new(rt);
+        self
+    }
+
+    pub fn with_pinning(mut self, p: Arc<uwa_session::PinningStore>) -> Self {
+        let mut rt = (*self.runtime).clone();
+        rt.pinning = Some(p);
+        self.runtime = Arc::new(rt);
+        self
+    }
+
+    pub fn without_pinning(mut self) -> Self {
+        let mut rt = (*self.runtime).clone();
+        rt.pinning = None;
         self.runtime = Arc::new(rt);
         self
     }

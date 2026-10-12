@@ -10,6 +10,7 @@ pub struct RequestRecorder {
     record: RequestRecord,
     start: std::time::Instant,
     last_mark: std::time::Instant,
+    pin_mode: Option<String>,
 }
 
 impl RequestRecorder {
@@ -33,6 +34,7 @@ impl RequestRecorder {
             record,
             start: now,
             last_mark: now,
+            pin_mode: None,
         }
     }
 
@@ -98,6 +100,12 @@ impl RequestRecorder {
         }
     }
 
+    /// Record what the pipeline sent to the browser this turn. `"full"`
+    /// or `"delta"` — see `uwa_session::pinning`.
+    pub fn set_pin_mode(&mut self, mode: &str) {
+        self.pin_mode = Some(mode.to_string());
+    }
+
     pub fn finish_success(
         &mut self,
         text: &str,
@@ -111,6 +119,7 @@ impl RequestRecorder {
             tool_calls,
             finish_reason: finish_reason.to_string(),
             extraction_source: extraction_source.to_string(),
+            pin_mode: self.pin_mode.take(),
         });
     }
 

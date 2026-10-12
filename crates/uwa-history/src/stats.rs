@@ -269,6 +269,7 @@ mod tests {
                 tool_calls: 0,
                 finish_reason: "stop".into(),
                 extraction_source: "dom".into(),
+                pin_mode: None,
             }),
             RequestStatus::Error => r.mark_error("x"),
             _ => {}

@@ -118,12 +118,15 @@ pub async fn run_with(config_path: PathBuf, cdp_url: &str) -> anyhow::Result<()>
         Arc::new(transport)
     };
 
-    // Sessions + sweeper.
+    // Sessions + sweeper (idle sessions + pinning TTL).
     let sessions = Arc::new(uwa_session::SessionManager::new(
         uwa_session::SessionCfg::default(),
     ));
+    // Conversation pinning store — safe optimization, on by default.
+    let pinning = Arc::new(uwa_session::PinningStore::new(Duration::from_secs(30 * 60)));
     {
         let sm = sessions.clone();
+        let pinning = pinning.clone();
         let stop = shutdown.clone();
         tokio::spawn(async move {
             let interval = sm.cfg().sweep_interval;
@@ -134,6 +137,10 @@ pub async fn run_with(config_path: PathBuf, cdp_url: &str) -> anyhow::Result<()>
                         let n = sm.evict_idle().await.len();
                         if n > 0 {
                             tracing::info!(n, "evicted idle sessions");
+                        }
+                        let p = pinning.sweep().await;
+                        if p > 0 {
+                            tracing::debug!(n = p, "expired pinning entries");
                         }
                         uwa_api::metrics::active_sessions(sm.len());
                     }
@@ -160,7 +167,18 @@ pub async fn run_with(config_path: PathBuf, cdp_url: &str) -> anyhow::Result<()>
     let state = AppState::minimal(config.clone(), Arc::new(registry), transport.clone())
         .with_sessions(sessions.clone())
         .with_semaphores(Arc::new(sem))
-        .with_history(history);
+        .with_history(history)
+        .with_pinning(pinning);
+
+    tracing::info!(
+        pinning_enabled = state.runtime.pinning.is_some(),
+        "conversation pinning {}",
+        if state.runtime.pinning.is_some() {
+            "on"
+        } else {
+            "off"
+        }
+    );
 
     // HTTP API.
     let addr: SocketAddr = format!("{}:{}", config.server.bind, config.server.port).parse()?;

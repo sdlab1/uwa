@@ -60,6 +60,10 @@ pub struct ResponseSnapshot {
     pub finish_reason: String,
     /// Source of the extraction (`network` | `dom` | `none`).
     pub extraction_source: String,
+    /// `"full"` or `"delta"` — what the pipeline actually sent to the
+    /// browser. Absent when the record predates this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pin_mode: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -163,6 +167,7 @@ mod tests {
             tool_calls: 0,
             finish_reason: "stop".into(),
             extraction_source: "dom".into(),
+            pin_mode: None,
         });
         assert_eq!(r.status, RequestStatus::Success);
         assert!(r.finished_at.is_some());

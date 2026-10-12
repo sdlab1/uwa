@@ -226,6 +226,7 @@
               <th class="text-right">Total</th>
               <th class="w-[240px]">Waterfall</th>
               <th class="text-right">TTFT</th>
+              <th>Pin</th>
             </tr>
           </thead>
           <tbody>
@@ -251,6 +252,15 @@
                   />
                 </td>
                 <td class="text-right font-mono">{fmtMs(r.timing.ttft_ms)}</td>
+                <td>
+                  {#if r.response?.pin_mode === 'delta'}
+                    <span class="pill" style="border-color: var(--ok); color: var(--ok);">delta</span>
+                  {:else if r.response?.pin_mode === 'full'}
+                    <span class="pill muted">full</span>
+                  {:else}
+                    <span class="muted">—</span>
+                  {/if}
+                </td>
               </tr>
             {/each}
           </tbody>
