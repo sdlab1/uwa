@@ -303,6 +303,23 @@ fn libc_sigterm() -> i32 {
     1
 }
 
+/// Scheme split, case-insensitive (`HTTP://`, `Https://` — the URL can
+/// come from user config, not only from `status()` itself). Returns
+/// whether TLS was requested plus the remainder after `://`.
+fn scheme_parts(url: &str) -> (bool, &str) {
+    let lower = url.to_lowercase();
+    if lower.starts_with("https://") {
+        (true, url.get(8..).unwrap_or(""))
+    } else if lower.starts_with("http://") {
+        (false, url.get(7..).unwrap_or(""))
+    } else {
+        (false, url)
+    }
+}
+
+/// How long a single probe step (connect, write, read) may take.
+const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(300);
+
 /// Extract `(host, port)` from a health-check URL. Pure and unit-tested.
 ///
 /// Handles the shapes `http_ok` used to choke on (each reported a healthy
@@ -310,32 +327,34 @@ fn libc_sigterm() -> i32 {
 /// * `http://localhost:8080/…` — hostnames (not just IP literals);
 /// * `http://host/…` — no port → scheme default (80);
 /// * `https://host/…` — used to split at the wrong colon entirely;
+/// * `HTTP://host:8080/…` — any letter case of the scheme;
 /// * `http://[::1]:8080/…` — bracketed IPv6 literals;
 /// * `http://user:pass@host:8080/…` — userinfo is dropped.
 fn host_port(url: &str) -> Option<(String, u16)> {
-    let https = url.starts_with("https://");
-    let rest = url
-        .strip_prefix("https://")
-        .or_else(|| url.strip_prefix("http://"))
-        .unwrap_or(url);
-    // Cut path and query — everything from the first '/' or '?'.
-    let end = rest.find(['/', '?']).unwrap_or(rest.len());
-    let mut authority = &rest[..end];
+    let (https, rest) = scheme_parts(url);
+    // Cut path, query and fragment — everything from the first '/', '?'
+    // or '#'. `get(..n)` instead of slicing: forbid-level lint.
+    let authority = match rest.find(['/', '?', '#']).and_then(|end| rest.get(..end)) {
+        Some(a) => a,
+        None => rest,
+    };
     // Drop userinfo (`user:pass@host`).
-    if let Some(at) = authority.rfind('@') {
-        authority = &authority[at + 1..];
-    }
+    let authority = match authority.rfind('@') {
+        Some(at) => authority.get(at + 1..).unwrap_or(authority),
+        None => authority,
+    };
     let default_port: u16 = if https { 443 } else { 80 };
 
     // Bracketed IPv6 literal: `[::1]:8080`.
     if let Some(inner) = authority.strip_prefix('[') {
         let close = inner.find(']')?;
-        let host = &inner[..close];
+        let host = inner.get(..close)?;
         if host.is_empty() {
             return None;
         }
-        let port = inner[close + 1..]
-            .strip_prefix(':')
+        let port = inner
+            .get(close + 1..)
+            .and_then(|p| p.strip_prefix(':'))
             .and_then(|p| p.parse().ok())
             .unwrap_or(default_port);
         return Some((host.to_string(), port));
@@ -351,19 +370,78 @@ fn host_port(url: &str) -> Option<(String, u16)> {
     Some((host.to_string(), port))
 }
 
+/// Request target (path + query) for the HTTP probe, defaulting to `/`.
+fn request_target(url: &str) -> String {
+    let (_, rest) = scheme_parts(url);
+    let rest = match rest.split_once('#') {
+        Some((before, _)) => before,
+        None => rest,
+    };
+    match rest.split_once('/') {
+        Some((_, path)) => format!("/{path}"),
+        None => "/".to_string(),
+    }
+}
+
+/// Parse an HTTP status line (`HTTP/1.0 200 OK`) out of the first bytes of
+/// a response. `None` for anything that is not HTTP.
+fn parse_status_line(bytes: &[u8]) -> Option<u16> {
+    let head = String::from_utf8_lossy(bytes);
+    let code = head.lines().next()?.split_whitespace().nth(1)?;
+    code.parse().ok()
+}
+
 fn http_ok(url: &str) -> bool {
     let Some((host, port)) = host_port(url) else {
         return false;
     };
+    let (https, _) = scheme_parts(url);
+    let target = request_target(url);
+
     // `"...".parse::<SocketAddr>()` only accepts IP literals — `localhost`
     // and other hostnames must go through the system resolver.
     use std::net::ToSocketAddrs as _;
     let Ok(addrs) = (host.as_str(), port).to_socket_addrs() else {
         return false;
     };
-    addrs.into_iter().any(|addr| {
-        std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(300)).is_ok()
-    })
+
+    for addr in addrs {
+        let Ok(mut stream) = std::net::TcpStream::connect_timeout(&addr, PROBE_TIMEOUT) else {
+            continue;
+        };
+        let _ = stream.set_read_timeout(Some(PROBE_TIMEOUT));
+        let _ = stream.set_write_timeout(Some(PROBE_TIMEOUT));
+
+        // std has no TLS: for https URLs the completed TCP handshake is
+        // the strongest signal available (the daemon URL is always
+        // http:// — tracked in docs/ISSUES.md).
+        if https {
+            return true;
+        }
+
+        // A bare TCP connect proves nothing — any unrelated service on the
+        // port would pass. Ask /healthz and require a 2xx answer, so a
+        // foreign HTTP server (404), a non-HTTP one (garbage) and a silent
+        // socket all report the daemon as down.
+        use std::io::{Read as _, Write as _};
+        let request = format!("GET {target} HTTP/1.0\r\nHost: {host}\r\nConnection: close\r\n\r\n");
+        if stream.write_all(request.as_bytes()).is_err() {
+            continue;
+        }
+        let mut buf = [0u8; 256];
+        let read = match stream.read(&mut buf) {
+            Ok(n) => n,
+            Err(_) => continue,
+        };
+        let answered_ok = buf
+            .get(..read)
+            .and_then(parse_status_line)
+            .is_some_and(|code| (200..300).contains(&code));
+        if answered_ok {
+            return true;
+        }
+    }
+    false
 }
 
 #[cfg(test)]
@@ -476,24 +554,124 @@ mod tests {
         assert_eq!(host_port("http://host:notaport/"), None);
     }
 
-    // ---- http_ok against a real listener ----
+    // ---- http_ok against real listeners ----
 
-    #[test]
-    fn http_ok_probes_a_real_listener() {
-        // Literal IP.
+    /// Spawn a responder thread: accept `n` connections, drain the request,
+    /// answer with `reply` (or stay silent when `reply` is empty).
+    fn spawn_responder(n: usize, reply: &'static [u8]) -> (u16, std::thread::JoinHandle<()>) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
-        assert!(http_ok(&format!("http://127.0.0.1:{port}/healthz")));
-        drop(listener);
-        // Port closed → not ok. (The OS could hand the port to someone else
-        // within milliseconds — vanishingly unlikely, and connect is fast.)
-        assert!(!http_ok(&format!("http://127.0.0.1:{port}/healthz")));
+        let handle = std::thread::spawn(move || {
+            for _ in 0..n {
+                let Ok((mut sock, _)) = listener.accept() else {
+                    break;
+                };
+                let mut buf = [0u8; 512];
+                let _ = std::io::Read::read(&mut sock, &mut buf);
+                if !reply.is_empty() {
+                    let _ = std::io::Write::write_all(&mut sock, reply);
+                }
+            }
+        });
+        (port, handle)
+    }
 
-        // Hostname → resolution through ToSocketAddrs. Bind via the same
-        // hostname so the test works whatever loopback family `localhost`
-        // maps to (some environments resolve it to ::1 only).
-        let listener = std::net::TcpListener::bind("localhost:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
+    #[test]
+    fn http_ok_requires_a_real_2xx_http_answer() {
+        let (port, handle) = spawn_responder(
+            3,
+            b"HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n{\"status\":\"ok\"}",
+        );
+        assert!(http_ok(&format!("http://127.0.0.1:{port}/healthz")));
+        // Hostname → resolution through ToSocketAddrs.
         assert!(http_ok(&format!("http://localhost:{port}/healthz")));
+        // Scheme in any letter case.
+        assert!(http_ok(&format!("HTTP://127.0.0.1:{port}/healthz")));
+        handle.join().unwrap();
+
+        // Responder gone → connection refused → down.
+        assert!(!http_ok(&format!("http://127.0.0.1:{port}/healthz")));
+    }
+
+    #[test]
+    fn http_ok_rejects_foreign_services() {
+        // Non-HTTP speaker (the old TCP-connect probe called this "healthy").
+        let (port, handle) = spawn_responder(1, b"welcome to my telnet server\r\n");
+        assert!(!http_ok(&format!("http://127.0.0.1:{port}/healthz")));
+        handle.join().unwrap();
+
+        // HTTP speaker without the health endpoint.
+        let (port, handle) = spawn_responder(1, b"HTTP/1.0 404 Not Found\r\n\r\nnope");
+        assert!(!http_ok(&format!("http://127.0.0.1:{port}/healthz")));
+        handle.join().unwrap();
+
+        // Server error responses are health failures too.
+        let (port, handle) = spawn_responder(1, b"HTTP/1.0 500 Internal Server Error\r\n\r\n");
+        assert!(!http_ok(&format!("http://127.0.0.1:{port}/healthz")));
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn http_ok_silent_socket_times_out_as_down() {
+        // A bound-but-never-accepting listener: connect succeeds, the write
+        // succeeds, the read hits the 300 ms timeout → down.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let started = std::time::Instant::now();
+        assert!(!http_ok(&format!("http://127.0.0.1:{port}/healthz")));
+        assert!(
+            started.elapsed() >= std::time::Duration::from_millis(250),
+            "the silent socket must be bounded by the read timeout"
+        );
+        drop(listener);
+    }
+
+    #[test]
+    fn http_ok_https_falls_back_to_tcp_handshake() {
+        // std has no TLS: https URLs are probed by TCP connect only.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        assert!(http_ok(&format!("https://127.0.0.1:{port}/healthz")));
+        drop(listener);
+        assert!(!http_ok(&format!("https://127.0.0.1:{port}/healthz")));
+    }
+
+    // ---- pure helpers ----
+
+    #[test]
+    fn parse_status_line_variants() {
+        assert_eq!(parse_status_line(b"HTTP/1.0 200 OK\r\n\r\n"), Some(200));
+        assert_eq!(
+            parse_status_line(b"HTTP/1.1 500 Internal Server Error\r\n"),
+            Some(500)
+        );
+        assert_eq!(parse_status_line(b"garbage line"), None);
+        assert_eq!(parse_status_line(b""), None);
+        assert_eq!(parse_status_line(b"HTTP/1.1"), None);
+    }
+
+    #[test]
+    fn request_target_variants() {
+        assert_eq!(request_target("http://h:1/healthz?a=b"), "/healthz?a=b");
+        assert_eq!(request_target("http://h:1"), "/");
+        assert_eq!(request_target("https://h/x#frag"), "/x");
+        assert_eq!(request_target("HTTP://H/healthz"), "/healthz");
+    }
+
+    #[test]
+    fn host_port_is_scheme_case_insensitive() {
+        assert_eq!(
+            host_port("HTTP://LocalHost:8080/healthz"),
+            Some(("LocalHost".into(), 8080))
+        );
+        assert_eq!(
+            host_port("HTTPS://example.com/x"),
+            Some(("example.com".into(), 443))
+        );
+        // Fragment must not leak into the authority.
+        assert_eq!(
+            host_port("http://127.0.0.1:8080/h#frag"),
+            Some(("127.0.0.1".into(), 8080))
+        );
     }
 }
