@@ -59,9 +59,9 @@ impl SseParser {
                 continue;
             }
             if let Some(rest) = line.strip_prefix("event:") {
-                self.cur_event = Some(rest.trim_start().to_string());
+                self.cur_event = Some(strip_one_space(rest).to_string());
             } else if let Some(rest) = line.strip_prefix("data:") {
-                self.cur_data.push(rest.trim_start().to_string());
+                self.cur_data.push(strip_one_space(rest).to_string());
             }
             // Other SSE fields (`id:`, `retry:`, comments) ignored for our use.
         }
@@ -78,9 +78,9 @@ impl SseParser {
             self.buf.clear();
             if !line.is_empty() {
                 if let Some(rest) = line.strip_prefix("event:") {
-                    self.cur_event = Some(rest.trim_start().to_string());
+                    self.cur_event = Some(strip_one_space(rest).to_string());
                 } else if let Some(rest) = line.strip_prefix("data:") {
-                    self.cur_data.push(rest.trim_start().to_string());
+                    self.cur_data.push(strip_one_space(rest).to_string());
                 }
             }
         }
@@ -96,6 +96,14 @@ impl SseParser {
             None
         }
     }
+}
+
+/// SSE field-value handling: strip exactly one leading space, per the SSE
+/// spec. `trim_start()` ate *all* leading whitespace, corrupting payloads
+/// that intentionally begin with a space — e.g. streamed token deltas like
+/// `data:  world` lost their ` world` leading space.
+fn strip_one_space(rest: &str) -> &str {
+    rest.strip_prefix(' ').unwrap_or(rest)
 }
 
 /// Minimal JSON path extractor.
@@ -202,8 +210,12 @@ fn parse_path(path: &str) -> Option<Vec<Segment>> {
                 i += end + 1;
             }
             _ => {
-                cur.push(bytes[i] as char);
-                i += 1;
+                // Decode a whole UTF-8 scalar: `bytes[i] as char` mangled
+                // every non-ASCII key — each byte became its own bogus
+                // `char`, so a key like `помощь` never matched.
+                let ch = path[i..].chars().next()?;
+                cur.push(ch);
+                i += ch.len_utf8();
             }
         }
     }
@@ -485,6 +497,51 @@ mod tests {
     fn json_path_empty_is_none() {
         let v = json!({});
         assert!(json_path_str(&v, "").is_none());
+    }
+
+    // ---- regressions ----
+
+    #[test]
+    fn sse_keeps_one_leading_space_after_colon() {
+        // `data:  world` (two spaces) must yield " world": the SSE spec
+        // strips a *single* leading space. trim_start() ate both, corrupting
+        // streamed token deltas.
+        let mut p = SseParser::new();
+        let frames = p.feed("data:  world\n\n");
+        assert_eq!(frames[0].data, " world");
+
+        // No space at all is also valid.
+        let mut p = SseParser::new();
+        let frames = p.feed("data:x\n\n");
+        assert_eq!(frames[0].data, "x");
+    }
+
+    #[test]
+    fn sse_finish_keeps_leading_space() {
+        let mut p = SseParser::new();
+        assert!(p.feed("data:  tail").is_empty());
+        let f = p.finish().unwrap();
+        assert_eq!(f.data, " tail");
+    }
+
+    #[test]
+    fn json_path_non_ascii_keys() {
+        // Regression: `bytes[i] as char` turned every byte of a multi-byte
+        // key into its own bogus `char`, so non-ASCII keys never matched.
+        let v = json!({"помощь": {"текст": "привет"}, "檔案": {"內容": "你好"}});
+        assert_eq!(json_path_str(&v, "помощь.текст").as_deref(), Some("привет"));
+        assert_eq!(json_path_str(&v, "檔案.內容").as_deref(), Some("你好"));
+
+        // Emoji key (4-byte scalars).
+        let v = json!({"🚀": {"msg": "launched"}});
+        assert_eq!(json_path_str(&v, "🚀.msg").as_deref(), Some("launched"));
+    }
+
+    #[test]
+    fn json_path_unclosed_bracket_is_none() {
+        let v = json!({"a": [1, 2]});
+        assert!(json_path_str(&v, "a[0").is_none());
+        assert!(json_path_str(&v, "a[0.b").is_none());
     }
 
     #[test]

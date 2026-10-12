@@ -217,13 +217,42 @@ fn logs(follow: bool, lines: usize) -> Result<()> {
             let Ok(cur) = std::fs::read_to_string(&p) else {
                 continue;
             };
-            if cur.len() > pos {
-                print!("{}", &cur[pos..]);
-                pos = cur.len();
+            let (new_pos, chunk) = follow_chunk(pos, &cur);
+            if !chunk.is_empty() {
+                print!("{chunk}");
+                use std::io::Write as _;
+                let _ = std::io::stdout().flush();
             }
+            pos = new_pos;
         }
     }
     Ok(())
+}
+
+/// Pure `logs --follow` step: given the previous byte offset into the log
+/// and the current file contents, decide what to print and where to resume.
+///
+/// * append — the new bytes past `pos`;
+/// * no change — empty chunk, offset unchanged;
+/// * truncation/rotation (`cur` shrank below `pos`) — restart from byte 0,
+///   so following a rotated log resumes instead of going silent forever;
+/// * a stale offset landing mid-UTF-8 (a truncation cut a multi-byte char
+///   and the file regrew) — snap forward to the next char boundary instead
+///   of panicking on a non-boundary slice.
+fn follow_chunk(prev: usize, cur: &str) -> (usize, String) {
+    let pos = if cur.len() < prev { 0 } else { prev };
+    let pos = if cur.is_char_boundary(pos) {
+        pos
+    } else {
+        (pos..=cur.len())
+            .find(|&i| cur.is_char_boundary(i))
+            .unwrap_or(cur.len())
+    };
+    if cur.len() > pos {
+        (cur.len(), cur[pos..].to_string())
+    } else {
+        (pos, String::new())
+    }
 }
 
 // ---- plumbing ----
@@ -274,20 +303,197 @@ fn libc_sigterm() -> i32 {
     1
 }
 
-fn http_ok(url: &str) -> bool {
-    let rest = url.trim_start_matches("http://");
-    let (host, port_path) = match rest.split_once(':') {
-        Some((h, p)) => (h.to_string(), p.to_string()),
-        None => return false,
+/// Extract `(host, port)` from a health-check URL. Pure and unit-tested.
+///
+/// Handles the shapes `http_ok` used to choke on (each reported a healthy
+/// daemon as down):
+/// * `http://localhost:8080/…` — hostnames (not just IP literals);
+/// * `http://host/…` — no port → scheme default (80);
+/// * `https://host/…` — used to split at the wrong colon entirely;
+/// * `http://[::1]:8080/…` — bracketed IPv6 literals;
+/// * `http://user:pass@host:8080/…` — userinfo is dropped.
+fn host_port(url: &str) -> Option<(String, u16)> {
+    let https = url.starts_with("https://");
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .unwrap_or(url);
+    // Cut path and query — everything from the first '/' or '?'.
+    let end = rest.find(['/', '?']).unwrap_or(rest.len());
+    let mut authority = &rest[..end];
+    // Drop userinfo (`user:pass@host`).
+    if let Some(at) = authority.rfind('@') {
+        authority = &authority[at + 1..];
+    }
+    let default_port: u16 = if https { 443 } else { 80 };
+
+    // Bracketed IPv6 literal: `[::1]:8080`.
+    if let Some(inner) = authority.strip_prefix('[') {
+        let close = inner.find(']')?;
+        let host = &inner[..close];
+        if host.is_empty() {
+            return None;
+        }
+        let port = inner[close + 1..]
+            .strip_prefix(':')
+            .and_then(|p| p.parse().ok())
+            .unwrap_or(default_port);
+        return Some((host.to_string(), port));
+    }
+
+    let (host, port) = match authority.rsplit_once(':') {
+        Some((h, p)) => (h, p.parse::<u16>().ok()?),
+        None => (authority, default_port),
     };
-    let port = port_path
-        .split('/')
-        .next()
-        .unwrap_or("80")
-        .parse()
-        .unwrap_or(80);
-    let Ok(addr) = format!("{host}:{port}").parse() else {
+    if host.is_empty() {
+        return None;
+    }
+    Some((host.to_string(), port))
+}
+
+fn http_ok(url: &str) -> bool {
+    let Some((host, port)) = host_port(url) else {
         return false;
     };
-    std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(300)).is_ok()
+    // `"...".parse::<SocketAddr>()` only accepts IP literals — `localhost`
+    // and other hostnames must go through the system resolver.
+    use std::net::ToSocketAddrs as _;
+    let Ok(addrs) = (host.as_str(), port).to_socket_addrs() else {
+        return false;
+    };
+    addrs.into_iter().any(|addr| {
+        std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(300)).is_ok()
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- follow_chunk ----
+
+    #[test]
+    fn follow_chunk_appends_new_bytes() {
+        let (pos, chunk) = follow_chunk(5, "hello world");
+        assert_eq!(pos, 11);
+        assert_eq!(chunk, " world");
+    }
+
+    #[test]
+    fn follow_chunk_no_change_yields_empty() {
+        let (pos, chunk) = follow_chunk(11, "hello world");
+        assert_eq!(pos, 11);
+        assert_eq!(chunk, "");
+    }
+
+    #[test]
+    fn follow_chunk_recovers_after_truncation() {
+        // Log rotated/truncated below our offset: restart from byte 0 so
+        // following resumes on the new content instead of going silent.
+        let (pos, chunk) = follow_chunk(500, "new log\n");
+        assert_eq!(pos, 8);
+        assert_eq!(chunk, "new log\n");
+    }
+
+    #[test]
+    fn follow_chunk_stale_offset_mid_utf8_does_not_panic() {
+        // 'ё' is two bytes; a truncation left a stale offset inside it.
+        // Must not panic ("byte index 1 is not a char boundary") and must
+        // snap forward to the next boundary.
+        let cur = "ёжик";
+        let (pos, chunk) = follow_chunk(1, cur);
+        assert!(cur.is_char_boundary(pos));
+        assert_eq!(chunk, "жик");
+        assert_eq!(pos, cur.len());
+    }
+
+    #[test]
+    fn follow_chunk_multibyte_content_round_trip() {
+        let cur = "привет мир";
+        let (pos, chunk) = follow_chunk(0, cur);
+        assert_eq!(chunk, cur);
+        let (pos2, chunk2) = follow_chunk(pos, cur);
+        assert_eq!(chunk2, "");
+        assert_eq!(pos2, cur.len());
+    }
+
+    // ---- host_port ----
+
+    #[test]
+    fn host_port_parses_ip_with_port() {
+        assert_eq!(
+            host_port("http://127.0.0.1:8080/healthz"),
+            Some(("127.0.0.1".into(), 8080))
+        );
+    }
+
+    #[test]
+    fn host_port_parses_hostname_with_port() {
+        // Regression: SocketAddr::parse rejected `localhost`, so a healthy
+        // daemon on http://localhost:8080 reported as down.
+        assert_eq!(
+            host_port("http://localhost:8080/healthz"),
+            Some(("localhost".into(), 8080))
+        );
+    }
+
+    #[test]
+    fn host_port_defaults_http_port_80() {
+        assert_eq!(
+            host_port("http://example.com/healthz"),
+            Some(("example.com".into(), 80))
+        );
+    }
+
+    #[test]
+    fn host_port_defaults_https_port_443() {
+        assert_eq!(
+            host_port("https://example.com/healthz"),
+            Some(("example.com".into(), 443))
+        );
+    }
+
+    #[test]
+    fn host_port_handles_ipv6() {
+        assert_eq!(
+            host_port("http://[::1]:8080/healthz"),
+            Some(("::1".into(), 8080))
+        );
+        assert_eq!(host_port("http://[::1]/healthz"), Some(("::1".into(), 80)));
+    }
+
+    #[test]
+    fn host_port_drops_userinfo() {
+        assert_eq!(
+            host_port("http://user:pass@localhost:8080/healthz"),
+            Some(("localhost".into(), 8080))
+        );
+    }
+
+    #[test]
+    fn host_port_rejects_garbage() {
+        assert_eq!(host_port("http://"), None);
+        assert_eq!(host_port("http://host:notaport/"), None);
+    }
+
+    // ---- http_ok against a real listener ----
+
+    #[test]
+    fn http_ok_probes_a_real_listener() {
+        // Literal IP.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        assert!(http_ok(&format!("http://127.0.0.1:{port}/healthz")));
+        drop(listener);
+        // Port closed → not ok. (The OS could hand the port to someone else
+        // within milliseconds — vanishingly unlikely, and connect is fast.)
+        assert!(!http_ok(&format!("http://127.0.0.1:{port}/healthz")));
+
+        // Hostname → resolution through ToSocketAddrs. Bind via the same
+        // hostname so the test works whatever loopback family `localhost`
+        // maps to (some environments resolve it to ::1 only).
+        let listener = std::net::TcpListener::bind("localhost:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        assert!(http_ok(&format!("http://localhost:{port}/healthz")));
+    }
 }

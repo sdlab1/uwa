@@ -41,6 +41,7 @@ pub fn stream_response(
         let mut calls: Vec<ToolCall> = Vec::new();
         let mut finish = FinishReason::Stop;
         let mut completion_text = String::new();
+        let mut saw_done = false;
 
         while let Some(ev) = rx.recv().await {
             match ev {
@@ -62,6 +63,7 @@ pub fn stream_response(
                 } => {
                     finish = f;
                     calls = tool_calls;
+                    saw_done = true;
                     break;
                 }
                 StreamEvent::Error(e) => {
@@ -84,6 +86,28 @@ pub fn stream_response(
                     return;
                 }
             }
+        }
+
+        if !saw_done {
+            // Producer dropped its channel without a final chunk: this used
+            // to fall through and be reported as a clean `stop` completion.
+            let payload = json!({
+                "id": stream_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model,
+                "choices": [{
+                    "index": 0,
+                    "delta": {},
+                    "finish_reason": "error"
+                }],
+                "error": { "message": "stream producer dropped before completion" }
+            });
+            let _ = tx
+                .send(Ok(Event::default().data(payload.to_string())))
+                .await;
+            let _ = tx.send(Ok(Event::default().data("[DONE]"))).await;
+            return;
         }
 
         // Tool calls: one aggregated delta (matches previous behavior).
@@ -193,5 +217,59 @@ mod tests {
         // Event doesn't expose fields; constructing without a panic is the
         // contract we care about here.
         let _ = ev;
+    }
+
+    // ---- stream writer (driven through a channel) ----
+
+    async fn collect(
+        drive: impl FnOnce(mpsc::Sender<StreamEvent>),
+    ) -> Vec<crate::routes::sse_testing::SseFrame> {
+        let (tx, rx) = mpsc::channel(16);
+        let resp = stream_response(RequestId::new(), "gpt-4o".into(), 1_000, rx, false, 3);
+        drive(tx);
+        crate::routes::sse_testing::collect(resp).await
+    }
+
+    #[tokio::test]
+    async fn normal_completion_chunks() {
+        let frames = collect(|tx| {
+            tx.try_send(StreamEvent::Delta("hello".into())).unwrap();
+            tx.try_send(StreamEvent::Done {
+                finish: FinishReason::Stop,
+                tool_calls: vec![],
+            })
+            .unwrap();
+        })
+        .await;
+
+        let last = frames.last().expect("frames");
+        assert!(last.is_done_sentinel());
+        let finish_chunk = &frames[frames.len() - 2];
+        assert_eq!(finish_chunk.json()["choices"][0]["finish_reason"], "stop");
+        assert!(frames
+            .iter()
+            .any(|f| f.json()["choices"][0]["delta"]["content"] == "hello"));
+    }
+
+    #[tokio::test]
+    async fn dropped_producer_finishes_with_error() {
+        // Regression: a producer that dropped its channel without a Done
+        // used to produce a clean `stop` finish chunk.
+        let frames = collect(|tx| {
+            tx.try_send(StreamEvent::Delta("partial".into())).unwrap();
+            drop(tx);
+        })
+        .await;
+
+        let last = frames.last().expect("frames");
+        assert!(last.is_done_sentinel());
+        let error_chunk = &frames[frames.len() - 2];
+        let j = error_chunk.json();
+        assert_eq!(j["choices"][0]["finish_reason"], "error");
+        assert!(j["error"]["message"].as_str().unwrap().contains("dropped"));
+        // ...and no clean `stop` finish chunk anywhere.
+        assert!(frames
+            .iter()
+            .all(|f| f.json()["choices"][0]["finish_reason"] != "stop"));
     }
 }

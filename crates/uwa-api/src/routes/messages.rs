@@ -312,7 +312,14 @@ fn convert_message(m: &AnthropicMessage) -> Vec<ChatMessage> {
                     .and_then(Value::as_str)
                     .unwrap_or("")
                     .to_string();
-                let input = b.get("input").cloned().unwrap_or(Value::Null);
+                // Missing or explicit-null `input` must become `{}` —
+                // serializing Value::Null produced the *string* "null",
+                // which broke clients parsing tool arguments as JSON.
+                let input = b
+                    .get("input")
+                    .cloned()
+                    .filter(|v| !v.is_null())
+                    .unwrap_or_else(|| json!({}));
                 tool_calls.push(ToolCallRef {
                     id,
                     kind: "function".into(),
@@ -487,6 +494,7 @@ fn stream_anthropic_from_channel(
         let mut calls: Vec<ToolCall> = Vec::new();
         let mut finish = FinishReason::Stop;
         let mut output_text = String::new();
+        let mut saw_done = false;
 
         while let Some(ev) = rx.recv().await {
             match ev {
@@ -522,24 +530,22 @@ fn stream_anthropic_from_channel(
                 } => {
                     finish = f;
                     calls = tool_calls;
+                    saw_done = true;
                     break;
                 }
                 StreamEvent::Error(e) => {
-                    let _ = tx
-                        .send(Ok(sse_event(
-                            "error",
-                            json!({ "type": "error", "error": { "message": e.to_string() } }),
-                        )))
-                        .await;
-                    let _ = tx
-                        .send(Ok(sse_event(
-                            "message_stop",
-                            json!({ "type": "message_stop" }),
-                        )))
-                        .await;
+                    emit_anthropic_stream_error(&tx, text_block_open, text_index, &e).await;
                     return;
                 }
             }
+        }
+
+        if !saw_done {
+            // Producer dropped its channel without a final chunk: this used
+            // to fall through and masquerade as a clean `end_turn`.
+            let e = UwaError::Internal("stream producer dropped before completion".into());
+            emit_anthropic_stream_error(&tx, text_block_open, text_index, &e).await;
+            return;
         }
 
         let mut index = text_index;
@@ -625,11 +631,60 @@ fn sse_event(name: &str, payload: Value) -> Event {
         .data(serde_json::to_string(&payload).unwrap_or_default())
 }
 
+/// Anthropic stream error `type` — must be one of the values the SDKs
+/// accept; `server_error` (the OpenAI kind) is not, so it maps to
+/// `api_error`.
+fn anthropic_error_type(e: &UwaError) -> &'static str {
+    match e.openai_shape().1 {
+        "invalid_request_error" => "invalid_request_error",
+        _ => "api_error",
+    }
+}
+
+/// Close the open text block (if any), then emit a typed `error` event and
+/// `message_stop`. Shared by the mid-stream-error and dropped-producer
+/// paths — leaving the block open (or omitting `error.type`) broke the
+/// SDKs' stream parsers.
+async fn emit_anthropic_stream_error(
+    tx: &mpsc::Sender<Result<Event, std::convert::Infallible>>,
+    text_block_open: bool,
+    text_index: u32,
+    e: &UwaError,
+) {
+    if text_block_open {
+        let _ = tx
+            .send(Ok(sse_event(
+                "content_block_stop",
+                json!({ "type": "content_block_stop", "index": text_index }),
+            )))
+            .await;
+    }
+    let _ = tx
+        .send(Ok(sse_event(
+            "error",
+            json!({
+                "type": "error",
+                "error": {
+                    "type": anthropic_error_type(e),
+                    "message": e.to_string(),
+                }
+            }),
+        )))
+        .await;
+    let _ = tx
+        .send(Ok(sse_event(
+            "message_stop",
+            json!({ "type": "message_stop" }),
+        )))
+        .await;
+}
+
 // ---------- tests ----------
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::routes::chat::pipeline::StreamEvent;
     use serde_json::json;
 
     #[test]
@@ -820,5 +875,178 @@ mod tests {
         );
         assert_eq!(r.stop_reason.as_deref(), Some("tool_use"));
         assert_eq!(r.content.len(), 1);
+    }
+
+    #[test]
+    fn tool_use_without_input_becomes_empty_object() {
+        // Regression: a `tool_use` block with a missing or null `input`
+        // serialized its arguments as the *string* "null" instead of "{}".
+        let m = AnthropicMessage {
+            role: "assistant".into(),
+            content: json!([
+                {"type": "tool_use", "id": "t1", "name": "w"},
+                {"type": "tool_use", "id": "t2", "name": "x", "input": null}
+            ]),
+        };
+        let tc = convert_message(&m)[0].tool_calls.clone().unwrap();
+        assert_eq!(tc[0].function.arguments, "{}");
+        assert_eq!(tc[1].function.arguments, "{}");
+
+        // Real input still round-trips.
+        let m = AnthropicMessage {
+            role: "assistant".into(),
+            content: json!([{"type": "tool_use", "id": "t3", "name": "w", "input": {"a": 1}}]),
+        };
+        let tc = convert_message(&m)[0].tool_calls.clone().unwrap();
+        assert_eq!(tc[0].function.arguments, r#"{"a":1}"#);
+    }
+
+    // ---- stream writer (driven through a channel) ----
+
+    async fn collect_stream(
+        drive: impl FnOnce(mpsc::Sender<crate::routes::chat::pipeline::StreamEvent>),
+    ) -> Vec<crate::routes::sse_testing::SseFrame> {
+        let (tx, rx) = mpsc::channel(16);
+        let resp = stream_anthropic_from_channel("msg_1".into(), "claude".into(), rx);
+        drive(tx);
+        crate::routes::sse_testing::collect(resp).await
+    }
+
+    fn tool_call(id: &str, name: &str, arguments: Value) -> ToolCall {
+        ToolCall {
+            id: id.into(),
+            name: name.into(),
+            arguments,
+        }
+    }
+
+    fn event_names(frames: &[crate::routes::sse_testing::SseFrame]) -> Vec<&str> {
+        frames.iter().map(|f| f.event.as_str()).collect()
+    }
+
+    #[tokio::test]
+    async fn anthropic_stream_happy_path_two_tool_calls() {
+        let frames = collect_stream(|tx| {
+            tx.try_send(StreamEvent::Delta("checking ".into())).unwrap();
+            tx.try_send(StreamEvent::Delta("weather".into())).unwrap();
+            tx.try_send(StreamEvent::Done {
+                finish: FinishReason::ToolCalls,
+                tool_calls: vec![
+                    tool_call("t1", "get_weather", json!({"city": "NYC"})),
+                    tool_call("t2", "get_time", json!({})),
+                ],
+            })
+            .unwrap();
+        })
+        .await;
+
+        assert_eq!(
+            event_names(&frames),
+            vec![
+                "message_start",
+                "content_block_start",
+                "content_block_delta",
+                "content_block_delta",
+                "content_block_stop",
+                // two tool_use blocks, three events each
+                "content_block_start",
+                "content_block_delta",
+                "content_block_stop",
+                "content_block_start",
+                "content_block_delta",
+                "content_block_stop",
+                "message_delta",
+                "message_stop",
+            ]
+        );
+
+        // Text block at index 0; tool blocks at 1 and 2.
+        assert_eq!(frames[1].json()["index"], 0);
+        assert_eq!(frames[5].json()["index"], 1);
+        assert_eq!(frames[5].json()["content_block"]["type"], "tool_use");
+        assert_eq!(
+            frames[6].json()["delta"]["partial_json"],
+            r#"{"city":"NYC"}"#
+        );
+        assert_eq!(frames[8].json()["index"], 2);
+
+        assert_eq!(frames[11].json()["delta"]["stop_reason"], "tool_use");
+        assert!(frames[12].json()["type"] == "message_stop");
+    }
+
+    #[tokio::test]
+    async fn anthropic_stream_error_closes_text_block_and_types_the_error() {
+        // Regression: the error event had no `error.type`, and a partially
+        // streamed text block was left open (SDKs hang waiting for
+        // content_block_stop).
+        let frames = collect_stream(|tx| {
+            tx.try_send(StreamEvent::Delta("partial answer".into()))
+                .unwrap();
+            tx.try_send(StreamEvent::Error(UwaError::BadRequest("boom".into())))
+                .unwrap();
+        })
+        .await;
+
+        assert_eq!(
+            event_names(&frames),
+            vec![
+                "message_start",
+                "content_block_start",
+                "content_block_delta",
+                "content_block_stop",
+                "error",
+                "message_stop",
+            ]
+        );
+        let err = frames[4].json();
+        assert_eq!(err["error"]["type"], "invalid_request_error");
+        assert!(err["error"]["message"].as_str().unwrap().contains("boom"));
+    }
+
+    #[tokio::test]
+    async fn anthropic_stream_dropped_producer_is_an_error_not_end_turn() {
+        // Regression: a producer that dropped its channel without a Done
+        // used to be reported as a clean `end_turn` completion.
+        let frames = collect_stream(|tx| {
+            tx.try_send(StreamEvent::Delta("half an answer".into()))
+                .unwrap();
+            drop(tx);
+        })
+        .await;
+
+        assert_eq!(
+            event_names(&frames),
+            vec![
+                "message_start",
+                "content_block_start",
+                "content_block_delta",
+                "content_block_stop",
+                "error",
+                "message_stop",
+            ]
+        );
+        let err = frames[4].json();
+        assert_eq!(err["error"]["type"], "api_error");
+        assert!(err["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("dropped"));
+        // No message_delta with stop_reason end_turn anywhere.
+        assert!(frames
+            .iter()
+            .all(|f| f.json()["delta"]["stop_reason"] != "end_turn"));
+    }
+
+    #[test]
+    fn anthropic_error_type_mapping() {
+        assert_eq!(
+            anthropic_error_type(&UwaError::BadRequest("x".into())),
+            "invalid_request_error"
+        );
+        // `server_error` is not an Anthropic type; it must become api_error.
+        assert_eq!(
+            anthropic_error_type(&UwaError::Internal("x".into())),
+            "api_error"
+        );
     }
 }

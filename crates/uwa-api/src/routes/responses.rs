@@ -212,6 +212,7 @@ fn stream_response(
 
         let mut finish_reason = "stop";
         let mut calls: Vec<uwa_tools::ToolCall> = Vec::new();
+        let mut saw_done = false;
 
         while let Some(ev) = rx.recv().await {
             match ev {
@@ -237,31 +238,36 @@ fn stream_response(
                         uwa_core::types::FinishReason::ContentFilter => "content_filter",
                     };
                     calls = tool_calls;
+                    saw_done = true;
                     break;
                 }
-                chat::pipeline::StreamEvent::Error(e) => {
-                    let _ = tx
-                        .send(Ok(Event::default().event("response.failed").data(
-                            json!({
-                                "type": "response.failed",
-                                "response": { "id": resp_id, "error": e.to_string() },
-                            })
-                            .to_string(),
-                        )))
-                        .await;
+                chat::pipeline::StreamEvent::Error(ref e) => {
+                    emit_response_failed(&tx, &resp_id, e).await;
                     return;
                 }
             }
         }
 
-        for c in &calls {
+        if !saw_done {
+            // Producer dropped its channel without a final chunk: this used
+            // to fall through and masquerade as a clean `response.completed`.
+            let e = UwaError::Internal("stream producer dropped before completion".into());
+            emit_response_failed(&tx, &resp_id, &e).await;
+            return;
+        }
+
+        // Function-call items follow the text message (if any) in the final
+        // `output` array, and their `output_index` must say so. All-zero
+        // indices made parallel calls collide for Codex.
+        let index_base: u32 = if acc.is_empty() { 0 } else { 1 };
+        for (i, c) in calls.iter().enumerate() {
             let _ = tx
                 .send(Ok(Event::default()
                     .event("response.output_item.added")
                     .data(
                         json!({
                             "type": "response.output_item.added",
-                            "output_index": 0,
+                            "output_index": index_base + i as u32,
                             "item": {
                                 "type": "function_call",
                                 "call_id": c.id,
@@ -310,6 +316,33 @@ fn stream_response(
     Sse::new(ReceiverStream::new(out_rx))
         .keep_alive(KeepAlive::default())
         .into_response()
+}
+
+/// Emit the `response.failed` terminal event, shared by the explicit-error
+/// and dropped-producer paths. `status: "failed"` + structured `error`
+/// object is what the Responses SDKs look for.
+async fn emit_response_failed(
+    tx: &mpsc::Sender<Result<Event, std::convert::Infallible>>,
+    resp_id: &str,
+    error: &UwaError,
+) {
+    let _ = tx
+        .send(Ok(Event::default().event("response.failed").data(
+            json!({
+                "type": "response.failed",
+                "response": {
+                    "id": resp_id,
+                    "object": "response",
+                    "status": "failed",
+                    "error": {
+                        "code": error.openai_shape().2,
+                        "message": error.to_string(),
+                    },
+                },
+            })
+            .to_string(),
+        )))
+        .await;
 }
 
 /// Streaming variant of the response `output` array: message text plus
@@ -802,5 +835,116 @@ mod tests {
         assert_eq!(v["output"][0]["content"][0]["type"], "output_text");
         assert_eq!(v["output"][0]["content"][0]["text"], "hi");
         assert!(v.get("error").is_none(), "absent fields are skipped");
+    }
+
+    // ---- streaming writer (driven through a channel) ----
+
+    fn call(id: &str, name: &str, arguments: Value) -> uwa_tools::ToolCall {
+        uwa_tools::ToolCall {
+            id: id.into(),
+            name: name.into(),
+            arguments,
+        }
+    }
+
+    async fn collect(
+        drive: impl FnOnce(mpsc::Sender<chat::pipeline::StreamEvent>),
+    ) -> Vec<crate::routes::sse_testing::SseFrame> {
+        let (tx, rx) = mpsc::channel(16);
+        let resp = stream_response("gpt-4o".into(), 8, rx);
+        drive(tx);
+        crate::routes::sse_testing::collect(resp).await
+    }
+
+    fn added_indices(frames: &[crate::routes::sse_testing::SseFrame]) -> Vec<u64> {
+        frames
+            .iter()
+            .filter(|f| f.event == "response.output_item.added")
+            .map(|f| f.json()["output_index"].as_u64().unwrap())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn parallel_function_calls_get_distinct_output_indices() {
+        // Regression: every function call was emitted with `output_index`
+        // 0, so parallel calls collided for clients like Codex.
+        let frames = collect(|tx| {
+            tx.try_send(chat::pipeline::StreamEvent::Done {
+                finish: uwa_core::types::FinishReason::ToolCalls,
+                tool_calls: vec![
+                    call("c1", "get_weather", json!({"city": "NYC"})),
+                    call("c2", "get_time", json!({})),
+                    call("c3", "get_date", json!({})),
+                ],
+            })
+            .unwrap();
+        })
+        .await;
+
+        assert_eq!(added_indices(&frames), vec![0, 1, 2]);
+        let completed = frames
+            .iter()
+            .find(|f| f.event == "response.completed")
+            .expect("completed event");
+        assert_eq!(completed.json()["response"]["status"], "completed");
+        assert_eq!(
+            completed.json()["response"]["output"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
+    }
+
+    #[tokio::test]
+    async fn function_call_indices_start_after_the_text_message() {
+        // With a text message first, function calls must be indexed from 1
+        // to match the final `output` array.
+        let frames = collect(|tx| {
+            tx.try_send(chat::pipeline::StreamEvent::Delta("thinking".into()))
+                .unwrap();
+            tx.try_send(chat::pipeline::StreamEvent::Done {
+                finish: uwa_core::types::FinishReason::ToolCalls,
+                tool_calls: vec![
+                    call("c1", "get_weather", json!({})),
+                    call("c2", "get_time", json!({})),
+                ],
+            })
+            .unwrap();
+        })
+        .await;
+
+        assert_eq!(added_indices(&frames), vec![1, 2]);
+        let completed = frames
+            .iter()
+            .find(|f| f.event == "response.completed")
+            .expect("completed event");
+        let completed = completed.json();
+        let output = completed["response"]["output"].as_array().unwrap();
+        assert_eq!(output[0]["type"], "message");
+        assert_eq!(output[1]["type"], "function_call");
+    }
+
+    #[tokio::test]
+    async fn dropped_producer_fails_the_response() {
+        // Regression: a producer that dropped its channel without a Done
+        // used to be reported as a clean `response.completed`.
+        let frames = collect(|tx| {
+            tx.try_send(chat::pipeline::StreamEvent::Delta("partial".into()))
+                .unwrap();
+            drop(tx);
+        })
+        .await;
+
+        let failed = frames
+            .iter()
+            .find(|f| f.event == "response.failed")
+            .expect("response.failed event");
+        assert_eq!(failed.json()["response"]["status"], "failed");
+        assert!(failed.json()["response"]["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("dropped"));
+        assert!(frames.iter().all(|f| f.event != "response.completed"));
     }
 }
