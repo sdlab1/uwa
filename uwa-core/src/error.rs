@@ -38,8 +38,12 @@ impl ModelNotFound {
             let preview: Vec<&str> = sorted.iter().take(8).map(String::as_str).collect();
             s.push_str(" Available: ");
             s.push_str(&preview.join(", "));
-            if sorted.len() > preview.len() {
-                s.push_str(&format!(", … (+{} more)", sorted.len() - preview.len()));
+            // `preview` is a prefix of `sorted`, so the subtraction cannot
+            // underflow — but `arithmetic_side_effects` is forbid-level and
+            // cannot see that, hence saturating_sub.
+            let rest = sorted.len().saturating_sub(preview.len());
+            if rest > 0 {
+                s.push_str(&format!(", … (+{rest} more)"));
             }
             s.push('.');
         }
@@ -97,6 +101,16 @@ fn closest_match(requested: &str, available: &[String]) -> Option<String> {
     best.map(|(_, c)| c.clone())
 }
 
+/// Iterative Levenshtein DP carried in two row vectors.
+///
+/// Written **index-free** (iterator pairs + `Vec::last`, `saturating_add`
+/// instead of raw arithmetic) to satisfy the workspace's forbid-level
+/// clippy lints (`indexing_slicing`, `arithmetic_side_effects`): the DP
+/// indices are provably in range, but the lints cannot prove it.
+///
+/// Invariant: before row `i` is computed, `prev` holds
+/// `prev[j] = distance(a[..i], b[..j])`. Inside a row, `diag` trails the
+/// `prev` iterator by one cell, playing `prev[j-1]` against `above = prev[j]`.
 fn levenshtein(a: &str, b: &str) -> usize {
     let a: Vec<char> = a.chars().collect();
     let b: Vec<char> = b.chars().collect();
@@ -107,16 +121,27 @@ fn levenshtein(a: &str, b: &str) -> usize {
         return a.len();
     }
     let mut prev: Vec<usize> = (0..=b.len()).collect();
-    let mut cur = vec![0usize; b.len() + 1];
-    for i in 1..=a.len() {
-        cur[0] = i;
-        for j in 1..=b.len() {
-            let cost = if a[i - 1] == b[j - 1] { 0 } else { 1 };
-            cur[j] = (cur[j - 1] + 1).min(prev[j] + 1).min(prev[j - 1] + cost);
+    for (i, ca) in a.iter().enumerate() {
+        let mut cur: Vec<usize> = Vec::with_capacity(b.len().saturating_add(1));
+        // Row header: distance between a[..=i] and the empty `b`.
+        cur.push(i.saturating_add(1));
+        let mut prev_items = prev.iter().copied();
+        let mut diag = prev_items.next().unwrap_or(0);
+        for cb in b.iter() {
+            let above = prev_items.next().unwrap_or(0); // prev[j]
+            let left = cur.last().copied().unwrap_or(0); // cur[j-1]
+            let cost = usize::from(ca != cb);
+            cur.push(
+                above
+                    .saturating_add(1)
+                    .min(left.saturating_add(1))
+                    .min(diag.saturating_add(cost)),
+            );
+            diag = above;
         }
-        std::mem::swap(&mut prev, &mut cur);
+        prev = cur;
     }
-    prev[b.len()]
+    prev.last().copied().unwrap_or(0)
 }
 
 #[derive(Debug, Clone, Error)]
@@ -225,5 +250,53 @@ mod tests {
         let m = e.to_string();
         assert!(m.contains("Unknown model"));
         assert!(!m.contains("Did you mean"));
+    }
+
+    // ---- index-free levenshtein / closest_match rewrite ----
+
+    #[test]
+    fn levenshtein_matches_reference_values() {
+        // Locks the iterator-based rewrite against the classic textbook
+        // distances, including the empty-string edges and non-ASCII input
+        // that previously went through byte indexing.
+        assert_eq!(levenshtein("", ""), 0);
+        assert_eq!(levenshtein("abc", ""), 3);
+        assert_eq!(levenshtein("", "abc"), 3);
+        assert_eq!(levenshtein("kitten", "sitting"), 3);
+        assert_eq!(levenshtein("flaw", "lawn"), 2);
+        assert_eq!(levenshtein("gumbo", "gambol"), 2);
+        // "gpt-4" is a prefix of "gpt-4o" — one deletion.
+        assert_eq!(levenshtein("gpt-4o", "gpt-4"), 1);
+        assert_eq!(levenshtein("изменение", "изменения"), 1);
+        // Symmetry on a non-trivial pair.
+        assert_eq!(
+            levenshtein("claude", "gpt-4o"),
+            levenshtein("gpt-4o", "claude")
+        );
+    }
+
+    #[test]
+    fn closest_match_suggestions_survive_the_rewrite() {
+        // Prefix short-circuit still wins outright.
+        let m = ModelNotFound::new("gpt-4-turbo", vec!["gpt-4o".into(), "claude".into()]);
+        assert_eq!(m.suggestion.as_deref(), Some("gpt-4o"));
+
+        // Levenshtein fallback still fires within the distance budget
+        // ("cluade" -> "claude" is 2 edits; budget for 6 chars is 3).
+        let m = ModelNotFound::new("cluade", vec!["claude".into(), "gpt-4o".into()]);
+        assert_eq!(m.suggestion.as_deref(), Some("claude"));
+
+        // Far-off requests still get no suggestion.
+        let m = ModelNotFound::new("zzzzzzzz", vec!["claude".into(), "gpt-4o".into()]);
+        assert_eq!(m.suggestion, None);
+    }
+
+    #[test]
+    fn model_preview_overflow_note_is_correct() {
+        // >8 candidates: the "(+N more)" tail must count the remainder.
+        let available: Vec<String> = (0..12).map(|i| format!("model-{i:02}")).collect();
+        let m = ModelNotFound::new("model-00", available);
+        let msg = m.message();
+        assert!(msg.contains("(+4 more)"), "message was: {msg}");
     }
 }
