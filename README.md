@@ -252,6 +252,21 @@ profile's own context and lists the profile's tabs. See
 [docs/PROFILES.md](docs/PROFILES.md) for the isolation model, the
 per-profile limits, and what "separate context" actually means.
 
+## Recording workflows
+
+Some sites need a couple of clicks before the composer appears — "new
+chat", a mode toggle, a model picker. Instead of hand-writing a
+`Workflow`, drive the site once and let the recorder write it:
+
+1. **Recorder** page -> **Start recording**.
+2. Do the flow manually in the tab.
+3. **Stop** — you get a `[[providers.X.workflow]]` block to paste into
+   `uwa.toml`.
+
+No drag-and-drop, no node graph, no YAML. See
+[docs/RECORDER.md](docs/RECORDER.md) for what gets captured and how the
+proposal is built.
+
 ## Dashboard
 
 Everything is at `http://127.0.0.1:8080`:
@@ -324,6 +339,7 @@ points:
 - [Conformance](docs/CONFORMANCE.md) — tool-calling conformance across providers.
 - [Providers](docs/PROVIDERS.md) — selector registry, merge rules, self-heal.
 - [Profiles](docs/PROFILES.md) — multi-account browser contexts.
+- [Recorder](docs/RECORDER.md) — record a flow by hand, get a Workflow.
 - [Troubleshooting](docs/TROUBLESHOOTING.md) — the failures people actually hit.
 - [Positioning](docs/POSITIONING.md) — what we're building and what we're not.
 - [Why UWA](docs/why_uwa.md) — architectural deep-dive comparing UWA to typical Python wrappers.
