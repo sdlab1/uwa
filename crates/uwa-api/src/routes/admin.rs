@@ -756,3 +756,158 @@ pub async fn reset_profile(
         "dropped_tabs": dropped.iter().map(|t| t.as_str()).collect::<Vec<_>>(),
     })))
 }
+
+// ---------- recorder ----------
+
+#[derive(Debug, serde::Deserialize)]
+pub struct RecorderStartRequest {
+    /// Provider whose tab should be recorded.
+    pub provider: String,
+    /// Explicit tab. When absent, the first tab matching the provider's
+    /// URL patterns is used.
+    #[serde(default)]
+    pub tab_id: Option<String>,
+}
+
+/// `GET /admin/recorder/status` — one recording at a time; when none is
+/// in flight the shape is `{ active: false }`.
+pub async fn recorder_status(
+    State(state): State<AppState>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let slot = state.runtime.recorder.lock().await;
+    match slot.as_ref() {
+        Some(r) => {
+            let st = r.status().await;
+            Ok(Json(
+                serde_json::to_value(st).unwrap_or_else(|_| serde_json::json!({ "active": false })),
+            ))
+        }
+        None => Ok(Json(serde_json::json!({ "active": false }))),
+    }
+}
+
+/// `POST /admin/recorder/start` — begin observing a provider's tab.
+/// Rejects a second concurrent recording with a message naming the
+/// in-flight one.
+pub async fn recorder_start(
+    State(state): State<AppState>,
+    Json(req): Json<RecorderStartRequest>,
+) -> ApiResult<Json<crate::recorder::RecorderStatus>> {
+    {
+        let slot = state.runtime.recorder.lock().await;
+        if let Some(existing) = slot.as_ref() {
+            let st = existing.status().await;
+            return Err(UwaError::BadRequest(format!(
+                "recording already in progress (id `{}`, {} events); \
+                 stop it before starting a new one",
+                st.id, st.events
+            ))
+            .into());
+        }
+    }
+
+    let provider_cfg = state
+        .config
+        .providers
+        .get(&req.provider)
+        .cloned()
+        .ok_or_else(|| {
+            UwaError::UnknownModel(uwa_core::ModelNotFound::new(
+                req.provider.clone(),
+                state.config.available_models(),
+            ))
+        })?;
+
+    let tab = if let Some(id) = req.tab_id.clone() {
+        uwa_core::TabId::from_raw(id)
+    } else {
+        let tabs = state.transport.list_tabs().await?;
+        let mut picked: Option<uwa_core::TabId> = None;
+        for t in &tabs {
+            if let Ok(page) = state.transport.page(t).await {
+                if let Ok(url) = page.url().await {
+                    if provider_cfg
+                        .url_patterns
+                        .iter()
+                        .any(|pat| url_glob_matches(pat, &url))
+                    {
+                        picked = Some(t.clone());
+                        break;
+                    }
+                }
+            }
+        }
+        picked.ok_or_else(|| {
+            UwaError::Unavailable(format!(
+                "no open tab matches provider `{}`; open the site in Chromium first",
+                req.provider
+            ))
+        })?
+    };
+
+    let rec =
+        crate::recorder::Recorder::start(state.clone(), req.provider.clone(), tab).await?;
+    let st = rec.status().await;
+    let mut slot = state.runtime.recorder.lock().await;
+    *slot = Some(rec);
+    Ok(Json(st))
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct RecorderStopResponse {
+    pub provider: String,
+    pub event_count: usize,
+    pub warnings: Vec<String>,
+    pub workflow: uwa_core::workflow::Workflow,
+    pub toml_snippet: String,
+}
+
+/// `POST /admin/recorder/stop` — end the recording, synthesise the
+/// proposal, and render the TOML. The recorder slot is freed whether or
+/// not the proposal succeeds.
+pub async fn recorder_stop(
+    State(state): State<AppState>,
+) -> ApiResult<Json<RecorderStopResponse>> {
+    let rec = {
+        let mut slot = state.runtime.recorder.lock().await;
+        slot.take()
+    };
+    let Some(rec) = rec else {
+        return Err(UwaError::BadRequest("no recording in progress".into()).into());
+    };
+
+    let provider = rec.provider.clone();
+    let trace = rec.stop().await;
+
+    let proposal = match state.config.providers.get(&provider) {
+        Some(p) => uwa_providers::workflow::propose_workflow(&trace, &p.selectors),
+        None => uwa_providers::workflow::ProposedWorkflow {
+            workflow: uwa_core::workflow::Workflow::default(),
+            warnings: vec![format!(
+                "provider `{provider}` disappeared from the config mid-recording"
+            )],
+            event_count: trace.events.len(),
+        },
+    };
+
+    let toml_snippet =
+        uwa_providers::workflow::workflow_to_toml_snippet(&provider, &proposal.workflow);
+
+    Ok(Json(RecorderStopResponse {
+        provider,
+        event_count: proposal.event_count,
+        warnings: proposal.warnings,
+        workflow: proposal.workflow,
+        toml_snippet,
+    }))
+}
+
+/// Same glob as `uwa-config::url_matches`, duplicated here to avoid a
+/// public re-export from `uwa-config` just for one call.
+fn url_glob_matches(pattern: &str, url: &url::Url) -> bool {
+    let u = url.as_str();
+    match pattern.split_once('*') {
+        None => pattern == u,
+        Some((head, tail)) => u.starts_with(head) && (tail.is_empty() || u.ends_with(tail)),
+    }
+}

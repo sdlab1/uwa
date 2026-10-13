@@ -34,6 +34,10 @@ pub struct RuntimeServices {
     /// Conversation pinning state. `Some` by default: it's a safe
     /// optimization that also disables cleanly per-provider via config.
     pub pinning: Option<Arc<uwa_session::PinningStore>>,
+    /// Single in-flight recording, when the user started one from the
+    /// dashboard. Shared across requests so the status endpoint and the
+    /// stop endpoint see the same recorder.
+    pub recorder: Arc<tokio::sync::Mutex<Option<Arc<crate::recorder::Recorder>>>>,
 }
 
 impl Default for RuntimeServices {
@@ -43,6 +47,7 @@ impl Default for RuntimeServices {
             semaphores: Arc::new(ProviderSemaphores::new(4)),
             breakers: Arc::new(DashMap::new()),
             history: None,
+            recorder: Arc::new(tokio::sync::Mutex::new(None)),
             pinning: Some(Arc::new(uwa_session::PinningStore::new(
                 std::time::Duration::from_secs(30 * 60),
             ))),
