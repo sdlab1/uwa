@@ -82,20 +82,23 @@ impl SseParser {
     }
 
     /// Flush any pending frame at end-of-stream (some servers omit the final
-    /// blank line). Also processes any data still buffered without a newline
-    /// terminator.
+    /// blank line). Also processes *all* remaining lines in the buffer
+    /// (some servers omit newlines; callers may call finish() without a
+    /// prior feed() that ended on a newline).
     pub fn finish(&mut self) -> Option<SseFrame> {
-        // Process any remaining line in the buffer (without trailing newline).
+        // Process *all* remaining lines in the buffer (some servers omit the
+        // final blank line; a caller may also call finish() without a prior
+        // feed() that ended on a newline).
+        while let Some(nl) = self.buf.find('\n') {
+            let line = self.buf[..nl].trim_end_matches('\r').to_string();
+            self.buf.drain(..=nl);
+            self.process_line(&line);
+        }
+        // Final line without a trailing newline.
         if !self.buf.is_empty() {
             let line = self.buf.trim_end_matches('\r').to_string();
             self.buf.clear();
-            if !line.is_empty() {
-                if let Some(rest) = line.strip_prefix("event:") {
-                    self.cur_event = Some(strip_one_space(rest).to_string());
-                } else if let Some(rest) = line.strip_prefix("data:") {
-                    self.cur_data.push(strip_one_space(rest).to_string());
-                }
-            }
+            self.process_line(&line);
         }
 
         if self.cur_event.is_some() || !self.cur_data.is_empty() {
@@ -107,6 +110,19 @@ impl SseParser {
             Some(f)
         } else {
             None
+        }
+    }
+
+    fn process_line(&mut self, line: &str) {
+        if line.is_empty() {
+            // Blank line = end of frame; handled by the caller via the
+            // frame-emission check after the loop.
+            return;
+        }
+        if let Some(rest) = line.strip_prefix("event:") {
+            self.cur_event = Some(strip_one_space(rest).to_string());
+        } else if let Some(rest) = line.strip_prefix("data:") {
+            self.cur_data.push(strip_one_space(rest).to_string());
         }
     }
 }
@@ -641,5 +657,29 @@ mod tests {
         // have any stale data.
         let tail2 = p.finish();
         assert!(tail2.is_none());
+    }
+
+    #[test]
+    fn finish_processes_multiple_buffered_lines() {
+        let mut p = SseParser::new();
+        // Feed without a trailing newline, so the buffer holds two logical lines.
+        let _ = p.feed("event: foo\ndata: bar");
+        let f = p.finish().expect("frame");
+        assert_eq!(f.event.as_deref(), Some("foo"));
+        assert_eq!(f.data, "bar");
+    }
+
+    #[test]
+    fn finish_with_empty_buffer_returns_none() {
+        let mut p = SseParser::new();
+        assert!(p.finish().is_none());
+    }
+
+    #[test]
+    fn finish_single_line_without_newline() {
+        let mut p = SseParser::new();
+        let _ = p.feed("data: hello");
+        let f = p.finish().expect("frame");
+        assert_eq!(f.data, "hello");
     }
 }

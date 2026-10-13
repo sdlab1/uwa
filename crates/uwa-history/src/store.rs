@@ -142,9 +142,11 @@ impl HistoryStore {
 
     /// Newest-first records matching *every* given filter.
     ///
-    /// `by_provider` and `by_status` each filter on one field; callers that
-    /// need both (the admin endpoint accepts `?provider=..&status=..`) must
-    /// not chain them, because `take(limit)` runs before the second filter.
+    /// This method applies **all** filters before `take(limit)`, so combining
+    /// `provider` and `status` here is correct. Do **not** reimplement this by
+    /// chaining `by_provider` followed by `by_status`: each of those methods
+    /// applies its own `take(limit)` first, which would silently drop matches
+    /// that pass the second filter.
     pub async fn query(
         &self,
         provider: Option<&str>,
@@ -259,10 +261,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn query_applies_all_filters_before_the_limit() {
-        let store = HistoryStore::new(HistoryCfg::default(), false)
-            .await
-            .unwrap();
+    async fn query_applies_all_filters_before_the_limit() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let store = HistoryStore::new(HistoryCfg::default(), false).await?;
         // Oldest -> newest. Only "a1" and "a3" are (chatgpt, Error).
         for (id, prov, st) in [
             ("a1", "chatgpt", RequestStatus::Error),
@@ -299,10 +300,11 @@ mod tests {
             .await
             .is_empty());
         assert!(store.query(None, None, 0).await.is_empty());
+        Ok(())
     }
 
     #[tokio::test]
-    async fn in_memory_ring_buffer() {
+    async fn in_memory_ring_buffer() -> Result<(), Box<dyn std::error::Error>> {
         let store = HistoryStore::new(
             HistoryCfg {
                 buffer_size: 3,
@@ -310,8 +312,7 @@ mod tests {
             },
             false,
         )
-        .await
-        .unwrap();
+        .await?;
 
         for i in 0..5 {
             store.append(rec(&format!("r{i}"), "chatgpt")).await;
@@ -320,35 +321,34 @@ mod tests {
         assert_eq!(recent.len(), 3);
         assert_eq!(recent[0].id, "r4");
         assert_eq!(recent[2].id, "r2");
+        Ok(())
     }
 
     #[tokio::test]
-    async fn filter_by_provider() {
-        let store = HistoryStore::new(HistoryCfg::default(), false)
-            .await
-            .unwrap();
+    async fn filter_by_provider() -> Result<(), Box<dyn std::error::Error>> {
+        let store = HistoryStore::new(HistoryCfg::default(), false).await?;
         store.append(rec("a", "chatgpt")).await;
         store.append(rec("b", "claude")).await;
         store.append(rec("c", "chatgpt")).await;
         let only = store.by_provider("chatgpt", 10).await;
         assert_eq!(only.len(), 2);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn filter_by_status() {
-        let store = HistoryStore::new(HistoryCfg::default(), false)
-            .await
-            .unwrap();
+    async fn filter_by_status() -> Result<(), Box<dyn std::error::Error>> {
+        let store = HistoryStore::new(HistoryCfg::default(), false).await?;
         let mut r = rec("a", "chatgpt");
         r.status = RequestStatus::Error;
         store.append(r).await;
         store.append(rec("b", "chatgpt")).await;
         let errs = store.by_status(RequestStatus::Error, 10).await;
         assert_eq!(errs.len(), 1);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn truncates_long_previews() {
+    async fn truncates_long_previews() -> Result<(), Box<dyn std::error::Error>> {
         let store = HistoryStore::new(
             HistoryCfg {
                 max_preview_bytes: 8,
@@ -356,14 +356,14 @@ mod tests {
             },
             false,
         )
-        .await
-        .unwrap();
+        .await?;
         let mut r = rec("a", "chatgpt");
         r.request.user_preview = "x".repeat(100);
         store.append(r).await;
         let rec = &store.recent(1).await[0];
         assert!(rec.request.user_preview.len() < 100);
         assert!(rec.request.user_preview.ends_with('…'));
+        Ok(())
     }
 }
 

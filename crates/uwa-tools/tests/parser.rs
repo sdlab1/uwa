@@ -170,3 +170,27 @@ fn scan_fence_parses_valid_fence() {
     assert_eq!(out.calls.len(), 1);
     assert_eq!(out.calls[0].name, "foo");
 }
+
+#[test]
+fn unstreamed_text_merges_overlapping_ranges() {
+    let raw = "prefix\n\u{3c}tool_call\u{3e}{\"name\":\"a\"}\u{3c}/tool_call\u{3e}BETWEEN\n\u{3c}tool_call\u{3e}{\"name\":\"b\"}\u{3c}/tool_call\u{3e}TAIL";
+    let known = vec!["a".to_string(), "b".to_string()];
+    let out = unstreamed_text(raw, &known);
+    assert!(!out.contains("prefix"));
+    assert!(out.contains("BETWEEN"));
+    assert!(out.contains("TAIL"));
+}
+
+#[test]
+fn unstreamed_text_no_calls_returns_empty() {
+    let out = unstreamed_text("plain text", &[]);
+    assert!(out.is_empty());
+}
+
+#[test]
+fn unstreamed_text_single_block_collects_tail() {
+    let raw = "prefix\n\u{3c}tool_call\u{3e}{\"name\":\"x\"}\u{3c}/tool_call\u{3e}suffix";
+    let known = vec!["x".to_string()];
+    let out = unstreamed_text(raw, &known);
+    assert_eq!(out, "suffix");
+}
