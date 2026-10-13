@@ -70,10 +70,13 @@ fn process_alive(pid: u32) -> bool {
 mod tests {
     use super::*;
 
+    /// Each test gets its own directory: the suite used to share one and
+    /// the cleanup hook's `remove_dir_all` raced with `writes_and_removes`
+    /// (file unlinked between acquire and assert).
     fn tmp(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("uwa-pid-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("uwa-pid-test-{}-{name}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        dir.join(name)
+        dir.join("x.pid")
     }
 
     #[test]
@@ -122,16 +125,23 @@ mod tests {
     /// this hook is for.
     #[test]
     fn zzz_removes_our_temp_files() {
-        let dir = std::env::temp_dir().join(format!("uwa-pid-test-{}", std::process::id()));
-        // A sibling test may be mid-flight with its own file; retry the
-        // sweep a few times to give it a chance to finish, then let go.
-        for _ in 0..40 {
-            let _ = std::fs::remove_dir_all(&dir);
-            if !dir.exists() {
-                return;
+        // Per-test directories (see `tmp`) make this race-free by
+        // construction: `remove_dir` — unlike `remove_dir_all` — only
+        // succeeds on *empty* directories, so a sibling mid-flight keeps
+        // its file and this hook only collects the shells that are
+        // done. Deliberately assert-free.
+        let prefix = format!("uwa-pid-test-{}-", std::process::id());
+        let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
+            return;
+        };
+        for e in entries.flatten() {
+            let name = e.file_name();
+            let Some(name) = name.to_str() else { continue };
+            if name.starts_with(&prefix) {
+                // Only succeeds when empty; in-flight siblings are
+                // skipped, not deleted.
+                let _ = std::fs::remove_dir(e.path());
             }
-            std::thread::sleep(std::time::Duration::from_millis(25));
         }
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }
