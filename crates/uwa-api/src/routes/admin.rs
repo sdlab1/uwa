@@ -771,16 +771,14 @@ pub struct RecorderStartRequest {
 
 /// `GET /admin/recorder/status` — one recording at a time; when none is
 /// in flight the shape is `{ active: false }`.
-pub async fn recorder_status(
-    State(state): State<AppState>,
-) -> ApiResult<Json<serde_json::Value>> {
+pub async fn recorder_status(State(state): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
     let slot = state.runtime.recorder.lock().await;
     match slot.as_ref() {
         Some(r) => {
             let st = r.status().await;
-            Ok(Json(
-                serde_json::to_value(st).unwrap_or_else(|_| serde_json::json!({ "active": false })),
-            ))
+            Ok(Json(serde_json::to_value(st).unwrap_or_else(
+                |_| serde_json::json!({ "active": false }),
+            )))
         }
         None => Ok(Json(serde_json::json!({ "active": false }))),
     }
@@ -845,8 +843,7 @@ pub async fn recorder_start(
         })?
     };
 
-    let rec =
-        crate::recorder::Recorder::start(state.clone(), req.provider.clone(), tab).await?;
+    let rec = crate::recorder::Recorder::start(state.clone(), req.provider.clone(), tab).await?;
     let st = rec.status().await;
     let mut slot = state.runtime.recorder.lock().await;
     *slot = Some(rec);
@@ -865,9 +862,7 @@ pub struct RecorderStopResponse {
 /// `POST /admin/recorder/stop` — end the recording, synthesise the
 /// proposal, and render the TOML. The recorder slot is freed whether or
 /// not the proposal succeeds.
-pub async fn recorder_stop(
-    State(state): State<AppState>,
-) -> ApiResult<Json<RecorderStopResponse>> {
+pub async fn recorder_stop(State(state): State<AppState>) -> ApiResult<Json<RecorderStopResponse>> {
     let rec = {
         let mut slot = state.runtime.recorder.lock().await;
         slot.take()

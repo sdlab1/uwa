@@ -11,8 +11,8 @@ pub mod error;
 pub mod history;
 pub mod metrics;
 pub mod middleware;
-pub mod routes;
 pub mod recorder;
+pub mod routes;
 pub mod routing;
 pub mod state;
 
@@ -230,7 +230,10 @@ pub fn router(state: AppState) -> Router {
             get(routes::admin::provider_registry),
         )
         .route("/admin/sessions", get(routes::admin::sessions))
-        .route("/admin/recorder/status", get(routes::admin::recorder_status))
+        .route(
+            "/admin/recorder/status",
+            get(routes::admin::recorder_status),
+        )
         .route("/admin/recorder/start", post(routes::admin::recorder_start))
         .route("/admin/recorder/stop", post(routes::admin::recorder_stop))
         .route(

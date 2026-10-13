@@ -3004,6 +3004,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
+ "uwa-browser",
  "uwa-config",
  "uwa-core",
  "uwa-extract",

@@ -108,7 +108,10 @@ pub fn propose_workflow(trace: &Trace, selectors: &Selectors) -> ProposedWorkflo
                         optional: true,
                     });
                 } else if let Some(t) = resolve_target(selector, selectors) {
-                    actions.push(Action::Click { target: t, optional: true });
+                    actions.push(Action::Click {
+                        target: t,
+                        optional: true,
+                    });
                 }
             }
         }
@@ -119,7 +122,9 @@ pub fn propose_workflow(trace: &Trace, selectors: &Selectors) -> ProposedWorkflo
     // reliably forgets. An empty trace stays empty (and warns below).
     if !actions.is_empty()
         && selectors.assistant_message.is_some()
-        && !actions.iter().any(|a| matches!(a, Action::StreamWait { .. }))
+        && !actions
+            .iter()
+            .any(|a| matches!(a, Action::StreamWait { .. }))
     {
         actions.push(Action::StreamWait {
             target: "assistant_message".into(),
@@ -185,7 +190,9 @@ fn dedupe_clicks(events: Vec<TraceEvent>) -> Vec<TraceEvent> {
 
     for ev in events {
         match &ev {
-            TraceEvent::Click { selector, at_ms, .. } => {
+            TraceEvent::Click {
+                selector, at_ms, ..
+            } => {
                 if let Some((prev, t)) = last.as_ref() {
                     if prev == selector && at_ms.saturating_sub(*t) < CLICK_DEDUP_MS {
                         last = Some((selector.clone(), *at_ms));
@@ -420,12 +427,16 @@ mod tests {
         ]);
         let p = propose_workflow(&t, &sels());
         assert_eq!(p.workflow.steps.len(), 3);
-        assert!(matches!(&p.workflow.steps[0], Action::FillInput { target, value }
-            if target == "input_box" && value.is_none()));
+        assert!(
+            matches!(&p.workflow.steps[0], Action::FillInput { target, value }
+            if target == "input_box" && value.is_none())
+        );
         assert!(matches!(&p.workflow.steps[1], Action::Click { target, .. }
             if target == "send_btn"));
-        assert!(matches!(&p.workflow.steps[2], Action::StreamWait { target, .. }
-            if target == "assistant_message"));
+        assert!(
+            matches!(&p.workflow.steps[2], Action::StreamWait { target, .. }
+            if target == "assistant_message")
+        );
         assert!(p.warnings.is_empty(), "{:?}", p.warnings);
     }
 
@@ -482,8 +493,10 @@ mod tests {
             src: "".into(),
         }]);
         let p = propose_workflow(&t, &sels());
-        assert!(matches!(&p.workflow.steps[0], Action::Click { target, optional }
-            if target == "#new-chat-button" && *optional));
+        assert!(
+            matches!(&p.workflow.steps[0], Action::Click { target, optional }
+            if target == "#new-chat-button" && *optional)
+        );
     }
 
     #[test]
@@ -495,8 +508,10 @@ mod tests {
             src: "".into(),
         }]);
         let p = propose_workflow(&t, &sels());
-        assert!(matches!(&p.workflow.steps[0], Action::Click { target, optional }
-            if target == "send_btn" && !*optional));
+        assert!(
+            matches!(&p.workflow.steps[0], Action::Click { target, optional }
+            if target == "send_btn" && !*optional)
+        );
     }
 
     #[test]
@@ -509,8 +524,10 @@ mod tests {
             src: "".into(),
         }]);
         let p = propose_workflow(&t, &sels());
-        assert!(matches!(&p.workflow.steps[0], Action::FillInput { value, .. }
-            if value.is_none()));
+        assert!(
+            matches!(&p.workflow.steps[0], Action::FillInput { value, .. }
+            if value.is_none())
+        );
     }
 
     #[test]
@@ -523,8 +540,10 @@ mod tests {
             src: "".into(),
         }]);
         let p = propose_workflow(&t, &sels());
-        assert!(matches!(&p.workflow.steps[0], Action::FillInput { value, .. }
-            if value.as_deref() == Some("3")));
+        assert!(
+            matches!(&p.workflow.steps[0], Action::FillInput { value, .. }
+            if value.as_deref() == Some("3"))
+        );
     }
 
     #[test]
@@ -555,15 +574,31 @@ mod tests {
     #[test]
     fn long_gap_wait_is_capped() {
         let t = trace(vec![
-            TraceEvent::Click { selector: "#a".into(), seq: 1, at_ms: 0, src: "".into() },
-            TraceEvent::Click { selector: "#b".into(), seq: 2, at_ms: 3_600_000, src: "".into() },
+            TraceEvent::Click {
+                selector: "#a".into(),
+                seq: 1,
+                at_ms: 0,
+                src: "".into(),
+            },
+            TraceEvent::Click {
+                selector: "#b".into(),
+                seq: 2,
+                at_ms: 3_600_000,
+                src: "".into(),
+            },
         ]);
         let p = propose_workflow(&t, &sels());
         let wait = p
             .workflow
             .steps
             .iter()
-            .find_map(|a| if let Action::Wait { seconds } = a { Some(*seconds) } else { None })
+            .find_map(|a| {
+                if let Action::Wait { seconds } = a {
+                    Some(*seconds)
+                } else {
+                    None
+                }
+            })
             .unwrap_or_else(|| unreachable!("wait must exist"));
         assert!(wait <= MAX_WAIT_SECS);
     }
@@ -577,8 +612,19 @@ mod tests {
     #[test]
     fn toml_snippet_renders_actions() {
         let t = trace(vec![
-            TraceEvent::Input { selector: "#prompt-textarea".into(), text: "hi".into(), seq: 1, at_ms: 0, src: "".into() },
-            TraceEvent::Click { selector: "[data-testid=send-button]".into(), seq: 2, at_ms: 100, src: "".into() },
+            TraceEvent::Input {
+                selector: "#prompt-textarea".into(),
+                text: "hi".into(),
+                seq: 1,
+                at_ms: 0,
+                src: "".into(),
+            },
+            TraceEvent::Click {
+                selector: "[data-testid=send-button]".into(),
+                seq: 2,
+                at_ms: 100,
+                src: "".into(),
+            },
         ]);
         let p = propose_workflow(&t, &sels());
         let toml = workflow_to_toml_snippet("chatgpt", &p.workflow);
