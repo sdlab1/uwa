@@ -237,7 +237,10 @@ fn stream_response(
                             )))
                         .await;
                 }
-                chat::pipeline::StreamEvent::Done { finish: _, tool_calls } => {
+                chat::pipeline::StreamEvent::Done {
+                    finish: _,
+                    tool_calls,
+                } => {
                     calls = tool_calls;
                     saw_done = true;
                     break;

@@ -231,8 +231,14 @@ fn logs(follow: bool, lines: usize) -> Result<()> {
         // Poor man's tail -f: poll + append.
         #[cfg(unix)]
         let mut pos = fs::metadata(&p)
-            .map(|m| LogPosition { inode: m.ino(), offset: content.len() })
-            .unwrap_or(LogPosition { inode: 0, offset: content.len() });
+            .map(|m| LogPosition {
+                inode: m.ino(),
+                offset: content.len(),
+            })
+            .unwrap_or(LogPosition {
+                inode: 0,
+                offset: content.len(),
+            });
         #[cfg(not(unix))]
         let mut pos = content.len();
         loop {
@@ -294,9 +300,21 @@ fn follow_chunk(prev: LogPosition, cur: &str, meta: &fs::Metadata) -> (LogPositi
             .unwrap_or(cur.len())
     };
     if cur.len() > pos {
-        (LogPosition { inode: cur_inode, offset: cur.len() }, cur[pos..].to_string())
+        (
+            LogPosition {
+                inode: cur_inode,
+                offset: cur.len(),
+            },
+            cur[pos..].to_string(),
+        )
     } else {
-        (LogPosition { inode: cur_inode, offset: pos }, String::new())
+        (
+            LogPosition {
+                inode: cur_inode,
+                offset: pos,
+            },
+            String::new(),
+        )
     }
 }
 
@@ -522,7 +540,10 @@ mod tests {
         f.write_all(b"hello").unwrap();
         f.flush().unwrap();
         let meta = f.as_file().metadata().unwrap();
-        let pos = LogPosition { inode: meta.ino(), offset: 5 };
+        let pos = LogPosition {
+            inode: meta.ino(),
+            offset: 5,
+        };
 
         f.write_all(b" world").unwrap();
         f.flush().unwrap();
@@ -542,7 +563,10 @@ mod tests {
         f.write_all(b"hello world").unwrap();
         f.flush().unwrap();
         let meta = f.as_file().metadata().unwrap();
-        let pos = LogPosition { inode: meta.ino(), offset: 11 };
+        let pos = LogPosition {
+            inode: meta.ino(),
+            offset: 11,
+        };
 
         let cur = std::fs::read_to_string(f.path()).unwrap();
         let meta2 = f.as_file().metadata().unwrap();
@@ -559,7 +583,10 @@ mod tests {
         // Write initial content
         std::fs::write(f.path(), b"old log content").unwrap();
         let meta = std::fs::metadata(f.path()).unwrap();
-        let pos = LogPosition { inode: meta.ino(), offset: 500 };
+        let pos = LogPosition {
+            inode: meta.ino(),
+            offset: 500,
+        };
 
         // Truncate and write shorter content - simulate log rotation
         std::fs::write(f.path(), b"new log\n").unwrap();
@@ -579,7 +606,10 @@ mod tests {
         f.write_all("ёжик".as_bytes()).unwrap();
         f.flush().unwrap();
         let meta = f.as_file().metadata().unwrap();
-        let pos = LogPosition { inode: meta.ino(), offset: 1 };
+        let pos = LogPosition {
+            inode: meta.ino(),
+            offset: 1,
+        };
 
         let cur = std::fs::read_to_string(f.path()).unwrap();
         let meta2 = f.as_file().metadata().unwrap();
@@ -598,7 +628,10 @@ mod tests {
         f.write_all("привет мир".as_bytes()).unwrap();
         f.flush().unwrap();
         let meta = f.as_file().metadata().unwrap();
-        let pos = LogPosition { inode: meta.ino(), offset: 0 };
+        let pos = LogPosition {
+            inode: meta.ino(),
+            offset: 0,
+        };
 
         let cur = std::fs::read_to_string(f.path()).unwrap();
         let meta2 = f.as_file().metadata().unwrap();
@@ -618,7 +651,10 @@ mod tests {
         f.write_all(b"old content").unwrap();
         f.flush().unwrap();
         let meta = f.as_file().metadata().unwrap();
-        let pos = LogPosition { inode: meta.ino(), offset: 100 };
+        let pos = LogPosition {
+            inode: meta.ino(),
+            offset: 100,
+        };
 
         // Simulate inode change by recreating the file
         let path = f.path().to_path_buf();
