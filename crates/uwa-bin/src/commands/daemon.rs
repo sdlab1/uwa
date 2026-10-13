@@ -872,7 +872,7 @@ mod tests {
     fn logs_tail_does_not_panic_when_lines_exceeds_total() {
         // Regression for `all.get(start..).unwrap_or(&[])`:
         // `lines` greater than number of lines in log.
-        let all = vec!["a", "b"];
+        let all = ["a", "b"];
         let lines = 10usize;
         let start = all.len().saturating_sub(lines);
         let tail = all.get(start..).unwrap_or(&[]);
