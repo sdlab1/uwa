@@ -1,6 +1,7 @@
 import type {
   ChatRequest, ChatResponse, HealthResp, HistoryResp, ModelList, PoolStatus,
   ProviderMap, ReadyResp, SelectorTestResp, SessionsResp, StatsResp,
+  RegistryInfo,
 } from './types';
 
 const KEY_STORAGE = 'uwa:apiKey';
@@ -88,8 +89,15 @@ export const dropSession = (id: string) =>
 export const recoverSessions = () =>
   request<{ dropped_tabs: string[] }>('/admin/sessions/recover', { method: 'POST' });
 
-export const selectorTest = (b: { provider: string; selector: string; tab_id?: string }) =>
-  request<SelectorTestResp>('/admin/selector-test', { method: 'POST', body: JSON.stringify(b) });
+export const selectorTest = (b: {
+  provider: string;
+  selector: string;
+  tab_id?: string;
+  field?: string;
+}) => request<SelectorTestResp>('/admin/selector-test', { method: 'POST', body: JSON.stringify(b) });
+
+export const getProviderRegistry = () =>
+  request<RegistryInfo>('/admin/providers/registry');
 
 export const selectorGenerate = (b: { provider: string; tab_id?: string }) =>
   request<unknown>('/admin/selector-generate', { method: 'POST', body: JSON.stringify(b) });

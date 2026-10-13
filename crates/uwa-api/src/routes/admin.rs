@@ -108,6 +108,11 @@ pub struct SelectorTestRequest {
     #[serde(default)]
     pub tab_id: Option<String>,
     pub selector: String,
+    /// Which `Selector` field this probe stands for. Used to look up
+    /// fallback candidates from the registry. One of: `input`,
+    /// `send_button`, `stop_button`, `assistant_message`. Default `input`.
+    #[serde(default)]
+    pub field: Option<String>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -116,6 +121,62 @@ pub struct SelectorTestResponse {
     pub first_text: Option<String>,
     pub duration_ms: u64,
     pub error: Option<String>,
+    /// Registry-provided fallback candidates. Populated only when
+    /// `matched == 0` and the provider has alternates for the field.
+    /// Empty otherwise — the UI keeps the response compact on the happy
+    /// path.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fallbacks: Vec<FallbackCandidate>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct FallbackCandidate {
+    pub selector: String,
+    pub matched: u32,
+    pub first_text: Option<String>,
+}
+
+/// Run one selector probe against the page. Returns (matched, first_text)
+/// or an error when the selector itself is invalid.
+async fn probe(
+    page: &dyn uwa_core::Page,
+    selector: &str,
+) -> Result<(u32, Option<String>), UwaError> {
+    let selector_json =
+        serde_json::to_string(selector).map_err(|e| UwaError::Internal(e.to_string()))?;
+    let js = format!(
+        r#"(function() {{
+            try {{
+                const els = document.querySelectorAll({sel});
+                const first = els[0];
+                return {{
+                    ok: true,
+                    matched: els.length,
+                    first_text: first ? (first.innerText || first.textContent || '').slice(0, 200) : null
+                }};
+            }} catch (e) {{
+                return {{ ok: false, error: String(e) }};
+            }}
+        }})()"#,
+        sel = selector_json,
+    );
+    let v = page.eval(&js).await?;
+    if v.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
+        let err = v
+            .get("error")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown");
+        return Err(UwaError::BadRequest(format!("selector: {err}")));
+    }
+    let n = v
+        .get("matched")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0) as u32;
+    let text = v
+        .get("first_text")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    Ok((n, text))
 }
 
 pub async fn selector_test(
@@ -145,56 +206,49 @@ pub async fn selector_test(
     };
     let page = state.transport.page(&tab).await?;
 
-    let selector_json = serde_json::to_string(&req.selector).unwrap_or_default();
-    let js = format!(
-        r#"(function() {{
-            try {{
-                const els = document.querySelectorAll({sel});
-                const first = els[0];
-                return {{
-                    ok: true,
-                    matched: els.length,
-                    first_text: first ? (first.innerText || first.textContent || '').slice(0, 500) : null
-                }};
-            }} catch (e) {{
-                return {{ ok: false, error: String(e) }};
-            }}
-        }})()"#,
-        sel = selector_json,
-    );
-
-    let v = page.eval(&js).await;
+    let (matched, first_text, error) = match probe(page.as_ref(), &req.selector).await {
+        Ok((n, text)) => (n, text, None),
+        Err(e) => (0, None, Some(e.to_string())),
+    };
 
     let duration_ms = start.elapsed().as_millis() as u64;
 
-    match v {
-        Ok(val) => {
-            let matched = val.get("matched").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
-            let first_text = val
-                .get("first_text")
-                .and_then(|x| x.as_str())
-                .map(str::to_string);
-            let error = if val.get("ok").and_then(|x| x.as_bool()) == Some(true) {
-                None
-            } else {
-                val.get("error")
-                    .and_then(|x| x.as_str())
-                    .map(str::to_string)
-            };
-            Ok(Json(SelectorTestResponse {
-                matched,
-                first_text,
-                duration_ms,
-                error,
-            }))
+    let registry = uwa_config::Registry::load();
+    // The `field` the user is testing has to be named explicitly so we
+    // know which fallback list to use. Default is "input" — it's the one
+    // users test most.
+    let field = req.field.as_deref().unwrap_or("input");
+    let fallbacks: Vec<FallbackCandidate> = if matched == 0 {
+        let mut out = Vec::new();
+        for candidate in registry.alternates_for(&req.provider, field) {
+            if candidate == req.selector {
+                continue; // same selector, already failed
+            }
+            if let Ok((n, text)) = probe(page.as_ref(), &candidate).await {
+                if n > 0 {
+                    out.push(FallbackCandidate {
+                        selector: candidate,
+                        matched: n,
+                        first_text: text,
+                    });
+                }
+            }
+            if out.len() >= 3 {
+                break;
+            }
         }
-        Err(e) => Ok(Json(SelectorTestResponse {
-            matched: 0,
-            first_text: None,
-            duration_ms,
-            error: Some(e.to_string()),
-        })),
-    }
+        out
+    } else {
+        Vec::new()
+    };
+
+    Ok(Json(SelectorTestResponse {
+        matched,
+        first_text,
+        duration_ms,
+        error,
+        fallbacks,
+    }))
 }
 
 // ---------- sessions ----------

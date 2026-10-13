@@ -11,7 +11,17 @@ pub async fn run(config_path: PathBuf) -> Result<()> {
     println!("config:      {}", config_path.display());
     println!("uwa_home:    {}", super::paths::uwa_home().display());
 
-    let cfg = uwa_config::Config::load_from_path(&config_path)
+    let registry = uwa_config::Registry::load();
+    println!("registry:    {} entries", registry.names().len());
+    match registry.cache_dir() {
+        Some(dir) => println!("cache:       {}", dir.display()),
+        None => println!("cache:       none (using built-in)"),
+    }
+    if let Some(m) = registry.manifest() {
+        println!("manifest:    {}", m.registry_version);
+    }
+
+    let cfg = uwa_config::Config::load_from_path_with_registry(&config_path, &registry)
         .with_context(|| format!("loading {}", config_path.display()))?;
     println!("bind:        {}:{}", cfg.server.bind, cfg.server.port);
     println!(

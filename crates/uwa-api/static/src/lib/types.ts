@@ -26,6 +26,23 @@ export type ProviderMap = Record<string, ProviderInfo>;
 export interface SelectorTestResp {
   matched: number; first_text: string | null;
   duration_ms: number; error: string | null;
+  fallbacks?: FallbackCandidate[];
+}
+
+export interface FallbackCandidate {
+  selector: string;
+  matched: number;
+  first_text: string | null;
+}
+
+export interface RegistryInfo {
+  manifest: {
+    registry_version: string;
+    generated_at: string;
+    min_uwa_version: string;
+  } | null;
+  cache_dir: string | null;
+  entries: Record<string, { version: string; updated_at: string }>;
 }
 
 export interface HistoryRecord {

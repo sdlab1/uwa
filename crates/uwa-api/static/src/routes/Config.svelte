@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import type { ProviderInfo, ProviderMap, SelectorTestResp } from '../lib/types';
-  import { getProviders, selectorTest, selectorGenerate } from '../lib/api';
+  import type { ProviderInfo, ProviderMap, SelectorTestResp, RegistryInfo } from '../lib/types';
+  import { getProviders, getProviderRegistry, selectorTest, selectorGenerate } from '../lib/api';
   import { toast } from '../lib/stores';
   import KV from '../lib/components/KV.svelte';
   import CodeBlock from '../lib/components/CodeBlock.svelte';
@@ -10,9 +10,13 @@
   let err = $state<string | null>(null);
   let loading = $state(true);
 
+  // Registry info for the top-of-page card.
+  let registry = $state<RegistryInfo | null>(null);
+
   // Per-provider inline selector-test state.
   type TestState = {
     open: boolean;
+    field: string;
     selector: string;
     result: SelectorTestResp | null;
     running: boolean;
@@ -32,6 +36,11 @@
     } finally {
       loading = false;
     }
+    try {
+      registry = await getProviderRegistry();
+    } catch {
+      registry = null;
+    }
   }
 
   /** Toggle the inline selector-test panel. Mutating $state here is legal:
@@ -39,10 +48,29 @@
    * template, which Svelte 5 rejects with `state_unsafe_mutation`). */
   function toggleTest(name: string, info: ProviderInfo): void {
     if (!tests[name]) {
-      tests[name] = { open: false, selector: info.selectors.input ?? '', result: null, running: false };
+      tests[name] = {
+        open: false,
+        field: 'input',
+        selector: info.selectors.input ?? '',
+        result: null,
+        running: false,
+      };
     }
     const t = tests[name]!;
     t.open = !t.open;
+  }
+
+  /** Switch which selector field the probe stands for; resets the result. */
+  function setField(name: string, info: ProviderInfo, field: string): void {
+    const t = tests[name];
+    if (!t) return;
+    t.field = field;
+    t.selector =
+      field === 'input' ? info.selectors.input ?? '' :
+      field === 'send_button' ? info.selectors.send_button ?? '' :
+      field === 'assistant_message' ? info.selectors.assistant_message ?? '' :
+      '';
+    t.result = null;
   }
 
   async function runTest(name: string) {
@@ -51,11 +79,27 @@
     t.running = true;
     t.result = null;
     try {
-      t.result = await selectorTest({ provider: name, selector: t.selector });
+      t.result = await selectorTest({
+        provider: name,
+        selector: t.selector,
+        field: t.field,
+      });
     } catch (e) {
       t.result = { matched: 0, first_text: null, duration_ms: 0, error: String(e) };
     } finally {
       t.running = false;
+    }
+  }
+
+  /** We never touch the user's uwa.toml — put an override snippet on the
+   * clipboard instead, so the registry suggestion stays explicit. */
+  async function applyFallback(name: string, field: string, selector: string): Promise<void> {
+    const snippet = `[providers.${name}.selectors]\n${field} = "${selector}"\n`;
+    try {
+      await navigator.clipboard.writeText(snippet);
+      toast(`Copied override snippet for ${name}.${field}`, 'ok');
+    } catch {
+      toast('Copy failed — select and copy manually', 'err');
     }
   }
 
@@ -86,6 +130,33 @@
 
 <h2>Config</h2>
 <p class="lead">Read-only view of the loaded provider config. Edit <code>uwa.toml</code> and restart to change.</p>
+
+{#if registry}
+  <div class="card">
+    <div class="card-head">
+      <h3 class="m-0">Registry</h3>
+      <span class="text-[11px] muted">{Object.keys(registry.entries).length} entries</span>
+    </div>
+    <dl class="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-1 text-[13px] m-0">
+      {#if registry.manifest}
+        <dt class="muted">manifest</dt>
+        <dd class="m-0 font-mono">{registry.manifest.registry_version}</dd>
+        <dt class="muted">generated</dt>
+        <dd class="m-0 font-mono">{registry.manifest.generated_at}</dd>
+      {:else}
+        <dt class="muted">manifest</dt>
+        <dd class="m-0 muted">(none — using built-in entries)</dd>
+      {/if}
+      <dt class="muted">cache</dt>
+      <dd class="m-0 font-mono">{registry.cache_dir ?? '(built-in only)'}</dd>
+    </dl>
+    <p class="text-[11px] muted mt-2 m-0">
+      The registry supplies selectors the user config leaves unset. Update
+      with <code>uwa providers update</code>; inspect with
+      <code>uwa providers diff NAME</code>.
+    </p>
+  </div>
+{/if}
 
 {#if err}
   <div class="card border-err">
@@ -128,6 +199,18 @@
 
       {#if t && t.open}
         <div class="mt-3 p-3 border border-border rounded-sm bg-panel2">
+          <div class="flex items-center gap-2 mb-2">
+            <label class="text-[11px] muted uppercase tracking-[0.5px]" for={`sel-field-${name}`}>field</label>
+            <select
+              id={`sel-field-${name}`}
+              class="input max-w-[180px]"
+              value={t.field}
+              onchange={(e) => setField(name, info, (e.currentTarget as HTMLSelectElement).value)}>
+              <option value="input">input</option>
+              <option value="send_button">send_button</option>
+              <option value="assistant_message">assistant_message</option>
+            </select>
+          </div>
           <div class="flex items-center gap-2">
             <input
               class="input font-mono text-[12px]"
@@ -143,7 +226,33 @@
               {#if t.result.error}
                 <span class="err">Error: {t.result.error}</span>
               {:else if t.result.matched === 0}
-                <span class="warn">Matched 0 elements — not logged in, wrong page, or stale selector.</span>
+                <div class="warn">
+                  <div>Matched 0 elements — not logged in, wrong page, or stale selector.</div>
+                  {#if t.result.fallbacks && t.result.fallbacks.length > 0}
+                    <div class="mt-2 muted text-[11.5px]">Registry fallbacks tried:</div>
+                    <ul class="list-none m-0 p-0 mt-1 space-y-1">
+                      {#each t.result.fallbacks as f (f.selector)}
+                        <li class="flex items-center gap-2 text-[12px]">
+                          <code class="flex-1 truncate" title={f.selector}>{f.selector}</code>
+                          <span class="ok shrink-0">{f.matched} match</span>
+                          <button
+                            class="ghost-btn shrink-0"
+                            onclick={() => applyFallback(name, t.field, f.selector)}>
+                            copy override
+                          </button>
+                        </li>
+                      {/each}
+                    </ul>
+                    <div class="text-[11px] muted mt-1">
+                      Add the snippet to <code>uwa.toml</code>, then restart uwa.
+                    </div>
+                  {:else}
+                    <div class="mt-1 text-[11.5px] muted">
+                      No registry fallbacks matched. Try a full page load,
+                      then re-run; or use the <b>scan</b> panel below.
+                    </div>
+                  {/if}
+                </div>
               {:else}
                 <span class="ok">✓ Matched {t.result.matched} element(s)</span>
                 <span class="muted"> in {t.result.duration_ms} ms</span>
