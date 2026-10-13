@@ -231,6 +231,27 @@ and files an issue when one stops matching —
 schema, merge rules, and the fallback story are in
 [docs/PROVIDERS.md](docs/PROVIDERS.md).
 
+## Multi-account profiles
+
+Run the same site as two different users at once. Each profile is a
+separate browser context with its own cookies:
+
+```toml
+[profiles.work]
+label = "Work accounts"
+provider_limits = { chatgpt = 1 }
+```
+
+```bash
+curl -H 'x-uwa-session: work' http://127.0.0.1:8080/v1/chat/completions \
+  -d '{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}'
+```
+
+The **Profiles** page in the dashboard opens a login page inside the
+profile's own context and lists the profile's tabs. See
+[docs/PROFILES.md](docs/PROFILES.md) for the isolation model, the
+per-profile limits, and what "separate context" actually means.
+
 ## Dashboard
 
 Everything is at `http://127.0.0.1:8080`:
@@ -302,6 +323,7 @@ points:
 - [Compatibility](docs/COMPATIBILITY.md) — tested clients and versions.
 - [Conformance](docs/CONFORMANCE.md) — tool-calling conformance across providers.
 - [Providers](docs/PROVIDERS.md) — selector registry, merge rules, self-heal.
+- [Profiles](docs/PROFILES.md) — multi-account browser contexts.
 - [Troubleshooting](docs/TROUBLESHOOTING.md) — the failures people actually hit.
 - [Positioning](docs/POSITIONING.md) — what we're building and what we're not.
 - [Why UWA](docs/why_uwa.md) — architectural deep-dive comparing UWA to typical Python wrappers.

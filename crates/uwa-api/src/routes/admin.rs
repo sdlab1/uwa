@@ -267,6 +267,7 @@ pub async fn sessions(State(state): State<AppState>) -> ApiResult<Json<serde_jso
         .map(|s| {
             serde_json::json!({
                 "conversation": s.conversation.as_str(),
+                "profile": s.profile.as_str(),
                 "tab": s.tab.as_str(),
                 "age_secs": now.duration_since(s.created).as_secs(),
                 "idle_secs": s.idle.as_secs(),
@@ -558,4 +559,200 @@ fn uwa_home_file(rel: &str) -> std::path::PathBuf {
                 .join(".uwa")
         });
     home.join(rel)
+}
+
+// ---------- profiles ----------
+
+#[derive(Debug, serde::Serialize)]
+pub struct ProfileSummary {
+    pub name: String,
+    pub label: String,
+    pub notes: String,
+    pub tabs: Vec<String>,
+    /// Whether at least one tab currently belongs to the profile.
+    pub active: bool,
+    /// Whether the profile is a real (non-default) context the transport
+    /// knows how to open tabs in.
+    pub named: bool,
+}
+
+/// `GET /admin/profiles` — configured profiles plus their live tab counts.
+pub async fn list_profiles(State(state): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
+    let mut out: Vec<ProfileSummary> = Vec::new();
+
+    // Default profile is always present, whether or not it's declared.
+    let default_tabs: Vec<String> = state
+        .transport
+        .list_tabs_in(uwa_session::ProfileName::DEFAULT)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|t| t.to_string())
+        .collect();
+    out.push(ProfileSummary {
+        name: uwa_session::ProfileName::DEFAULT.into(),
+        label: "Default".into(),
+        notes: "The context Chromium was launched with; your normal logins.".into(),
+        active: !default_tabs.is_empty(),
+        named: false,
+        tabs: default_tabs,
+    });
+
+    // Configured profiles, sorted for a stable dashboard order.
+    let mut names: Vec<&String> = state.config.profiles.keys().collect();
+    names.sort();
+    for name in names {
+        let Some(cfg) = state.config.profiles.get(name) else {
+            continue;
+        };
+        let tabs: Vec<String> = state
+            .transport
+            .list_tabs_in(name)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|t| t.to_string())
+            .collect();
+        out.push(ProfileSummary {
+            name: name.clone(),
+            label: if cfg.label.is_empty() {
+                name.clone()
+            } else {
+                cfg.label.clone()
+            },
+            notes: cfg.notes.clone(),
+            active: !tabs.is_empty(),
+            named: true,
+            tabs,
+        });
+    }
+
+    Ok(Json(serde_json::json!({
+        "supports_profiles": state.transport.supports_profiles(),
+        "profiles": out,
+    })))
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct OpenProfileRequest {
+    /// URL to open. Required — the endpoint deliberately does not default
+    /// to a specific provider.
+    pub url: String,
+    /// If set, an existing tab with this URL prefix is reused instead of
+    /// opening a new one.
+    #[serde(default)]
+    pub reuse_if_url_starts_with: Option<String>,
+}
+
+/// `POST /admin/profiles/:name/open` — open a URL inside the profile's
+/// context. This is how the dashboard lets a user log in to a site under
+/// the profile without touching the OS browser.
+pub async fn open_profile_tab(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Json(req): Json<OpenProfileRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let is_default = name == uwa_session::ProfileName::DEFAULT;
+    if !is_default && !state.config.profiles.contains_key(&name) {
+        return Err(UwaError::BadRequest(format!("unknown profile `{name}`")).into());
+    }
+    if !is_default && !state.transport.supports_profiles() {
+        return Err(
+            UwaError::Config("this transport does not support named profiles".into()).into(),
+        );
+    }
+
+    // Reuse an existing tab if the caller asked and one matches.
+    if let Some(prefix) = &req.reuse_if_url_starts_with {
+        for tab in state
+            .transport
+            .list_tabs_in(&name)
+            .await
+            .unwrap_or_default()
+        {
+            if let Ok(page) = state.transport.page(&tab).await {
+                if let Ok(url) = page.url().await {
+                    if url.as_str().starts_with(prefix) {
+                        return Ok(Json(serde_json::json!({
+                            "tab": tab.to_string(),
+                            "reused": true,
+                        })));
+                    }
+                }
+            }
+        }
+    }
+
+    let tab = if is_default {
+        // For the default profile, fall back to an existing tab: the
+        // browser's own context already has whatever the user opened at
+        // launch, and a transport without profile support cannot open one.
+        let existing = state
+            .transport
+            .list_tabs_in(uwa_session::ProfileName::DEFAULT)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .next();
+        match existing {
+            Some(t) => {
+                // Navigate the existing tab to the requested URL.
+                if let Ok(page) = state.transport.page(&t).await {
+                    if let Ok(u) = url::Url::parse(&req.url) {
+                        let _ = page.goto(&u).await;
+                    }
+                }
+                t
+            }
+            None => {
+                return Err(UwaError::Unavailable(
+                    "no tabs in the default context; open one in Chromium first".into(),
+                )
+                .into())
+            }
+        }
+    } else {
+        state.transport.open_tab(&name, &req.url).await?
+    };
+
+    Ok(Json(serde_json::json!({
+        "tab": tab.to_string(),
+        "reused": false,
+    })))
+}
+
+/// `POST /admin/profiles/:name/reset` — close the profile's browser
+/// context. Every tab in it is dropped and its cookies are discarded;
+/// the next request that uses the profile starts from a clean context.
+pub async fn reset_profile(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    if name == uwa_session::ProfileName::DEFAULT {
+        return Err(UwaError::BadRequest(
+            "the default profile cannot be reset through the API; \
+             restart Chromium with a fresh user-data-dir instead"
+                .into(),
+        )
+        .into());
+    }
+    if !state.config.profiles.contains_key(&name) {
+        return Err(UwaError::BadRequest(format!("unknown profile `{name}`")).into());
+    }
+
+    let dropped = state.transport.close_profile(&name).await?;
+
+    // Also drop any sessions that were pinned to tabs in this profile.
+    if let Some(sm) = &state.runtime.sessions {
+        let sessions = sm.list().await;
+        for s in sessions {
+            if s.profile.as_str() == name {
+                let _ = sm.remove_for(&s.conversation, &s.profile);
+            }
+        }
+    }
+
+    Ok(Json(serde_json::json!({
+        "dropped_tabs": dropped.iter().map(|t| t.as_str()).collect::<Vec<_>>(),
+    })))
 }

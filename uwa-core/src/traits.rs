@@ -1,7 +1,7 @@
 //! Cross-crate contracts. Everything that touches the browser or a
 //! provider MUST go through these traits so we can unit-test with mocks.
 
-use crate::error::Result;
+use crate::error::{Result, UwaError};
 use crate::ids::TabId;
 use async_trait::async_trait;
 use futures::stream::Stream;
@@ -171,6 +171,62 @@ pub trait Transport: Send + Sync {
     /// Default implementation is a no-op for mock/test transports.
     async fn shutdown(&self) -> Result<()> {
         Ok(())
+    }
+
+    // ---- profile support (default: unsupported) ----
+
+    /// Whether this transport honours profile names. When `false`, any
+    /// non-default profile is rejected at the routing layer before we
+    /// get here, so the methods below are never called for a real
+    /// non-default profile.
+    fn supports_profiles(&self) -> bool {
+        false
+    }
+
+    /// Open a new tab inside the named profile's browser context and
+    /// navigate it to `url`. Called lazily — the first time a session
+    /// acquires a profile that has no tabs yet.
+    async fn open_tab(&self, _profile: &str, _url: &str) -> Result<TabId> {
+        Err(UwaError::Config(
+            "this transport does not support browser profiles".into(),
+        ))
+    }
+
+    /// Which profile owns this tab. `None` means the transport doesn't
+    /// track profiles at all (default behaviour).
+    async fn tab_profile(&self, _tab: &TabId) -> Result<Option<String>> {
+        Ok(None)
+    }
+
+    /// Tabs belonging to a profile.
+    ///
+    /// The default implementation uses `tab_profile`; when the transport
+    /// doesn't track profiles, only the literal name `"default"` returns
+    /// anything (all tabs), and every other name returns an empty list —
+    /// which is exactly the behaviour we want for a transport with no
+    /// profile support.
+    async fn list_tabs_in(&self, profile: &str) -> Result<Vec<TabId>> {
+        if !self.supports_profiles() {
+            return if profile == "default" {
+                self.list_tabs().await
+            } else {
+                Ok(Vec::new())
+            };
+        }
+        let all = self.list_tabs().await?;
+        let mut out = Vec::new();
+        for t in all {
+            if self.tab_profile(&t).await?.as_deref() == Some(profile) {
+                out.push(t);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Drop a profile: close its browser context and remove every tab
+    /// that belonged to it. Default: no-op (nothing to drop).
+    async fn close_profile(&self, _profile: &str) -> Result<Vec<TabId>> {
+        Ok(Vec::new())
     }
 }
 

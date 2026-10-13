@@ -203,7 +203,15 @@ async fn client_disconnect_stops_the_browser_turn() {
     let (tx, mut rx) = mpsc::channel::<StreamEvent>(4);
     let st = state.clone();
     let task = tokio::spawn(async move {
-        run_pipeline_streaming(&st, &plain_req(), &Vec::<ToolSpec>::new(), None, tx).await
+        run_pipeline_streaming(
+            &st,
+            &plain_req(),
+            &Vec::<ToolSpec>::new(),
+            None,
+            &uwa_session::ProfileName::default_name(),
+            tx,
+        )
+        .await
     });
 
     // Client reads one delta, then goes away.
@@ -242,7 +250,15 @@ async fn client_disconnects_do_not_trip_the_circuit_breaker() {
         let (tx, mut rx) = mpsc::channel::<StreamEvent>(4);
         let st = state.clone();
         let task = tokio::spawn(async move {
-            run_pipeline_streaming(&st, &plain_req(), &Vec::<ToolSpec>::new(), None, tx).await
+            run_pipeline_streaming(
+                &st,
+                &plain_req(),
+                &Vec::<ToolSpec>::new(),
+                None,
+                &uwa_session::ProfileName::default_name(),
+                tx,
+            )
+            .await
         });
         let _ = rx.recv().await;
         drop(rx);

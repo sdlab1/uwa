@@ -133,6 +133,7 @@ pub async fn create(
                 &req_task,
                 &specs_task,
                 None,
+                &uwa_session::ProfileName::default_name(),
                 tx,
             )
             .await;
@@ -148,7 +149,14 @@ pub async fn create(
         return Ok(stream_response(chat_req.model.clone(), input_chars, rx));
     }
 
-    let (text, calls, finish) = chat::run_pipeline(&state, &chat_req, &local_tools, None).await?;
+    let (text, calls, finish) = chat::run_pipeline(
+        &state,
+        &chat_req,
+        &local_tools,
+        None,
+        &uwa_session::ProfileName::default_name(),
+    )
+    .await?;
 
     let id = RequestId::new();
     let created = now_secs();

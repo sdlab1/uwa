@@ -243,3 +243,19 @@ enabled = false
 enabled = false
 at = "04:00"
 drain_secs = 30
+# ---------- Browser profiles (optional) ----------
+#
+# Each profile is a separate Chromium context with its own cookie jar.
+# A client picks one with the `X-UWA-Session: <name>` header. The default
+# (no header) uses the browser's own context — the one you logged into.
+#
+# Use this to keep work and personal accounts apart, or to run the same
+# site as two different users simultaneously.
+
+# [profiles.work]
+# label = "Work accounts"
+# notes = "Stricter limits — the IT department watches."
+# provider_limits = { chatgpt = 1, claude = 1 }
+#
+# [profiles.personal]
+# label = "Personal"

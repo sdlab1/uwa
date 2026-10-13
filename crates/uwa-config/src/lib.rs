@@ -54,6 +54,29 @@ pub struct Config {
     /// Routing groups configuration.
     #[serde(default)]
     pub groups: HashMap<String, GroupCfg>,
+    /// Named browser contexts: separate cookie jars, separate logins.
+    /// A request carries `X-UWA-Session: <name>` to pick one; the
+    /// default (unnamed) context is used otherwise.
+    #[serde(default)]
+    pub profiles: HashMap<String, ProfileCfg>,
+}
+
+/// One profile in `[profiles.<name>]`. The map key is the profile name.
+///
+/// `default` is reserved: it means the browser's own context (the one
+/// the user already logged into when they launched Chromium).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ProfileCfg {
+    /// Human-readable label shown in the dashboard.
+    #[serde(default)]
+    pub label: String,
+    /// Optional per-provider concurrency cap. Overrides the provider's
+    /// own `max_concurrency` for requests that use this profile.
+    #[serde(default)]
+    pub provider_limits: HashMap<String, u32>,
+    /// Free-form notes shown in the dashboard.
+    #[serde(default)]
+    pub notes: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -486,6 +509,42 @@ impl Config {
         for (name, g) in &self.groups {
             g.validate(&self.providers)
                 .map_err(|e| UwaError::Config(format!("group `{name}`: {e}")))?;
+        }
+
+        // 4b. Profiles: names must be identifiers; `default` is reserved;
+        //     every named provider limit must reference a real provider.
+        for (name, p) in &self.profiles {
+            if name == "default" {
+                return Err(UwaError::Config(
+                    "profiles.default is reserved: use the default context \
+                     directly (omit the header) instead of declaring it"
+                        .into(),
+                ));
+            }
+            if name.is_empty() {
+                return Err(UwaError::Config("profile name must not be empty".into()));
+            }
+            if !name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            {
+                return Err(UwaError::Config(format!(
+                    "profile `{name}`: names may contain only ASCII letters, \
+                     digits, `-` and `_`"
+                )));
+            }
+            for (pname, limit) in &p.provider_limits {
+                if *limit == 0 {
+                    return Err(UwaError::Config(format!(
+                        "profiles.{name}.provider_limits.{pname} must be ≥ 1"
+                    )));
+                }
+                if !self.providers.contains_key(pname) {
+                    return Err(UwaError::Config(format!(
+                        "profiles.{name}.provider_limits references unknown provider `{pname}`"
+                    )));
+                }
+            }
         }
 
         // 5. CDP backend endpoint must be usable.
@@ -984,6 +1043,62 @@ mod tests {
             vec!["--lang=en-US".to_string()]
         );
         assert_eq!(cfg.backend.nodriver.init_timeout_ms, 5000);
+    }
+
+    #[test]
+    fn profiles_parse_and_validate() {
+        let toml = format!(
+            r#"{SAMPLE}
+            [profiles.work]
+            label = "Work accounts"
+            provider_limits = {{ chatgpt = 1 }}
+
+            [profiles.personal]
+            label = "Personal"
+            "#
+        );
+        let cfg = Config::load_from_str(&toml).unwrap();
+        assert_eq!(cfg.profiles.len(), 2);
+        let work = cfg.profiles.get("work").unwrap();
+        assert_eq!(work.label, "Work accounts");
+        assert_eq!(work.provider_limits.get("chatgpt"), Some(&1));
+        assert_eq!(
+            cfg.profiles.get("personal").map(|p| p.label.as_str()),
+            Some("Personal")
+        );
+    }
+
+    #[test]
+    fn profiles_default_to_empty() {
+        let cfg = Config::load_from_str(SAMPLE).unwrap();
+        assert!(cfg.profiles.is_empty());
+    }
+
+    #[test]
+    fn profile_default_name_is_rejected() {
+        let toml = format!("{SAMPLE}\n[profiles.default]\nlabel = \"x\"\n");
+        let err = Config::load_from_str(&toml).unwrap_err();
+        assert!(err.to_string().contains("reserved"), "{err}");
+    }
+
+    #[test]
+    fn profile_bad_name_is_rejected() {
+        let toml = format!("{SAMPLE}\n[profiles.\"with space\"]\nlabel = \"x\"\n");
+        assert!(Config::load_from_str(&toml).is_err());
+    }
+
+    #[test]
+    fn profile_zero_limit_is_rejected() {
+        let toml = format!("{SAMPLE}\n[profiles.work]\nprovider_limits = {{ chatgpt = 0 }}\n");
+        let err = Config::load_from_str(&toml).unwrap_err();
+        assert!(err.to_string().contains("≥ 1"), "{err}");
+    }
+
+    #[test]
+    fn profile_limit_for_unknown_provider_is_rejected() {
+        let toml = format!("{SAMPLE}\n[profiles.work]\nprovider_limits = {{ nosuch = 1 }}\n");
+        let err = Config::load_from_str(&toml).unwrap_err();
+        assert!(err.to_string().contains("nosuch"), "{err}");
     }
 
     #[test]

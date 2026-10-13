@@ -233,6 +233,15 @@ pub fn router(state: AppState) -> Router {
             "/admin/sessions/recover",
             post(routes::admin::recover_sessions),
         )
+        .route("/admin/profiles", get(routes::admin::list_profiles))
+        .route(
+            "/admin/profiles/:name/open",
+            post(routes::admin::open_profile_tab),
+        )
+        .route(
+            "/admin/profiles/:name/reset",
+            post(routes::admin::reset_profile),
+        )
         .route(
             "/admin/sessions/:id",
             axum::routing::delete(routes::admin::drop_session),

@@ -1,7 +1,8 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import type { ChatMessage, ModelObject, ToolCallRef } from '../lib/types';
-  import { chat, chatStream, getModels, ApiError } from '../lib/api';
+  import { chat, chatStream, getModels, getProfiles, ApiError } from '../lib/api';
+  import type { ProfileSummary } from '../lib/types';
   import {
     toast, streamStart, streamFirstToken, streamDelta, streamDone, streamError,
   } from '../lib/stores';
@@ -19,6 +20,8 @@
 
   // ---- Models ----
   let models: ModelObject[] = $state([]);
+  let profiles: ProfileSummary[] = $state([]);
+  let profile: string = $state('');
   let model: string = $state(active?.model ?? '');
   let streamMode: boolean = $state(true);
   let toolsRaw: string = $state('');
@@ -154,6 +157,7 @@
         phase = 'waiting';
         const acc = await chatStream(req, {
           signal: abort.signal,
+          profile: profile || undefined,
           onFirstToken: () => {
             firstTokenAt = performance.now();
             phase = 'first-token';
@@ -188,7 +192,7 @@
         for (const k of Object.keys(streamToolCalls)) streamToolCalls[+k]!.done = true;
       } else {
         phase = 'waiting';
-        const r = await chat(req);
+        const r = await chat(req, { profile: profile || undefined });
         const m = r.choices[0]?.message;
         if (m) {
           s.messages[assistantIndex]!.content = m.content ?? '';
@@ -241,6 +245,13 @@
 
   onMount(async () => {
     try {
+      const pr = await getProfiles();
+      profiles = pr.profiles;
+      profile = profiles[0]?.name ?? '';
+    } catch {
+      profiles = [];
+    }
+    try {
       const list = await getModels();
       models = list.data;
       if (!model && models[0]) model = models[0].id;
@@ -280,6 +291,14 @@
     <div class="chat-head">
       <h2 class="m-0">{active?.title ?? 'New chat'}</h2>
       <div class="chat-head-actions">
+        {#if profiles.length > 1}
+          <label class="text-[11px] muted" for="pg-profile">profile</label>
+          <select id="pg-profile" class="input max-w-[140px]" bind:value={profile}>
+            {#each profiles as p (p.name)}
+              <option value={p.name}>{p.label}</option>
+            {/each}
+          </select>
+        {/if}
         <StreamBadge {phase} {ttftMs} {totalMs} chars={charsStreamed} />
         <button class="ghost-btn" onclick={clearActive}>clear</button>
       </div>

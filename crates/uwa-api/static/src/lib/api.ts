@@ -2,6 +2,7 @@ import type {
   ChatRequest, ChatResponse, HealthResp, HistoryResp, ModelList, PoolStatus,
   ProviderMap, ReadyResp, SelectorTestResp, SessionsResp, StatsResp,
   RegistryInfo,
+  ProfileListResp,
 } from './types';
 
 const KEY_STORAGE = 'uwa:apiKey';
@@ -111,9 +112,20 @@ export const selectorApply = (b: {
 }) => request<unknown>('/admin/selector-apply', { method: 'POST', body: JSON.stringify(b) });
 
 // === chat ===
-export async function chat(req: ChatRequest): Promise<ChatResponse> {
+/** Extra per-request options: `profile` maps to the `X-UWA-Session`
+ * header (multi-account browser contexts). */
+export interface ChatOpts {
+  profile?: string;
+}
+
+function sessionHeader(profile?: string): Record<string, string> {
+  return profile ? { 'x-uwa-session': profile } : {};
+}
+
+export async function chat(req: ChatRequest, opts: ChatOpts = {}): Promise<ChatResponse> {
   return request<ChatResponse>('/v1/chat/completions', {
     method: 'POST',
+    headers: sessionHeader(opts.profile),
     body: JSON.stringify({ ...req, stream: false }),
   });
 }
@@ -127,10 +139,13 @@ export interface StreamHandlers {
 }
 
 /** Real SSE: emits per-chunk, aggregates and returns the final text. */
-export async function chatStream(req: ChatRequest, h: StreamHandlers = {}): Promise<string> {
+export async function chatStream(
+  req: ChatRequest,
+  h: StreamHandlers & ChatOpts = {},
+): Promise<string> {
   const r = await fetch('/v1/chat/completions', {
     method: 'POST',
-    headers: headers({ accept: 'text/event-stream' }),
+    headers: headers({ accept: 'text/event-stream', ...sessionHeader(h.profile) }),
     body: JSON.stringify({ ...req, stream: true }),
     signal: h.signal,
   });
@@ -232,3 +247,20 @@ export interface ConformanceReport {
   hint?: string;
 }
 export const getConformance = () => request<ConformanceReport>('/admin/conformance');
+
+
+// === profiles (multi-account browser contexts) ===
+export const getProfiles = () => request<ProfileListResp>('/admin/profiles');
+export const openProfileTab = (
+  name: string,
+  body: { url: string; reuse_if_url_starts_with?: string },
+) =>
+  request<{ tab: string; reused: boolean }>(
+    `/admin/profiles/${encodeURIComponent(name)}/open`,
+    { method: 'POST', body: JSON.stringify(body) },
+  );
+export const resetProfile = (name: string) =>
+  request<{ dropped_tabs: string[] }>(
+    `/admin/profiles/${encodeURIComponent(name)}/reset`,
+    { method: 'POST' },
+  );

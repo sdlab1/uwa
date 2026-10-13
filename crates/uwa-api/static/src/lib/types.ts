@@ -87,8 +87,22 @@ export interface StatsResp {
   requests_per_minute: number[];
 }
 
+export interface ProfileSummary {
+  name: string;
+  label: string;
+  notes: string;
+  tabs: string[];
+  active: boolean;
+  named: boolean;
+}
+
+export interface ProfileListResp {
+  supports_profiles: boolean;
+  profiles: ProfileSummary[];
+}
+
 export interface SessionInfo {
-  conversation: string; tab: string;
+  conversation: string; profile?: string; tab: string;
   age_secs: number; idle_secs: number; generation: number;
 }
 export interface SessionsResp { sessions: SessionInfo[]; }

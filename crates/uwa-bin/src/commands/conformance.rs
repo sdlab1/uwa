@@ -289,10 +289,15 @@ impl ConformanceBackend for LiveBackend {
         let all_specs =
             uwa_api::routes::chat::local_tools(&req).map_err(|e| format!("local_tools: {e}"))?;
 
-        let (text, calls, _finish) =
-            uwa_api::routes::chat::run_pipeline(&self.state, &req, &all_specs, None)
-                .await
-                .map_err(|e| format!("pipeline: {e}"))?;
+        let (text, calls, _finish) = uwa_api::routes::chat::run_pipeline(
+            &self.state,
+            &req,
+            &all_specs,
+            None,
+            &uwa_session::ProfileName::default_name(),
+        )
+        .await
+        .map_err(|e| format!("pipeline: {e}"))?;
 
         Ok(BackendOutcome {
             outcome: uwa_tools::ToolParseOutcome { calls, text },

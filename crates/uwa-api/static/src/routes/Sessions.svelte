@@ -95,6 +95,7 @@
       <thead>
         <tr>
           <th>Conversation</th>
+          <th>Profile</th>
           <th>Tab</th>
           <th class="text-right">Age</th>
           <th class="text-right">Idle</th>
@@ -106,6 +107,7 @@
         {#each sessions as s (s.conversation)}
           <tr>
             <td class="font-mono text-[12px]">{s.conversation}</td>
+            <td class="font-mono text-[12px] text-muted">{s.profile ?? 'default'}</td>
             <td class="font-mono text-[12px] text-muted">{s.tab.slice(0, 12)}…</td>
             <td class="text-right">{fmtRel(s.age_secs)}</td>
             <td class="text-right">{fmtRel(s.idle_secs)}</td>

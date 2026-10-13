@@ -17,11 +17,16 @@ pub struct RoutingHint {
     pub tab: Option<TabId>,
     /// Pin a specific conversation id. Overrides the hash-based default.
     pub conversation: Option<ConversationId>,
+    /// Browser profile name (`X-UWA-Session`). `None` = default context.
+    pub profile: Option<String>,
 }
 
 impl RoutingHint {
     pub fn is_empty(&self) -> bool {
-        self.provider.is_none() && self.tab.is_none() && self.conversation.is_none()
+        self.provider.is_none()
+            && self.tab.is_none()
+            && self.conversation.is_none()
+            && self.profile.is_none()
     }
 }
 
@@ -44,10 +49,18 @@ impl<S: Send + Sync> FromRequestParts<S> for HintExtractor {
             .get("x-uwa-provider")
             .and_then(|v| v.to_str().ok())
             .map(str::to_string);
+        let profile = parts
+            .headers
+            .get("x-uwa-session")
+            .and_then(|v| v.to_str().ok())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
         Ok(HintExtractor(RoutingHint {
             provider,
             tab: None,
             conversation: None,
+            profile,
         }))
     }
 }
@@ -117,6 +130,23 @@ pub async fn resolve_hint(
                 .map(|(name, _)| name.clone())
                 .ok_or_else(|| UwaError::NoProviderForUrl(domain.to_string()))?;
             out.provider = Some(provider_name);
+        }
+    }
+    if let Some(profile) = &out.profile {
+        if profile != uwa_session::ProfileName::DEFAULT
+            && !state.config.profiles.contains_key(profile)
+        {
+            let mut known: Vec<&str> = state.config.profiles.keys().map(String::as_str).collect();
+            known.sort();
+            let list = if known.is_empty() {
+                "(none)".to_string()
+            } else {
+                known.join(", ")
+            };
+            return Err(UwaError::BadRequest(format!(
+                "unknown profile `{profile}`; configured profiles: {list}. \
+                 Omit the `X-UWA-Session` header to use the default context."
+            )));
         }
     }
     Ok(out)

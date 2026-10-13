@@ -20,6 +20,14 @@ fn cid(s: &str) -> ConversationId {
     ConversationId::from_raw(s)
 }
 
+/// Composite default-profile key used by direct `entries` assertions.
+fn key(s: &str) -> SessionKey {
+    SessionKey {
+        cid: cid(s),
+        profile: ProfileName::default_name(),
+    }
+}
+
 #[tokio::test]
 async fn same_conversation_same_tab() {
     let sm = SessionManager::new(cfg(60_000, 8));
@@ -76,7 +84,7 @@ async fn evict_idle_removes_old() {
     assert_eq!(sm.len(), 1);
     tokio::time::sleep(Duration::from_millis(60)).await;
     let evicted = sm.evict_idle().await;
-    assert_eq!(evicted, vec![cid("old")]);
+    assert_eq!(evicted, vec![(cid("old"), ProfileName::default_name())]);
     assert!(sm.is_empty());
 }
 
@@ -104,7 +112,7 @@ async fn recover_drops_unhealthy() {
     let dead = sm.recover(&t).await;
     assert_eq!(dead, vec![dead_tab]);
     assert_eq!(sm.len(), 1);
-    assert!(sm.entries.contains_key(&cid("good")));
+    assert!(sm.entries.contains_key(&key("good")));
     drop(h1);
 }
 
@@ -121,8 +129,8 @@ async fn max_sessions_evicts_oldest() {
     let c = sm.acquire(&cid("c"), &t).await.unwrap();
     drop(c);
     assert!(sm.len() <= 2);
-    assert!(!sm.entries.contains_key(&cid("a")));
-    assert!(sm.entries.contains_key(&cid("c")));
+    assert!(!sm.entries.contains_key(&key("a")));
+    assert!(sm.entries.contains_key(&key("c")));
 }
 
 #[tokio::test]
@@ -152,8 +160,8 @@ async fn over_capacity_never_evicts_a_busy_session() {
     // At capacity with the only session busy: the manager must grow past
     // the cap rather than evicting the live lease.
     let other = sm.acquire(&cid("other"), &t).await.unwrap();
-    assert!(sm.entries.contains_key(&cid("busy")));
-    assert!(sm.entries.contains_key(&cid("other")));
+    assert!(sm.entries.contains_key(&key("busy")));
+    assert!(sm.entries.contains_key(&key("other")));
     assert_eq!(busy.tab, tab_of_busy, "the live lease keeps its tab");
 
     drop(busy);
@@ -233,7 +241,7 @@ async fn recover_drops_parked_sessions_on_dead_tabs() {
     let dead = sm.recover(&t).await;
     assert_eq!(dead, vec![dead_tab]);
     assert_eq!(sm.len(), 1);
-    assert!(sm.entries.contains_key(&cid("good")));
+    assert!(sm.entries.contains_key(&key("good")));
     drop(h1);
 }
 
@@ -408,7 +416,10 @@ async fn cancelled_acquire_releases_its_lease() {
     drop(held);
     assert_eq!(sm.list().await.first().map(|s| s.holders), Some(0));
     tokio::time::sleep(Duration::from_millis(30)).await;
-    assert_eq!(sm.evict_idle().await, vec![cid("c")]);
+    assert_eq!(
+        sm.evict_idle().await,
+        vec![(cid("c"), ProfileName::default_name())]
+    );
 }
 
 #[tokio::test]
@@ -468,12 +479,12 @@ async fn capacity_eviction_takes_oldest_parked_and_spares_busy() {
     tokio::time::sleep(Duration::from_millis(5)).await;
 
     let newcomer = sm.acquire(&cid("new"), &t).await.unwrap();
-    assert!(sm.entries.contains_key(&cid("busy")), "leased entry spared");
+    assert!(sm.entries.contains_key(&key("busy")), "leased entry spared");
     assert!(
-        !sm.entries.contains_key(&cid("parked")),
+        !sm.entries.contains_key(&key("parked")),
         "parked LRU evicted"
     );
-    assert!(sm.entries.contains_key(&cid("new")));
+    assert!(sm.entries.contains_key(&key("new")));
     drop((busy, newcomer));
 }
 
@@ -539,4 +550,179 @@ async fn churn_never_runs_one_conversation_twice_at_once() {
     for s in sm.list().await {
         assert_eq!(s.holders, 0, "lease leaked for {}", s.conversation);
     }
+}
+
+// ---- profile behaviour ----
+
+fn profile(s: &str) -> ProfileName {
+    ProfileName::new(s)
+}
+
+fn tabs_with_profiles() -> MockTransport {
+    MockTransport::new().with_profiles()
+}
+
+#[tokio::test]
+async fn same_conversation_different_profiles_get_different_tabs() {
+    let sm = SessionManager::new(cfg(60_000, 8));
+    let t = tabs_with_profiles();
+
+    let work = sm
+        .acquire_with_profile(&cid("c1"), profile("work"), &t)
+        .await
+        .unwrap();
+    let personal = sm
+        .acquire_with_profile(&cid("c1"), profile("personal"), &t)
+        .await
+        .unwrap();
+
+    assert_eq!(work.conversation, personal.conversation);
+    assert_ne!(work.profile, personal.profile);
+    assert_ne!(
+        work.tab, personal.tab,
+        "different profiles must not share a tab"
+    );
+    assert_eq!(sm.len(), 2);
+}
+
+#[tokio::test]
+async fn same_profile_reuses_the_tab() {
+    let sm = SessionManager::new(cfg(60_000, 8));
+    let t = tabs_with_profiles();
+
+    let a = sm
+        .acquire_with_profile(&cid("c1"), profile("work"), &t)
+        .await
+        .unwrap();
+    let tab = a.tab.clone();
+    drop(a);
+
+    let b = sm
+        .acquire_with_profile(&cid("c1"), profile("work"), &t)
+        .await
+        .unwrap();
+    assert_eq!(b.tab, tab);
+    assert_eq!(sm.len(), 1);
+}
+
+#[tokio::test]
+async fn new_profile_opens_a_tab_lazily() {
+    let sm = SessionManager::new(cfg(60_000, 8));
+    let t = tabs_with_profiles();
+    assert!(t.list_tabs_in("work").await.unwrap_or_default().is_empty());
+
+    let h = sm
+        .acquire_with_profile(&cid("c1"), profile("work"), &t)
+        .await
+        .unwrap();
+
+    let work_tabs = t.list_tabs_in("work").await.unwrap_or_default();
+    assert_eq!(work_tabs.len(), 1);
+    assert_eq!(work_tabs.first(), Some(&h.tab));
+}
+
+#[tokio::test]
+async fn unsupported_profile_is_an_error() {
+    let sm = SessionManager::new(cfg(60_000, 8));
+    // Default MockTransport: no profile support.
+    let t = MockTransport::with_n_tabs(1);
+    let err = match sm
+        .acquire_with_profile(&cid("c1"), profile("work"), &t)
+        .await
+    {
+        Err(e) => e,
+        Ok(_) => unreachable!("profile on a non-profile transport must fail"),
+    };
+    assert!(matches!(err, UwaError::Unavailable(_)), "{err:?}");
+}
+
+#[tokio::test]
+async fn empty_header_profile_falls_back_to_default() {
+    let sm = SessionManager::new(cfg(60_000, 8));
+    let t = MockTransport::with_n_tabs(1).with_profiles();
+    let h = sm
+        .acquire_with_profile(&cid("c1"), ProfileName::new(""), &t)
+        .await
+        .unwrap();
+    assert!(h.profile.is_default());
+}
+
+#[tokio::test]
+async fn remove_drops_every_profile_for_a_conversation() {
+    let sm = SessionManager::new(cfg(60_000, 8));
+    let t = tabs_with_profiles();
+    let _ = sm
+        .acquire_with_profile(&cid("c1"), profile("work"), &t)
+        .await
+        .unwrap();
+    let _ = sm
+        .acquire_with_profile(&cid("c1"), profile("personal"), &t)
+        .await
+        .unwrap();
+    assert_eq!(sm.len(), 2);
+    let removed = sm.remove(&cid("c1"));
+    assert!(removed.is_some());
+    assert!(sm.is_empty());
+}
+
+#[tokio::test]
+async fn remove_for_drops_only_one_profile() {
+    let sm = SessionManager::new(cfg(60_000, 8));
+    let t = tabs_with_profiles();
+    let _ = sm
+        .acquire_with_profile(&cid("c1"), profile("work"), &t)
+        .await
+        .unwrap();
+    let _ = sm
+        .acquire_with_profile(&cid("c1"), profile("personal"), &t)
+        .await
+        .unwrap();
+
+    let removed = sm.remove_for(&cid("c1"), &profile("work"));
+    assert!(removed.is_some());
+    assert_eq!(sm.len(), 1);
+
+    let list = sm.list().await;
+    assert_eq!(list.len(), 1);
+    assert_eq!(list.first().map(|s| s.profile.as_str()), Some("personal"));
+}
+
+#[tokio::test]
+async fn list_includes_profile_name() {
+    let sm = SessionManager::new(cfg(60_000, 8));
+    let t = tabs_with_profiles();
+    let _ = sm
+        .acquire_with_profile(&cid("c1"), profile("work"), &t)
+        .await
+        .unwrap();
+    let list = sm.list().await;
+    assert_eq!(list.len(), 1);
+    assert_eq!(list.first().map(|s| s.profile.as_str()), Some("work"));
+}
+
+#[tokio::test]
+async fn empty_profiles_each_get_their_own_lazy_tab() {
+    // Two named profiles over a transport that only has a default tab:
+    // each profile finds no tabs of its own and lazily opens one, so
+    // they never share a tab even though `default` has one.
+    let sm = SessionManager::new(cfg(60_000, 8));
+    let t = MockTransport::with_n_tabs(1).with_profiles();
+    let a = sm
+        .acquire_with_profile(&cid("c1"), profile("work"), &t)
+        .await
+        .unwrap();
+    let b = sm
+        .acquire_with_profile(&cid("c1"), profile("personal"), &t)
+        .await
+        .unwrap();
+    assert_ne!(a.tab, b.tab);
+    assert_eq!(sm.len(), 2);
+    drop((a, b));
+}
+
+#[test]
+fn profile_key_distinguishes_case_sensitively() {
+    // `Work` and `work` are distinct profiles at the manager level;
+    // only the reserved `default` collapses case-insensitively.
+    assert_ne!(profile("Work"), profile("work"));
 }

@@ -1,5 +1,10 @@
-//! Session table: conversation -> leased tab, with idle/capacity eviction and
-//! automatic re-pinning when a tab dies.
+//! Session table: (conversation, profile) -> leased tab, with idle/capacity
+//! eviction and automatic re-pinning when a tab dies.
+//!
+//! Two requests for the same conversation but different profiles get
+//! different tabs — that is what makes multi-account work. Two requests
+//! for the same (conversation, profile) get the same tab, which keeps a
+//! conversation's context intact.
 //!
 //! Invariants worth knowing before touching this file:
 //!
@@ -21,6 +26,8 @@ use std::sync::{Arc, Mutex as StdMutex, PoisonError};
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, OwnedMutexGuard};
 use uwa_core::{ConversationId, Result, TabId, Transport, UwaError};
+
+use crate::profile::ProfileName;
 
 /// How many times `acquire` re-resolves an entry that was removed while the
 /// caller was queued on it. Only reachable under absurd churn.
@@ -46,6 +53,8 @@ impl Default for SessionCfg {
 struct SessionEntry {
     /// Only ever changed while `access` is held (see `ensure_live_tab`).
     tab: StdMutex<TabId>,
+    /// The browser context this session runs under.
+    profile: ProfileName,
     created: Instant,
     /// Milliseconds since `created`. Lock-free so that `Drop` can always
     /// record the release (the old `try_lock` silently skipped it).
@@ -58,9 +67,10 @@ struct SessionEntry {
 }
 
 impl SessionEntry {
-    fn new(tab: TabId) -> Self {
+    fn new(tab: TabId, profile: ProfileName) -> Self {
         Self {
             tab: StdMutex::new(tab),
+            profile,
             created: Instant::now(),
             last_used_ms: AtomicU64::new(0),
             access: Arc::new(Mutex::new(())),
@@ -130,6 +140,7 @@ impl Drop for Lease {
 #[derive(Debug, Clone)]
 pub struct SessionInfo {
     pub conversation: ConversationId,
+    pub profile: ProfileName,
     pub tab: TabId,
     pub created: Instant,
     pub last_used: Instant,
@@ -140,8 +151,15 @@ pub struct SessionInfo {
     pub generation: u64,
 }
 
+/// Composite key: the conversation plus the profile it runs under.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct SessionKey {
+    cid: ConversationId,
+    profile: ProfileName,
+}
+
 pub struct SessionManager {
-    entries: dashmap::DashMap<ConversationId, Arc<SessionEntry>>,
+    entries: dashmap::DashMap<SessionKey, Arc<SessionEntry>>,
     cfg: SessionCfg,
     /// Round-robin cursor for tab picking on fresh sessions.
     rr: AtomicU64,
@@ -150,6 +168,8 @@ pub struct SessionManager {
 /// RAII lease on a conversation's tab. Serializes work per conversation.
 pub struct SessionHandle {
     pub conversation: ConversationId,
+    /// The browser context this lease runs under.
+    pub profile: ProfileName,
     /// The tab to use for this turn — guaranteed to have answered a health
     /// probe at acquire time.
     pub tab: TabId,
@@ -194,32 +214,53 @@ impl SessionManager {
         &self.cfg
     }
 
-    /// Lease the conversation's tab, creating the session on first use.
-    ///
-    /// If the pinned tab no longer answers, the conversation is moved to a
-    /// healthy tab instead of failing every request until idle eviction.
+    /// Lease the conversation's tab (default profile), creating the session
+    /// on first use. Kept for callers that don't do profiles.
     pub async fn acquire(
         &self,
         cid: &ConversationId,
         transport: &dyn Transport,
     ) -> Result<SessionHandle> {
+        self.acquire_with_profile(cid, ProfileName::default_name(), transport)
+            .await
+    }
+
+    /// Lease a tab for `(conversation, profile)`.
+    ///
+    /// If the pinned tab no longer answers, the conversation is moved to a
+    /// healthy tab instead of failing every request until idle eviction.
+    /// When the profile is new and has no tabs yet, one is opened lazily
+    /// (only if the transport supports profiles).
+    pub async fn acquire_with_profile(
+        &self,
+        cid: &ConversationId,
+        profile: ProfileName,
+        transport: &dyn Transport,
+    ) -> Result<SessionHandle> {
+        let key = SessionKey {
+            cid: cid.clone(),
+            profile: profile.clone(),
+        };
         for _ in 0..MAX_ACQUIRE_ATTEMPTS {
-            let lease = match self.lease_existing(cid) {
+            let lease = match self.lease_existing(&key) {
                 Some(l) => l,
-                None => self.create(cid, transport).await?,
+                None => self.create(&key, transport).await?,
             };
             let guard = Arc::clone(&lease.0.access).lock_owned().await;
             // Explicitly removed (admin drop / recover) while we were queued:
             // our entry is orphaned, so a later caller would get a *second*
             // entry and run concurrently on another tab. Start over.
-            if !self.is_current(cid, &lease.0) {
+            if !self.is_current(&key, &lease.0) {
                 continue;
             }
-            let tab = self.ensure_live_tab(cid, &lease.0, transport).await?;
+            let tab = self
+                .ensure_live_tab(cid, &key.profile, &lease.0, transport)
+                .await?;
             lease.0.touch();
             let generation = lease.0.generation.load(Ordering::Acquire);
             return Ok(SessionHandle {
                 conversation: cid.clone(),
+                profile: lease.0.profile.clone(),
                 tab,
                 generation,
                 _guard: guard,
@@ -233,25 +274,44 @@ impl SessionManager {
 
     /// Take a lease on an existing entry. The counter is bumped while the
     /// shard read lock is held, which is what makes `remove_if` eviction safe.
-    fn lease_existing(&self, cid: &ConversationId) -> Option<Lease> {
-        self.entries.get(cid).map(|r| Lease::take(r.value()))
+    fn lease_existing(&self, key: &SessionKey) -> Option<Lease> {
+        self.entries.get(key).map(|r| Lease::take(r.value()))
     }
 
-    fn is_current(&self, cid: &ConversationId, entry: &Arc<SessionEntry>) -> bool {
+    fn is_current(&self, key: &SessionKey, entry: &Arc<SessionEntry>) -> bool {
         self.entries
-            .get(cid)
+            .get(key)
             .is_some_and(|r| Arc::ptr_eq(r.value(), entry))
     }
 
-    async fn create(&self, cid: &ConversationId, transport: &dyn Transport) -> Result<Lease> {
+    async fn create(&self, key: &SessionKey, transport: &dyn Transport) -> Result<Lease> {
         self.evict_if_over_capacity();
-        let tab = self.pick_tab(transport, None).await?;
+        // Pick a tab inside the profile; a named profile with no tabs of its
+        // own opens one lazily (mirrors the no-session-manager fallback).
+        let tab = match self.pick_tab_in(&key.profile, transport, None).await {
+            Ok(t) => t,
+            Err(e) => {
+                let can_open = !key.profile.is_default() && transport.supports_profiles();
+                if !can_open {
+                    return Err(e);
+                }
+                transport
+                    .open_tab(key.profile.as_str(), "about:blank")
+                    .await?;
+                transport
+                    .list_tabs_in(key.profile.as_str())
+                    .await?
+                    .into_iter()
+                    .next()
+                    .ok_or(e)?
+            }
+        };
         // Another task may have created the entry while we were probing
         // tabs; then its tab wins and ours is simply dropped.
-        Ok(match self.entries.entry(cid.clone()) {
+        Ok(match self.entries.entry(key.clone()) {
             dashmap::mapref::entry::Entry::Occupied(o) => Lease::take(o.get()),
             dashmap::mapref::entry::Entry::Vacant(v) => {
-                let entry = Arc::new(SessionEntry::new(tab));
+                let entry = Arc::new(SessionEntry::new(tab, key.profile.clone()));
                 let lease = Lease::take(&entry);
                 v.insert(entry);
                 lease
@@ -264,6 +324,7 @@ impl SessionManager {
     async fn ensure_live_tab(
         &self,
         cid: &ConversationId,
+        profile: &ProfileName,
         entry: &SessionEntry,
         transport: &dyn Transport,
     ) -> Result<TabId> {
@@ -271,9 +332,10 @@ impl SessionManager {
         let Err(cause) = transport.health(&current).await else {
             return Ok(current);
         };
-        let fresh = self.pick_tab(transport, Some(&current)).await?;
+        let fresh = self.pick_tab_in(profile, transport, Some(&current)).await?;
         tracing::warn!(
             conversation = %cid,
+            profile = %profile,
             dead_tab = %current,
             new_tab = %fresh,
             %cause,
@@ -284,16 +346,29 @@ impl SessionManager {
         Ok(fresh)
     }
 
-    /// Least-leased healthy tab (spreads conversations across the pool).
-    /// The scan order rotates so ties don't funnel everyone onto tab #0.
-    async fn pick_tab(&self, transport: &dyn Transport, avoid: Option<&TabId>) -> Result<TabId> {
-        let tabs = transport.list_tabs().await?;
+    /// Least-leased healthy tab within `profile` (spreads conversations
+    /// across the profile's tabs). The scan order rotates so ties don't
+    /// funnel everyone onto the profile's first tab. Load counts only
+    /// sessions of the same profile: a tab shared with another profile is
+    /// a different cookie jar and must not be counted as busy for this one.
+    async fn pick_tab_in(
+        &self,
+        profile: &ProfileName,
+        transport: &dyn Transport,
+        avoid: Option<&TabId>,
+    ) -> Result<TabId> {
+        let tabs = transport.list_tabs_in(profile.as_str()).await?;
         if tabs.is_empty() {
-            return Err(UwaError::Unavailable("no browser tabs available".into()));
+            return Err(UwaError::Unavailable(format!(
+                "no browser tabs available for profile `{profile}`"
+            )));
         }
 
         let mut load: HashMap<TabId, usize> = HashMap::new();
         for e in self.entries.iter() {
+            if e.value().profile != *profile {
+                continue;
+            }
             let n = load.entry(e.value().tab()).or_default();
             *n = n.saturating_add(1);
         }
@@ -314,16 +389,19 @@ impl SessionManager {
                 return Ok(tab);
             }
         }
-        Err(UwaError::Unavailable(
-            "no healthy browser tabs available".into(),
-        ))
+        Err(UwaError::Unavailable(format!(
+            "no healthy browser tabs available for profile `{profile}`"
+        )))
     }
 
     /// Idle eviction. Never touches a leased session, and re-checks idleness
     /// under the shard lock so a session used since the scan survives.
-    pub async fn evict_idle(&self) -> Vec<ConversationId> {
+    /// Idle eviction. Never touches a leased session, and re-checks idleness
+    /// under the shard lock so a session used since the scan survives.
+    /// Returns the evicted (conversation, profile) pairs.
+    pub async fn evict_idle(&self) -> Vec<(ConversationId, ProfileName)> {
         let ttl = self.cfg.idle_ttl;
-        let candidates: Vec<(ConversationId, Arc<SessionEntry>)> = self
+        let candidates: Vec<(SessionKey, Arc<SessionEntry>)> = self
             .entries
             .iter()
             .filter(|e| e.value().is_evictable(ttl))
@@ -331,14 +409,14 @@ impl SessionManager {
             .collect();
         candidates
             .into_iter()
-            .filter(|(cid, cand)| {
+            .filter(|(key, cand)| {
                 self.entries
-                    .remove_if(cid, |_, cur| {
+                    .remove_if(key, |_, cur| {
                         Arc::ptr_eq(cur, cand) && cur.is_evictable(ttl)
                     })
                     .is_some()
             })
-            .map(|(cid, _)| cid)
+            .map(|(key, _)| (key.cid, key.profile))
             .collect()
     }
 
@@ -355,11 +433,11 @@ impl SessionManager {
                 .filter(|e| e.value().is_parked())
                 .min_by_key(|e| e.value().last_used())
                 .map(|e| (e.key().clone(), Arc::clone(e.value())));
-            let Some((cid, cand)) = oldest else {
+            let Some((key, cand)) = oldest else {
                 return;
             };
             self.entries
-                .remove_if(&cid, |_, cur| Arc::ptr_eq(cur, &cand) && cur.is_parked());
+                .remove_if(&key, |_, cur| Arc::ptr_eq(cur, &cand) && cur.is_parked());
         }
     }
 
@@ -370,14 +448,14 @@ impl SessionManager {
     /// fails, and the next `acquire` re-pins them. Removing a leased entry
     /// would let a second request run the same conversation concurrently.
     pub async fn recover(&self, transport: &dyn Transport) -> Vec<TabId> {
-        let snapshot: Vec<(ConversationId, Arc<SessionEntry>)> = self
+        let snapshot: Vec<(SessionKey, Arc<SessionEntry>)> = self
             .entries
             .iter()
             .map(|e| (e.key().clone(), Arc::clone(e.value())))
             .collect();
         let mut alive: HashMap<TabId, bool> = HashMap::new();
         let mut dead = Vec::new();
-        for (cid, entry) in snapshot {
+        for (key, entry) in snapshot {
             let tab = entry.tab();
             let ok = match alive.get(&tab) {
                 Some(v) => *v,
@@ -391,7 +469,7 @@ impl SessionManager {
                 }
             };
             if !ok {
-                self.entries.remove_if(&cid, |_, cur| {
+                self.entries.remove_if(&key, |_, cur| {
                     Arc::ptr_eq(cur, &entry) && cur.is_parked() && cur.tab() == tab
                 });
             }
@@ -407,7 +485,8 @@ impl SessionManager {
             .map(|e| {
                 let entry = e.value();
                 SessionInfo {
-                    conversation: e.key().clone(),
+                    conversation: e.key().cid.clone(),
+                    profile: e.key().profile.clone(),
                     tab: entry.tab(),
                     created: entry.created,
                     last_used: entry.last_used(),
@@ -421,10 +500,34 @@ impl SessionManager {
         out
     }
 
-    /// Forget a conversation unconditionally (admin). A handle that is still
-    /// alive keeps working on its tab; the next request starts a new session.
+    /// Forget a conversation unconditionally (admin), across every profile.
+    /// A handle that is still alive keeps working on its tab; the next
+    /// request starts a new session. Returns the first removed tab.
     pub fn remove(&self, cid: &ConversationId) -> Option<TabId> {
-        self.entries.remove(cid).map(|(_, e)| e.tab())
+        let keys: Vec<SessionKey> = self
+            .entries
+            .iter()
+            .filter(|e| e.key().cid == *cid)
+            .map(|e| e.key().clone())
+            .collect();
+        let mut removed = None;
+        for key in keys {
+            if let Some((_, e)) = self.entries.remove(&key) {
+                if removed.is_none() {
+                    removed = Some(e.tab());
+                }
+            }
+        }
+        removed
+    }
+
+    /// Forget one (conversation, profile) session.
+    pub fn remove_for(&self, cid: &ConversationId, profile: &ProfileName) -> Option<TabId> {
+        let key = SessionKey {
+            cid: cid.clone(),
+            profile: profile.clone(),
+        };
+        self.entries.remove(&key).map(|(_, e)| e.tab())
     }
 
     pub fn len(&self) -> usize {

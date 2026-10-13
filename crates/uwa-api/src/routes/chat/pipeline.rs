@@ -47,6 +47,7 @@ use crate::history::RequestRecorder;
 use crate::state::AppState;
 
 use uwa_session::pinning::{decide, hash_messages, hash_system, ConversationState, PinDecision};
+use uwa_session::ProfileName;
 
 /// One item emitted while a response streams in.
 #[derive(Debug)]
@@ -105,6 +106,7 @@ pub async fn run_pipeline(
     req: &ChatCompletionRequest,
     all_specs: &[ToolSpec],
     pinned_tab: Option<&TabId>,
+    profile: &ProfileName,
 ) -> Result<(String, Vec<ToolCall>, FinishReason), UwaError> {
     let provider_cfg = state
         .config
@@ -126,7 +128,8 @@ pub async fn run_pipeline(
 
     let mut recorder = RequestRecorder::new(req, &provider_cfg.name, None);
 
-    let result = run_pipeline_inner(state, req, all_specs, pinned_tab, &mut recorder).await;
+    let result =
+        run_pipeline_inner(state, req, all_specs, pinned_tab, profile, &mut recorder).await;
 
     match &result {
         Ok((text, calls, finish)) => {
@@ -181,7 +184,29 @@ pub async fn run_pipeline_with_hint(
     all_specs: &[ToolSpec],
     hint: &crate::routing::RoutingHint,
 ) -> Result<(String, Vec<ToolCall>, FinishReason), UwaError> {
-    run_pipeline(state, req, all_specs, hint.tab.as_ref()).await
+    let profile = hint
+        .profile
+        .clone()
+        .map(ProfileName::new)
+        .unwrap_or_else(ProfileName::default_name);
+    run_pipeline(state, req, all_specs, hint.tab.as_ref(), &profile).await
+}
+
+/// Streaming twin of [`run_pipeline_with_hint`]: derives the profile from
+/// the hint and forwards to [`run_pipeline_streaming`].
+pub async fn run_pipeline_streaming_with_hint(
+    state: &AppState,
+    req: &ChatCompletionRequest,
+    all_specs: &[ToolSpec],
+    hint: &crate::routing::RoutingHint,
+    tx: mpsc::Sender<StreamEvent>,
+) -> Result<(), UwaError> {
+    let profile = hint
+        .profile
+        .clone()
+        .map(ProfileName::new)
+        .unwrap_or_else(ProfileName::default_name);
+    run_pipeline_streaming(state, req, all_specs, hint.tab.as_ref(), &profile, tx).await
 }
 
 /// Streaming twin of [`run_pipeline`]. Deltas are pushed onto `tx` as they
@@ -193,6 +218,7 @@ pub async fn run_pipeline_streaming(
     req: &ChatCompletionRequest,
     all_specs: &[ToolSpec],
     pinned_tab: Option<&TabId>,
+    profile: &ProfileName,
     tx: mpsc::Sender<StreamEvent>,
 ) -> Result<(), UwaError> {
     let provider_cfg = state
@@ -218,8 +244,16 @@ pub async fn run_pipeline_streaming(
 
     let mut recorder = RequestRecorder::new(req, &provider_cfg.name, None);
 
-    let result =
-        run_pipeline_streaming_inner(state, req, all_specs, pinned_tab, &mut recorder, &tx).await;
+    let result = run_pipeline_streaming_inner(
+        state,
+        req,
+        all_specs,
+        pinned_tab,
+        profile,
+        &mut recorder,
+        &tx,
+    )
+    .await;
 
     // Decided on the typed `Abort`, not by comparing error text afterwards.
     let client_gone = matches!(result, Err(Abort::ClientGone));
@@ -288,6 +322,7 @@ async fn run_pipeline_streaming_inner(
     req: &ChatCompletionRequest,
     all_specs: &[ToolSpec],
     pinned_tab: Option<&TabId>,
+    profile: &ProfileName,
     recorder: &mut RequestRecorder,
     tx: &mpsc::Sender<StreamEvent>,
 ) -> Result<(String, Vec<ToolCall>, FinishReason), Abort> {
@@ -310,7 +345,10 @@ async fn run_pipeline_streaming_inner(
 
     let cid = uwa_session::conversation_id(&req.messages);
     let session_handle = match &state.runtime.sessions {
-        Some(sm) => Some(sm.acquire(&cid, state.transport.as_ref()).await?),
+        Some(sm) => Some(
+            sm.acquire_with_profile(&cid, profile.clone(), state.transport.as_ref())
+                .await?,
+        ),
         None => None,
     };
 
@@ -333,10 +371,27 @@ async fn run_pipeline_streaming_inner(
         match &session_handle {
             Some(h) => h.tab.clone(),
             None => {
-                let tabs = state.transport.list_tabs().await?;
-                tabs.into_iter()
-                    .next()
-                    .ok_or_else(|| UwaError::Unavailable("no browser tabs available".into()))?
+                // No session manager: pick a tab from the requested profile,
+                // lazily opening one for a named profile on a supporting
+                // transport (mirrors the session-manager path).
+                let tabs = state.transport.list_tabs_in(profile.as_str()).await?;
+                let tabs = if tabs.is_empty()
+                    && !profile.is_default()
+                    && state.transport.supports_profiles()
+                {
+                    let _ = state
+                        .transport
+                        .open_tab(profile.as_str(), "about:blank")
+                        .await?;
+                    state.transport.list_tabs_in(profile.as_str()).await?
+                } else {
+                    tabs
+                };
+                tabs.into_iter().next().ok_or_else(|| {
+                    UwaError::Unavailable(format!(
+                        "no browser tabs available for profile `{profile}`"
+                    ))
+                })?
             }
         }
     };
@@ -502,6 +557,7 @@ async fn run_pipeline_inner(
     req: &ChatCompletionRequest,
     all_specs: &[ToolSpec],
     pinned_tab: Option<&TabId>,
+    profile: &ProfileName,
     recorder: &mut RequestRecorder,
 ) -> Result<(String, Vec<ToolCall>, FinishReason), UwaError> {
     let provider_cfg = state
@@ -524,7 +580,10 @@ async fn run_pipeline_inner(
     // Session pinning — same tab for the whole bridge turn.
     let cid = uwa_session::conversation_id(&req.messages);
     let session_handle = match &state.runtime.sessions {
-        Some(sm) => Some(sm.acquire(&cid, state.transport.as_ref()).await?),
+        Some(sm) => Some(
+            sm.acquire_with_profile(&cid, profile.clone(), state.transport.as_ref())
+                .await?,
+        ),
         None => None,
     };
 
@@ -552,10 +611,27 @@ async fn run_pipeline_inner(
         match &session_handle {
             Some(h) => h.tab.clone(),
             None => {
-                let tabs = state.transport.list_tabs().await?;
-                tabs.into_iter()
-                    .next()
-                    .ok_or_else(|| UwaError::Unavailable("no browser tabs available".into()))?
+                // No session manager: pick a tab from the requested profile,
+                // lazily opening one for a named profile on a supporting
+                // transport (mirrors the session-manager path).
+                let tabs = state.transport.list_tabs_in(profile.as_str()).await?;
+                let tabs = if tabs.is_empty()
+                    && !profile.is_default()
+                    && state.transport.supports_profiles()
+                {
+                    let _ = state
+                        .transport
+                        .open_tab(profile.as_str(), "about:blank")
+                        .await?;
+                    state.transport.list_tabs_in(profile.as_str()).await?
+                } else {
+                    tabs
+                };
+                tabs.into_iter().next().ok_or_else(|| {
+                    UwaError::Unavailable(format!(
+                        "no browser tabs available for profile `{profile}`"
+                    ))
+                })?
             }
         }
     };

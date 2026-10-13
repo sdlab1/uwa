@@ -113,13 +113,13 @@ pub async fn chat_completions(
         let state_task = state.clone();
         let req_clone = req.clone();
         let specs_clone = all_specs.clone();
-        let tab_hint = hint.tab.clone();
+        let hint_clone = hint.clone();
         tokio::spawn(async move {
-            let _ = pipeline::run_pipeline_streaming(
+            let _ = pipeline::run_pipeline_streaming_with_hint(
                 &state_task,
                 &req_clone,
                 &specs_clone,
-                tab_hint.as_ref(),
+                &hint_clone,
                 tx,
             )
             .await;

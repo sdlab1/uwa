@@ -10,9 +10,11 @@
 mod hash;
 mod manager;
 pub mod pinning;
+mod profile;
 
 pub use hash::conversation_id;
 pub use manager::{SessionCfg, SessionHandle, SessionInfo, SessionManager};
 pub use pinning::{
     decide, hash_messages, hash_system, ConversationState, PinDecision, PinningStore,
 };
+pub use profile::ProfileName;

@@ -138,6 +138,7 @@ async fn messages_inner(
                 &oa_req_task,
                 &specs_clone,
                 tab_hint.as_ref(),
+                &uwa_session::ProfileName::default_name(),
                 tx,
             )
             .await;
@@ -154,6 +155,7 @@ async fn messages_inner(
             &oa_req,
             &all_specs,
             hint.tab.as_ref(),
+            &uwa_session::ProfileName::default_name(),
         )
         .await?;
         Ok(Json(build_response(
