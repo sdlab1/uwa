@@ -141,6 +141,126 @@ pub enum CaptureSource {
     Attribute { target: String, attr: String },
 }
 
+// ---------------------------------------------------------------------------
+// Recording
+// ---------------------------------------------------------------------------
+//
+// A `Trace` is a raw sequence of DOM interactions a user performed during
+// a recording session. It's produced by `uwa-browser::recorder` from a JS
+// observer, carried over the HTTP layer as JSON, and consumed by
+// `uwa-providers::workflow::propose_workflow` to synthesise a `Workflow`.
+//
+// The types live here so the producer (`uwa-browser`) and the consumer
+// (`uwa-providers`) share one definition without a dependency edge
+// between them.
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Trace {
+    /// Wall-clock start of the recording, milliseconds since Unix epoch.
+    #[serde(default)]
+    pub started_at_ms: u64,
+    /// Wall-clock end, milliseconds since Unix epoch.
+    #[serde(default)]
+    pub ended_at_ms: u64,
+    pub events: Vec<TraceEvent>,
+}
+
+impl Trace {
+    /// Events observed between two wall-clock timestamps, inclusive of
+    /// the lower bound. Used by tests and by the dashboard's timeline
+    /// scrubber.
+    pub fn events_between(&self, from_ms: u64, to_ms: u64) -> Vec<&TraceEvent> {
+        self.events
+            .iter()
+            .filter(|e| {
+                let at = e.at_ms();
+                at >= from_ms && at <= to_ms
+            })
+            .collect()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.events.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TraceEvent {
+    Click {
+        selector: String,
+        #[serde(default)]
+        seq: u64,
+        #[serde(default)]
+        at_ms: u64,
+        #[serde(default)]
+        src: String,
+    },
+    Input {
+        selector: String,
+        text: String,
+        #[serde(default)]
+        seq: u64,
+        #[serde(default)]
+        at_ms: u64,
+        #[serde(default)]
+        src: String,
+    },
+    /// Explicit Enter; the recorder emits these so a flow that submits by
+    /// pressing Enter rather than clicking a button is captured.
+    #[serde(rename = "keypress")]
+    KeyPress {
+        key: String,
+        #[serde(default)]
+        selector: String,
+        #[serde(default)]
+        seq: u64,
+        #[serde(default)]
+        at_ms: u64,
+        #[serde(default)]
+        src: String,
+    },
+    Submit {
+        #[serde(default)]
+        selector: String,
+        #[serde(default)]
+        seq: u64,
+        #[serde(default)]
+        at_ms: u64,
+        #[serde(default)]
+        src: String,
+    },
+}
+
+impl TraceEvent {
+    pub fn at_ms(&self) -> u64 {
+        match self {
+            Self::Click { at_ms, .. }
+            | Self::Input { at_ms, .. }
+            | Self::KeyPress { at_ms, .. }
+            | Self::Submit { at_ms, .. } => *at_ms,
+        }
+    }
+
+    pub fn seq(&self) -> u64 {
+        match self {
+            Self::Click { seq, .. }
+            | Self::Input { seq, .. }
+            | Self::KeyPress { seq, .. }
+            | Self::Submit { seq, .. } => *seq,
+        }
+    }
+
+    pub fn selector(&self) -> &str {
+        match self {
+            Self::Click { selector, .. }
+            | Self::Input { selector, .. }
+            | Self::KeyPress { selector, .. }
+            | Self::Submit { selector, .. } => selector,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -272,5 +392,53 @@ seconds = 0.25"#,
         assert!(w.is_empty());
         let s = serde_json::to_string(&w).unwrap();
         assert_eq!(s, "[]");
+    }
+
+    #[test]
+    fn trace_event_at_ms_is_uniform() {
+        let click = TraceEvent::Click {
+            selector: "#x".into(),
+            seq: 1,
+            at_ms: 100,
+            src: String::new(),
+        };
+        let input = TraceEvent::Input {
+            selector: "#y".into(),
+            text: "hi".into(),
+            seq: 2,
+            at_ms: 200,
+            src: String::new(),
+        };
+        assert_eq!(click.at_ms(), 100);
+        assert_eq!(input.at_ms(), 200);
+        assert_eq!(click.seq(), 1);
+        assert_eq!(input.seq(), 2);
+    }
+
+    #[test]
+    fn trace_roundtrips_through_json() {
+        let trace = Trace {
+            started_at_ms: 1,
+            ended_at_ms: 2,
+            events: vec![
+                TraceEvent::Click {
+                    selector: "#a".into(),
+                    seq: 1,
+                    at_ms: 10,
+                    src: "https://x/".into(),
+                },
+                TraceEvent::Input {
+                    selector: "#b".into(),
+                    text: "hi".into(),
+                    seq: 2,
+                    at_ms: 20,
+                    src: "https://x/".into(),
+                },
+            ],
+        };
+        let j = serde_json::to_string(&trace).unwrap();
+        let back: Trace = serde_json::from_str(&j).unwrap();
+        assert_eq!(back.events.len(), 2);
+        assert!(matches!(&back.events[0], TraceEvent::Click { selector, .. } if selector == "#a"));
     }
 }
