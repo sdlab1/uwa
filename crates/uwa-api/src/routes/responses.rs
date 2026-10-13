@@ -210,7 +210,6 @@ fn stream_response(
             )))
             .await;
 
-        let mut finish_reason = "stop";
         let mut calls: Vec<uwa_tools::ToolCall> = Vec::new();
         let mut saw_done = false;
 
@@ -230,13 +229,7 @@ fn stream_response(
                             )))
                         .await;
                 }
-                chat::pipeline::StreamEvent::Done { finish, tool_calls } => {
-                    finish_reason = match finish {
-                        uwa_core::types::FinishReason::Stop => "stop",
-                        uwa_core::types::FinishReason::ToolCalls => "tool_calls",
-                        uwa_core::types::FinishReason::Length => "length",
-                        uwa_core::types::FinishReason::ContentFilter => "content_filter",
-                    };
+                chat::pipeline::StreamEvent::Done { finish: _, tool_calls } => {
                     calls = tool_calls;
                     saw_done = true;
                     break;
@@ -305,7 +298,9 @@ fn stream_response(
                             "output_tokens": out_tok,
                             "total_tokens": in_tok.saturating_add(out_tok),
                         },
-                        "finish_reason": finish_reason,
+                        // Note: finish_reason is not part of the Responses API spec.
+                        // The completion signal is carried by status="completed" and
+                        // incomplete_details (absent = fully complete).
                     }
                 })
                 .to_string(),
