@@ -62,3 +62,4 @@ libc = "0.2"
 [dev-dependencies]
 uwa-testkit = { path = "../uwa-testkit" }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+tempfile = "3"

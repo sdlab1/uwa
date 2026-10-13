@@ -3034,6 +3034,7 @@ dependencies = [
  "serde_path_to_error",
  "sha2",
  "tar",
+ "tempfile",
  "tokio",
  "toml",
  "tracing",

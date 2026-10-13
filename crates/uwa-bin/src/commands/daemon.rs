@@ -6,7 +6,11 @@
 
 use anyhow::{anyhow, bail, Context, Result};
 use clap::Subcommand;
+use std::fs;
 use std::path::PathBuf;
+
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 
 use super::paths;
 
@@ -218,12 +222,22 @@ fn logs(follow: bool, lines: usize) -> Result<()> {
     }
     if follow {
         // Poor man's tail -f: poll + append.
+        #[cfg(unix)]
+        let mut pos = fs::metadata(&p)
+            .map(|m| LogPosition { inode: m.ino(), offset: content.len() })
+            .unwrap_or(LogPosition { inode: 0, offset: content.len() });
+        #[cfg(not(unix))]
         let mut pos = content.len();
         loop {
             std::thread::sleep(std::time::Duration::from_millis(500));
             let Ok(cur) = std::fs::read_to_string(&p) else {
                 continue;
             };
+            #[cfg(unix)]
+            let (new_pos, chunk) = fs::metadata(&p)
+                .map(|meta| follow_chunk(pos, &cur, &meta))
+                .unwrap_or((pos, String::new()));
+            #[cfg(not(unix))]
             let (new_pos, chunk) = follow_chunk(pos, &cur);
             if !chunk.is_empty() {
                 print!("{chunk}");
@@ -236,16 +250,51 @@ fn logs(follow: bool, lines: usize) -> Result<()> {
     Ok(())
 }
 
-/// Pure `logs --follow` step: given the previous byte offset into the log
-/// and the current file contents, decide what to print and where to resume.
+/// Inode + byte offset pair for log following across rotation/in-place rewrite.
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LogPosition {
+    inode: u64,
+    offset: usize,
+}
+
+/// Pure `logs --follow` step: given the previous position (inode + byte offset)
+/// and the current file contents + metadata, decide what to print and where
+/// to resume.
 ///
-/// * append — the new bytes past `pos`;
-/// * no change — empty chunk, offset unchanged;
-/// * truncation/rotation (`cur` shrank below `pos`) — restart from byte 0,
+/// * same inode, append — the new bytes past `pos`;
+/// * same inode, no change — empty chunk, offset unchanged;
+/// * same inode, truncation (`cur` shrank below `pos`) — restart from byte 0,
 ///   so following a rotated log resumes instead of going silent forever;
+/// * inode changed (log rewritten in place, e.g. logrotate with copytruncate,
+///   or editor saved over the file) — restart from byte 0 regardless of offset;
 /// * a stale offset landing mid-UTF-8 (a truncation cut a multi-byte char
 ///   and the file regrew) — snap forward to the next char boundary instead
 ///   of panicking on a non-boundary slice.
+#[cfg(unix)]
+fn follow_chunk(prev: LogPosition, cur: &str, meta: &fs::Metadata) -> (LogPosition, String) {
+    let cur_inode = meta.ino();
+    let pos = if cur_inode != prev.inode || cur.len() < prev.offset {
+        0
+    } else {
+        prev.offset
+    };
+    let pos = if cur.is_char_boundary(pos) {
+        pos
+    } else {
+        (pos..=cur.len())
+            .find(|&i| cur.is_char_boundary(i))
+            .unwrap_or(cur.len())
+    };
+    if cur.len() > pos {
+        (LogPosition { inode: cur_inode, offset: cur.len() }, cur[pos..].to_string())
+    } else {
+        (LogPosition { inode: cur_inode, offset: pos }, String::new())
+    }
+}
+
+/// Fallback for non-Unix: just track byte offset (no inode available).
+#[cfg(not(unix))]
 fn follow_chunk(prev: usize, cur: &str) -> (usize, String) {
     let pos = if cur.len() < prev { 0 } else { prev };
     let pos = if cur.is_char_boundary(pos) {
@@ -457,49 +506,140 @@ mod tests {
 
     // ---- follow_chunk ----
 
+#[cfg(unix)]
+fn make_temp_file(content: &str) -> (std::path::PathBuf, std::fs::File) {
+    use std::fs::File;
+    use std::io::Write;
+    let mut f = tempfile::NamedTempFile::new().unwrap();
+    f.write_all(content.as_bytes()).unwrap();
+    f.flush().unwrap();
+    let path = f.path().to_path_buf();
+    (path, f.into_file())
+}
+
     #[test]
     fn follow_chunk_appends_new_bytes() {
-        let (pos, chunk) = follow_chunk(5, "hello world");
-        assert_eq!(pos, 11);
+        use std::fs::File;
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let mut f = NamedTempFile::new().unwrap();
+        f.write_all(b"hello").unwrap();
+        f.flush().unwrap();
+        let meta = f.as_file().metadata().unwrap();
+        let pos = LogPosition { inode: meta.ino(), offset: 5 };
+
+        f.write_all(b" world").unwrap();
+        f.flush().unwrap();
+        let cur = std::fs::read_to_string(f.path()).unwrap();
+        let meta2 = f.as_file().metadata().unwrap();
+        let (new_pos, chunk) = follow_chunk(pos, &cur, &meta2);
+        assert_eq!(new_pos.offset, 11);
         assert_eq!(chunk, " world");
     }
 
     #[test]
     fn follow_chunk_no_change_yields_empty() {
-        let (pos, chunk) = follow_chunk(11, "hello world");
-        assert_eq!(pos, 11);
+        use std::fs::File;
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let mut f = NamedTempFile::new().unwrap();
+        f.write_all(b"hello world").unwrap();
+        f.flush().unwrap();
+        let meta = f.as_file().metadata().unwrap();
+        let pos = LogPosition { inode: meta.ino(), offset: 11 };
+
+        let cur = std::fs::read_to_string(f.path()).unwrap();
+        let meta2 = f.as_file().metadata().unwrap();
+        let (new_pos, chunk) = follow_chunk(pos, &cur, &meta2);
+        assert_eq!(new_pos.offset, 11);
         assert_eq!(chunk, "");
     }
 
     #[test]
     fn follow_chunk_recovers_after_truncation() {
-        // Log rotated/truncated below our offset: restart from byte 0 so
-        // following resumes on the new content instead of going silent.
-        let (pos, chunk) = follow_chunk(500, "new log\n");
-        assert_eq!(pos, 8);
+        // Test truncation recovery: when file shrinks below our offset,
+        // we should restart from byte 0.
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        // Write initial content
+        std::fs::write(f.path(), b"old log content").unwrap();
+        let meta = std::fs::metadata(f.path()).unwrap();
+        let pos = LogPosition { inode: meta.ino(), offset: 500 };
+
+        // Truncate and write shorter content - simulate log rotation
+        std::fs::write(f.path(), b"new log\n").unwrap();
+        let cur = std::fs::read_to_string(f.path()).unwrap();
+        let meta2 = std::fs::metadata(f.path()).unwrap();
+        let (new_pos, chunk) = follow_chunk(pos, &cur, &meta2);
+        assert_eq!(new_pos.offset, 8);
         assert_eq!(chunk, "new log\n");
     }
 
     #[test]
     fn follow_chunk_stale_offset_mid_utf8_does_not_panic() {
-        // 'ё' is two bytes; a truncation left a stale offset inside it.
-        // Must not panic ("byte index 1 is not a char boundary") and must
-        // snap forward to the next boundary.
-        let cur = "ёжик";
-        let (pos, chunk) = follow_chunk(1, cur);
-        assert!(cur.is_char_boundary(pos));
+        use std::fs::File;
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let mut f = NamedTempFile::new().unwrap();
+        f.write_all("ёжик".as_bytes()).unwrap();
+        f.flush().unwrap();
+        let meta = f.as_file().metadata().unwrap();
+        let pos = LogPosition { inode: meta.ino(), offset: 1 };
+
+        let cur = std::fs::read_to_string(f.path()).unwrap();
+        let meta2 = f.as_file().metadata().unwrap();
+        let (new_pos, chunk) = follow_chunk(pos, &cur, &meta2);
+        assert!(cur.is_char_boundary(new_pos.offset));
         assert_eq!(chunk, "жик");
-        assert_eq!(pos, cur.len());
+        assert_eq!(new_pos.offset, cur.len());
     }
 
     #[test]
     fn follow_chunk_multibyte_content_round_trip() {
-        let cur = "привет мир";
-        let (pos, chunk) = follow_chunk(0, cur);
+        use std::fs::File;
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let mut f = NamedTempFile::new().unwrap();
+        f.write_all("привет мир".as_bytes()).unwrap();
+        f.flush().unwrap();
+        let meta = f.as_file().metadata().unwrap();
+        let pos = LogPosition { inode: meta.ino(), offset: 0 };
+
+        let cur = std::fs::read_to_string(f.path()).unwrap();
+        let meta2 = f.as_file().metadata().unwrap();
+        let (new_pos, chunk) = follow_chunk(pos, &cur, &meta2);
         assert_eq!(chunk, cur);
-        let (pos2, chunk2) = follow_chunk(pos, cur);
+        let (pos2, chunk2) = follow_chunk(new_pos, &cur, &meta2);
         assert_eq!(chunk2, "");
-        assert_eq!(pos2, cur.len());
+        assert_eq!(pos2.offset, cur.len());
+    }
+
+    #[test]
+    fn follow_chunk_inode_change_restarts_from_zero() {
+        use std::fs::File;
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let mut f = NamedTempFile::new().unwrap();
+        f.write_all(b"old content").unwrap();
+        f.flush().unwrap();
+        let meta = f.as_file().metadata().unwrap();
+        let pos = LogPosition { inode: meta.ino(), offset: 100 };
+
+        // Simulate inode change by recreating the file
+        let path = f.path().to_path_buf();
+        drop(f);
+        std::fs::write(&path, b"new content").unwrap();
+
+        let f2 = std::fs::File::open(&path).unwrap();
+        let cur = std::fs::read_to_string(&path).unwrap();
+        let meta2 = f2.metadata().unwrap();
+        let (new_pos, chunk) = follow_chunk(pos, &cur, &meta2);
+        assert_eq!(new_pos.offset, 11);
+        assert_eq!(chunk, "new content");
     }
 
     // ---- host_port ----

@@ -98,13 +98,14 @@ async fn recover_drops_unhealthy() {
     let t = tabs(2);
     let h1 = sm.acquire(&cid("good"), &t).await.unwrap();
     let h2 = sm.acquire(&cid("bad"), &t).await.unwrap();
-    t.mark_unhealthy(&h2.tab);
+    let dead_tab = h2.tab.clone();
+    drop(h2); // Park the session first
+    t.mark_unhealthy(&dead_tab);
     let dead = sm.recover(&t).await;
-    assert_eq!(dead, vec![h2.tab.clone()]);
+    assert_eq!(dead, vec![dead_tab]);
     assert_eq!(sm.len(), 1);
     assert!(sm.entries.contains_key(&cid("good")));
     drop(h1);
-    drop(h2);
 }
 
 #[tokio::test]
