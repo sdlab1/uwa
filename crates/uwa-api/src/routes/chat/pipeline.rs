@@ -479,9 +479,10 @@ async fn run_pipeline_streaming_inner(
         (first.text, Vec::new(), FinishReason::Stop)
     };
 
+    // `resolve_tool_calls` already calls `increment_round` when validation
+    // passes. Do not double-count the round here.
     if !calls.is_empty() {
         recorder.record_tool_calls(calls.len());
-        recorder.increment_round();
     }
 
     emit(
