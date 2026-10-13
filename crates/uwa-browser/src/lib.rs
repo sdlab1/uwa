@@ -18,6 +18,7 @@ pub mod media_capture;
 #[cfg(feature = "nodriver")]
 pub mod nodriver;
 pub mod oopif;
+pub mod recorder;
 #[cfg(feature = "cdp")]
 pub mod oopif_ws;
 pub mod page;
