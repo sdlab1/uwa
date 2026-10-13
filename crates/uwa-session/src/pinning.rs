@@ -23,6 +23,8 @@ use tokio::sync::RwLock;
 use uwa_core::types::openai::ChatMessage;
 use uwa_core::{ConversationId, TabId};
 
+use crate::hash::{fnv_byte, fnv_bytes, role_tag, FNV_OFFSET};
+
 /// Everything we need to know about a conversation to decide what to send.
 #[derive(Debug, Clone)]
 pub struct ConversationState {
@@ -176,37 +178,6 @@ impl PinningStore {
 // ---------------------------------------------------------------------------
 // Hash functions
 // ---------------------------------------------------------------------------
-
-/// FNV-1a 64-bit. Deterministic across runs (unlike `DefaultHasher`,
-/// which is allowed to change between Rust versions). We never persist
-/// these hashes; stability across runs is a nicety that lets us reason
-/// about them in logs.
-const FNV_OFFSET: u64 = 0xcbf29ce484222325;
-const FNV_PRIME: u64 = 0x100000001b3;
-
-#[inline]
-fn fnv_byte(mut h: u64, b: u8) -> u64 {
-    h ^= b as u64;
-    h.wrapping_mul(FNV_PRIME)
-}
-
-#[inline]
-fn fnv_bytes(mut h: u64, bytes: &[u8]) -> u64 {
-    for &b in bytes {
-        h = fnv_byte(h, b);
-    }
-    h
-}
-
-fn role_tag(role: uwa_core::types::Role) -> u8 {
-    use uwa_core::types::Role;
-    match role {
-        Role::System => 1,
-        Role::User => 2,
-        Role::Assistant => 3,
-        Role::Tool => 4,
-    }
-}
 
 /// Hash a message sequence. Two sequences with the same roles, contents,
 /// and tool calls produce the same hash; a single byte changed in any

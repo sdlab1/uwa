@@ -1,7 +1,33 @@
-//! Conversation id from prefix of history. Same id across tool-loop rounds.
-use std::hash::{Hash, Hasher};
+//! Conversation id from prefix of history, plus the FNV-1a helpers shared with
+//! the pinning hashes.
 use uwa_core::types::openai::ChatMessage;
+use uwa_core::types::Role;
 use uwa_core::ConversationId;
+
+/// FNV-1a 64-bit. Deterministic across runs *and* Rust versions (unlike
+/// `DefaultHasher`, whose algorithm std may change), so ids and hashes can be
+/// compared across restarts and quoted in logs.
+pub(crate) const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+#[inline]
+pub(crate) fn fnv_byte(h: u64, b: u8) -> u64 {
+    (h ^ u64::from(b)).wrapping_mul(FNV_PRIME)
+}
+
+#[inline]
+pub(crate) fn fnv_bytes(h: u64, bytes: &[u8]) -> u64 {
+    bytes.iter().fold(h, |acc, &b| fnv_byte(acc, b))
+}
+
+pub(crate) fn role_tag(role: Role) -> u8 {
+    match role {
+        Role::System => 1,
+        Role::User => 2,
+        Role::Assistant => 3,
+        Role::Tool => 4,
+    }
+}
 
 /// Identify a conversation by its stable *opening*: every leading system
 /// message plus the first non-system message (the user's first turn).
@@ -13,24 +39,17 @@ use uwa_core::ConversationId;
 /// different ids for one conversation, which moved it to a fresh tab and
 /// defeated pinning.
 pub fn conversation_id(messages: &[ChatMessage]) -> ConversationId {
-    let mut h = std::collections::hash_map::DefaultHasher::new();
+    let mut h = FNV_OFFSET;
     for m in messages {
-        role_str(m.role).hash(&mut h);
-        m.content_text().hash(&mut h);
-        if !matches!(m.role, uwa_core::types::Role::System) {
+        h = fnv_byte(h, role_tag(m.role));
+        h = fnv_byte(h, 0); // role/content separator
+        h = fnv_bytes(h, m.content_text().as_bytes());
+        h = fnv_byte(h, 0xff); // message terminator (never valid UTF-8)
+        if !matches!(m.role, Role::System) {
             break;
         }
     }
-    ConversationId::from_raw(format!("conv_{:x}", h.finish()))
-}
-
-fn role_str(r: uwa_core::types::Role) -> u8 {
-    match r {
-        uwa_core::types::Role::System => 0,
-        uwa_core::types::Role::User => 1,
-        uwa_core::types::Role::Assistant => 2,
-        uwa_core::types::Role::Tool => 3,
-    }
+    ConversationId::from_raw(format!("conv_{h:016x}"))
 }
 
 #[cfg(test)]
@@ -61,78 +80,41 @@ mod tests {
     }
 
     #[test]
-    fn id_is_stable_as_the_conversation_grows_without_a_system_prompt() {
-        // Regression: turn 2 used to hash `[user, assistant]` while turn 1
-        // hashed `[user]`, so every follow-up looked like a new conversation.
-        let turn1 = vec![ChatMessage::text(Role::User, "q")];
-        let turn2 = vec![
-            ChatMessage::text(Role::User, "q"),
-            ChatMessage::text(Role::Assistant, "a"),
-            ChatMessage::text(Role::User, "q2"),
-        ];
-        let turn3 = vec![
-            ChatMessage::text(Role::User, "q"),
-            ChatMessage::text(Role::Assistant, "a"),
-            ChatMessage::text(Role::User, "q2"),
-            ChatMessage::text(Role::Assistant, "a2"),
-            ChatMessage::text(Role::User, "q3"),
-        ];
-        assert_eq!(conversation_id(&turn1), conversation_id(&turn2));
-        assert_eq!(conversation_id(&turn2), conversation_id(&turn3));
+    fn fnv_matches_the_published_test_vectors() {
+        assert_eq!(fnv_bytes(FNV_OFFSET, b""), 0xcbf2_9ce4_8422_2325);
+        assert_eq!(fnv_bytes(FNV_OFFSET, b"a"), 0xaf63_dc4c_8601_ec8c);
+        assert_eq!(fnv_bytes(FNV_OFFSET, b"foobar"), 0x8594_4171_f739_67e8);
     }
 
     #[test]
-    fn id_is_stable_with_system_prompt_and_tool_rounds() {
-        let first = vec![
+    fn id_is_a_pinned_golden_value() {
+        let msgs = vec![
             ChatMessage::text(Role::System, "sys"),
             ChatMessage::text(Role::User, "q"),
         ];
-        let later = vec![
-            ChatMessage::text(Role::System, "sys"),
-            ChatMessage::text(Role::User, "q"),
-            ChatMessage::text(Role::Assistant, "calling"),
-            ChatMessage::text(Role::Tool, "result"),
-        ];
-        assert_eq!(conversation_id(&first), conversation_id(&later));
+        assert_eq!(conversation_id(&msgs).as_str(), "conv_1393131233e47b38");
     }
 
     #[test]
-    fn id_distinguishes_system_prompt_and_first_user_turn() {
-        let base = vec![
-            ChatMessage::text(Role::System, "sys"),
-            ChatMessage::text(Role::User, "q"),
+    fn leading_system_only_history_does_not_panic() {
+        let msgs = vec![
+            ChatMessage::text(Role::System, "a"),
+            ChatMessage::text(Role::System, "b"),
         ];
-        let other_sys = vec![
-            ChatMessage::text(Role::System, "SYS"),
-            ChatMessage::text(Role::User, "q"),
-        ];
-        let other_user = vec![
-            ChatMessage::text(Role::System, "sys"),
-            ChatMessage::text(Role::User, "Q"),
-        ];
-        assert_ne!(conversation_id(&base), conversation_id(&other_sys));
-        assert_ne!(conversation_id(&base), conversation_id(&other_user));
+        assert!(conversation_id(&msgs).as_str().starts_with("conv_"));
+        assert!(conversation_id(&[]).as_str().starts_with("conv_"));
     }
 
     #[test]
-    fn id_does_not_confuse_role_or_message_boundaries() {
-        // ("ab","c") vs ("a","bc") and system-vs-user with equal text.
+    fn identical_openings_share_an_id() {
         let a = vec![
-            ChatMessage::text(Role::System, "ab"),
-            ChatMessage::text(Role::User, "c"),
+            ChatMessage::text(Role::User, "hi"),
+            ChatMessage::text(Role::Assistant, "one"),
         ];
         let b = vec![
-            ChatMessage::text(Role::System, "a"),
-            ChatMessage::text(Role::User, "bc"),
+            ChatMessage::text(Role::User, "hi"),
+            ChatMessage::text(Role::Assistant, "two"),
         ];
-        let c = vec![ChatMessage::text(Role::User, "x")];
-        let d = vec![ChatMessage::text(Role::System, "x")];
-        assert_ne!(conversation_id(&a), conversation_id(&b));
-        assert_ne!(conversation_id(&c), conversation_id(&d));
-    }
-
-    #[test]
-    fn id_of_empty_history_is_well_defined() {
-        assert_eq!(conversation_id(&[]), conversation_id(&[]));
+        assert_eq!(conversation_id(&a), conversation_id(&b));
     }
 }

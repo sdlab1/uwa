@@ -270,7 +270,8 @@ pub async fn sessions(State(state): State<AppState>) -> ApiResult<Json<serde_jso
                 "tab": s.tab.as_str(),
                 "age_secs": now.duration_since(s.created).as_secs(),
                 "idle_secs": s.idle.as_secs(),
-                "generation": s.holders,
+                "holders": s.holders,
+                "generation": s.generation,
             })
         })
         .collect();

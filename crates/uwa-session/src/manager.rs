@@ -1,10 +1,30 @@
-//! Session table: conversation -> leased tab, with idle/capacity eviction.
+//! Session table: conversation -> leased tab, with idle/capacity eviction and
+//! automatic re-pinning when a tab dies.
+//!
+//! Invariants worth knowing before touching this file:
+//!
+//! * One conversation is served by at most one [`SessionHandle`] at a time
+//!   (per-entry async mutex). Waiters queue on that mutex.
+//! * "Busy" is an explicit counter (`leases`: live handle + queued waiters),
+//!   never `Arc::strong_count` — snapshots taken by sweeps also clone the
+//!   `Arc` and used to be miscounted as holders.
+//! * The counter is bumped while the map shard is locked, and eviction uses
+//!   `remove_if` under the same shard lock, so "check parked, then remove"
+//!   cannot race with a concurrent `acquire`.
+//! * A tab that stopped answering is replaced inside `acquire` (the conversation
+//!   is re-pinned to a healthy tab); the pinning store notices the tab change
+//!   and falls back to a full replay.
 
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex as StdMutex, PoisonError};
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, OwnedMutexGuard};
 use uwa_core::{ConversationId, Result, TabId, Transport, UwaError};
+
+/// How many times `acquire` re-resolves an entry that was removed while the
+/// caller was queued on it. Only reachable under absurd churn.
+const MAX_ACQUIRE_ATTEMPTS: u32 = 8;
 
 #[derive(Debug, Clone)]
 pub struct SessionCfg {
@@ -24,11 +44,86 @@ impl Default for SessionCfg {
 }
 
 struct SessionEntry {
-    tab: TabId,
+    /// Only ever changed while `access` is held (see `ensure_live_tab`).
+    tab: StdMutex<TabId>,
     created: Instant,
-    last_used: Mutex<Instant>,
+    /// Milliseconds since `created`. Lock-free so that `Drop` can always
+    /// record the release (the old `try_lock` silently skipped it).
+    last_used_ms: AtomicU64,
     access: Arc<Mutex<()>>,
+    /// Bumped on every release and whenever the tab is swapped.
     generation: AtomicU64,
+    /// Live handle + queued waiters. 0 = parked.
+    leases: AtomicUsize,
+}
+
+impl SessionEntry {
+    fn new(tab: TabId) -> Self {
+        Self {
+            tab: StdMutex::new(tab),
+            created: Instant::now(),
+            last_used_ms: AtomicU64::new(0),
+            access: Arc::new(Mutex::new(())),
+            generation: AtomicU64::new(0),
+            leases: AtomicUsize::new(0),
+        }
+    }
+
+    fn tab(&self) -> TabId {
+        self.tab
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    fn set_tab(&self, tab: TabId) {
+        *self.tab.lock().unwrap_or_else(PoisonError::into_inner) = tab;
+    }
+
+    fn touch(&self) {
+        let ms = u64::try_from(self.created.elapsed().as_millis()).unwrap_or(u64::MAX);
+        self.last_used_ms.fetch_max(ms, Ordering::AcqRel);
+    }
+
+    fn last_used(&self) -> Instant {
+        let ms = self.last_used_ms.load(Ordering::Acquire);
+        self.created
+            .checked_add(Duration::from_millis(ms))
+            .unwrap_or(self.created)
+    }
+
+    fn idle(&self, now: Instant) -> Duration {
+        now.saturating_duration_since(self.last_used())
+    }
+
+    fn holders(&self) -> usize {
+        self.leases.load(Ordering::Acquire)
+    }
+
+    fn is_parked(&self) -> bool {
+        self.holders() == 0
+    }
+
+    fn is_evictable(&self, ttl: Duration) -> bool {
+        self.is_parked() && self.idle(Instant::now()) > ttl
+    }
+}
+
+/// Counts one interested party (waiter or holder) on an entry; released on
+/// drop, so a cancelled `acquire` future cannot leak a lease.
+struct Lease(Arc<SessionEntry>);
+
+impl Lease {
+    fn take(entry: &Arc<SessionEntry>) -> Self {
+        entry.leases.fetch_add(1, Ordering::AcqRel);
+        Self(Arc::clone(entry))
+    }
+}
+
+impl Drop for Lease {
+    fn drop(&mut self) {
+        self.0.leases.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 /// Immutable snapshot of one entry, safe to serialize outside the map.
@@ -39,8 +134,10 @@ pub struct SessionInfo {
     pub created: Instant,
     pub last_used: Instant,
     pub idle: Duration,
-    /// Number of live handles (0 = parked).
+    /// Number of live handles plus queued waiters (0 = parked).
     pub holders: usize,
+    /// Changes on every release and on every tab swap.
+    pub generation: u64,
 }
 
 pub struct SessionManager {
@@ -53,26 +150,35 @@ pub struct SessionManager {
 /// RAII lease on a conversation's tab. Serializes work per conversation.
 pub struct SessionHandle {
     pub conversation: ConversationId,
+    /// The tab to use for this turn — guaranteed to have answered a health
+    /// probe at acquire time.
     pub tab: TabId,
     pub generation: u64,
+    // Field order matters: the access guard is released before the lease.
     _guard: OwnedMutexGuard<()>,
-    entry: Arc<SessionEntry>,
+    lease: Lease,
 }
 
 impl Drop for SessionHandle {
     fn drop(&mut self) {
-        if let Ok(mut g) = self.entry.last_used.try_lock() {
-            *g = Instant::now();
-        }
-        self.entry.generation.fetch_add(1, Ordering::Relaxed);
+        self.lease.0.touch();
+        self.lease.0.generation.fetch_add(1, Ordering::AcqRel);
     }
 }
 
 impl SessionHandle {
     /// Bump `last_used` — a long tool-loop must not be evicted mid-flight.
+    /// (Eviction already skips leased sessions; this keeps the idle clock
+    /// honest for the moment the lease ends.)
     pub async fn touch(&self) {
-        *self.entry.last_used.lock().await = Instant::now();
+        self.lease.0.touch();
     }
+}
+
+/// Rotate `items` left by `offset` (clamped), without slicing or modulo.
+fn rotate_by<T>(items: &mut [T], offset: usize) {
+    let by = offset.min(items.len());
+    items.rotate_left(by);
 }
 
 impl SessionManager {
@@ -88,182 +194,237 @@ impl SessionManager {
         &self.cfg
     }
 
+    /// Lease the conversation's tab, creating the session on first use.
+    ///
+    /// If the pinned tab no longer answers, the conversation is moved to a
+    /// healthy tab instead of failing every request until idle eviction.
     pub async fn acquire(
         &self,
         cid: &ConversationId,
         transport: &dyn Transport,
     ) -> Result<SessionHandle> {
-        if let Some(entry) = self.entries.get(cid).map(|e| e.clone()) {
-            let guard = entry.access.clone().lock_owned().await;
-            *entry.last_used.lock().await = Instant::now();
-            let generation = entry.generation.load(Ordering::Relaxed);
+        for _ in 0..MAX_ACQUIRE_ATTEMPTS {
+            let lease = match self.lease_existing(cid) {
+                Some(l) => l,
+                None => self.create(cid, transport).await?,
+            };
+            let guard = Arc::clone(&lease.0.access).lock_owned().await;
+            // Explicitly removed (admin drop / recover) while we were queued:
+            // our entry is orphaned, so a later caller would get a *second*
+            // entry and run concurrently on another tab. Start over.
+            if !self.is_current(cid, &lease.0) {
+                continue;
+            }
+            let tab = self.ensure_live_tab(cid, &lease.0, transport).await?;
+            lease.0.touch();
+            let generation = lease.0.generation.load(Ordering::Acquire);
             return Ok(SessionHandle {
                 conversation: cid.clone(),
-                tab: entry.tab.clone(),
+                tab,
                 generation,
                 _guard: guard,
-                entry,
+                lease,
             });
         }
+        Err(UwaError::Unavailable(
+            "session table changed too quickly to lease a tab".into(),
+        ))
+    }
 
-        self.evict_if_over_capacity().await;
+    /// Take a lease on an existing entry. The counter is bumped while the
+    /// shard read lock is held, which is what makes `remove_if` eviction safe.
+    fn lease_existing(&self, cid: &ConversationId) -> Option<Lease> {
+        self.entries.get(cid).map(|r| Lease::take(r.value()))
+    }
+
+    fn is_current(&self, cid: &ConversationId, entry: &Arc<SessionEntry>) -> bool {
+        self.entries
+            .get(cid)
+            .is_some_and(|r| Arc::ptr_eq(r.value(), entry))
+    }
+
+    async fn create(&self, cid: &ConversationId, transport: &dyn Transport) -> Result<Lease> {
+        self.evict_if_over_capacity();
+        let tab = self.pick_tab(transport, None).await?;
+        // Another task may have created the entry while we were probing
+        // tabs; then its tab wins and ours is simply dropped.
+        Ok(match self.entries.entry(cid.clone()) {
+            dashmap::mapref::entry::Entry::Occupied(o) => Lease::take(o.get()),
+            dashmap::mapref::entry::Entry::Vacant(v) => {
+                let entry = Arc::new(SessionEntry::new(tab));
+                let lease = Lease::take(&entry);
+                v.insert(entry);
+                lease
+            }
+        })
+    }
+
+    /// Return the entry's tab if it answers; otherwise re-pin the entry to a
+    /// healthy tab. Called with the entry's access lock held.
+    async fn ensure_live_tab(
+        &self,
+        cid: &ConversationId,
+        entry: &SessionEntry,
+        transport: &dyn Transport,
+    ) -> Result<TabId> {
+        let current = entry.tab();
+        let Err(cause) = transport.health(&current).await else {
+            return Ok(current);
+        };
+        let fresh = self.pick_tab(transport, Some(&current)).await?;
+        tracing::warn!(
+            conversation = %cid,
+            dead_tab = %current,
+            new_tab = %fresh,
+            %cause,
+            "pinned tab stopped answering; re-pinning conversation"
+        );
+        entry.set_tab(fresh.clone());
+        entry.generation.fetch_add(1, Ordering::AcqRel);
+        Ok(fresh)
+    }
+
+    /// Least-leased healthy tab (spreads conversations across the pool).
+    /// The scan order rotates so ties don't funnel everyone onto tab #0.
+    async fn pick_tab(&self, transport: &dyn Transport, avoid: Option<&TabId>) -> Result<TabId> {
         let tabs = transport.list_tabs().await?;
         if tabs.is_empty() {
             return Err(UwaError::Unavailable("no browser tabs available".into()));
         }
 
-        // Pick the least-leased tab (spread conversations across the pool),
-        // rotating the scan order so ties don't funnel everyone onto tab #0.
-        let mut lease_count: std::collections::HashMap<TabId, usize> =
-            std::collections::HashMap::new();
+        let mut load: HashMap<TabId, usize> = HashMap::new();
         for e in self.entries.iter() {
-            let count = lease_count.entry(e.value().tab.clone()).or_default();
-            *count = count.saturating_add(1);
+            let n = load.entry(e.value().tab()).or_default();
+            *n = n.saturating_add(1);
         }
-        // Rotate the scan order without raw modulo/slicing (forbid-level
-        // lints): checked_rem + get() with an explicit empty fallback.
-        let offset = u64::try_from(tabs.len())
-            .ok()
-            .and_then(|len| self.rr.fetch_add(1, Ordering::Relaxed).checked_rem(len))
-            .unwrap_or(0) as usize;
-        let rotated = tabs
-            .get(offset..)
-            .unwrap_or(&[])
-            .iter()
-            .chain(tabs.get(..offset).unwrap_or(&[]).iter());
-        // `tabs` is checked non-empty above, so `min_by_key` always finds a
-        // tab; the match keeps the forbid-level `expect_used` lint out.
-        let tab = match rotated
-            .min_by_key(|t| lease_count.get(*t).copied().unwrap_or(0))
-            .cloned()
-        {
-            Some(t) => t,
-            None => return Err(UwaError::Unavailable("no browser tabs available".into())),
-        };
 
-        let fresh = Arc::new(SessionEntry {
-            tab: tab.clone(),
-            created: Instant::now(),
-            last_used: Mutex::new(Instant::now()),
-            access: Arc::new(Mutex::new(())),
-            generation: AtomicU64::new(0),
-        });
-        let entry = match self.entries.entry(cid.clone()) {
-            dashmap::mapref::entry::Entry::Occupied(o) => o.get().clone(),
-            dashmap::mapref::entry::Entry::Vacant(v) => {
-                v.insert(fresh.clone());
-                fresh
+        let mut candidates: Vec<TabId> = tabs.into_iter().filter(|t| Some(t) != avoid).collect();
+        let cursor = self.rr.fetch_add(1, Ordering::Relaxed);
+        let len = u64::try_from(candidates.len()).unwrap_or(u64::MAX);
+        let offset = cursor
+            .checked_rem(len)
+            .and_then(|o| usize::try_from(o).ok())
+            .unwrap_or(0);
+        rotate_by(&mut candidates, offset);
+        // Stable sort: equal load keeps the rotated order.
+        candidates.sort_by_key(|t| load.get(t).copied().unwrap_or(0));
+
+        for tab in candidates {
+            if transport.health(&tab).await.is_ok() {
+                return Ok(tab);
             }
-        };
-        let guard = entry.access.clone().lock_owned().await;
-        let generation = entry.generation.load(Ordering::Relaxed);
-        Ok(SessionHandle {
-            conversation: cid.clone(),
-            tab: entry.tab.clone(),
-            generation,
-            _guard: guard,
-            entry,
-        })
+        }
+        Err(UwaError::Unavailable(
+            "no healthy browser tabs available".into(),
+        ))
     }
 
-    /// Idle eviction — **no DashMap guard held across `.await`** (audit B2).
+    /// Idle eviction. Never touches a leased session, and re-checks idleness
+    /// under the shard lock so a session used since the scan survives.
     pub async fn evict_idle(&self) -> Vec<ConversationId> {
-        let mut candidates: Vec<(ConversationId, Arc<SessionEntry>, Instant)> = Vec::new();
-        for e in self.entries.iter() {
-            let cid = e.key().clone();
-            let entry = e.value().clone();
-            // Critical: the shard guard must not live through the await below.
-            drop(e);
-            let last = *entry.last_used.lock().await;
-            candidates.push((cid, entry, last));
-        }
-        let now = Instant::now();
-        // `candidates` itself holds one clone per entry, and the map holds the
-        // original, so an untouched parked entry has a refcount of exactly 2.
-        let stale: Vec<ConversationId> = candidates
-            .into_iter()
-            .filter(|(_, entry, last)| {
-                now.duration_since(*last) > self.cfg.idle_ttl && Arc::strong_count(entry) <= 2
-            })
-            .map(|(cid, _, _)| cid)
-            .collect();
-        for id in &stale {
-            self.entries.remove(id);
-        }
-        stale
-    }
-
-    async fn evict_if_over_capacity(&self) {
-        while self.entries.len() >= self.cfg.max_sessions {
-            let snapshot: Vec<(ConversationId, Arc<SessionEntry>)> = self
-                .entries
-                .iter()
-                .map(|e| (e.key().clone(), e.value().clone()))
-                .collect();
-            let mut ages: Vec<(ConversationId, Instant, usize)> = Vec::new();
-            for (cid, entry) in snapshot {
-                // Never evict a session with a live handle — its conversation
-                // is mid-flight and the lease would silently fork onto
-                // another tab. Refs here: map + snapshot = 2; holders add 1+.
-                let busy = Arc::strong_count(&entry) > 2;
-                if busy {
-                    continue;
-                }
-                ages.push((cid, *entry.last_used.lock().await, 0));
-            }
-            ages.sort_by_key(|(_, t, _)| *t);
-            match ages.into_iter().next() {
-                Some((id, _, _)) => {
-                    self.entries.remove(&id);
-                }
-                None => return, // everything busy: grow past capacity instead
-            }
-        }
-    }
-
-    /// Drop sessions whose tab no longer answers; returns the dead tab ids.
-    pub async fn recover(&self, transport: &dyn Transport) -> Vec<TabId> {
-        let snapshot: Vec<(ConversationId, TabId)> = self
+        let ttl = self.cfg.idle_ttl;
+        let candidates: Vec<(ConversationId, Arc<SessionEntry>)> = self
             .entries
             .iter()
-            .map(|e| (e.key().clone(), e.value().tab.clone()))
+            .filter(|e| e.value().is_evictable(ttl))
+            .map(|e| (e.key().clone(), Arc::clone(e.value())))
             .collect();
+        candidates
+            .into_iter()
+            .filter(|(cid, cand)| {
+                self.entries
+                    .remove_if(cid, |_, cur| {
+                        Arc::ptr_eq(cur, cand) && cur.is_evictable(ttl)
+                    })
+                    .is_some()
+            })
+            .map(|(cid, _)| cid)
+            .collect()
+    }
+
+    /// Make room for one more session by dropping the least recently used
+    /// *parked* one. If everything is busy, grow past the cap instead of
+    /// forking a mid-flight conversation onto another tab.
+    fn evict_if_over_capacity(&self) {
+        let mut budget = self.entries.len();
+        while self.entries.len() >= self.cfg.max_sessions && budget > 0 {
+            budget = budget.saturating_sub(1);
+            let oldest = self
+                .entries
+                .iter()
+                .filter(|e| e.value().is_parked())
+                .min_by_key(|e| e.value().last_used())
+                .map(|e| (e.key().clone(), Arc::clone(e.value())));
+            let Some((cid, cand)) = oldest else {
+                return;
+            };
+            self.entries
+                .remove_if(&cid, |_, cur| Arc::ptr_eq(cur, &cand) && cur.is_parked());
+        }
+    }
+
+    /// Probe every distinct pinned tab once and drop the *parked* sessions
+    /// whose tab no longer answers. Returns the dead tabs (deduplicated).
+    ///
+    /// Sessions that are in use are kept: their holder either finishes or
+    /// fails, and the next `acquire` re-pins them. Removing a leased entry
+    /// would let a second request run the same conversation concurrently.
+    pub async fn recover(&self, transport: &dyn Transport) -> Vec<TabId> {
+        let snapshot: Vec<(ConversationId, Arc<SessionEntry>)> = self
+            .entries
+            .iter()
+            .map(|e| (e.key().clone(), Arc::clone(e.value())))
+            .collect();
+        let mut alive: HashMap<TabId, bool> = HashMap::new();
         let mut dead = Vec::new();
-        for (cid, tab) in snapshot {
-            if transport.health(&tab).await.is_err() {
-                dead.push(tab);
-                self.entries.remove(&cid);
+        for (cid, entry) in snapshot {
+            let tab = entry.tab();
+            let ok = match alive.get(&tab) {
+                Some(v) => *v,
+                None => {
+                    let v = transport.health(&tab).await.is_ok();
+                    alive.insert(tab.clone(), v);
+                    if !v {
+                        dead.push(tab.clone());
+                    }
+                    v
+                }
+            };
+            if !ok {
+                self.entries.remove_if(&cid, |_, cur| {
+                    Arc::ptr_eq(cur, &entry) && cur.is_parked() && cur.tab() == tab
+                });
             }
         }
         dead
     }
 
     pub async fn list(&self) -> Vec<SessionInfo> {
-        let snapshot: Vec<(ConversationId, Arc<SessionEntry>)> = self
+        let now = Instant::now();
+        let mut out: Vec<SessionInfo> = self
             .entries
             .iter()
-            .map(|e| (e.key().clone(), e.value().clone()))
+            .map(|e| {
+                let entry = e.value();
+                SessionInfo {
+                    conversation: e.key().clone(),
+                    tab: entry.tab(),
+                    created: entry.created,
+                    last_used: entry.last_used(),
+                    idle: entry.idle(now),
+                    holders: entry.holders(),
+                    generation: entry.generation.load(Ordering::Acquire),
+                }
+            })
             .collect();
-        let now = Instant::now();
-        let mut out = Vec::with_capacity(snapshot.len());
-        for (cid, entry) in snapshot {
-            let last_used = *entry.last_used.lock().await;
-            out.push(SessionInfo {
-                conversation: cid,
-                tab: entry.tab.clone(),
-                created: entry.created,
-                last_used,
-                idle: now.duration_since(last_used),
-                // Refs: the map entry + this function's snapshot clone.
-                holders: Arc::strong_count(&entry).saturating_sub(2),
-            });
-        }
         out.sort_by_key(|s| s.idle);
         out
     }
 
+    /// Forget a conversation unconditionally (admin). A handle that is still
+    /// alive keeps working on its tab; the next request starts a new session.
     pub fn remove(&self, cid: &ConversationId) -> Option<TabId> {
-        self.entries.remove(cid).map(|(_, e)| e.tab.clone())
+        self.entries.remove(cid).map(|(_, e)| e.tab())
     }
 
     pub fn len(&self) -> usize {

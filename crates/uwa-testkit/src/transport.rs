@@ -12,6 +12,8 @@ use crate::page::MockPage;
 pub struct MockTransport {
     tabs: Vec<TabId>,
     healthy: Mutex<HashSet<TabId>>,
+    /// Tabs the "user" closed: gone from `list_tabs`, `page` and `health`.
+    closed: Mutex<HashSet<TabId>>,
     pages: HashMap<TabId, Arc<MockPage>>,
     /// Rotate `list_tabs` on every call, like a tab pool handing out the
     /// next free tab.
@@ -24,6 +26,7 @@ impl MockTransport {
         Self {
             tabs: Vec::new(),
             healthy: Mutex::new(HashSet::new()),
+            closed: Mutex::new(HashSet::new()),
             pages: HashMap::new(),
             round_robin: false,
             rr: AtomicUsize::new(0),
@@ -75,6 +78,16 @@ impl MockTransport {
         crate::lock(&self.healthy).insert(id.clone());
     }
 
+    /// Simulate the user closing the tab: it vanishes from `list_tabs`, and
+    /// `page`/`health` report `TabNotFound` (what a real CDP target does).
+    pub fn close_tab(&self, id: &TabId) {
+        crate::lock(&self.closed).insert(id.clone());
+    }
+
+    fn is_closed(&self, id: &TabId) -> bool {
+        crate::lock(&self.closed).contains(id)
+    }
+
     pub fn tab_ids(&self) -> Vec<TabId> {
         self.tabs.clone()
     }
@@ -94,6 +107,9 @@ impl Default for MockTransport {
 #[async_trait]
 impl Transport for MockTransport {
     async fn page(&self, tab: &TabId) -> Result<Box<dyn Page>> {
+        if self.is_closed(tab) {
+            return Err(UwaError::TabNotFound(tab.to_string()));
+        }
         match self.pages.get(tab) {
             Some(p) => Ok(Box::new(p.as_ref().clone())),
             None => Err(UwaError::TabNotFound(tab.to_string())),
@@ -101,18 +117,21 @@ impl Transport for MockTransport {
     }
 
     async fn list_tabs(&self) -> Result<Vec<TabId>> {
-        if !self.round_robin || self.tabs.is_empty() {
-            return Ok(self.tabs.clone());
+        let mut open: Vec<TabId> = self
+            .tabs
+            .iter()
+            .filter(|t| !self.is_closed(t))
+            .cloned()
+            .collect();
+        if self.round_robin && !open.is_empty() {
+            let start = self.rr.fetch_add(1, Ordering::SeqCst) % open.len();
+            open.rotate_left(start);
         }
-        let start = self.rr.fetch_add(1, Ordering::SeqCst) % self.tabs.len();
-        let mut out = Vec::with_capacity(self.tabs.len());
-        out.extend(self.tabs[start..].iter().cloned());
-        out.extend(self.tabs[..start].iter().cloned());
-        Ok(out)
+        Ok(open)
     }
 
     async fn health(&self, tab: &TabId) -> Result<()> {
-        if crate::lock(&self.healthy).contains(tab) {
+        if !self.is_closed(tab) && crate::lock(&self.healthy).contains(tab) {
             Ok(())
         } else {
             Err(UwaError::TabNotFound(tab.to_string()))
@@ -171,5 +190,18 @@ mod tests {
             Err(e) => assert!(matches!(e, UwaError::TabNotFound(_)), "{e:?}"),
             Ok(_) => panic!("unknown tab must not produce a page"),
         }
+    }
+
+    #[tokio::test]
+    async fn closed_tab_disappears_everywhere() {
+        let t = MockTransport::with_n_tabs(2);
+        let ids = t.tab_ids();
+        let gone = ids.first().expect("tab 0").clone();
+        let kept = ids.get(1).expect("tab 1").clone();
+        t.close_tab(&gone);
+        assert_eq!(t.list_tabs().await.expect("tabs"), vec![kept.clone()]);
+        assert!(t.health(&gone).await.is_err());
+        assert!(t.page(&gone).await.is_err());
+        assert!(t.health(&kept).await.is_ok());
     }
 }
