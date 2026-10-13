@@ -130,6 +130,24 @@ impl CircuitBreaker {
         })
     }
 
+    /// Give back an admitted call that ended with *no verdict* (client went
+    /// away, request rejected before reaching the provider).
+    ///
+    /// Without this a half-open probe slot stays taken until the cooldown
+    /// reclaims it, so one cancelled probe blocks the provider for a whole
+    /// extra cooldown even though nothing is in flight. Neutral for the
+    /// failure window: it is neither a success nor a failure.
+    pub fn release(&self) {
+        self.with(|inner| {
+            if inner.state == CircuitState::HalfOpen {
+                inner.half_open_in_flight = inner.half_open_in_flight.saturating_sub(1);
+                if inner.half_open_in_flight == 0 {
+                    inner.half_open_probe_at = None;
+                }
+            }
+        });
+    }
+
     pub fn record_success(&self) {
         self.with(|inner| {
             // A verdict from a call admitted *before* the trip is stale: it
@@ -424,5 +442,36 @@ mod tests {
         }
         assert!(cb.allow().is_ok(), "first probe must be admitted");
         assert!(cb.allow().is_err(), "only one probe at a time");
+    }
+
+    #[tokio::test]
+    async fn released_probe_frees_the_slot_immediately() {
+        let cb = cb();
+        for _ in 0..3 {
+            cb.record_failure();
+        }
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        assert!(cb.allow().is_ok(), "probe admitted");
+        assert!(cb.allow().is_err(), "slot taken");
+        cb.release(); // probe cancelled without a verdict
+        assert_eq!(cb.state(), CircuitState::HalfOpen, "no verdict, no change");
+        assert!(cb.allow().is_ok(), "slot is free again without waiting");
+    }
+
+    #[test]
+    fn release_is_a_noop_outside_half_open_and_never_underflows() {
+        let cb = cb();
+        cb.release();
+        assert_eq!(cb.state(), CircuitState::Closed);
+        assert!(cb.allow().is_ok());
+        cb.release();
+        cb.release();
+        assert_eq!(cb.state(), CircuitState::Closed);
+        for _ in 0..3 {
+            cb.record_failure();
+        }
+        cb.release();
+        assert_eq!(cb.state(), CircuitState::Open, "Open stays Open");
+        assert!(cb.allow().is_err());
     }
 }

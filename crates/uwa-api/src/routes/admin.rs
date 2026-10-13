@@ -34,21 +34,18 @@ pub async fn history(
     };
 
     let limit = q.limit.min(500);
-    let records = if let Some(p) = &q.provider {
-        store.by_provider(p, limit).await
-    } else if let Some(s) = &q.status {
-        let st = match s.as_str() {
-            "success" => uwa_history::RequestStatus::Success,
-            "error" => uwa_history::RequestStatus::Error,
-            "pending" => uwa_history::RequestStatus::Pending,
-            _ => {
-                return Err(UwaError::BadRequest(format!("bad status `{s}`")).into());
-            }
-        };
-        store.by_status(st, limit).await
-    } else {
-        store.recent(limit).await
+    // Both filters may be combined; previously `?provider=x&status=error`
+    // silently ignored the status.
+    let status = match q.status.as_deref() {
+        None => None,
+        Some("success") => Some(uwa_history::RequestStatus::Success),
+        Some("error") => Some(uwa_history::RequestStatus::Error),
+        Some("pending") => Some(uwa_history::RequestStatus::Pending),
+        Some(other) => {
+            return Err(UwaError::BadRequest(format!("bad status `{other}`")).into());
+        }
     };
+    let records = store.query(q.provider.as_deref(), status, limit).await;
 
     let count = records.len();
     Ok(Json(serde_json::json!({
@@ -197,8 +194,14 @@ pub async fn selector_test(
 
     // Pick a tab: explicit or first available.
     let tabs = state.transport.list_tabs().await?;
+    // An explicit tab must be one the transport actually knows. Taking any
+    // caller-supplied id would let this endpoint read page text from tabs it
+    // never listed.
     let tab = match &req.tab_id {
-        Some(id) => uwa_core::TabId::from_raw(id.clone()),
+        Some(id) => tabs
+            .into_iter()
+            .find(|t| t.as_str() == id)
+            .ok_or_else(|| UwaError::TabNotFound(id.clone()))?,
         None => tabs
             .into_iter()
             .next()
@@ -404,8 +407,14 @@ pub async fn selector_generate(
     };
 
     let tabs = state.transport.list_tabs().await?;
+    // An explicit tab must be one the transport actually knows. Taking any
+    // caller-supplied id would let this endpoint read page text from tabs it
+    // never listed.
     let tab = match &req.tab_id {
-        Some(id) => uwa_core::TabId::from_raw(id.clone()),
+        Some(id) => tabs
+            .into_iter()
+            .find(|t| t.as_str() == id)
+            .ok_or_else(|| UwaError::TabNotFound(id.clone()))?,
         None => tabs
             .into_iter()
             .next()

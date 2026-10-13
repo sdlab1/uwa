@@ -276,3 +276,73 @@ proptest! {
         prop_assert!(!visible.contains("\"name\":\"write_file\""), "leaked: {:?}", visible);
     }
 }
+
+// ---------- bug: partial ```json opener leaked before the rest arrived ----------
+
+/// `safe_emit_end` held back partial `<tool_call>` / ```tool_call openers but
+/// not partial ```json ones. A chunk boundary after "```js" released those
+/// five bytes to the client; the next chunk then completed a fence that
+/// `parse` turned into a call, leaving stray "```js" in the visible text.
+#[test]
+fn stream_json_fence_call_never_leaks_a_partial_opener() {
+    let c = call_json("echo", json!({"msg": "hi"}));
+    let full = format!("Sure.\n```json\n{c}\n```");
+    for size in 1..=full.len() {
+        let chunks: Vec<&str> = split_every(&full, size);
+        let (visible, ncalls) = simulate_stream(&chunks, &known());
+        assert_eq!(ncalls, 1, "chunk size {size}");
+        assert_eq!(visible, "Sure.\n", "chunk size {size} leaked {visible:?}");
+    }
+}
+
+#[test]
+fn gate_holds_every_prefix_of_every_opener() {
+    let k = known();
+    for opener in ["<tool_call>", "```tool_call", "```json"] {
+        for len in 1..opener.len() {
+            let tail = &opener[..len];
+            let buf = format!("abc {tail}");
+            assert_eq!(gate(&buf, &k), 4, "prefix {tail:?} must be held back");
+        }
+    }
+}
+
+#[test]
+fn gate_hold_respects_multibyte_boundaries() {
+    let k = known();
+    // 'é' is 2 bytes; the hold must still land on a char boundary.
+    let buf = "héllo ```jso";
+    let end = gate(buf, &k);
+    assert!(buf.is_char_boundary(end));
+    assert_eq!(&buf[..end], "héllo ");
+    let buf = "日本語 <tool_";
+    let end = gate(buf, &k);
+    assert!(buf.is_char_boundary(end));
+    assert_eq!(&buf[..end], "日本語 ");
+}
+
+/// A held-back prefix is flushed when the stream ends and the text turns
+/// out to be ordinary prose: nothing may be swallowed.
+#[test]
+fn held_partial_opener_is_delivered_when_it_was_only_prose() {
+    for full in ["Use ```jso", "Use ```js", "Use ```", "Use <tool_", "Use ``"] {
+        for size in 1..=full.len() {
+            let chunks: Vec<&str> = split_every(full, size);
+            let (visible, ncalls) = simulate_stream(&chunks, &known());
+            assert_eq!(ncalls, 0);
+            assert_eq!(visible, full, "chunk size {size}");
+        }
+    }
+}
+
+#[test]
+fn stream_tool_call_xml_never_leaks_at_any_chunk_size() {
+    let c = call_json("write_file", json!({"path": "a", "content": "x```y</b>"}));
+    let full = format!("Ok, writing.\n<tool_call>{c}</tool_call>");
+    for size in 1..=full.len() {
+        let chunks: Vec<&str> = split_every(&full, size);
+        let (visible, ncalls) = simulate_stream(&chunks, &known());
+        assert_eq!(ncalls, 1, "chunk size {size}");
+        assert_eq!(visible, "Ok, writing.\n", "chunk size {size}: {visible:?}");
+    }
+}

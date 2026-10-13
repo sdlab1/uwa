@@ -140,6 +140,27 @@ impl HistoryStore {
         buf.iter().rev().take(limit).cloned().collect()
     }
 
+    /// Newest-first records matching *every* given filter.
+    ///
+    /// `by_provider` and `by_status` each filter on one field; callers that
+    /// need both (the admin endpoint accepts `?provider=..&status=..`) must
+    /// not chain them, because `take(limit)` runs before the second filter.
+    pub async fn query(
+        &self,
+        provider: Option<&str>,
+        status: Option<crate::record::RequestStatus>,
+        limit: usize,
+    ) -> Vec<RequestRecord> {
+        let buf = self.inner.buffer.read().await;
+        buf.iter()
+            .rev()
+            .filter(|r| provider.map_or(true, |p| r.provider == p))
+            .filter(|r| status.map_or(true, |s| r.status == s))
+            .take(limit)
+            .cloned()
+            .collect()
+    }
+
     /// Filter by provider.
     pub async fn by_provider(&self, provider: &str, limit: usize) -> Vec<RequestRecord> {
         let buf = self.inner.buffer.read().await;
@@ -235,6 +256,49 @@ mod tests {
                 stream: false,
             },
         )
+    }
+
+    #[tokio::test]
+    async fn query_applies_all_filters_before_the_limit() {
+        let store = HistoryStore::new(HistoryCfg::default(), false)
+            .await
+            .unwrap();
+        // Oldest -> newest. Only "a1" and "a3" are (chatgpt, Error).
+        for (id, prov, st) in [
+            ("a1", "chatgpt", RequestStatus::Error),
+            ("b1", "claude", RequestStatus::Error),
+            ("a2", "chatgpt", RequestStatus::Success),
+            ("a3", "chatgpt", RequestStatus::Error),
+            ("a4", "chatgpt", RequestStatus::Success),
+        ] {
+            let mut r = rec(id, prov);
+            r.status = st;
+            store.append(r).await;
+        }
+        let ids = |v: Vec<RequestRecord>| v.into_iter().map(|r| r.id).collect::<Vec<_>>();
+
+        // Both filters, newest first, and the limit counts *matches*.
+        assert_eq!(
+            ids(store
+                .query(Some("chatgpt"), Some(RequestStatus::Error), 10)
+                .await),
+            ["a3", "a1"]
+        );
+        assert_eq!(
+            ids(store
+                .query(Some("chatgpt"), Some(RequestStatus::Error), 1)
+                .await),
+            ["a3"],
+            "limit must apply after filtering"
+        );
+        // Single filters and no filter behave like the dedicated methods.
+        assert_eq!(ids(store.query(Some("claude"), None, 10).await), ["b1"]);
+        assert_eq!(ids(store.query(None, None, 2).await), ["a4", "a3"]);
+        assert!(store
+            .query(Some("nope"), Some(RequestStatus::Success), 10)
+            .await
+            .is_empty());
+        assert!(store.query(None, None, 0).await.is_empty());
     }
 
     #[tokio::test]

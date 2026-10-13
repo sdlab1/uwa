@@ -498,3 +498,218 @@ async fn runtime_services_defaults_and_overrides() {
     );
     assert!(Arc::ptr_eq(&state.breaker("c"), &tuned.breaker("c")));
 }
+
+// ---------------------------------------------------------------------------
+// Auth + browser-origin hardening (bug-hunt session)
+// ---------------------------------------------------------------------------
+
+/// Off-loopback server (key enforced) with one answering provider.
+fn lan_server() -> TestServer {
+    let provider = Arc::new(MockProvider::new("chatgpt").with_answer("hi"));
+    AppBuilder::new()
+        .with_config(config_with_key_lan())
+        .with_transport(Arc::new(MockTransport::with_n_tabs(1)))
+        .with_provider(provider)
+        .build()
+        .server
+}
+
+#[tokio::test]
+async fn lan_accepts_x_api_key_header() {
+    // The Anthropic SDK / Claude Code send `x-api-key`, never `Authorization`.
+    // README tells users to set ANTHROPIC_API_KEY; without this they got 401
+    // on any non-loopback bind (Docker included).
+    lan_server()
+        .get("/v1/models")
+        .add_header("x-api-key", "k")
+        .await
+        .assert_status_ok();
+}
+
+#[tokio::test]
+async fn lan_rejects_wrong_or_missing_keys() {
+    let s = lan_server();
+    s.get("/v1/models")
+        .add_header("x-api-key", "nope")
+        .await
+        .assert_status_unauthorized();
+    s.get("/v1/models")
+        .add_header("Authorization", "Bearer nope")
+        .await
+        .assert_status_unauthorized();
+    s.get("/v1/models")
+        .add_header("Authorization", "Bearer")
+        .await
+        .assert_status_unauthorized();
+    s.get("/v1/models").await.assert_status_unauthorized();
+    // Admin routes sit behind the same single auth layer.
+    s.get("/admin/stats").await.assert_status_unauthorized();
+}
+
+#[tokio::test]
+async fn lan_bearer_scheme_is_case_insensitive() {
+    let s = lan_server();
+    for v in ["bearer k", "BEARER k", "Bearer   k"] {
+        s.get("/v1/models")
+            .add_header("Authorization", v)
+            .await
+            .assert_status_ok();
+    }
+}
+
+#[tokio::test]
+async fn lan_accepts_query_key_once_decoded() {
+    let s = lan_server();
+    s.get("/v1/models?api_key=k").await.assert_status_ok();
+    s.get("/v1/models?x=1&api_key=%6B").await.assert_status_ok();
+    s.get("/v1/models?api_key=%256B")
+        .await
+        .assert_status_unauthorized(); // decoded once: "%6B" != "k"
+    s.get("/v1/models?api_key=%zz")
+        .await
+        .assert_status_unauthorized();
+}
+
+#[tokio::test]
+async fn loopback_blocks_cross_origin_browser_requests() {
+    // A random website can `fetch("http://127.0.0.1:8080/...")`. On a
+    // loopback bind there is no key check, so the Origin guard is the only
+    // thing between that page and the user's logged-in LLM sessions.
+    let h = harness("hi");
+    let payload = json!({"model": "gpt-4o", "messages": [{"role": "user", "content": "x"}]});
+
+    let r = h
+        .server
+        .post("/v1/chat/completions")
+        .add_header("Origin", "https://evil.example")
+        .json(&payload)
+        .await;
+    r.assert_status_forbidden();
+    assert_eq!(r.json::<Value>()["error"]["code"], "forbidden_origin");
+    assert!(
+        h.provider.sent().is_empty(),
+        "a blocked request must never reach the browser"
+    );
+
+    for path in ["/admin/history", "/admin/stats", "/admin/sessions"] {
+        h.server
+            .get(path)
+            .add_header("Origin", "https://evil.example")
+            .await
+            .assert_status_forbidden();
+    }
+    // The opaque origin (sandboxed iframe, file://) is just as foreign.
+    h.server
+        .get("/v1/models")
+        .add_header("Origin", "null")
+        .await
+        .assert_status_forbidden();
+}
+
+#[tokio::test]
+async fn loopback_blocks_dns_rebinding_hosts() {
+    let s = server("hi");
+    let r = s
+        .get("/v1/models")
+        .add_header("Host", "rebind.evil.example:8080")
+        .await;
+    r.assert_status_forbidden();
+    assert_eq!(r.json::<Value>()["error"]["code"], "forbidden_host");
+}
+
+#[tokio::test]
+async fn loopback_allows_local_dashboard_and_plain_clients() {
+    let s = server("hi");
+    // curl / SDKs: no Origin header at all.
+    s.get("/v1/models").await.assert_status_ok();
+    // The bundled dashboard: same-origin, loopback Host + Origin.
+    for origin in ["http://127.0.0.1:8080", "http://localhost:3000"] {
+        s.get("/v1/models")
+            .add_header("Host", "127.0.0.1:8080")
+            .add_header("Origin", origin)
+            .await
+            .assert_status_ok();
+    }
+}
+
+#[tokio::test]
+async fn cors_preflight_is_not_granted_to_foreign_origins_on_loopback() {
+    let s = server("hi");
+    let evil = s
+        .method(axum::http::Method::OPTIONS, "/v1/chat/completions")
+        .add_header("Origin", "https://evil.example")
+        .add_header("Access-Control-Request-Method", "POST")
+        .add_header("Access-Control-Request-Headers", "content-type")
+        .await;
+    assert!(
+        evil.headers().get("access-control-allow-origin").is_none(),
+        "foreign origin must not be granted CORS on a loopback bind"
+    );
+
+    let local = s
+        .method(axum::http::Method::OPTIONS, "/v1/chat/completions")
+        .add_header("Origin", "http://localhost:3000")
+        .add_header("Access-Control-Request-Method", "POST")
+        .add_header("Access-Control-Request-Headers", "content-type")
+        .await;
+    assert_eq!(
+        local
+            .headers()
+            .get("access-control-allow-origin")
+            .and_then(|v| v.to_str().ok()),
+        Some("http://localhost:3000")
+    );
+}
+
+#[tokio::test]
+async fn request_id_header_is_sanitized() {
+    let s = server("hi");
+    let r = s
+        .get("/v1/models")
+        .add_header("x-request-id", "ok-id_1.2")
+        .await;
+    r.assert_status_ok();
+    // Oversized / odd ids are replaced, never echoed into logs unchecked.
+    let long = "a".repeat(5_000);
+    s.get("/v1/models")
+        .add_header("x-request-id", long.as_str())
+        .await
+        .assert_status_ok();
+    s.get("/v1/models")
+        .add_header("x-request-id", "has space")
+        .await
+        .assert_status_ok();
+}
+
+// ---------------------------------------------------------------------------
+// Conversation identity across turns
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn follow_up_turn_without_system_prompt_stays_on_the_same_session() {
+    // Regression: the conversation id hashed the first TWO messages. Turn 1
+    // of a system-less client is `[user]`, turn 2 is `[user, assistant, user]`,
+    // so the id changed on the second turn: the conversation silently moved
+    // to a fresh session/tab and lost its browser-side context.
+    let sm = Arc::new(SessionManager::new(SessionCfg::default()));
+    let h = harness_with("pong", Some(sm.clone()));
+
+    chat(
+        &h.server,
+        json!({"model": "gpt-4o", "messages": [{"role": "user", "content": "ping"}]}),
+    )
+    .await
+    .assert_status_ok();
+    chat(
+        &h.server,
+        json!({"model": "gpt-4o", "messages": [
+            {"role": "user", "content": "ping"},
+            {"role": "assistant", "content": "pong"},
+            {"role": "user", "content": "again"},
+        ]}),
+    )
+    .await
+    .assert_status_ok();
+
+    assert_eq!(sm.len(), 1, "a follow-up turn must reuse the session");
+}

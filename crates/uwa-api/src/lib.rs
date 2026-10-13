@@ -160,6 +160,26 @@ async fn serve_index() -> axum::response::Response {
     }
 }
 
+/// CORS policy. On a loopback bind only loopback web origins (the bundled
+/// dashboard, a local web UI) may call the API from a browser; reflecting
+/// `*` there would let any website read responses from the daemon. Off
+/// loopback the API key is the gate (it is not an ambient browser
+/// credential), so any origin may preflight.
+fn cors_layer(bind: &str) -> CorsLayer {
+    use tower_http::cors::{AllowOrigin, Any};
+    let base = CorsLayer::new()
+        .allow_methods(Any)
+        .allow_headers(Any)
+        .expose_headers(Any);
+    if middleware::is_loopback_bind(bind) {
+        base.allow_origin(AllowOrigin::predicate(|origin, _| {
+            middleware::is_loopback_origin(origin.as_bytes())
+        }))
+    } else {
+        base.allow_origin(Any)
+    }
+}
+
 pub fn router(state: AppState) -> Router {
     let api_plain = Router::new()
         .route("/v1/models", get(routes::models::list_models))
@@ -217,18 +237,22 @@ pub fn router(state: AppState) -> Router {
             "/admin/sessions/:id",
             axum::routing::delete(routes::admin::drop_session),
         )
-        .route("/admin/logs/stream", get(routes::admin::log_stream))
-        .layer(axum::middleware::from_fn_with_state(
-            state.clone(),
-            middleware::require_api_key,
-        ));
+        .route("/admin/logs/stream", get(routes::admin::log_stream));
 
+    // Layer order: the last `.layer` is outermost and runs first. The origin
+    // guard must reject a hostile browser request before anything else
+    // (auth included) looks at it. Auth is applied once, here, to every
+    // API and admin route.
     let api = api_plain
         .merge(api_scoped)
         .merge(admin)
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             middleware::require_api_key,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            middleware::guard_browser_origin,
         ));
 
     Router::new()
@@ -239,7 +263,7 @@ pub fn router(state: AppState) -> Router {
         .merge(api)
         .layer(axum::middleware::from_fn(middleware::inject_request_id))
         .layer(TraceLayer::new_for_http())
-        .layer(CorsLayer::permissive())
+        .layer(cors_layer(&state.config.server.bind))
         .layer(tower_http::timeout::TimeoutLayer::new(Duration::from_secs(
             // Constant divisor is lint-safe; the +5 grace must saturate.
             (state.config.server.request_timeout_ms / 1000).saturating_add(5),

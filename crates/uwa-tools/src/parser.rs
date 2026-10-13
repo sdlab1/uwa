@@ -346,9 +346,14 @@ pub fn safe_emit_end(buf: &str) -> usize {
     if let Some(i) = tool_marker_index(buf) {
         return i;
     }
-    const MARKERS: [&str; 2] = ["<tool_call>", "```tool_call"];
+    // Every opener `parse` can act on, so a chunk boundary inside any of them
+    // (`` ```js `` | `on\n{...}`) cannot leak half a fence to the client before
+    // the rest turns the block into a call. `tool_marker_index` stays limited
+    // to the two unambiguous markers: a plain ```json block is only a call
+    // when its body parses as one, which `safe_emit_end_for` decides.
+    const HOLD_PREFIXES: [&str; 3] = ["<tool_call>", "```tool_call", "```json"];
     let mut hold = 0usize;
-    for m in MARKERS {
+    for m in HOLD_PREFIXES {
         // Longest proper prefix of `m` that `buf` ends with.
         for len in (1..m.len()).rev() {
             if len <= buf.len()

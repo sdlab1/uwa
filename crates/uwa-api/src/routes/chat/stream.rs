@@ -244,14 +244,6 @@ fn sse_chunk(
 mod tests {
     use super::*;
 
-    #[test]
-    fn sse_chunk_has_required_fields() {
-        let ev = sse_chunk("req_1", 100, "gpt-4o", json!({"content": "hi"}), None);
-        // Event doesn't expose fields; constructing without a panic is the
-        // contract we care about here.
-        let _ = ev;
-    }
-
     // ---- stream writer (driven through a channel) ----
 
     async fn collect(

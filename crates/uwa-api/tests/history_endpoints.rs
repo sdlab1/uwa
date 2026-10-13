@@ -127,3 +127,91 @@ async fn selector_test_on_live_tab() {
     let v: serde_json::Value = r.json();
     assert!(v["duration_ms"].as_u64().is_some());
 }
+
+async fn history_count(s: &axum_test::TestServer, query: &str) -> u64 {
+    let r = s
+        .get(&format!("/admin/history{query}"))
+        .add_header("Authorization", TEST_AUTH_HEADER)
+        .await;
+    r.assert_status_ok();
+    r.json::<serde_json::Value>()["count"].as_u64().unwrap()
+}
+
+#[tokio::test]
+async fn history_provider_and_status_filters_combine() {
+    // Regression: `?provider=..&status=..` honoured only the provider and
+    // silently dropped the status filter.
+    let s = server_with_history().await;
+    let _ = s
+        .post("/v1/chat/completions")
+        .add_header("Authorization", TEST_AUTH_HEADER)
+        .json(&json!({"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]}))
+        .await;
+
+    assert_eq!(history_count(&s, "?provider=chatgpt").await, 1);
+    assert_eq!(history_count(&s, "?status=success").await, 1);
+    assert_eq!(
+        history_count(&s, "?provider=chatgpt&status=success").await,
+        1
+    );
+    assert_eq!(
+        history_count(&s, "?provider=chatgpt&status=error").await,
+        0,
+        "the status filter must apply together with the provider filter"
+    );
+    assert_eq!(
+        history_count(&s, "?provider=claude&status=success").await,
+        0
+    );
+}
+
+#[tokio::test]
+async fn history_rejects_unknown_status_even_with_a_provider_filter() {
+    let s = server_with_history().await;
+    for q in ["?status=bogus", "?provider=chatgpt&status=bogus"] {
+        s.get(&format!("/admin/history{q}"))
+            .add_header("Authorization", TEST_AUTH_HEADER)
+            .await
+            .assert_status_bad_request();
+    }
+}
+
+#[tokio::test]
+async fn history_limit_is_capped_and_zero_is_empty() {
+    let s = server_with_history().await;
+    let _ = s
+        .post("/v1/chat/completions")
+        .add_header("Authorization", TEST_AUTH_HEADER)
+        .json(&json!({"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]}))
+        .await;
+    assert_eq!(history_count(&s, "?limit=0").await, 0);
+    assert_eq!(history_count(&s, "?limit=1000000").await, 1);
+}
+
+#[tokio::test]
+async fn selector_test_refuses_tabs_the_transport_never_listed() {
+    // An arbitrary `tab_id` used to be handed straight to the transport,
+    // making the endpoint a page-text reader for any tab in the browser.
+    let s = server_with_history().await;
+    let r = s
+        .post("/admin/selector-test")
+        .add_header("Authorization", TEST_AUTH_HEADER)
+        .json(&json!({
+            "provider": "chatgpt",
+            "selector": "body",
+            "tab_id": "tab_not_in_the_list"
+        }))
+        .await;
+    r.assert_status(axum::http::StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(r.json::<serde_json::Value>()["error"]["code"], "no_tab");
+}
+
+#[tokio::test]
+async fn selector_test_rejects_unknown_provider() {
+    let s = server_with_history().await;
+    s.post("/admin/selector-test")
+        .add_header("Authorization", TEST_AUTH_HEADER)
+        .json(&json!({"provider": "nope", "selector": "body"}))
+        .await
+        .assert_status_not_found();
+}

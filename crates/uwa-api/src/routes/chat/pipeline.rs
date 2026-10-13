@@ -113,7 +113,16 @@ pub async fn run_pipeline(
 
     let breaker = state.breaker(&provider_cfg.name);
     breaker.allow()?;
-    let _permit = state.runtime.semaphores.acquire(&provider_cfg.name).await?;
+    let _permit = match state.runtime.semaphores.acquire(&provider_cfg.name).await {
+        Ok(p) => p,
+        Err(e) => {
+            // Rejected by our own backpressure before touching the provider:
+            // not the provider's fault, and a half-open probe slot taken by
+            // `allow()` must not stay stuck.
+            breaker.release();
+            return Err(e);
+        }
+    };
 
     let mut recorder = RequestRecorder::new(req, &provider_cfg.name, None);
 
@@ -201,6 +210,7 @@ pub async fn run_pipeline_streaming(
     let _permit = match state.runtime.semaphores.acquire(&provider_cfg.name).await {
         Ok(p) => p,
         Err(e) => {
+            breaker.release(); // see `run_pipeline`: no verdict on the provider
             let _ = tx.send(StreamEvent::Error(e.clone())).await;
             return Err(e);
         }
@@ -211,6 +221,8 @@ pub async fn run_pipeline_streaming(
     let result =
         run_pipeline_streaming_inner(state, req, all_specs, pinned_tab, &mut recorder, &tx).await;
 
+    // Decided on the typed `Abort`, not by comparing error text afterwards.
+    let client_gone = matches!(result, Err(Abort::ClientGone));
     let result: Result<_, UwaError> = match result {
         Ok(v) => Ok(v),
         Err(Abort::Failed(e)) => Err(e),
@@ -237,7 +249,7 @@ pub async fn run_pipeline_streaming(
                 "stream",
             );
         }
-        Err(UwaError::Unavailable(m)) if m == "client disconnected" => {}
+        Err(_) if client_gone => breaker.release(),
         Err(e) => {
             breaker.record_failure();
             recorder.finish_error(&e.to_string());
@@ -596,7 +608,6 @@ async fn run_pipeline_inner(
     )
     .await;
 
-    recorder.mark_send_start();
     let raw = site.wait_response(page.as_ref()).await?;
     recorder.mark_wait_end();
 
@@ -680,7 +691,6 @@ async fn resolve_tool_calls(
                     .map_err(|_| UwaError::Timeout(send_timeout))??;
                 recorder.mark_send_end();
 
-                recorder.mark_send_start();
                 raw = site.wait_response(page).await?;
                 recorder.mark_wait_end();
             }
