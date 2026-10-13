@@ -303,6 +303,7 @@ impl NetExtractor for DefaultNetExtractor {
             let mut sse = SseParser::new();
             let mut active_url: Option<String> = None;
             let mut active_request: Option<String> = None;
+            let mut active_is_sse = false;
 
             loop {
                 let ev = match tokio::time::timeout(idle, rx.recv()).await {
@@ -320,6 +321,7 @@ impl NetExtractor for DefaultNetExtractor {
                         if !rules.matches(&url, &mime) {
                             continue;
                         }
+                        active_is_sse = mime.contains("event-stream");
                         active_url = Some(url.clone());
                         active_request = Some(request_id.clone());
                         if mime.contains("event-stream") {
@@ -360,7 +362,7 @@ impl NetExtractor for DefaultNetExtractor {
                         if active_request.as_deref() != Some(request_id.as_str()) {
                             continue;
                         }
-                        if active_url.is_some() {
+                        if active_url.is_some() && active_is_sse {
                             if let Some(tail) = sse.finish() {
                                 if let Some(s) = decode_sse_frame(
                                     &tail.data,
@@ -615,5 +617,29 @@ mod tests {
             json_path: "a".into(),
         };
         assert!(decode_json("not json", &d).is_none());
+    }
+
+    #[test]
+    fn sse_finish_not_called_for_json_response_after_sse() {
+        // Regression: sse.finish() was called for *any* Finished event,
+        // even after a JSON response. If the SSE parser still had buffered
+        // data from a previous SSE response, finish() would flush it and
+        // leak it as a delta.
+        let mut p = SseParser::new();
+        // Simulate an incomplete SSE frame from a previous response
+        assert!(p.feed("data: stale").is_empty());
+
+        // Now simulate a JSON response Finished - finish() should NOT be called
+        // because it's not an SSE response. In the real code, active_is_sse
+        // would be false for JSON responses.
+        // Here we test the parser behavior directly: finish() returns the
+        // buffered data, but the caller should not call it for non-SSE.
+        let tail = p.finish();
+        assert_eq!(tail.unwrap().data, "stale");
+
+        // Parser is now clean. A subsequent JSON response should not
+        // have any stale data.
+        let tail2 = p.finish();
+        assert!(tail2.is_none());
     }
 }

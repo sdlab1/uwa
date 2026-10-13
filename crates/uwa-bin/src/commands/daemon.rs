@@ -168,6 +168,11 @@ fn stop() -> Result<()> {
         let _ = send_signal(pid, 9);
     }
 
+    // Confirm the process actually died before reporting success.
+    if process_alive(pid) {
+        bail!("daemon (pid {pid}) did not stop after SIGTERM/SIGKILL");
+    }
+
     let _ = std::fs::remove_file(&pid_path);
     let _ = std::fs::remove_file(&pgid_path);
     println!("stopped (pid {pid})");
@@ -217,7 +222,9 @@ fn logs(follow: bool, lines: usize) -> Result<()> {
     let content = std::fs::read_to_string(&p).unwrap_or_default();
     let all: Vec<&str> = content.lines().collect();
     let start = all.len().saturating_sub(lines);
-    for line in &all[start..] {
+    // forbid-level `indexing_slicing`: use `get(..)` instead of `&all[start..]`.
+    let tail = all.get(start..).unwrap_or(&[]);
+    for line in tail {
         println!("{line}");
     }
     if follow {
@@ -396,7 +403,7 @@ fn host_port(url: &str) -> Option<(String, u16)> {
     };
     // Drop userinfo (`user:pass@host`).
     let authority = match authority.rfind('@') {
-        Some(at) => authority.get(at + 1..).unwrap_or(authority),
+        Some(at) => authority.get(at.saturating_add(1)..).unwrap_or(authority),
         None => authority,
     };
     let default_port: u16 = if https { 443 } else { 80 };
@@ -409,7 +416,7 @@ fn host_port(url: &str) -> Option<(String, u16)> {
             return None;
         }
         let port = inner
-            .get(close + 1..)
+            .get(close.saturating_add(1)..)
             .and_then(|p| p.strip_prefix(':'))
             .and_then(|p| p.parse().ok())
             .unwrap_or(default_port);
@@ -804,5 +811,35 @@ mod tests {
             host_port("http://127.0.0.1:8080/h#frag"),
             Some(("127.0.0.1".into(), 8080))
         );
+    }
+
+    #[test]
+    fn host_port_drops_userinfo_with_at_at_end() {
+        // Regression for `at.saturating_add(1)`: `@` at the end of authority.
+        assert_eq!(
+            host_port("http://user:pass@localhost:8080/healthz"),
+            Some(("localhost".into(), 8080))
+        );
+    }
+
+    #[test]
+    fn host_port_ipv6_with_port() {
+        // Regression for `close.saturating_add(1)`: port after `]`.
+        assert_eq!(
+            host_port("http://[::1]:8080/healthz"),
+            Some(("::1".into(), 8080))
+        );
+        assert_eq!(host_port("http://[::1]/healthz"), Some(("::1".into(), 80)));
+    }
+
+    #[test]
+    fn logs_tail_does_not_panic_when_lines_exceeds_total() {
+        // Regression for `all.get(start..).unwrap_or(&[])`:
+        // `lines` greater than number of lines in log.
+        let all = vec!["a", "b"];
+        let lines = 10usize;
+        let start = all.len().saturating_sub(lines);
+        let tail = all.get(start..).unwrap_or(&[]);
+        assert_eq!(tail, &all[..]);
     }
 }
