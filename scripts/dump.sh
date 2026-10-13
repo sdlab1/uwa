@@ -42,14 +42,14 @@ while IFS='=' read -r key value || [[ -n "$key" ]]; do
 done < "$SCRIPT_DIR/repo.conf"
 
 # Alias groups
-SOURCE_GROUP=(ALL_SRCS ALL_TOMLS UWA_BIN_CONFIG MANIFEST RUST_TOOLCHAIN CARGO_DEPS2 UWA_API_EXTRA RUST_BUILD_GUIDE)
+SOURCE_GROUP=(ALL_SRCS ALL_TOMLS UWA_BIN_CONFIG UWA_BIN_BUILD UWA_CONFIG_BUILD MANIFEST RUST_TOOLCHAIN CARGO_DEPS2 UWA_API_EXTRA RUST_BUILD_GUIDE)
 TESTS_GROUP=(ALL_TESTS)
 
 # --- is_source_file: single source of truth for dumpable extensions ----
 is_source_file() {
   case "$1" in
     Cargo.lock) return 1 ;;
-    *.rs|*.toml|*.ts|*.js|*.css|*.sh|*.json|*.html|*.txt|*.snap|*.md|*.svelte|*package-lock.json) return 0 ;;
+    *.rs|*.toml|*.ts|*.js|*.css|*.sh|*.json|*.html|*.txt|*.snap|*.md|*.svelte|*package-lock.json|*build.rs) return 0 ;;
     *) return 1 ;;
   esac
 }
