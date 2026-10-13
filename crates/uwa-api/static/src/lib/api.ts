@@ -3,6 +3,7 @@ import type {
   ProviderMap, ReadyResp, SelectorTestResp, SessionsResp, StatsResp,
   RegistryInfo,
   ProfileListResp,
+  RecorderStatus, RecorderStopResponse,
 } from './types';
 
 const KEY_STORAGE = 'uwa:apiKey';
@@ -264,3 +265,11 @@ export const resetProfile = (name: string) =>
     `/admin/profiles/${encodeURIComponent(name)}/reset`,
     { method: 'POST' },
   );
+
+
+// === recorder (observe a manual flow, propose a workflow) ===
+export const recorderStatus = () => request<RecorderStatus>('/admin/recorder/status');
+export const recorderStart = (body: { provider: string; tab_id?: string }) =>
+  request<RecorderStatus>('/admin/recorder/start', { method: 'POST', body: JSON.stringify(body) });
+export const recorderStop = () =>
+  request<RecorderStopResponse>('/admin/recorder/stop', { method: 'POST' });

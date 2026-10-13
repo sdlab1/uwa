@@ -138,3 +138,24 @@ export interface ChatResponse {
   choices: Array<{ index: number; message: ChatMessage; finish_reason: string | null }>;
   usage: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
 }
+
+
+export interface RecorderStatus {
+  active: boolean;
+  id?: string;
+  provider?: string;
+  tab?: string;
+  started_at_ms?: number;
+  elapsed_ms?: number;
+  events?: number;
+  installed?: boolean;
+  poll_errors?: number;
+}
+
+export interface RecorderStopResponse {
+  provider: string;
+  event_count: number;
+  warnings: string[];
+  workflow: { steps: unknown[] };
+  toml_snippet: string;
+}
