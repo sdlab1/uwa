@@ -150,3 +150,23 @@ fn safe_emit_end_holds_back_partial_markers() {
     assert!(safe_emit_end("``") <= 2);
     let _ = full_marker;
 }
+
+#[test]
+fn scan_fence_ignores_inline_opener() {
+    let text = "some text ```tool_call\n{\"name\": \"foo\", \"arguments\": {}}\n```";
+    let known = vec!["foo".to_string()];
+    let out = parse(text, &known);
+    assert!(
+        out.calls.is_empty(),
+        "inline ```tool_call should not be parsed as a tool call"
+    );
+}
+
+#[test]
+fn scan_fence_parses_valid_fence() {
+    let text = "```tool_call\n{\"name\": \"foo\", \"arguments\": {}}\n```";
+    let known = vec!["foo".to_string()];
+    let out = parse(text, &known);
+    assert_eq!(out.calls.len(), 1);
+    assert_eq!(out.calls[0].name, "foo");
+}

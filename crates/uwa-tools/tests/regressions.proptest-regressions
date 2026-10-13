@@ -6,3 +6,4 @@
 # everyone who runs the test benefits from these saved cases.
 cc 17fd14d62e28c36f38bdcb0aba14a49f1d6a18b74f4eadbb05209b8ada575fd3 # shrinks to items = [(Bare, "{")], lead = ""
 cc c1b7cbbabad6f054763b2dff531008e63025b484bd114027402f7e55061b66ce # shrinks to st = Bare, s = "{", chunk = 1
+cc 48ce56b43ac5ed5a8acb07bde5381db0b752a790342ec54d335173c41a35cdda # shrinks to st = Bare, s = "```", chunk = 1

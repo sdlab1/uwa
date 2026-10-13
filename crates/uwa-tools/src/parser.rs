@@ -111,7 +111,12 @@ fn fenced_regions(text: &str) -> Vec<Range<usize>> {
     for line in text.split_inclusive('\n') {
         let start = offset;
         offset = offset.saturating_add(line.len());
-        if line.trim_start().starts_with("```") {
+        // Treat a line as a fence boundary if it STARTS with ``` (after whitespace)
+        // OR if the ENTIRE LINE is just ``` (standalone closer).
+        // This avoids false positives from ``` inside content/arguments.
+        let trimmed = line.trim_start();
+        let is_fence_boundary = trimmed.starts_with("```") || trimmed == "```";
+        if is_fence_boundary {
             match open.take() {
                 Some(s) => regions.push(s..offset),
                 None => open = Some(start),
@@ -229,6 +234,16 @@ fn scan_fence(
     let mut i = 0usize;
     while let Some(rel) = text.get(i..).and_then(|s| s.find(&opener)) {
         let start = i.saturating_add(rel);
+
+        // The opener must be the first non-whitespace token on its line.
+        // This prevents inline ```tool_call / ```json from being parsed as calls.
+        let line_start = text[..start].rfind('\n').map_or(0, |p| p.saturating_add(1));
+        if !text[line_start..start].trim().is_empty() {
+            // Not a real fence opener – skip this occurrence and keep searching.
+            i = start.saturating_add(opener.len());
+            continue;
+        }
+
         let after_open = start.saturating_add(opener.len());
         // The rest of the opener line must be blank: ```jsonc / ```json5
         // are different languages, not this fence.
@@ -264,25 +279,46 @@ fn scan_bare(
     consumed: &mut Vec<Range<usize>>,
 ) {
     let fenced = fenced_regions(text);
+    // Collect lines with their byte offsets for neighbor checks.
+    let mut lines: Vec<(usize, usize, &str)> = Vec::new();
     let mut offset = 0usize;
     for line in text.split_inclusive('\n') {
         let start = offset;
         let end = offset.saturating_add(line.len());
         offset = end;
+        lines.push((start, end, line));
+    }
 
-        if fenced.iter().any(|r| overlaps(r, &(start..end))) {
+    for (idx, (start, end, line)) in lines.iter().enumerate() {
+        if fenced.iter().any(|r| overlaps(r, &(*start..*end))) {
             continue;
         }
         let trimmed = line.trim();
         if !trimmed.starts_with('{') || !trimmed.ends_with('}') {
             continue;
         }
-        if consumed.iter().any(|r| overlaps(r, &(start..end))) {
+        if consumed.iter().any(|r| overlaps(r, &(*start..*end))) {
             continue;
+        }
+        // Check for inline fence opener pattern: previous line contains ```
+        // and next line is just ```. This catches cases where scan_fence
+        // rejected an inline opener but the JSON body is still present.
+        if idx > 0 && idx.saturating_add(1) < lines.len() {
+            let prev_line = lines
+                .get(idx.saturating_sub(1))
+                .map(|(_, _, l)| *l)
+                .unwrap_or("");
+            let next_line = lines
+                .get(idx.saturating_add(1))
+                .map(|(_, _, l)| l.trim())
+                .unwrap_or("");
+            if prev_line.contains("```") && next_line == "```" {
+                continue; // Skip - likely inside an inline-opened fence block.
+            }
         }
         if let Some(call) = parse_call_json(trimmed, known) {
             out.push(call);
-            consumed.push(start..end);
+            consumed.push(*start..*end);
         }
     }
 }
