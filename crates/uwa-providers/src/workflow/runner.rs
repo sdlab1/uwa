@@ -266,7 +266,21 @@ impl<'a> WorkflowRunner<'a> {
     /// Unknown names fall back to the variable store — so a `CAPTURE`
     /// earlier in the workflow can provide a raw CSS selector for later
     /// steps.
+    /// Resolve a named selector against `ProviderCfg.selectors`.
+    ///
+    /// Precedence:
+    /// 1. a captured variable from a `CAPTURE` step,
+    /// 2. a documented named target (`input_box`, `send_btn`, ...),
+    /// 3. a raw CSS selector when the name *looks* like one.
+    ///
+    /// Step 3 is what lets a recorded workflow carry selectors the
+    /// provider config doesn't name. It's deliberately conservative:
+    /// `definitely_not_a_selector` (alnum + underscores) is still a
+    /// `UnknownTarget`, only strings with CSS metacharacters get through.
     fn resolve(&self, name: &str) -> WorkflowResult<String> {
+        if let Some(v) = self.vars.get(name) {
+            return Ok(v.clone());
+        }
         let raw = match name {
             "input_box" | "input" => self.selectors.input.as_deref(),
             "send_btn" | "send_button" => self.selectors.send_button.as_deref(),
@@ -274,18 +288,25 @@ impl<'a> WorkflowRunner<'a> {
             "result_container" | "assistant_message" => self.selectors.assistant_message.as_deref(),
             "conversation_root" => self.selectors.conversation_root.as_deref(),
             other => {
-                // Allow capturing custom selectors via `CAPTURE` earlier
-                // in the workflow.
-                return self
-                    .vars
-                    .get(other)
-                    .cloned()
-                    .ok_or_else(|| WorkflowError::UnknownTarget(other.to_string()));
+                if looks_like_css(other) {
+                    return Ok(other.to_string());
+                }
+                return Err(WorkflowError::UnknownTarget(other.to_string()));
             }
         };
         raw.map(|s| s.to_string())
             .ok_or_else(|| WorkflowError::UnknownTarget(name.to_string()))
     }
+}
+
+fn looks_like_css(s: &str) -> bool {
+    s.contains('#')
+        || s.contains('.')
+        || s.contains('[')
+        || s.contains('>')
+        || s.contains(':')
+        || s.contains(' ')
+        || s.starts_with('*')
 }
 
 fn hash_str(s: &str) -> u64 {
@@ -574,5 +595,36 @@ mod tests {
             }],
         };
         runner.run(&p, &wf).await.unwrap();
+    }
+    #[tokio::test]
+    async fn raw_css_selector_is_accepted_when_it_looks_like_one() {
+        let p = ScriptedPage::new(vec![("el.click()", json!(true))]);
+        let sels = selectors();
+        let mut runner = WorkflowRunner::new(&sels, "hi");
+        let wf = Workflow {
+            steps: vec![Action::Click {
+                target: "#raw-button".into(),
+                optional: false,
+            }],
+        };
+        runner.run(&p, &wf).await.unwrap();
+        assert!(p.log().iter().any(|s| s.contains("#raw-button")));
+    }
+
+    #[tokio::test]
+    async fn alnum_unknown_target_still_errors() {
+        let p = ScriptedPage::new(vec![]);
+        let sels = selectors();
+        let mut runner = WorkflowRunner::new(&sels, "");
+        let wf = Workflow {
+            steps: vec![Action::Click {
+                target: "definitely_not_a_selector".into(),
+                optional: false,
+            }],
+        };
+        assert!(matches!(
+            runner.run(&p, &wf).await.unwrap_err(),
+            WorkflowError::UnknownTarget(_)
+        ));
     }
 }
