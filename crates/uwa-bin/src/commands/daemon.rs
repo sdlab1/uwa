@@ -506,20 +506,8 @@ mod tests {
 
     // ---- follow_chunk ----
 
-#[cfg(unix)]
-fn make_temp_file(content: &str) -> (std::path::PathBuf, std::fs::File) {
-    use std::fs::File;
-    use std::io::Write;
-    let mut f = tempfile::NamedTempFile::new().unwrap();
-    f.write_all(content.as_bytes()).unwrap();
-    f.flush().unwrap();
-    let path = f.path().to_path_buf();
-    (path, f.into_file())
-}
-
     #[test]
     fn follow_chunk_appends_new_bytes() {
-        use std::fs::File;
         use std::io::Write;
         use tempfile::NamedTempFile;
 
@@ -540,7 +528,6 @@ fn make_temp_file(content: &str) -> (std::path::PathBuf, std::fs::File) {
 
     #[test]
     fn follow_chunk_no_change_yields_empty() {
-        use std::fs::File;
         use std::io::Write;
         use tempfile::NamedTempFile;
 
@@ -561,7 +548,7 @@ fn make_temp_file(content: &str) -> (std::path::PathBuf, std::fs::File) {
     fn follow_chunk_recovers_after_truncation() {
         // Test truncation recovery: when file shrinks below our offset,
         // we should restart from byte 0.
-        let mut f = tempfile::NamedTempFile::new().unwrap();
+        let f = tempfile::NamedTempFile::new().unwrap();
         // Write initial content
         std::fs::write(f.path(), b"old log content").unwrap();
         let meta = std::fs::metadata(f.path()).unwrap();
@@ -578,7 +565,6 @@ fn make_temp_file(content: &str) -> (std::path::PathBuf, std::fs::File) {
 
     #[test]
     fn follow_chunk_stale_offset_mid_utf8_does_not_panic() {
-        use std::fs::File;
         use std::io::Write;
         use tempfile::NamedTempFile;
 
@@ -598,7 +584,6 @@ fn make_temp_file(content: &str) -> (std::path::PathBuf, std::fs::File) {
 
     #[test]
     fn follow_chunk_multibyte_content_round_trip() {
-        use std::fs::File;
         use std::io::Write;
         use tempfile::NamedTempFile;
 
@@ -619,7 +604,6 @@ fn make_temp_file(content: &str) -> (std::path::PathBuf, std::fs::File) {
 
     #[test]
     fn follow_chunk_inode_change_restarts_from_zero() {
-        use std::fs::File;
         use std::io::Write;
         use tempfile::NamedTempFile;
 
