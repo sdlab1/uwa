@@ -161,6 +161,13 @@ on dropped probes. `HalfOpenGuard` with Drop to release slots implemented.
 ### UWA-114 ✅ Misleading comment in pipeline
 `max_tool_retries=0` comment was misleading. Fixed.
 
+### UWA-136 ✅ Pipeline double-counts tools_rounds
+`tools_rounds` counter was incremented twice in the streaming path:
+once in `resolve_tool_calls` (when validation passes) and once in
+`run_pipeline_streaming_inner` after the call returned.
+Fixed by removing the duplicate call in the streaming path.
+Buffered path was already correct.
+
 ---
 
 ## ⬜ Open
@@ -251,14 +258,14 @@ provider_registry method to be placed outside impl block.
 File is untracked and doesn't compile in sandbox - parallel agent is
 editing it.
 
-### UWA-136 ⬜ Pipeline double-counts tools_rounds
-`tools_rounds` counter is incremented twice in error paths.
-
 ### UWA-137 ⬜ X-UWA-Provider routing missing
-Pipeline doesn't route based on `X-UWA-Provider` header.
+The header is extracted and used to select the provider in the handler.
+Potential issue: session pinning doesn't include provider in the key,
+so same conversation with different providers shares the same tab.
 
 ### UWA-138 ⬜ Buffered/stream tool call deduplication
-No deduplication between buffered and streaming tool call processing.
+Both paths use shared `resolve_tool_calls` for validation/self-heal.
+The deduplication is already implemented via the shared function.
 
 ### UWA-139 🟡 clap-derive E0453 in uwa-bin
 Under forbid lints, `clap` derive generates `allow(clippy::restriction)`
