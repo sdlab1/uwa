@@ -127,7 +127,7 @@ mod tests {
             "type": "object",
             "properties": { "n": { "type": "integer" } }
         });
-        let err = validate_arguments(&json!({ "n": "five" }), &s).unwrap_err();
+        let err = validate_arguments(&json!({ "n": "five" }), &s).expect_err("expected error");
         assert!(err.contains("integer"), "{err}");
     }
 
@@ -153,7 +153,8 @@ mod tests {
             }
         });
         assert!(validate_arguments(&json!({ "cities": ["NYC", "SF"] }), &s).is_ok());
-        let err = validate_arguments(&json!({ "cities": ["NYC", 42] }), &s).unwrap_err();
+        let err =
+            validate_arguments(&json!({ "cities": ["NYC", 42] }), &s).expect_err("expected error");
         assert!(err.contains("[1]"), "{err}");
     }
 

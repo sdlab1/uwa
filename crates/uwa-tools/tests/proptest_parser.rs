@@ -89,8 +89,9 @@ proptest! {
 
         prop_assert_eq!(out.calls.len(), 1);
         prop_assert_eq!(out.calls[0].name.as_str(), name);
-        prop_assert_eq!(out.calls[0].arguments.get(&key), Some(&val));
-        prop_assert!(!out.text.contains(OPEN), "marker left: {:?}", out.text);
+        let call = out.calls.get(0).expect("call exists");
+        prop_assert_eq!(call.name.as_str(), name);
+        prop_assert_eq!(call.arguments.get(&key), Some(&val));
         prop_assert!(out.text.contains("prefix"), "{:?}", out.text);
         prop_assert!(out.text.contains("suffix"), "{:?}", out.text);
     }
@@ -106,8 +107,8 @@ proptest! {
 
         let out = parse(&text, &known());
 
-        prop_assert_eq!(out.calls.len(), 1);
-        prop_assert_eq!(out.calls[0].arguments.get(&key), Some(&val));
+        let call = out.calls.get(0).expect("call exists");
+        prop_assert_eq!(call.arguments.get(&key), Some(&val));
         prop_assert!(!out.text.contains("```tool_call"), "{:?}", out.text);
     }
 

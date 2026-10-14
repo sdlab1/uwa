@@ -58,7 +58,10 @@ fn tool_call_fence_with_backticks_in_arguments() {
     );
     let out = parse(&text, &known());
     assert_eq!(out.calls.len(), 1, "call dropped: {out:?}");
-    assert_eq!(out.calls.first().expect("first call").arguments, args);
+    assert_eq!(
+        out.calls.first().expect("first call exists").arguments,
+        args
+    );
     assert!(out.text.is_empty(), "leftover text: {:?}", out.text);
 }
 
@@ -71,7 +74,10 @@ fn json_fence_with_backticks_in_arguments() {
     );
     let out = parse(&text, &known());
     assert_eq!(out.calls.len(), 1, "call dropped: {out:?}");
-    assert_eq!(out.calls.first().expect("first call").arguments, args);
+    assert_eq!(
+        out.calls.first().expect("first call exists").arguments,
+        args
+    );
     assert!(out.text.contains("Writing.") && out.text.contains("Done."));
     assert!(!out.text.contains("```"), "fence leftovers: {:?}", out.text);
 }
@@ -85,7 +91,10 @@ fn xml_block_with_closing_tag_in_arguments() {
     );
     let out = parse(&text, &known());
     assert_eq!(out.calls.len(), 1, "call dropped: {out:?}");
-    assert_eq!(out.calls.first().expect("first call").arguments, args);
+    assert_eq!(
+        out.calls.first().expect("first call exists").arguments,
+        args
+    );
 }
 
 #[test]
@@ -96,11 +105,11 @@ fn two_fenced_calls_are_not_merged_by_candidate_search() {
     let out = parse(&text, &known());
     assert_eq!(out.calls.len(), 2);
     assert_eq!(
-        out.calls.first().expect("first call").arguments,
+        out.calls.first().expect("first call exists").arguments,
         json!({"x": 1})
     );
     assert_eq!(
-        out.calls.get(1).expect("second call").arguments,
+        out.calls.get(1).expect("second call exists").arguments,
         json!({"x": 2})
     );
 }
@@ -112,7 +121,7 @@ fn unparseable_fence_does_not_swallow_following_valid_call() {
     let out = parse(&text, &known());
     assert_eq!(out.calls.len(), 1);
     assert_eq!(
-        out.calls.first().expect("first call").arguments,
+        out.calls.first().expect("first call exists").arguments,
         json!({"x": 2})
     );
 }
@@ -225,7 +234,7 @@ fn nasty_string() -> impl Strategy<Value = String> {
             Just("\n".to_string()),
             Just("{".to_string()),
             Just("}".to_string()),
-            proptest::string::string_regex("[a-z ]{0,6}").expect("regex"),
+            proptest::string::string_regex("[a-z ]{0,6}").expect("valid regex"),
         ],
         0..8,
     )
