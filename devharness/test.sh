@@ -156,6 +156,51 @@ echo "$T/stub2.sh" > .harness/items/W-001/agent
 "$DEVH" run >"$T/out" 2>&1 && pass "run exit 0 (override-агент)" || { fail "run exit 0 (override-агент)"; cat "$T/out"; }
 grep -q "per-item" "$T/out" && pass "override подхвачен" || fail "override подхвачен"
 
+echo "== 12. адаптация uwa: todo/NN.md + report.md =="
+R="$(fresh r12)"; base_env; cd "$R"
+mkdir -p todo
+printf '# Session 40 — Дистрибуция
+
+Создай файл done.txt.
+' > todo/40.md
+printf '# Отчет
+
+## Железные правила
+1. CI зелёный до коммита.
+' > todo/report.md
+"$DEVH" init >/dev/null
+grep -q "RULES='todo/report.md'" .harness/config && pass "init: RULES=report.md" || fail "init: RULES=report.md"
+"$DEVH" new 40 >/dev/null && [ -d .harness/items/W-040 ] && pass "new 40 → W-040" || fail "new 40 → W-040"
+grep -q "Дистрибуция" .harness/items/W-040/title && pass "title из заголовка спеки" || fail "title из заголовка спеки"
+grep -q "done.txt" .harness/items/W-040/spec.md && pass "спека скопирована" || fail "спека скопирована"
+"$DEVH" hint 40 | grep -q "todo/report.md" && pass "промпт инжектит правила" || fail "промпт инжектит правила"
+"$DEVH" run 40 >"$T/out" 2>&1 && pass "run 40" || { fail "run 40"; cat "$T/out"; }
+"$DEVH" merge 40 >/dev/null 2>&1 && pass "merge 40" || fail "merge 40"
+grep -q "## Session 40" todo/report.md && pass "report.md дописан сессией" || fail "report.md дописан сессией"
+
+echo "== 13. гигиена сообщения (MSG_DENY) + devh commit =="
+cat > "$T/stub-deny.sh" <<'S'
+#!/usr/bin/env bash
+echo marker > "$HARNESS_WORKTREE/done.txt"
+printf 'feat: реализация todo/40.md спеки
+
+детали: стаб
+' > "$HARNESS_SUMMARY"
+S
+chmod +x "$T/stub-deny.sh"
+R="$(fresh r13)"; base_env; cd "$R"
+"$DEVH" init >/dev/null
+printf 'спека
+' | "$DEVH" new "deny item" >/dev/null
+if HARNESS_AGENT="$T/stub-deny.sh" "$DEVH" run >"$T/out" 2>&1; then fail "run должен упасть (гигиена)"; else pass "run упал (гигиена сообщения)"; fi
+grep -q "devh commit" "$T/out" && pass "подсказка лечения" || fail "подсказка лечения"
+printf 'feat: маркер добавлен
+
+детали: стаб
+' > .harness/summaries/W-001.md
+"$DEVH" commit >"$T/out" 2>&1 && pass "devh commit восстановил" || { fail "devh commit восстановил"; cat "$T/out"; }
+"$DEVH" merge >/dev/null 2>&1 && pass "merge после commit" || fail "merge после commit"
+
 echo
 echo "ИТОГО: PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" -eq 0 ]
