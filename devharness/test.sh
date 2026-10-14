@@ -26,11 +26,11 @@ fresh() { # $1=имя → путь к новому репо с bare-remote и о
 
 base_env() {
   export HARNESS_AGENT="$T/stub.sh" HARNESS_WT_ROOT="$T/wt" HARNESS_VERIFY='test -f done.txt'
-  export HARNESS_MUTATE='' HARNESS_BENCH='' HARNESS_MUTATE_SCOPE='.'
-  export HARNESS_MAX_ACTIVE=3 HARNESS_MAX_FIX=3 HARNESS_AGENT_TIMEOUT=60 HARNESS_LOG_DAYS=30
+  export HARNESS_MUTATE="$T/mut-ok.sh {module}" HARNESS_MUTATE_SCOPE='.'
+  export HARNESS_BENCH='' HARNESS_MAX_ACTIVE=3 HARNESS_MAX_FIX=3 HARNESS_AGENT_TIMEOUT=60
+  export HARNESS_LOG_DAYS=30 HARNESS_NO_IGNORED=1 T_MUT_GOOD="$T/mut-good"
 }
 
-# стаб-агент: создаёт done.txt; на втором вызове включает мутационный "ремонт"
 cat > "$T/stub.sh" <<'S'
 #!/usr/bin/env bash
 [ -f "$HARNESS_WORKTREE/done.txt" ] && touch "$T_MUT_GOOD"
@@ -49,29 +49,55 @@ cat > "$T/sleeper.sh" <<'S'
 #!/usr/bin/env bash
 sleep 60
 S
-cat > "$T/fake-mutate.sh" <<'S'
+cat > "$T/stub2.sh" <<'S'
+#!/usr/bin/env bash
+echo second > "$HARNESS_WORKTREE/done2.txt"
+printf 'feat: второй агент отработал\n\nдетали: стаб2\n' > "$HARNESS_SUMMARY"
+S
+cat > "$T/stub-deny.sh" <<'S'
+#!/usr/bin/env bash
+echo marker > "$HARNESS_WORKTREE/done.txt"
+printf 'feat: реализация todo/40.md спеки\n\nдетали: стаб\n' > "$HARNESS_SUMMARY"
+S
+cat > "$T/stub-ign.sh" <<'S'
+#!/usr/bin/env bash
+[ -f "$HARNESS_WORKTREE/done.txt" ] && touch "$HARNESS_WORKTREE/ign-fix"
+echo marker > "$HARNESS_WORKTREE/done.txt"
+printf 'feat: ignored-тесты разобраны\n\nдетали: стаб\n' > "$HARNESS_SUMMARY"
+S
+cat > "$T/mut-ok.sh" <<'S'
+#!/usr/bin/env bash
+echo "Mutants: 10, Killed: 10 (100%)"
+S
+cat > "$T/mut-bad.sh" <<'S'
 #!/usr/bin/env bash
 if [ -f "$T_MUT_GOOD" ]; then echo "Mutants: 10, Killed: 10 (100%)"; else echo "Mutants: 10, Killed: 2 (20%)"; fi
 S
-chmod +x "$T"/stub*.sh "$T/sleeper.sh" "$T/fake-mutate.sh"
+cat > "$T/mut-garbage.sh" <<'S'
+#!/usr/bin/env bash
+echo "какой-то чужой вывод без маркеров"
+exit 0
+S
+chmod +x "$T"/stub*.sh "$T/sleeper.sh" "$T"/mut-*.sh
 
-echo "== 1. happy path: new → run → merge =="
+echo "== 1. happy path: new → run → merge (--no-red, mutation 100%) =="
 R="$(fresh r1)"; base_env; cd "$R"
 "$DEVH" init >/dev/null
-printf 'спека\n' | "$DEVH" new "item one" >/dev/null
+printf 'спека\n' | "$DEVH" new "item one" --no-red "стаб-сценарий" >/dev/null
 "$DEVH" run >"$T/out" 2>&1 && pass "run exit 0" || { fail "run exit 0"; cat "$T/out"; }
+grep -q "RED пропущен (записанный обход)" "$T/out" && pass "записанный обход RED" || fail "записанный обход RED"
+grep -q "killed 10 (100%)" .harness/logs/W-001-mutate.log && pass "mutation 100%" || fail "mutation 100%"
 "$DEVH" merge >"$T/out" 2>&1 && pass "merge exit 0" || fail "merge exit 0"
 [ "$(cat .harness/items/W-001/status)" = done ] && pass "статус done" || fail "статус done"
 [ "$(git log --oneline -1)" != "$(git log --oneline origin/main~1)" ] && pass "main продвинут" || fail "main продвинут"
 [ -s .harness/log.md ] && grep -q "fix-rounds=" .harness/log.md && pass "log.md + run-метрики" || fail "log.md + run-метрики"
-[ ! -d "$T/wt/devh-W-001" ] && pass "worktree убран" || fail "worktree убран"
+[ ! -d "$T/wt/"*-W-001 ] && pass "worktree убран" || fail "worktree убран"
 
 echo "== 2. mutation-гейт: 20% → fix-раунд → 100% =="
-R="$(fresh r2)"; base_env
-export HARNESS_MUTATE="$T/fake-mutate.sh {module}" HARNESS_MUTATE_SCOPE='.'
-export T_MUT_GOOD="$T/mut-good"; rm -f "$T_MUT_GOOD"
+R="$(fresh r2)"; base_env; rm -f "$T/mut-good"
+export HARNESS_MUTATE="$T/mut-bad.sh {module}"
 cd "$R"; "$DEVH" init >/dev/null
-printf 'спека\n' | "$DEVH" new "mut item" >/dev/null
+printf 'спека\n' | "$DEVH" new "mut item" --no-red "стаб" >/dev/null
 "$DEVH" run >"$T/out" 2>&1 && pass "run exit 0" || { fail "run exit 0"; cat "$T/out"; }
 grep -q "раунд фикса" "$T/out" && pass "fix-раунд был" || fail "fix-раунд был"
 grep -q "killed 10 (100%)" .harness/logs/W-001-mutate.log && pass "kill-rate 100%" || fail "kill-rate 100%"
@@ -84,10 +110,10 @@ echo 'test -f done.txt' > .harness/items/W-001/red.cmd
 "$DEVH" run >"$T/out" 2>&1 && pass "run exit 0" || { fail "run exit 0"; cat "$T/out"; }
 grep -q "OK red: падает" "$T/out" && grep -q "OK red: позеленел" "$T/out" && pass "RED-цикл" || fail "RED-цикл"
 
-echo "== 4. BLOCKED: run падает, статус active, abort → open =="
+echo "== 4. BLOCKED: run падает, abort → open =="
 R="$(fresh r4)"; base_env; cd "$R"
 "$DEVH" init >/dev/null
-printf 'спека\n' | "$DEVH" new "blocked" >/dev/null
+printf 'спека\n' | "$DEVH" new "blocked" --no-red "стаб" >/dev/null
 if HARNESS_AGENT="$T/stub-blocked.sh" HARNESS_VERIFY='true' "$DEVH" run >"$T/out" 2>&1; then fail "run должен упасть"; else pass "run упал (BLOCKED)"; fi
 [ "$(cat .harness/items/W-001/status)" = active ] && pass "статус active" || fail "статус active"
 "$DEVH" abort >/dev/null 2>&1 && pass "abort" || fail "abort"
@@ -96,7 +122,7 @@ if HARNESS_AGENT="$T/stub-blocked.sh" HARNESS_VERIFY='true' "$DEVH" run >"$T/out
 echo "== 5. noop-агент: нет изменений → run и merge отказывают =="
 R="$(fresh r5)"; base_env; cd "$R"
 "$DEVH" init >/dev/null
-printf 'спека\n' | "$DEVH" new "noop" >/dev/null
+printf 'спека\n' | "$DEVH" new "noop" --no-red "стаб" >/dev/null
 if HARNESS_AGENT="$T/stub-noop.sh" HARNESS_VERIFY='true' "$DEVH" run >"$T/out" 2>&1; then fail "run должен упасть"; else pass "run упал (нет изменений)"; fi
 if "$DEVH" merge >"$T/out" 2>&1; then fail "merge должен упасть"; else pass "merge упал (нет коммитов)"; fi
 "$DEVH" abort >/dev/null 2>&1
@@ -104,15 +130,15 @@ if "$DEVH" merge >"$T/out" 2>&1; then fail "merge должен упасть"; el
 echo "== 6. WIP-лимит =="
 R="$(fresh r6)"; base_env; cd "$R"
 HARNESS_MAX_ACTIVE=1 "$DEVH" init >/dev/null
-printf 'a\n' | "$DEVH" new "a" >/dev/null
+printf 'a\n' | "$DEVH" new "a" --no-red x >/dev/null
 "$DEVH" run >/dev/null 2>&1 && pass "первый run ок" || fail "первый run ок"
-printf 'b\n' | "$DEVH" new "b" >/dev/null
+printf 'b\n' | "$DEVH" new "b" --no-red x >/dev/null
 if "$DEVH" run >"$T/out" 2>&1; then fail "второй run должен быть отклонён"; else pass "WIP-лимит отклонил"; fi
 
 echo "== 7. watchdog-timeout: висящий агент убит =="
 R="$(fresh r7)"; base_env; cd "$R"
 "$DEVH" init >/dev/null
-printf 'спека\n' | "$DEVH" new "sleep" >/dev/null
+printf 'спека\n' | "$DEVH" new "sleep" --no-red x >/dev/null
 if HARNESS_AGENT="$T/sleeper.sh" HARNESS_AGENT_TIMEOUT=2 "$DEVH" run >"$T/out" 2>&1; then fail "run должен упасть"; else pass "timeout убил агента"; fi
 "$DEVH" abort >/dev/null 2>&1
 
@@ -127,9 +153,8 @@ wait
 echo "== 9. run.lock: merge не идёт при живом run =="
 R="$(fresh r9)"; base_env; cd "$R"
 "$DEVH" init >/dev/null
-printf 'спека\n' | "$DEVH" new "lock" >/dev/null
+printf 'спека\n' | "$DEVH" new "lock" --no-red x >/dev/null
 "$DEVH" run >/dev/null 2>&1
-# держим run.lock из постороннего процесса 3 секунды
 bash -c 'exec 8>"$1"; flock -x 8; sleep 3' _ ".harness/items/W-001/run.lock" &
 sleep 0.3
 if "$DEVH" merge >"$T/out" 2>&1; then fail "merge должен быть отклонён"; else grep -q "run.lock" "$T/out" && pass "merge отклонён (run.lock)" || fail "merge отклонён не из-за лока"; fi
@@ -143,15 +168,9 @@ R="$(fresh r10)"; base_env; cd "$R"
 grep -q "fail=0" "$T/out" && pass "doctor чист" || fail "doctor чист"
 
 echo "== 11. per-item агент: маршрутизация по сложности =="
-cat > "$T/stub2.sh" <<'S'
-#!/usr/bin/env bash
-echo second > "$HARNESS_WORKTREE/done2.txt"
-printf 'feat: второй агент отработал\n\nдетали: стаб2\n' > "$HARNESS_SUMMARY"
-S
-chmod +x "$T/stub2.sh"
 R="$(fresh r11)"; base_env; export HARNESS_VERIFY='test -f done2.txt'; cd "$R"
 "$DEVH" init >/dev/null
-printf 'спека\n' | "$DEVH" new "agent item" >/dev/null
+printf 'спека\n' | "$DEVH" new "agent item" --no-red x >/dev/null
 echo "$T/stub2.sh" > .harness/items/W-001/agent
 "$DEVH" run >"$T/out" 2>&1 && pass "run exit 0 (override-агент)" || { fail "run exit 0 (override-агент)"; cat "$T/out"; }
 grep -q "per-item" "$T/out" && pass "override подхвачен" || fail "override подхвачен"
@@ -159,47 +178,61 @@ grep -q "per-item" "$T/out" && pass "override подхвачен" || fail "overr
 echo "== 12. адаптация uwa: todo/NN.md + report.md =="
 R="$(fresh r12)"; base_env; cd "$R"
 mkdir -p todo
-printf '# Session 40 — Дистрибуция
-
-Создай файл done.txt.
-' > todo/40.md
-printf '# Отчет
-
-## Железные правила
-1. CI зелёный до коммита.
-' > todo/report.md
+printf '# Session 40 — Дистрибуция\n\nСоздай файл done.txt.\n' > todo/40.md
+printf '# Отчет\n\n## Железные правила\n1. CI зелёный до коммита.\n' > todo/report.md
 "$DEVH" init >/dev/null
 grep -q "RULES='todo/report.md'" .harness/config && pass "init: RULES=report.md" || fail "init: RULES=report.md"
 "$DEVH" new 40 >/dev/null && [ -d .harness/items/W-040 ] && pass "new 40 → W-040" || fail "new 40 → W-040"
+echo 'test -f done.txt' > .harness/items/W-040/red.cmd
 grep -q "Дистрибуция" .harness/items/W-040/title && pass "title из заголовка спеки" || fail "title из заголовка спеки"
-grep -q "done.txt" .harness/items/W-040/spec.md && pass "спека скопирована" || fail "спека скопирована"
-"$DEVH" hint 40 | grep -q "todo/report.md" && pass "промпт инжектит правила" || fail "промпт инжектит правила"
+"$DEVH" hint 40 | grep -q "todo/report.md" && pass "справочник в промпте" || fail "справочник в промпте"
 "$DEVH" run 40 >"$T/out" 2>&1 && pass "run 40" || { fail "run 40"; cat "$T/out"; }
 "$DEVH" merge 40 >/dev/null 2>&1 && pass "merge 40" || fail "merge 40"
 grep -q "## Session 40" todo/report.md && pass "report.md дописан сессией" || fail "report.md дописан сессией"
 
 echo "== 13. гигиена сообщения (MSG_DENY) + devh commit =="
-cat > "$T/stub-deny.sh" <<'S'
-#!/usr/bin/env bash
-echo marker > "$HARNESS_WORKTREE/done.txt"
-printf 'feat: реализация todo/40.md спеки
-
-детали: стаб
-' > "$HARNESS_SUMMARY"
-S
-chmod +x "$T/stub-deny.sh"
 R="$(fresh r13)"; base_env; cd "$R"
 "$DEVH" init >/dev/null
-printf 'спека
-' | "$DEVH" new "deny item" >/dev/null
+printf 'спека\n' | "$DEVH" new "deny item" --no-red x >/dev/null
 if HARNESS_AGENT="$T/stub-deny.sh" "$DEVH" run >"$T/out" 2>&1; then fail "run должен упасть (гигиена)"; else pass "run упал (гигиена сообщения)"; fi
 grep -q "devh commit" "$T/out" && pass "подсказка лечения" || fail "подсказка лечения"
-printf 'feat: маркер добавлен
-
-детали: стаб
-' > .harness/summaries/W-001.md
+printf 'feat: маркер добавлен\n\nдетали: стаб\n' > .harness/summaries/W-001.md
 "$DEVH" commit >"$T/out" 2>&1 && pass "devh commit восстановил" || { fail "devh commit восстановил"; cat "$T/out"; }
 "$DEVH" merge >/dev/null 2>&1 && pass "merge после commit" || fail "merge после commit"
+
+echo "== 14. RED обязателен: без red.cmd и без --no-red run отказывает =="
+R="$(fresh r14)"; base_env; cd "$R"
+"$DEVH" init >/dev/null
+printf 'спека\n' | "$DEVH" new "no red" >/dev/null
+if "$DEVH" run >"$T/out" 2>&1; then fail "run должен упасть (нет RED)"; else pass "run упал (нет RED)"; fi
+grep -q "RED-пруф ОБЯЗАТЕЛЕН" "$T/out" && pass "сообщение про RED-пруф" || fail "сообщение про RED-пруф"
+"$DEVH" abort >/dev/null 2>&1
+
+echo "== 15. MUTATE обязателен: пустой MUTATE = блокер =="
+R="$(fresh r15)"; base_env; cd "$R"
+HARNESS_MUTATE='' "$DEVH" init >/dev/null
+printf 'спека\n' | "$DEVH" new "m item" --no-red x >/dev/null
+if env -u HARNESS_MUTATE "$DEVH" run >"$T/out" 2>&1; then fail "run должен упасть (MUTATE)"; else pass "run упал (MUTATE обязателен)"; fi
+grep -q "MUTATE-гейт ОБЯЗАТЕЛЕН" "$T/out" && pass "сообщение про MUTATE" || fail "сообщение про MUTATE"
+[ "$(cat .harness/items/W-001/status)" = open ] && pass "статус open (fail-fast до claim)" || fail "статус open"
+
+echo "== 16. mutation env-блокер: нераспознанный инструмент = FAIL, не fix-раунд =="
+R="$(fresh r16)"; base_env; export HARNESS_MUTATE="$T/mut-garbage.sh"; cd "$R"
+"$DEVH" init >/dev/null
+printf 'спека\n' | "$DEVH" new "env item" --no-red x >/dev/null
+if "$DEVH" run >"$T/out" 2>&1; then fail "run должен упасть (env)"; else pass "run упал (блокер среды)"; fi
+grep -q "Блокер СРЕДЫ" "$T/out" && pass "блокер среды помечен" || fail "блокер среды помечен"
+grep -q "раунд фикса" "$T/out" && fail "не должен быть fix-раунд" || pass "не fix-раунд (env ≠ работа агента)"
+"$DEVH" abort >/dev/null 2>&1
+
+echo "== 17. NO-IGNORED: ignored>0 = скрытый красный =="
+R="$(fresh r17)"; base_env
+export HARNESS_VERIFY='if [ -f ign-fix ]; then echo "3 passed; 0 failed; 0 ignored"; else echo "3 passed; 0 failed; 2 ignored"; fi; test -f done.txt'
+export HARNESS_AGENT="$T/stub-ign.sh"
+cd "$R"; "$DEVH" init >/dev/null
+printf 'спека\n' | "$DEVH" new "ign item" --no-red x >/dev/null
+"$DEVH" run >"$T/out" 2>&1 && pass "run exit 0" || { fail "run exit 0"; cat "$T/out"; }
+grep -q "гейт NO-IGNORED упал" "$T/out" && pass "NO-IGNORED fix-раунд был" || fail "NO-IGNORED fix-раунд был"
 
 echo
 echo "ИТОГО: PASS=$PASS FAIL=$FAIL"

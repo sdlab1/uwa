@@ -11,11 +11,14 @@
 #     лок держит открытый fd — ядро отпускает его при смерти процесса, stale-локов не бывает
 #   * логи: retention LOG_DAYS в `clean`
 #
-# Гейты (все опциональны, пустой конфиг = пропуск):
-#   VERIFY   — тесты/сборка обязаны проходить
-#   MUTATE   — мутационное тестирование изменённых файлов; kill-rate >= MIN_KILL%
-#   BENCH    — произвольная команда перф-гейта (напр. criterion против baseline)
-#   red.cmd  — RED-пруф: до работы обязан падать, после — проходить
+# Гейты — ОБЯЗАТЕЛЬНЫ (проза report.md переведена в код):
+#   VERIFY     — тесты/сборка обязаны проходить до коммита
+#   NO-IGNORED — ни одного ignored-теста в выводе verify (N ignored > 0 = красный)
+#   MUTATE     — мутационный гейт на изменённых файлах: kill-rate >= MIN_KILL%;
+#                инструмент не установлен = блокер СРЕДЫ, а не «пропуск»
+#   red.cmd    — RED-пруф, В ПЕРВУЮ ОЧЕРЕДЬ: до работы обязан падать, после — проходить;
+#                обход только записанный: devh new --no-red "<причина>"
+# Опционален ТОЛЬКО BENCH — перф-гейт (напр. criterion против baseline)
 #
 # Команды:
 #   devh init / new "title" [--no-red "причина"] | new <N> (из todo/N.md) / list / hint [id]
@@ -49,13 +52,14 @@ LOG_DAYS="${HARNESS_LOG_DAYS:-30}"
 RULES="${HARNESS_RULES:-}"
 RULES_LOG="${HARNESS_RULES_LOG:-}"
 MSG_DENY="${HARNESS_MSG_DENY:-}"
+NO_IGNORED="${HARNESS_NO_IGNORED:-1}"
 
 need_conf() {
   [ -f "$CONF" ] || { echo "devh: нет $CONF — сначала: devh init" >&2; exit 1; }
   # shellcheck disable=SC1090
   . "$CONF"
   local v env
-  for v in VERIFY BOOTSTRAP AGENT MAX_FIX REMOTE MAIN WT_ROOT MAX_ACTIVE MIN_KILL MUTATE MUTATE_SCOPE BENCH AGENT_TIMEOUT LOG_DAYS RULES RULES_LOG MSG_DENY; do
+  for v in VERIFY BOOTSTRAP AGENT MAX_FIX REMOTE MAIN WT_ROOT MAX_ACTIVE MIN_KILL MUTATE MUTATE_SCOPE BENCH AGENT_TIMEOUT LOG_DAYS RULES RULES_LOG MSG_DENY NO_IGNORED; do
     env="HARNESS_$v"
     # shellcheck disable=SC2086
     if [ -n "${!env:-}" ]; then printf -v "$v" '%s' "${!env}"; fi
@@ -154,7 +158,7 @@ prompt_for() { # $1=id
 "
   fi
   if [ -n "$RULES" ]; then
-    extra="${extra}Правила проекта: прочитай ПОЛНОСТЬЮ $ROOT/$RULES до начала работы и исполняй БЕСПРЕКОСЛОВНО (это конституция проекта: железные правила + уроки). В тексте работы и в summary НЕ упоминай этот файл и todo/.
+    extra="${extra}Справочник проекта: $ROOT/$RULES — прочитай целиком. Это база известных граблей и уроков (технические знания: как здесь пишется код). Процессные правила уже вшиты в гейты харнесса. В тексте работы и в summary НЕ упоминай этот файл и todo/.
 "
   fi
   if [ -n "$MUTATE" ]; then
@@ -227,6 +231,7 @@ BENCH=''                     # перф-гейт, пример: bash devharness/
 RULES='$RULES'               # файл правил проекта; промпт: «прочитай полностью, исполняй беспрекословно»
 RULES_LOG='$RULES_LOG'       # куда дописывать «## Session N …» после merge (пусто = выкл)
 MSG_DENY='$MSG_DENY'         # гигиена сообщения коммита (grep -E): матч → reject, лечение: devh commit
+NO_IGNORED=$NO_IGNORED          # 1 = ни одного ignored-теста в выводе verify (0 = выкл для чужих форматов)
 EOF
   # локальный ignore — workflow не попадает в git вообще
   touch "$ROOT/.git/info/exclude"
@@ -238,7 +243,14 @@ EOF
 # ─── new ───────────────────────────────────────────────────────────
 cmd_new() {
   need_conf
-  local arg="${1:-}" title id d
+  local arg="" no_red=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --no-red) no_red="${2:?--no-red требует записанную причину}"; shift 2 ;;
+      *) arg="$1"; shift ;;
+    esac
+  done
+  local title id d
   # числовой id = сессия из todo/N.md (workflow uwa)
   if [[ "$arg" =~ ^[0-9]+$ ]] && [ -f "$ROOT/todo/$arg.md" ]; then
     id="$(printf 'W-%03d' "$arg")"; d="$(items_dir)/$id"
@@ -248,7 +260,9 @@ cmd_new() {
     crit_end
     title="$(head -1 "$d/spec.md")"; title="${title#\# }"; [ -n "$title" ] || title="Session $arg"
     echo "$title" > "$d/title"; echo open > "$d/status"; : > "$d/plan.md"
-    echo "OK $id: $title (спека скопирована из todo/$arg.md)"
+    [ -n "$no_red" ] && echo "$no_red" > "$d/no-red"
+    echo "OK $id: $title (спека из todo/$arg.md)${no_red:+ [RED пропущен: $no_red]}"
+    echo "   RED-пруф ОБЯЗАТЕЛЕН (в первую очередь): $d/red.cmd — команда, падающая на чистом HEAD"
     return 0
   fi
   title="${arg:?devh new \"title\"}"
@@ -258,8 +272,9 @@ cmd_new() {
   crit_end
   if [ ! -t 0 ]; then cat > "$d/spec.md"
   else : > "$d/spec.md"; "${EDITOR:-vi}" "$d/spec.md"; fi
-  echo "OK $id: $title (спека: $d/spec.md)"
-  echo "   опционально RED-пруф: $d/red.cmd (до работы ОБЯЗАН падать, после — проходить)"
+  [ -n "$no_red" ] && echo "$no_red" > "$d/no-red"
+  echo "OK $id: $title (спека: $d/spec.md)${no_red:+ [RED пропущен: $no_red]}"
+  echo "   RED-пруф ОБЯЗАТЕЛЕН (в первую очередь): $d/red.cmd — команда, падающая на чистом HEAD"
 }
 
 # ─── list ──────────────────────────────────────────────────────────
@@ -289,7 +304,7 @@ cmd_hint() {
 # ─── mutation-гейт ─────────────────────────────────────────────────
 # Вывод инструмента: 'Mutants: N, Killed: M' (muex-формат). Нет вывода → честная деградация.
 mutate_gate() {
-  local files f mod out t k pct fail=0 warned=0
+  local files f mod out t k pct fail=0
   files="$(git -C "$wt" diff --name-only HEAD -- "$MUTATE_SCOPE" 2>/dev/null | sort -u)"
   if [ -z "$files" ] && [ -n "$(git -C "$wt" status --porcelain -- "$MUTATE_SCOPE")" ]; then
     files="$(git -C "$wt" status --porcelain -- "$MUTATE_SCOPE" 2>/dev/null | cut -c4- | sort -u)"
@@ -306,7 +321,8 @@ mutate_gate() {
         echo "mutation: 0 мутантов — нечего убивать, пропуск"
       fi
     else
-      echo "mutation ⚠: вывод без 'Mutants: N, Killed: M' — гейт пропущен (инструмент не установлен?)"
+      echo "mutation env: инструмент не распознан (нет 'Mutants: N, Killed: M'); MUTATE='$MUTATE'"
+      return 2
     fi
     return 0
   fi
@@ -329,20 +345,27 @@ mutate_gate() {
         echo "mutation $f: 0 мутантов — пропуск"
       fi
     else
-      echo "mutation ⚠ $f: вывод без 'Mutants: N, Killed: M' — пропуск файла (инструмент не установлен?)"
-      warned=1
+      echo "mutation env: инструмент не распознан для $f; MUTATE='$MUTATE'"
+      return 2
     fi
   done <<EOF2
 $files
 EOF2
-  if [ "$warned" = 1 ] && [ "$fail" = 0 ]; then echo "mutation ⚠: гейт деградировал (нет распознанных прогонов) — считается пройденным"; fi
   [ "$fail" = 0 ]
+}
+
+# железное правило №2: ни одного ignored-теста в выводе verify
+no_ignored_ok() { # $1 = лог verify
+  local n
+  n="$( { grep -oE '[0-9]+ ignored' "$1" 2>/dev/null || true; } | awk '$1+0>0' | wc -l )"
+  [ "$n" -eq 0 ]
 }
 
 # ─── run ────────────────────────────────────────────────────────────
 cmd_run() {
   need_conf
   [ -n "$VERIFY" ] || { echo "devh: VERIFY не задан ($CONF)" >&2; exit 1; }
+  [ -n "$MUTATE" ] || { echo "devh: MUTATE-гейт ОБЯЗАТЕЛЕН, «пропуск» запрещён — пропиши MUTATE в $CONF (gobot: cd gobot + mix mutants/muex; rust: cargo-mutants)" >&2; exit 1; }
   local id; id="$(resolve "${1:-}")"
   item_runlock "$id" "run"      # per-item лок: два run на один item невозможны
   local d wt br log sum round=0 msg dels prev_st
@@ -392,20 +415,33 @@ cmd_run() {
     echo "OK resume worktree: $wt"
   fi
 
-  # 2. RED-пруф: до работы обязан падать
-  if [ -f "$d/red.cmd" ]; then
+  # 2. RED-пруф — В ПЕРВУЮ ОЧЕРЕДЬ: обязательный гейт
+  if [ -s "$d/no-red" ]; then
+    echo "⚠  RED пропущен (записанный обход): $(cat "$d/no-red")"
+  elif [ -f "$d/red.cmd" ]; then
     if (cd "$wt" && bash "$d/red.cmd") >/dev/null 2>&1; then
       echo "FAIL: red.cmd уже зелёный на чистом HEAD — это не баг. Почини red.cmd или удали." >&2
       exit 1
     fi
     echo "OK red: падает на HEAD (пруф воспроизводится)"
+  else
+    echo "FAIL: RED-пруф ОБЯЗАТЕЛЕН (в первую очередь). Напиши $d/red.cmd — команду, падающую на чистом HEAD и зеленеющую после работы; либо записанный обход: devh abort $id && devh new --no-red \"<причина>\" …" >&2
+    exit 1
   fi
 
   # 3. агент → гейт-цикл (verify → mutation → bench; падение → fix-раунд агенту)
   gate() {
+    local mrc
     if ! (cd "$wt" && bash -c "$VERIFY") > "$log" 2>&1; then which=VERIFY; return 1; fi
+    if [ "$NO_IGNORED" = 1 ] && ! no_ignored_ok "$log"; then which=NO-IGNORED; return 1; fi
     if [ -n "$MUTATE" ]; then
-      if ! mutate_gate > "$mlog" 2>&1; then which=MUTATE; return 1; fi
+      mutate_gate > "$mlog" 2>&1
+      mrc=$?
+      if [ "$mrc" -eq 2 ]; then
+        echo "FAIL: mutation env-блокер — инструмент не распознан. Блокер СРЕДЫ, не работа агента: установи (gobot: muex; rust: cargo-mutants) или исправь MUTATE в $CONF. Детали: $mlog" >&2
+        set_status "$id" active; exit 1
+      fi
+      if [ "$mrc" -ne 0 ]; then which=MUTATE; return 1; fi
     fi
     if [ -n "$BENCH" ]; then
       if ! (cd "$wt" && bash -c "$BENCH") > "$blog" 2>&1; then which=BENCH; return 1; fi
@@ -427,6 +463,7 @@ cmd_run() {
 $(tail -40 "$log")
 
 Почини по логу. Правила те же: git не трогать, после фикса сам прогони: \`$VERIFY\`. Обнови summary: $sum" ;;
+      NO-IGNORED) run_agent "Verify прошёл, но в выводе есть ignored-тесты (>0). Железное правило: ни одного ignored — ignored = скрытый красный. Хвост лога:\n\n$(grep -E '[0-9]+ ignored' "$log" | head -10)\n\nРазбери причину игнора: почини тест и включи его; удаление проверки или новый ignore без причины запрещены. git не трогай. Обнови summary: $sum" ;;
       MUTATE) run_agent "Mutation-гейт не прошёл: твои тесты НЕ УБИВАЮТ мутантов на изменённом коде (kill-rate < ${MIN_KILL}%). Лог:
 
 $(tail -40 "$mlog")
@@ -442,7 +479,7 @@ $(tail -40 "$blog")
   echo "OK гейты: verify${MUTATE:+ +mutation}${BENCH:+ +bench}"
 
   # 4. RED-пруф: после работы обязан проходить
-  if [ -f "$d/red.cmd" ]; then
+  if [ -f "$d/red.cmd" ] && [ ! -s "$d/no-red" ]; then
     (cd "$wt" && bash "$d/red.cmd") >/dev/null 2>&1 \
       || { echo "FAIL: red.cmd не позеленел — фикс не доказан" >&2; set_status "$id" active; exit 1; }
     echo "OK red: позеленел"
