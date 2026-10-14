@@ -133,7 +133,8 @@ HARNESS_MAX_ACTIVE=1 "$DEVH" init >/dev/null
 printf 'a\n' | "$DEVH" new "a" --no-red x >/dev/null
 "$DEVH" run >/dev/null 2>&1 && pass "первый run ок" || fail "первый run ок"
 printf 'b\n' | "$DEVH" new "b" --no-red x >/dev/null
-if "$DEVH" run >"$T/out" 2>&1; then fail "второй run должен быть отклонён"; else pass "WIP-лимит отклонил"; fi
+if HARNESS_MAX_ACTIVE=1 "$DEVH" run W-002 >"$T/out" 2>&1; then fail "второй run (W-002) должен быть отклонён"; else pass "WIP-лимит отклонил W-002"; fi
+grep -q "WIP-лимит" "$T/out" && pass "сообщение WIP-лимита" || fail "сообщение WIP-лимита"
 
 echo "== 7. watchdog-timeout: висящий агент убит =="
 R="$(fresh r7)"; base_env; cd "$R"

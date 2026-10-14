@@ -11,7 +11,8 @@ devh run           # worktree → агент → гейты → commit → push 
 devh merge         # ревью сделано → rebase → ff-push в MAIN → лог → next:
 devh hint          # промпт следующей модели (спека + план + контекст)
 devh list / abort / clean / doctor
-bash devharness/test.sh   # regression suite харнесса (19 сценариев / 56 ассертов)
+bash devharness/test.sh       # regression suite харнесса (19 сценариев / 57 ассертов)
+bash devharness/selfmutate.sh # мутационная проверка самих тестов: вносим баги в копию devh — suite обязан их убивать (kill-rate 4/4)
 ```
 
 Алиас: `alias devh='/home/user/project_uwa/devharness/devh'`, затем из целевого
