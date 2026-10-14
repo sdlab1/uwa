@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Parser)]
+#[allow(clippy::restriction)]
 #[command(version, about = "Universal Web API — Rust bridge")]
 struct Cli {
     /// Path to TOML config.
