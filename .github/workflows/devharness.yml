@@ -1,0 +1,16 @@
+name: devharness
+on:
+  push:
+    paths: ['devharness/**']
+  pull_request:
+    paths: ['devharness/**']
+  workflow_dispatch:
+jobs:
+  selfcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+      - run: shellcheck devharness/devh devharness/test.sh devharness/selfmutate.sh devharness/examples/check_bench.sh
+      - run: bash devharness/test.sh
+      - run: bash devharness/selfmutate.sh

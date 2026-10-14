@@ -2,7 +2,7 @@
 # devharness/selfmutate.sh — мутационная проверка СОБСТВЕННЫХ тестов харнесса.
 # Вносим известные баги в ИЗОЛИРОВАННУЮ копию devh и проверяем, что test.sh их убивает.
 # «Тесты на вес золота» — применимо и к тестам самого харнесса (kill-rate).
-# Гейт: 7/7. Новые гейты devh должны сопровождаться новым мутантом здесь.
+# Гейт: 13/13. Новые гейты devh должны сопровождаться новым мутантом здесь.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 W="$(mktemp -d /tmp/devh-selfmut-XXXXXX)"
@@ -87,6 +87,50 @@ n = '''  if [ "$(git -C "$wt" rev-list --count "$MAIN..HEAD")" -eq 99 ] 2>/dev/n
 assert s.count(o) == 1
 open('devh', 'w', encoding='utf-8').write(s.replace(o, n))
 P7
+cat > "$W/m8.py" <<'P8'
+s = open('devh', encoding='utf-8').read()
+o = '''        if [ "$pct" -lt "$MIN_KILL" ]; then
+          echo "mutation FAIL $f: kill-rate'''
+n = '''        if false; then
+          echo "mutation FAIL $f: kill-rate'''
+assert s.count(o) == 1
+open('devh', 'w', encoding='utf-8').write(s.replace(o, n))
+P8
+cat > "$W/m9.py" <<'P9'
+s = open('devh', encoding='utf-8').read()
+o = '''  elif [ ! -f "$d/red.cmd" ]; then'''
+n = '''  elif false; then'''
+assert s.count(o) == 1
+open('devh', 'w', encoding='utf-8').write(s.replace(o, n))
+P9
+cat > "$W/m10.py" <<'P10'
+s = open('devh', encoding='utf-8').read()
+o = '''        timeout "$AGENT_TIMEOUT" $AGENT "$1" ) > "$HDIR/logs/$id-agent.log" 2>&1 \\'''
+n = '''        timeout 300 $AGENT "$1" ) > "$HDIR/logs/$id-agent.log" 2>&1 \\'''
+assert s.count(o) == 1
+open('devh', 'w', encoding='utf-8').write(s.replace(o, n))
+P10
+cat > "$W/m11.py" <<'P11'
+s = open('devh', encoding='utf-8').read()
+o = '''    flock -n 8 || { echo "devh: $1 сейчас в работе (run.lock занят) — $2 отклонён" >&2; exit 1; }'''
+n = '''    flock -x 8 || { echo "devh: $1 сейчас в работе (run.lock занят) — $2 отклонён" >&2; exit 1; }'''
+assert s.count(o) == 1
+open('devh', 'w', encoding='utf-8').write(s.replace(o, n))
+P11
+cat > "$W/m12.py" <<'P12'
+s = open('devh', encoding='utf-8').read()
+o = '''  if head -1 "$sum" | grep -q '^BLOCKED'; then'''
+n = '''  if false; then'''
+assert s.count(o) == 1
+open('devh', 'w', encoding='utf-8').write(s.replace(o, n))
+P12
+cat > "$W/m13.py" <<'P13'
+s = open('devh', encoding='utf-8').read()
+o = '''        [ "$pct" -lt "$MIN_KILL" ] && { echo "mutation FAIL: kill-rate ${pct}% < ${MIN_KILL}%"; return 1; }'''
+n = '''        false && { echo "mutation FAIL: kill-rate ${pct}% < ${MIN_KILL}%"; return 1; }'''
+assert s.count(o) == 1
+open('devh', 'w', encoding='utf-8').write(s.replace(o, n))
+P13
 
 echo "Мутационная проверка тестов devh (изолированная копия: $W/h):"
 mutant "M1: NO-IGNORED гейт отключён" "$W/m1.py"
@@ -96,6 +140,12 @@ mutant "M4: resume ломает RED pre-check (старый баг)" "$W/m4.py"
 mutant "M5: RED пост-гейт отключён (позеленение не проверяется)" "$W/m5.py"
 mutant "M6: гигиена в devh commit отключена (2-я линия)" "$W/m6.py"
 mutant "M7: merge-guard «нет коммитов» отключён" "$W/m7.py"
+mutant "M8: kill-rate MIN_KILL не проверяется (мутации не гейтят)" "$W/m8.py"
+mutant "M9: обязательность RED отключена (нет red.cmd → run идёт)" "$W/m9.py"
+mutant "M10: watchdog-timeout игнорируется (всегда 300с)" "$W/m10.py"
+mutant "M11: run.lock блокирующий вместо отказного (гонка merge/run)" "$W/m11.py"
+mutant "M12: BLOCKED-детект отключён" "$W/m12.py"
+mutant "M13: kill-rate в single-run ветке не проверяется" "$W/m13.py"
 echo
 echo "KILL-RATE: $KILLED/$TOTAL (skip=$SKIP)"
 [ "$KILLED" -eq "$TOTAL" ] && [ "$SKIP" -eq 0 ]

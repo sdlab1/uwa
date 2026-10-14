@@ -50,7 +50,7 @@ printf 'noop: ничего не делал\n' > "$HARNESS_SUMMARY"
 S
 cat > "$T/sleeper.sh" <<'S'
 #!/usr/bin/env bash
-sleep 60
+sleep 5
 S
 cat > "$T/stub2.sh" <<'S'
 #!/usr/bin/env bash
@@ -105,6 +105,7 @@ grep -q "killed 10 (100%)" .harness/logs/W-001-mutate.log && pass "mutation 100%
 [ "$(cat .harness/items/W-001/status)" = "done" ] && pass "статус done" || fail "статус done"
 [ "$(git log --oneline -1)" != "$(git log --oneline origin/main~1)" ] && pass "main продвинут" || fail "main продвинут"
 [ -s .harness/log.md ] && grep -q "fix-rounds=" .harness/log.md && pass "log.md + run-метрики" || fail "log.md + run-метрики"
+"$DEVH" logs W-001 >"$T/out" 2>&1 && grep -q "agent.log" "$T/out" && pass "devh logs показывает логи" || fail "devh logs показывает логи"
 if ls "$T/wt/"*-W-001 >/dev/null 2>&1; then fail "worktree убран"; else pass "worktree убран"; fi
 
 echo "== 2. mutation-гейт: 20% → fix-раунд → 100% =="
@@ -129,6 +130,7 @@ R="$(fresh r4)"; base_env; cd "$R" || exit 1
 "$DEVH" init >/dev/null
 printf 'спека\n' | "$DEVH" new "blocked" --no-red "стаб" >/dev/null
 if HARNESS_AGENT="$T/stub-blocked.sh" HARNESS_VERIFY='true' "$DEVH" run >"$T/out" 2>&1; then fail "run должен упасть"; else pass "run упал (BLOCKED)"; fi
+grep -q "BLOCKED: не хватает данных" "$T/out" && pass "BLOCKED-детект по подписи" || fail "BLOCKED-детект по подписи"
 [ "$(cat .harness/items/W-001/status)" = active ] && pass "статус active" || fail "статус active"
 "$DEVH" abort >/dev/null 2>&1 && pass "abort" || fail "abort"
 [ "$(cat .harness/items/W-001/status)" = open ] && pass "статус open" || fail "статус open"
@@ -155,6 +157,7 @@ R="$(fresh r7)"; base_env; cd "$R" || exit 1
 "$DEVH" init >/dev/null
 printf 'спека\n' | "$DEVH" new "sleep" --no-red x >/dev/null
 if HARNESS_AGENT="$T/sleeper.sh" HARNESS_AGENT_TIMEOUT=2 "$DEVH" run >"$T/out" 2>&1; then fail "run должен упасть"; else pass "timeout убил агента"; fi
+grep -q "timeout=" "$T/out" && pass "watchdog-подпись в ошибке" || fail "watchdog-подпись в ошибке"
 "$DEVH" abort >/dev/null 2>&1
 
 echo "== 8. параллельные new: id не склеиваются (flock) =="
@@ -280,6 +283,20 @@ if HARNESS_AGENT="$T/stub-blk-red.sh" "$DEVH" run >"$T/out" 2>&1; then fail "1-�
 HARNESS_AGENT="$T/stub.sh" "$DEVH" run >"$T/out" 2>&1 && pass "resume run exit 0" || { fail "resume run exit 0"; cat "$T/out"; }
 grep -q "RED pre-check пропущен" "$T/out" && pass "pre-check пропущен на resume" || fail "pre-check пропущен на resume"
 "$DEVH" merge >/dev/null 2>&1 && pass "merge после resume" || fail "merge после resume"
+
+echo "== 20. mutation single-run (без {module}): kill-rate гейтит и эту ветку =="
+cat > "$T/mut-bad2.sh" <<'S'
+#!/usr/bin/env bash
+if [ -f "$T_MUT_GOOD" ]; then echo "Mutants: 10, Killed: 10 (100%)"; else echo "Mutants: 10, Killed: 2 (20%)"; fi
+S
+chmod +x "$T/mut-bad2.sh"
+R="$(fresh r20)"; base_env; rm -f "$T/mut-good"; export HARNESS_MUTATE="$T/mut-bad2.sh"
+cd "$R" || exit 1; "$DEVH" init >/dev/null
+printf 'спека
+' | "$DEVH" new "single item" --no-red "стаб" >/dev/null
+"$DEVH" run >"$T/out" 2>&1 && pass "run exit 0 (single-run mutation)" || { fail "run exit 0"; cat "$T/out"; }
+grep -q "раунд фикса" "$T/out" && pass "fix-раунд был (single-run)" || fail "fix-раунд был (single-run)"
+grep -q "killed 10 (100%)" .harness/logs/W-001-mutate.log && pass "kill-rate 100% (single-run)" || fail "kill-rate 100% (single-run)"
 
 echo
 echo "ИТОГО: PASS=$PASS FAIL=$FAIL"

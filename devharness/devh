@@ -24,6 +24,7 @@
 #   devh init / new "title" [--no-red "причина"] | new <N> (из todo/N.md) / list / hint [id]
 #   devh run [id] / commit [id] (правка summary) / merge [id]
 #   devh abort [id] / clean / doctor
+#   devh logs [id]             логи item: пути ко всем логам + хвосты agent/verify
 #
 # State: .harness/ у ЦЕЛЕВОГО репо (в git не попадает — локальный exclude). Без БД.
 # Дом харнесса: project_uwa/devharness; сам скрипт location-independent (ROOT по cwd).
@@ -612,6 +613,30 @@ cmd_merge() {
   local nx; nx="$(first_live)" && echo "next: $nx — $(cat "$(items_dir)/$nx/title" 2>/dev/null)" || echo "next: очередь пуста 🎉"
 }
 
+# ─── logs (наблюдаемость) ───────────────────────────────────────────
+cmd_logs() {
+  need_conf
+  local id l
+  if [ -n "${1:-}" ]; then
+    id="$(resolve "$1")"
+    echo "# логи $id — $HDIR/logs/:"
+    find "$HDIR/logs" -maxdepth 1 -name "$id-*.log" -printf '%f (%s байт)\n' 2>/dev/null | sort | sed 's/^/  /'
+    echo
+    echo "живой прогон можно смотреть: tail -f $HDIR/logs/$id-agent.log"
+    if [ -f "$HDIR/logs/$id-agent.log" ]; then
+      echo; echo "— хвост agent.log:"; tail -15 "$HDIR/logs/$id-agent.log"
+    fi
+    if [ -f "$HDIR/logs/$id-verify.log" ]; then
+      echo; echo "— хвост verify.log:"; tail -10 "$HDIR/logs/$id-verify.log"
+    fi
+  else
+    echo "# все логи ($HDIR/logs/, свежие сверху):"
+    local l
+    l="$(find "$HDIR/logs" -maxdepth 1 -name '*.log' -printf '%TY-%Tm-%Td %TH:%TM %f (%s байт)\n' 2>/dev/null | sort -r | head -15)"
+    if [ -n "$l" ]; then printf '%s\n' "$l" | sed 's/^/  /'; else echo "  (пусто)"; fi
+  fi
+}
+
 # ─── abort / clean / doctor ────────────────────────────────────────
 cmd_abort() {
   need_conf
@@ -694,5 +719,6 @@ case "${1:-help}" in
   abort) shift; cmd_abort "$@" ;;
   clean) shift; cmd_clean "$@" ;;
   doctor) shift; cmd_doctor "$@" ;;
+  logs) shift; cmd_logs "$@" ;;
   *) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//' ;;
 esac
