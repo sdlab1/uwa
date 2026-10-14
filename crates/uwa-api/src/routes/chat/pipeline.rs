@@ -64,7 +64,6 @@ pub enum StreamEvent {
     Error(UwaError),
 }
 
-
 /// Why the streaming turn ended early.
 #[derive(Debug)]
 enum Abort {
@@ -105,10 +104,12 @@ pub async fn run_pipeline(
     profile: &ProfileName,
     hint: &RoutingHint,
 ) -> Result<(String, Vec<ToolCall>, FinishReason), UwaError> {
-    let provider_cfg = state
-        .config
-        .provider_for_model(&req.model)
-        .ok_or_else(|| unknown_model(state, &req.model))?;
+    let provider_cfg = state.config.provider_for_model(&req.model).ok_or_else(|| {
+        UwaError::UnknownModel(uwa_core::ModelNotFound::new(
+            req.model.clone(),
+            state.config.available_models(),
+        ))
+    })?;
 
     let breaker = state.breaker(&provider_cfg.name);
     breaker.allow()?;
@@ -227,10 +228,12 @@ pub async fn run_pipeline_streaming(
     tx: mpsc::Sender<StreamEvent>,
     hint: &RoutingHint,
 ) -> Result<(), UwaError> {
-    let provider_cfg = state
-        .config
-        .provider_for_model(&req.model)
-        .ok_or_else(|| unknown_model(state, &req.model))?;
+    let provider_cfg = state.config.provider_for_model(&req.model).ok_or_else(|| {
+        UwaError::UnknownModel(uwa_core::ModelNotFound::new(
+            req.model.clone(),
+            state.config.available_models(),
+        ))
+    })?;
 
     let breaker = state.breaker(&provider_cfg.name);
     // Early exits must reach the SSE writer as an error event; otherwise the
@@ -335,10 +338,12 @@ async fn run_pipeline_streaming_inner(
     tx: &mpsc::Sender<StreamEvent>,
     hint: &RoutingHint,
 ) -> Result<(String, Vec<ToolCall>, FinishReason), Abort> {
-    let provider_cfg = state
-        .config
-        .provider_for_model(&req.model)
-        .ok_or_else(|| unknown_model(state, &req.model))?;
+    let provider_cfg = state.config.provider_for_model(&req.model).ok_or_else(|| {
+        UwaError::UnknownModel(uwa_core::ModelNotFound::new(
+            req.model.clone(),
+            state.config.available_models(),
+        ))
+    })?;
     let site = state.providers.get(&provider_cfg.name)?;
 
     // --- identical setup to the buffered path ---
@@ -575,10 +580,12 @@ async fn run_pipeline_inner(
     recorder: &mut RequestRecorder,
     hint: &RoutingHint,
 ) -> Result<(String, Vec<ToolCall>, FinishReason), UwaError> {
-    let provider_cfg = state
-        .config
-        .provider_for_model(&req.model)
-        .ok_or_else(|| unknown_model(state, &req.model))?;
+    let provider_cfg = state.config.provider_for_model(&req.model).ok_or_else(|| {
+        UwaError::UnknownModel(uwa_core::ModelNotFound::new(
+            req.model.clone(),
+            state.config.available_models(),
+        ))
+    })?;
     let site = state.providers.get(&provider_cfg.name)?;
 
     // Tool-defs → system prompt. Empty when the client sent no tools.
