@@ -173,7 +173,11 @@ async fn streaming_reports_error_when_validation_never_passes() {
         "invalid call must not reach the client: {frames:?}"
     );
     let last = frames.last().expect("frames");
-    assert_eq!(last["choices"][0]["finish_reason"], "error", "{frames:?}");
+    // OpenAI streaming spec: error event + [DONE], no finish_reason on error.
+    assert!(
+        last["choices"][0]["finish_reason"].is_null(),
+        "finish_reason must be null on error: {last:?}"
+    );
     assert!(last["error"]["message"]
         .as_str()
         .unwrap()

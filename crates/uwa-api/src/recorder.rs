@@ -114,7 +114,7 @@ impl Recorder {
                                 g.events.push(e);
                             }
                             if g.events.len() > MAX_EVENTS {
-                                let drop = g.events.len() - MAX_EVENTS;
+                                let drop = g.events.len().saturating_sub(MAX_EVENTS);
                                 g.events.drain(0..drop);
                             }
                         }

@@ -365,7 +365,7 @@ pub fn workflow_to_toml_snippet(provider: &str, wf: &Workflow) -> String {
 }
 
 fn toml_str(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
+    let mut out = String::with_capacity(s.len().saturating_add(2));
     out.push('"');
     for ch in s.chars() {
         match ch {

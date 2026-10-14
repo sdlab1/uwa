@@ -75,6 +75,10 @@ pub fn stream_response(
                     break;
                 }
                 StreamEvent::Error(e) => {
+                    // OpenAI streaming spec: on error, send an error event
+                    // and then [DONE]. Do not include finish_reason: "error"
+                    // as it's not a valid enum value (valid: stop, length,
+                    // tool_calls, content_filter, function_call).
                     let payload = json!({
                         "id": stream_id,
                         "object": "chat.completion.chunk",
@@ -82,8 +86,7 @@ pub fn stream_response(
                         "model": model,
                         "choices": [{
                             "index": 0,
-                            "delta": {},
-                            "finish_reason": "error"
+                            "delta": {}
                         }],
                         "error": { "message": e.to_string() }
                     });
@@ -105,6 +108,7 @@ pub fn stream_response(
         if !saw_done {
             // Producer dropped its channel without a final chunk: this used
             // to fall through and be reported as a clean `stop` completion.
+            // OpenAI streaming spec: send error event + [DONE].
             let payload = json!({
                 "id": stream_id,
                 "object": "chat.completion.chunk",
@@ -112,8 +116,7 @@ pub fn stream_response(
                 "model": model,
                 "choices": [{
                     "index": 0,
-                    "delta": {},
-                    "finish_reason": "error"
+                    "delta": {}
                 }],
                 "error": { "message": "stream producer dropped before completion" }
             });
@@ -319,6 +322,7 @@ mod tests {
     async fn dropped_producer_finishes_with_error() {
         // Regression: a producer that dropped its channel without a Done
         // used to produce a clean `stop` finish chunk.
+        // OpenAI streaming spec: error event + [DONE], no finish_reason on error.
         let frames = collect(|tx| {
             tx.try_send(StreamEvent::Delta("partial".into())).unwrap();
             drop(tx);
@@ -329,7 +333,11 @@ mod tests {
         assert!(last.is_done_sentinel());
         let error_chunk = &frames[frames.len() - 2];
         let j = error_chunk.json();
-        assert_eq!(j["choices"][0]["finish_reason"], "error");
+        // No finish_reason on error (OpenAI spec: not a valid enum value)
+        assert!(
+            j["choices"][0]["finish_reason"].is_null(),
+            "finish_reason must be null on error: {j:?}"
+        );
         assert!(j["error"]["message"].as_str().unwrap().contains("dropped"));
         // ...and no clean `stop` finish chunk anywhere.
         assert!(frames
