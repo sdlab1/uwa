@@ -106,6 +106,8 @@ grep -q "killed 10 (100%)" .harness/logs/W-001-mutate.log && pass "mutation 100%
 [ "$(git log --oneline -1)" != "$(git log --oneline origin/main~1)" ] && pass "main продвинут" || fail "main продвинут"
 [ -s .harness/log.md ] && grep -q "fix-rounds=" .harness/log.md && pass "log.md + run-метрики" || fail "log.md + run-метрики"
 "$DEVH" logs W-001 >"$T/out" 2>&1 && grep -q "agent.log" "$T/out" && pass "devh logs показывает логи" || fail "devh logs показывает логи"
+grep -q "agent-r1" .harness/logs/W-001-timing.log && pass "timing: agent-r1" || fail "timing: agent-r1"
+grep -q "verify-r1" .harness/logs/W-001-timing.log && pass "timing: verify-r1" || fail "timing: verify-r1"
 if ls "$T/wt/"*-W-001 >/dev/null 2>&1; then fail "worktree убран"; else pass "worktree убран"; fi
 
 echo "== 2. mutation-гейт: 20% → fix-раунд → 100% =="

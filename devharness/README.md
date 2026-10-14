@@ -86,6 +86,7 @@ devh merge                                   # rebase → ff-push в MAIN → л
 | `.harness/logs/W-NNN-agent.log` | полный вывод агента за последний раунд |
 | `.harness/logs/W-NNN-verify.log` / `-mutate.log` / `-bench.log` | выводы гейтов последнего раунда |
 | `.harness/logs/W-NNN-bootstrap.log` | подготовка worktree (deps) |
+| `.harness/logs/W-NNN-timing.log` | тайминг стадий (сек): worktree / red / agent-rN / verify-rN / mutate-rN / bench-rN / commit; печатается в конце run и уходит в log.md (`- run: … timing: …`) — bottleneck ищется одним взглядом |
 | `.harness/log.md` | append-only журнал закрытых сессий: commit, `fix-rounds/gates/duration`, summary |
 | `.harness/summaries/W-NNN.md` | summary агента (1-я строка = сообщение коммита) |
 | `.harness/items/W-NNN/` | spec.md, plan.md (заметки между попытками), red.cmd, status, agent (override) |
@@ -118,7 +119,7 @@ devh merge                                   # rebase → ff-push в MAIN → л
 
 1. **Строгий режим** — `set -euo pipefail` везде.
 2. **Статика** — `shellcheck devh test.sh selfmutate.sh examples/check_bench.sh` = 0 findings (гейт: префет в test.sh + doctor + CI).
-3. **Чёрный ящик** — `test.sh`: 21 секций / 66 ассертов; реальные git-репо в песочнице, стабы только на границах (агент, мутатор). Полностью герметично, ~40 сек.
+3. **Чёрный ящик** — `test.sh`: 21 секций / 68 ассертов; реальные git-репо в песочнице, стабы только на границах (агент, мутатор). Полностью герметично, ~40 сек.
 4. **Самомутация** — `selfmutate.sh`: 13 известных багов вносятся в изолированную копию devh, suite обязан убить каждый (kill-rate **13/13**); kill-rate валиден только на зелёном базовом — вшито предусловием.
 
 CI: `.github/workflows/devharness.yml` — shellcheck + test.sh + selfmutate.sh

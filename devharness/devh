@@ -386,6 +386,9 @@ cmd_run() {
 
   # claim: WIP-лимит + статус под глобальным локом
   local t0; t0="$(date +%s)"
+  local TIMES="$HDIR/logs/$id-timing.log" tprev
+  : > "$TIMES"; tprev="$t0"
+  tstage() { local n; n="$(date +%s)"; printf '%s %s\n' "$1" "$((n - tprev))" >> "$TIMES"; tprev="$n"; }
   crit_begin
   prev_st="$(item_status "$id")"
   if [ "$MAX_ACTIVE" -gt 0 ] && [ "$prev_st" != active ]; then
@@ -406,6 +409,7 @@ cmd_run() {
         HARNESS_PLAN="$d/plan.md" HARNESS_SUMMARY="$sum" \
         timeout "$AGENT_TIMEOUT" $AGENT "$1" ) > "$HDIR/logs/$id-agent.log" 2>&1 \
       || { echo "FAIL агент (код выше; timeout=${AGENT_TIMEOUT}s; лог: $HDIR/logs/$id-agent.log)" >&2; set_status "$id" active; exit 1; }
+    tstage "agent-r$((round+1))"
   }
 
   # 1. worktree (+ однократный bootstrap)
@@ -425,6 +429,7 @@ cmd_run() {
     echo "OK resume worktree: $wt"
     fresh=0
   fi
+  tstage "worktree(+bootstrap)"
 
   # 2. RED-пруф — В ПЕРВУЮ ОЧЕРЕДЬ: обязательный гейт
   if [ -s "$d/no-red" ]; then
@@ -440,15 +445,18 @@ cmd_run() {
   else
     echo "OK red: падает на HEAD (пруф воспроизводится)"
   fi
+  tstage "red-pre"
 
   # 3. агент → гейт-цикл (verify → mutation → bench; падение → fix-раунд агенту)
   gate() {
     local mrc
     if ! (cd "$wt" && bash -c "$VERIFY") > "$log" 2>&1; then which=VERIFY; return 1; fi
+    tstage "verify-r$((round+1))"
     if [ "$NO_IGNORED" = 1 ] && ! no_ignored_ok "$log"; then which=NO-IGNORED; return 1; fi
     if [ -n "$MUTATE" ]; then
       mutate_gate > "$mlog" 2>&1
       mrc=$?
+      tstage "mutate-r$((round+1))"
       if [ "$mrc" -eq 2 ]; then
         echo "FAIL: mutation env-блокер — инструмент не распознан. Блокер СРЕДЫ, не работа агента: установи (gobot: muex; rust: cargo-mutants) или исправь MUTATE в $CONF. Детали: $mlog" >&2
         set_status "$id" active; exit 1
@@ -457,6 +465,7 @@ cmd_run() {
     fi
     if [ -n "$BENCH" ]; then
       if ! (cd "$wt" && bash -c "$BENCH") > "$blog" 2>&1; then which=BENCH; return 1; fi
+      tstage "bench-r$((round+1))"
     fi
     return 0
   }
@@ -496,6 +505,7 @@ $(tail -40 "$blog")
       || { echo "FAIL: red.cmd не позеленел — фикс не доказан" >&2; set_status "$id" active; exit 1; }
     echo "OK red: позеленел"
   fi
+  tstage "red-post"
 
   # 5. summary / BLOCKED
   if [ ! -s "$sum" ]; then echo "FAIL: агент не написал summary ($sum)" >&2; set_status "$id" active; exit 1; fi
@@ -521,12 +531,17 @@ $(tail -40 "$blog")
   echo "OK commit: $msg"
   printf 'fix-rounds=%d gates=verify%s%s duration=%ds\n' \
     "$round" "${MUTATE:+,mutation}" "${BENCH:+,bench}" "$(( $(date +%s) - t0 ))" > "$d/last-run"
+  printf 'timing: %s\n' "$(awk '{printf "%s=%ss ", $1, $2}' "$TIMES")" >> "$d/last-run"
 
   # 7. push ветки (ревью перед main — двухфазный merge)
   if has_remote; then
     if (cd "$wt" && git push -q -u "$REMOTE" "$br"); then echo "OK push: $REMOTE/$br"
     else echo "⚠  push не прошёл — коммит локальный; продолжай: devh merge $id"; fi
   fi
+  tstage "commit+push"
+  echo
+  echo "— тайминг стадий (сек):"
+  awk '{printf "  %-24s %ss\n", $1, $2}' "$TIMES"
   set_status "$id" active
   echo
   echo "ГОТОВО: $id на ветке $br. Ревью: git -C $wt diff $MAIN..$br — затем: devh merge $id"
