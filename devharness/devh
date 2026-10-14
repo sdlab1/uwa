@@ -28,6 +28,9 @@
 # State: .harness/ у ЦЕЛЕВОГО репо (в git не попадает — локальный exclude). Без БД.
 # Дом харнесса: project_uwa/devharness; сам скрипт location-independent (ROOT по cwd).
 
+# shellcheck shell=bash
+# shellcheck disable=SC2015  # A && echo ok || echo warn — идиома doctor/fallback-лестниц; echo не падает
+
 set -euo pipefail
 
 ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || { echo "devh: не git-репозиторий" >&2; exit 1; }
@@ -105,7 +108,7 @@ first_live() {
   for d in "$(items_dir)"/W-*; do
     [ -d "$d" ] || continue
     st="$(cat "$d/status" 2>/dev/null || echo open)"
-    [ "$st" = done ] && continue
+    [ "$st" = "done" ] && continue
     echo "${d##*/}"; return 0
   done
   return 1
@@ -349,9 +352,7 @@ mutate_gate() {
       echo "mutation env: инструмент не распознан для $f; MUTATE='$MUTATE'"
       return 2
     fi
-  done <<EOF2
-$files
-EOF2
+  done <<<"$files"
   [ "$fail" = 0 ]
 }
 
@@ -393,7 +394,8 @@ cmd_run() {
   [ "$prev_st" = active ] && echo "OK resume: $id уже active — продолжаем"
 
   run_agent() { # $1 = промпт; timeout = watchdog «агент сдох»
-    ( cd "$wt" && HARNESS_WORKTREE="$wt" HARNESS_SPEC="$d/spec.md" \
+    # shellcheck disable=SC2086  # $AGENT — команда+аргументы агента; слово-разбиение намеренно
+    ( cd "$wt" && env HARNESS_WORKTREE="$wt" HARNESS_SPEC="$d/spec.md" \
         HARNESS_PLAN="$d/plan.md" HARNESS_SUMMARY="$sum" \
         timeout "$AGENT_TIMEOUT" $AGENT "$1" ) > "$HDIR/logs/$id-agent.log" 2>&1 \
       || { echo "FAIL агент (код выше; timeout=${AGENT_TIMEOUT}s; лог: $HDIR/logs/$id-agent.log)" >&2; set_status "$id" active; exit 1; }
@@ -605,7 +607,7 @@ cmd_merge() {
   fi
   git -C "$ROOT" worktree remove --force "$wt" 2>/dev/null || true
   git -C "$ROOT" branch -D "$br" >/dev/null 2>&1 || true
-  set_status "$id" done
+  set_status "$id" "done"
   echo "OK $id → done. Лог: .harness/log.md"
   local nx; nx="$(first_live)" && echo "next: $nx — $(cat "$(items_dir)/$nx/title" 2>/dev/null)" || echo "next: очередь пуста 🎉"
 }
@@ -629,7 +631,7 @@ cmd_clean() {
   for d in "$(items_dir)"/W-*; do
     [ -d "$d" ] || continue
     id="${d##*/}"; st="$(item_status "$id")"; wt="$(wt_of "$id")"; br="$(branch_of "$id")"
-    if [ "$st" = done ] && { [ -d "$wt" ] || git -C "$ROOT" show-ref -q --verify "refs/heads/$br"; }; then
+    if [ "$st" = "done" ] && { [ -d "$wt" ] || git -C "$ROOT" show-ref -q --verify "refs/heads/$br"; }; then
       git -C "$ROOT" worktree remove --force "$wt" 2>/dev/null || true
       git -C "$ROOT" branch -D "$br" >/dev/null 2>&1 || true
       n=$((n+1)); echo "clean: $id"
@@ -650,6 +652,7 @@ cmd_doctor() {
   command -v "$ag" >/dev/null 2>&1 && say "ok   агент: $ag" || { say "WARN агент '$ag' не найден в PATH"; warn=1; }
   has_flock && say "ok   flock (блокировки состояний)" || { say "WARN нет flock — состояние без блокировок"; warn=1; }
   command -v timeout >/dev/null 2>&1 && say "ok   timeout (watchdog)" || { say "WARN нет coreutils timeout"; warn=1; }
+  command -v shellcheck >/dev/null 2>&1 && say "ok   shellcheck (статический слой)" || { say "WARN нет shellcheck — статика пропускается"; warn=1; }
   if has_remote; then
     git -C "$ROOT" ls-remote -q "$REMOTE" HEAD >/dev/null 2>&1 && say "ok   remote $REMOTE" || { say "WARN remote $REMOTE недоступен"; warn=1; }
   else
