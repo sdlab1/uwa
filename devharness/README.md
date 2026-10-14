@@ -27,6 +27,9 @@ bash devharness/test.sh   # regression suite харнесса (25 сценари
 | bench | `BENCH` | перф против baseline; готовый пример: `examples/check_bench.sh` (criterion, gobot) |
 | RED | `items/W-NNN/red.cmd` | до работы обязан падать, после — проходить |
 
+Per-item маршрутизация модели: `items/W-NNN/agent` — команда агента для конкретной
+задачи (лёгкое — дешёвой модели, сложное — сильной; бывший AgentScore).
+
 Падение гейта → fix-раунд агенту (хвост лога + жёсткая инструкция; для mutation:
 «усиль ассерты, ослаблять запрещено»), до `MAX_FIX` раундов.
 
@@ -56,7 +59,10 @@ JSON+flock, а не в БД — «писатели не должны блоки�
 hint, WIP-лимит, doctor, mutation (из `dev/mutation.ex`, Guardrails-5),
 bench-gates (Session 29), watchdog→`AGENT_TIMEOUT` (5b), chain done→next
 (workflow/6), retention (workflow/8), crash-recovery (Session 21), regression
-suite (5b/REGRESSION-1 → `test.sh`), транзакционность (stabilize/db-tx → flock).
+suite (5b/REGRESSION-1 → `test.sh`), транзакционность (stabilize/db-tx → flock),
+run-метрики в log.md: fix-rounds/gates/duration (бывший coverage_history),
+repo-контекст в промпте (бывший context_pack), per-item маршрутизация агента
+(бывший AgentScore/workflow/4-score).
 
 Отброшено: daemon, bugnet, embeddings, fleet, inbox, suggest, MCP,
 anti-cheat/simhash, coverage history, TUI, stabilize-серия. Если понадобится —

@@ -158,6 +158,9 @@ prompt_for() { # $1=id
 ЗАДАЧА: реализуй спеку $HDIR/items/$id/spec.md (прочитай её полностью).
 Заметки прошлых попыток (если есть): $HDIR/items/$id/plan.md — если не закончишь, допиши туда кратко: что сделано / что дальше.
 
+Контекст репо (HEAD на момент старта задачи):
+$(git -C "$ROOT" log --oneline -3 2>/dev/null | sed 's/^/  /')
+
 ЖЕЛЕЗНЫЕ ПРАВИЛА:
 1. НИКОГДА не запускай git (add/commit/push/checkout/stash...) — харнесс владеет git.
 2. Реализуй спеку целиком: код + тесты, по стандартам проекта.
@@ -316,9 +319,12 @@ cmd_run() {
   local d wt br log sum round=0 msg dels prev_st
   d="$(items_dir)/$id"; wt="$(wt_of "$id")"; br="$(branch_of "$id")"
   log="$HDIR/logs/$id-verify.log"; sum="$HDIR/summaries/$id.md"
+  # per-item маршрутизация агента (лёгкое — дешёвой модели, сложное — сильной)
+  if [ -s "$d/agent" ]; then AGENT="$(cat "$d/agent")"; echo ".. агент (per-item): $AGENT"; fi
   local mlog="$HDIR/logs/$id-mutate.log" blog="$HDIR/logs/$id-bench.log" which=VERIFY
 
   # claim: WIP-лимит + статус под глобальным локом
+  local t0; t0="$(date +%s)"
   crit_begin
   prev_st="$(item_status "$id")"
   if [ "$MAX_ACTIVE" -gt 0 ] && [ "$prev_st" != active ]; then
@@ -430,6 +436,8 @@ $(tail -40 "$blog")
   if [ "$dels" -gt 5 ]; then echo "⚠  удалений в коммите: $dels — проверь, что это задумано"; fi
   git -C "$wt" commit -q -m "$msg"
   echo "OK commit: $msg"
+  printf 'fix-rounds=%d gates=verify%s%s duration=%ds\n' \
+    "$round" "${MUTATE:+,mutation}" "${BENCH:+,bench}" "$(( $(date +%s) - t0 ))" > "$d/last-run"
 
   # 7. push ветки (ревью перед main — двухфазный merge)
   if has_remote; then
@@ -479,6 +487,7 @@ cmd_merge() {
 
   { echo "## $id — $(cat "$(items_dir)/$id/title") ($(date +%F))"
     echo "- commit: $sha"
+    [ -s "$(items_dir)/$id/last-run" ] && echo "- run: $(cat "$(items_dir)/$id/last-run")"
     sed -n '2,$p' "$sum" 2>/dev/null | sed 's/^/  /'
     echo
   } >> "$HDIR/log.md"

@@ -63,7 +63,7 @@ printf 'спека\n' | "$DEVH" new "item one" >/dev/null
 "$DEVH" merge >"$T/out" 2>&1 && pass "merge exit 0" || fail "merge exit 0"
 [ "$(cat .harness/items/W-001/status)" = done ] && pass "статус done" || fail "статус done"
 [ "$(git log --oneline -1)" != "$(git log --oneline origin/main~1)" ] && pass "main продвинут" || fail "main продвинут"
-[ -s .harness/log.md ] && pass "log.md записан" || fail "log.md записан"
+[ -s .harness/log.md ] && grep -q "fix-rounds=" .harness/log.md && pass "log.md + run-метрики" || fail "log.md + run-метрики"
 [ ! -d "$T/wt/devh-W-001" ] && pass "worktree убран" || fail "worktree убран"
 
 echo "== 2. mutation-гейт: 20% → fix-раунд → 100% =="
@@ -141,6 +141,20 @@ R="$(fresh r10)"; base_env; cd "$R"
 "$DEVH" init >/dev/null
 "$DEVH" doctor >"$T/out" 2>&1 && pass "doctor exit 0" || { fail "doctor exit 0"; cat "$T/out"; }
 grep -q "fail=0" "$T/out" && pass "doctor чист" || fail "doctor чист"
+
+echo "== 11. per-item агент: маршрутизация по сложности =="
+cat > "$T/stub2.sh" <<'S'
+#!/usr/bin/env bash
+echo second > "$HARNESS_WORKTREE/done2.txt"
+printf 'feat: второй агент отработал\n\nдетали: стаб2\n' > "$HARNESS_SUMMARY"
+S
+chmod +x "$T/stub2.sh"
+R="$(fresh r11)"; base_env; export HARNESS_VERIFY='test -f done2.txt'; cd "$R"
+"$DEVH" init >/dev/null
+printf 'спека\n' | "$DEVH" new "agent item" >/dev/null
+echo "$T/stub2.sh" > .harness/items/W-001/agent
+"$DEVH" run >"$T/out" 2>&1 && pass "run exit 0 (override-агент)" || { fail "run exit 0 (override-агент)"; cat "$T/out"; }
+grep -q "per-item" "$T/out" && pass "override подхвачен" || fail "override подхвачен"
 
 echo
 echo "ИТОГО: PASS=$PASS FAIL=$FAIL"
