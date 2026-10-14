@@ -200,7 +200,7 @@ cmd_init() {
     fi
   fi
   if [ -f "$ROOT/gobot/mix.exs" ] && [ -z "$MUTATE" ]; then
-    MUTATE='cd gobot && mix mutants --module {module}'   # muex; нет muex → гейт честно деградирует
+    MUTATE='cd gobot && mix mutants --module {module}'   # muex; нет muex → env-блокер на run (установи)
     MUTATE_SCOPE='gobot/lib'
   fi
   [ -n "$MUTATE_SCOPE" ] || MUTATE_SCOPE='lib'
@@ -302,7 +302,7 @@ cmd_hint() {
 }
 
 # ─── mutation-гейт ─────────────────────────────────────────────────
-# Вывод инструмента: 'Mutants: N, Killed: M' (muex-формат). Нет вывода → честная деградация.
+# Вывод инструмента: 'Mutants: N, Killed: M' (muex-формат). Нет вывода → env-блокер (rc=2): среда ≠ работа агента.
 mutate_gate() {
   local files f mod out t k pct fail=0
   files="$(git -C "$wt" diff --name-only HEAD -- "$MUTATE_SCOPE" 2>/dev/null | sort -u)"
@@ -369,7 +369,7 @@ cmd_run() {
   [ -n "$MUTATE" ] || { echo "devh: MUTATE-гейт ОБЯЗАТЕЛЕН, «пропуск» запрещён — пропиши MUTATE в $CONF (gobot: cd gobot + mix mutants/muex; rust: cargo-mutants)" >&2; exit 1; }
   local id; id="$(resolve "${1:-}")"
   item_runlock "$id" "run"      # per-item лок: два run на один item невозможны
-  local d wt br log sum round=0 msg dels prev_st
+  local d wt br log sum round=0 msg dels prev_st fresh=1
   d="$(items_dir)/$id"; wt="$(wt_of "$id")"; br="$(branch_of "$id")"
   log="$HDIR/logs/$id-verify.log"; sum="$HDIR/summaries/$id.md"
   # per-item маршрутизация агента (лёгкое — дешёвой модели, сложное — сильной)
@@ -414,20 +414,22 @@ cmd_run() {
     fi
   else
     echo "OK resume worktree: $wt"
+    fresh=0
   fi
 
   # 2. RED-пруф — В ПЕРВУЮ ОЧЕРЕДЬ: обязательный гейт
   if [ -s "$d/no-red" ]; then
     echo "⚠  RED пропущен (записанный обход): $(cat "$d/no-red")"
-  elif [ -f "$d/red.cmd" ]; then
-    if (cd "$wt" && bash "$d/red.cmd") >/dev/null 2>&1; then
-      echo "FAIL: red.cmd уже зелёный на чистом HEAD — это не баг. Почини red.cmd или удали." >&2
-      exit 1
-    fi
-    echo "OK red: падает на HEAD (пруф воспроизводится)"
-  else
+  elif [ ! -f "$d/red.cmd" ]; then
     echo "FAIL: RED-пруф ОБЯЗАТЕЛЕН (в первую очередь). Напиши $d/red.cmd — команду, падающую на чистом HEAD и зеленеющую после работы; либо записанный обход: echo \"<причина>\" > $d/no-red" >&2
     exit 1
+  elif [ "$fresh" = 0 ] && [ -n "$(git -C "$wt" status --porcelain)" ]; then
+    echo "OK resume: RED pre-check пропущен — дерево уже содержит работу; доказательство RED было на чистом HEAD первой попытки, позеленение проверит пост-гейт"
+  elif (cd "$wt" && bash "$d/red.cmd") >/dev/null 2>&1; then
+    echo "FAIL: red.cmd уже зелёный на чистом HEAD — это не баг. Почини red.cmd или удали." >&2
+    exit 1
+  else
+    echo "OK red: падает на HEAD (пруф воспроизводится)"
   fi
 
   # 3. агент → гейт-цикл (verify → mutation → bench; падение → fix-раунд агенту)

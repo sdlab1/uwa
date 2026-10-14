@@ -248,6 +248,22 @@ printf 'спека\n' | "$DEVH" new "del item" --no-red x >/dev/null
 HARNESS_AGENT="$T/stub-del.sh" "$DEVH" run >"$T/out" 2>&1 && pass "run exit 0 (удаление не блокер)" || { fail "run exit 0"; cat "$T/out"; }
 grep -q "удалён агентом — мутации не требуется" .harness/logs/W-001-mutate.log && pass "удалённый файл пропущен" || fail "удалённый файл пропущен"
 
+echo "== 19. resume: RED pre-check не ломает повторный run (работа уже в дереве) =="
+cat > "$T/stub-blk-red.sh" <<'S'
+#!/usr/bin/env bash
+echo marker > "$HARNESS_WORKTREE/done.txt"
+printf 'BLOCKED: первая попытка\n' > "$HARNESS_SUMMARY"
+S
+chmod +x "$T/stub-blk-red.sh"
+R="$(fresh r19)"; base_env; cd "$R"
+"$DEVH" init >/dev/null
+printf 'спека\n' | "$DEVH" new "resume item" >/dev/null
+echo 'test -f done.txt' > .harness/items/W-001/red.cmd
+if HARNESS_AGENT="$T/stub-blk-red.sh" "$DEVH" run >"$T/out" 2>&1; then fail "1-й run должен упасть"; else pass "1-й run BLOCKED (RED доказан на чистом HEAD)"; fi
+HARNESS_AGENT="$T/stub.sh" "$DEVH" run >"$T/out" 2>&1 && pass "resume run exit 0" || { fail "resume run exit 0"; cat "$T/out"; }
+grep -q "RED pre-check пропущен" "$T/out" && pass "pre-check пропущен на resume" || fail "pre-check пропущен на resume"
+"$DEVH" merge >/dev/null 2>&1 && pass "merge после resume" || fail "merge после resume"
+
 echo
 echo "ИТОГО: PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" -eq 0 ]

@@ -11,7 +11,7 @@ devh run           # worktree → агент → гейты → commit → push 
 devh merge         # ревью сделано → rebase → ff-push в MAIN → лог → next:
 devh hint          # промпт следующей модели (спека + план + контекст)
 devh list / abort / clean / doctor
-bash devharness/test.sh   # regression suite харнесса (25 сценариев, ~30 сек)
+bash devharness/test.sh   # regression suite харнесса (19 сценариев / 56 ассертов)
 ```
 
 Алиас: `alias devh='/home/user/project_uwa/devharness/devh'`, затем из целевого
@@ -62,6 +62,15 @@ Per-item маршрутизация модели: `items/W-NNN/agent` — ком
 Флоу сессии: `devh new 40 → run 40 → merge 40` → «next: …» → в report.md
 дописана секция. Если агент нарушил гигиену сообщения — поправь первую строку
 `.harness/summaries/W-040.md` и вызови `devh commit 40` (работа не пропадает).
+
+## Осознанные ограничения (не баги)
+
+- `NO-IGNORED` парсит cargo-формат `N ignored`; чужие форматы вывода —
+  `NO_IGNORED=0` в конфиге.
+- muex/cargo-mutants нужно поставить **до первого run** — об этом честно
+  говорит env-блокер (rc=2, «среда ≠ работа агента»), а не тихий пропуск.
+- Уроки/грабли (UI#7–13 и т.п.) остаются **справочником** в промпте (`RULES`)
+  — знания в гейт не компилируются; enforcement — только код.
 
 ## Надёжность состояния — почему без БД
 
