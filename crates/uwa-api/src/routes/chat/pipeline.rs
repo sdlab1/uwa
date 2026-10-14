@@ -64,12 +64,6 @@ pub enum StreamEvent {
     Error(UwaError),
 }
 
-fn unknown_model(state: &AppState, model: &str) -> UwaError {
-    UwaError::UnknownModel(uwa_core::ModelNotFound::new(
-        model,
-        state.config.available_models(),
-    ))
-}
 
 /// Why the streaming turn ended early.
 #[derive(Debug)]
