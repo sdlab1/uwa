@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use uwa_api::routes::chat::pipeline::{run_pipeline_streaming, StreamEvent};
+use uwa_api::routing::RoutingHint;
 use uwa_core::types::openai::ChatCompletionRequest;
 use uwa_core::ToolSpec;
 use uwa_resilience::CircuitState;
@@ -214,6 +215,7 @@ async fn client_disconnect_stops_the_browser_turn() {
             None,
             &uwa_session::ProfileName::default_name(),
             tx,
+            &RoutingHint::default(),
         )
         .await
     });
@@ -261,6 +263,7 @@ async fn client_disconnects_do_not_trip_the_circuit_breaker() {
                 None,
                 &uwa_session::ProfileName::default_name(),
                 tx,
+                &RoutingHint::default(),
             )
             .await
         });

@@ -26,6 +26,7 @@ use uwa_core::{RequestId, UwaError};
 
 use crate::error::ApiResult;
 use crate::routes::chat;
+use crate::routing::RoutingHint;
 use crate::state::AppState;
 
 // ---------- request ----------
@@ -135,6 +136,7 @@ pub async fn create(
                 None,
                 &uwa_session::ProfileName::default_name(),
                 tx,
+                &RoutingHint::default(),
             )
             .await;
         });
@@ -155,6 +157,7 @@ pub async fn create(
         &local_tools,
         None,
         &uwa_session::ProfileName::default_name(),
+        &RoutingHint::default(),
     )
     .await?;
 

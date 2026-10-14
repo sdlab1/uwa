@@ -295,6 +295,7 @@ impl ConformanceBackend for LiveBackend {
             &all_specs,
             None,
             &uwa_session::ProfileName::default_name(),
+            &uwa_api::routing::RoutingHint::default(),
         )
         .await
         .map_err(|e| format!("pipeline: {e}"))?;

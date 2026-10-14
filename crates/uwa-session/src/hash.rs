@@ -38,8 +38,18 @@ pub(crate) fn role_tag(role: Role) -> u8 {
 /// so a `take(2)` window hashed `[user]` and then `[user, assistant]` - two
 /// different ids for one conversation, which moved it to a fresh tab and
 /// defeated pinning.
-pub fn conversation_id(messages: &[ChatMessage]) -> ConversationId {
+///
+/// An optional `provider` parameter scopes the conversation to a specific
+/// provider (e.g. "chatgpt", "claude"), so the same user opening routed
+/// to different providers gets distinct conversation ids and separate
+/// pinning state.
+pub fn conversation_id(messages: &[ChatMessage], provider: Option<&str>) -> ConversationId {
     let mut h = FNV_OFFSET;
+    // Hash the provider first (if given) so it scopes the entire id.
+    if let Some(p) = provider {
+        h = fnv_bytes(h, p.as_bytes());
+        h = fnv_byte(h, 0x00); // provider separator
+    }
     for m in messages {
         h = fnv_byte(h, role_tag(m.role));
         h = fnv_byte(h, 0); // role/content separator
@@ -69,14 +79,14 @@ mod tests {
             ChatMessage::text(Role::User, "q"),
             ChatMessage::text(Role::Assistant, "different later round"),
         ];
-        assert_eq!(conversation_id(&a), conversation_id(&b));
+        assert_eq!(conversation_id(&a, None), conversation_id(&b, None));
     }
 
     #[test]
     fn different_prefix_different_id() {
         let a = vec![ChatMessage::text(Role::User, "q1")];
         let b = vec![ChatMessage::text(Role::User, "q2")];
-        assert_ne!(conversation_id(&a), conversation_id(&b));
+        assert_ne!(conversation_id(&a, None), conversation_id(&b, None));
     }
 
     #[test]
@@ -92,7 +102,10 @@ mod tests {
             ChatMessage::text(Role::System, "sys"),
             ChatMessage::text(Role::User, "q"),
         ];
-        assert_eq!(conversation_id(&msgs).as_str(), "conv_1393131233e47b38");
+        assert_eq!(
+            conversation_id(&msgs, None).as_str(),
+            "conv_1393131233e47b38"
+        );
     }
 
     #[test]
@@ -101,8 +114,8 @@ mod tests {
             ChatMessage::text(Role::System, "a"),
             ChatMessage::text(Role::System, "b"),
         ];
-        assert!(conversation_id(&msgs).as_str().starts_with("conv_"));
-        assert!(conversation_id(&[]).as_str().starts_with("conv_"));
+        assert!(conversation_id(&msgs, None).as_str().starts_with("conv_"));
+        assert!(conversation_id(&[], None).as_str().starts_with("conv_"));
     }
 
     #[test]
@@ -115,6 +128,6 @@ mod tests {
             ChatMessage::text(Role::User, "hi"),
             ChatMessage::text(Role::Assistant, "two"),
         ];
-        assert_eq!(conversation_id(&a), conversation_id(&b));
+        assert_eq!(conversation_id(&a, None), conversation_id(&b, None));
     }
 }

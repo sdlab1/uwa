@@ -131,15 +131,16 @@ async fn messages_inner(
         let state_task = state.clone();
         let oa_req_task = oa_req.clone();
         let specs_clone = all_specs.clone();
-        let tab_hint = hint.tab.clone();
+        let hint_clone = hint.clone();
         tokio::spawn(async move {
             let _ = crate::routes::chat::pipeline::run_pipeline_streaming(
                 &state_task,
                 &oa_req_task,
                 &specs_clone,
-                tab_hint.as_ref(),
+                hint_clone.tab.as_ref(),
                 &uwa_session::ProfileName::default_name(),
                 tx,
+                &hint_clone,
             )
             .await;
         });
@@ -156,6 +157,7 @@ async fn messages_inner(
             &all_specs,
             hint.tab.as_ref(),
             &uwa_session::ProfileName::default_name(),
+            &hint,
         )
         .await?;
         Ok(Json(build_response(

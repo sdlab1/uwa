@@ -44,6 +44,7 @@ use uwa_tools::{
 };
 
 use crate::history::RequestRecorder;
+use crate::routing::RoutingHint;
 use crate::state::AppState;
 
 use uwa_session::pinning::{decide, hash_messages, hash_system, ConversationState, PinDecision};
@@ -107,6 +108,7 @@ pub async fn run_pipeline(
     all_specs: &[ToolSpec],
     pinned_tab: Option<&TabId>,
     profile: &ProfileName,
+    hint: &RoutingHint,
 ) -> Result<(String, Vec<ToolCall>, FinishReason), UwaError> {
     let provider_cfg = state
         .config
@@ -128,8 +130,16 @@ pub async fn run_pipeline(
 
     let mut recorder = RequestRecorder::new(req, &provider_cfg.name, None);
 
-    let result =
-        run_pipeline_inner(state, req, all_specs, pinned_tab, profile, &mut recorder).await;
+    let result = run_pipeline_inner(
+        state,
+        req,
+        all_specs,
+        pinned_tab,
+        profile,
+        &mut recorder,
+        &hint,
+    )
+    .await;
 
     match &result {
         Ok((text, calls, finish)) => {
@@ -189,7 +199,7 @@ pub async fn run_pipeline_with_hint(
         .clone()
         .map(ProfileName::new)
         .unwrap_or_else(ProfileName::default_name);
-    run_pipeline(state, req, all_specs, hint.tab.as_ref(), &profile).await
+    run_pipeline(state, req, all_specs, hint.tab.as_ref(), &profile, hint).await
 }
 
 /// Streaming twin of [`run_pipeline_with_hint`]: derives the profile from
@@ -206,7 +216,7 @@ pub async fn run_pipeline_streaming_with_hint(
         .clone()
         .map(ProfileName::new)
         .unwrap_or_else(ProfileName::default_name);
-    run_pipeline_streaming(state, req, all_specs, hint.tab.as_ref(), &profile, tx).await
+    run_pipeline_streaming(state, req, all_specs, hint.tab.as_ref(), &profile, tx, hint).await
 }
 
 /// Streaming twin of [`run_pipeline`]. Deltas are pushed onto `tx` as they
@@ -220,6 +230,7 @@ pub async fn run_pipeline_streaming(
     pinned_tab: Option<&TabId>,
     profile: &ProfileName,
     tx: mpsc::Sender<StreamEvent>,
+    hint: &RoutingHint,
 ) -> Result<(), UwaError> {
     let provider_cfg = state
         .config
@@ -252,6 +263,7 @@ pub async fn run_pipeline_streaming(
         profile,
         &mut recorder,
         &tx,
+        &hint,
     )
     .await;
 
@@ -317,6 +329,7 @@ pub async fn run_pipeline_streaming(
     result.map(|_| ())
 }
 
+#[allow(clippy::too_many_arguments, clippy::needless_borrow)]
 async fn run_pipeline_streaming_inner(
     state: &AppState,
     req: &ChatCompletionRequest,
@@ -325,6 +338,7 @@ async fn run_pipeline_streaming_inner(
     profile: &ProfileName,
     recorder: &mut RequestRecorder,
     tx: &mpsc::Sender<StreamEvent>,
+    hint: &RoutingHint,
 ) -> Result<(String, Vec<ToolCall>, FinishReason), Abort> {
     let provider_cfg = state
         .config
@@ -343,7 +357,9 @@ async fn run_pipeline_streaming_inner(
         Some(build_system_prompt(&defs))
     };
 
-    let cid = uwa_session::conversation_id(&req.messages);
+    // Scope conversation_id by provider so different providers get
+    // distinct pinning state (UWA-137).
+    let cid = uwa_session::conversation_id(&req.messages, hint.provider.as_deref());
     let session_handle = match &state.runtime.sessions {
         Some(sm) => Some(
             sm.acquire_with_profile(&cid, profile.clone(), state.transport.as_ref())
@@ -559,6 +575,7 @@ async fn run_pipeline_inner(
     pinned_tab: Option<&TabId>,
     profile: &ProfileName,
     recorder: &mut RequestRecorder,
+    hint: &RoutingHint,
 ) -> Result<(String, Vec<ToolCall>, FinishReason), UwaError> {
     let provider_cfg = state
         .config
@@ -578,7 +595,9 @@ async fn run_pipeline_inner(
     };
 
     // Session pinning — same tab for the whole bridge turn.
-    let cid = uwa_session::conversation_id(&req.messages);
+    // Scope conversation_id by provider so different providers get
+    // distinct pinning state (UWA-137).
+    let cid = uwa_session::conversation_id(&req.messages, hint.provider.as_deref());
     let session_handle = match &state.runtime.sessions {
         Some(sm) => Some(
             sm.acquire_with_profile(&cid, profile.clone(), state.transport.as_ref())
