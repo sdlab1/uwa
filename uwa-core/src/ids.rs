@@ -63,11 +63,12 @@ mod tests {
     }
 
     #[test]
-    fn ids_serialize_transparently() {
+    fn ids_serialize_transparently() -> Result<(), Box<dyn std::error::Error>> {
         let id = RequestId::from_raw("req_abc");
-        let j = serde_json::to_string(&id).unwrap();
+        let j = serde_json::to_string(&id)?;
         assert_eq!(j, "\"req_abc\"");
-        let back: RequestId = serde_json::from_str(&j).unwrap();
+        let back: RequestId = serde_json::from_str(&j)?;
         assert_eq!(back, id);
+        Ok(())
     }
 }

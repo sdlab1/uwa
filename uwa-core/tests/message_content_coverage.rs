@@ -68,17 +68,16 @@ fn none_content_yields_empty_string() {
 }
 
 #[test]
-fn deserialize_string_and_parts_both_work() {
-    let s: ChatMessage =
-        serde_json::from_value(json!({ "role": "user", "content": "hello" })).unwrap();
+fn deserialize_string_and_parts_both_work() -> Result<(), Box<dyn std::error::Error>> {
+    let s: ChatMessage = serde_json::from_value(json!({ "role": "user", "content": "hello" }))?;
     assert_eq!(s.content_text(), "hello");
 
     let p: ChatMessage = serde_json::from_value(json!({
         "role": "user",
         "content": [{ "type": "text", "text": "hello" }]
-    }))
-    .unwrap();
+    }))?;
     assert_eq!(p.content_text(), "hello");
+    Ok(())
 }
 
 #[test]

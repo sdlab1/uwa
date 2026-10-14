@@ -266,13 +266,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn click_parses() {
+    fn click_parses() -> Result<(), Box<dyn std::error::Error>> {
         let toml = r#"
             action = "click"
             target = "send_btn"
             optional = true
         "#;
-        let a: Action = toml_edit::de::from_str(toml).unwrap();
+        let a: Action = toml_edit::de::from_str(toml)?;
         assert_eq!(
             a,
             Action::Click {
@@ -280,15 +280,16 @@ mod tests {
                 optional: true
             }
         );
+        Ok(())
     }
 
     #[test]
-    fn fill_input_defaults_value_to_none() {
+    fn fill_input_defaults_value_to_none() -> Result<(), Box<dyn std::error::Error>> {
         let toml = r#"
             action = "fill_input"
             target = "input_box"
         "#;
-        let a: Action = toml_edit::de::from_str(toml).unwrap();
+        let a: Action = toml_edit::de::from_str(toml)?;
         assert_eq!(
             a,
             Action::FillInput {
@@ -296,10 +297,11 @@ mod tests {
                 value: None
             }
         );
+        Ok(())
     }
 
     #[test]
-    fn if_parses_with_else() {
+    fn if_parses_with_else() -> Result<(), Box<dyn std::error::Error>> {
         let toml = r#"
             action = "if"
             [condition]
@@ -312,7 +314,7 @@ mod tests {
             action = "wait"
             seconds = 0.5
         "#;
-        let a: Action = toml_edit::de::from_str(toml).unwrap();
+        let a: Action = toml_edit::de::from_str(toml)?;
         match a {
             Action::If {
                 condition,
@@ -327,26 +329,27 @@ mod tests {
                 );
                 assert_eq!(then.len(), 1);
                 assert_eq!(else_.len(), 1);
+                Ok(())
             }
-            _ => panic!("expected If"),
+            _ => Err("expected If".into()),
         }
     }
 
     #[test]
-    fn wait_fractional_seconds() {
+    fn wait_fractional_seconds() -> Result<(), Box<dyn std::error::Error>> {
         let a: Action = toml_edit::de::from_str(
             r#"action = "wait"
 seconds = 0.25"#,
-        )
-        .unwrap();
+        )?;
         match a {
             Action::Wait { seconds } => assert!((seconds - 0.25).abs() < 0.001),
-            _ => panic!("expected Wait"),
+            _ => return Err("expected Wait".into()),
         }
+        Ok(())
     }
 
     #[test]
-    fn capture_parses() {
+    fn capture_parses() -> Result<(), Box<dyn std::error::Error>> {
         let toml = r#"
             action = "capture"
             name = "greeting"
@@ -354,7 +357,7 @@ seconds = 0.25"#,
             kind = "text"
             target = "assistant_message"
         "#;
-        let a: Action = toml_edit::de::from_str(toml).unwrap();
+        let a: Action = toml_edit::de::from_str(toml)?;
         assert_eq!(
             a,
             Action::Capture {
@@ -364,10 +367,11 @@ seconds = 0.25"#,
                 }
             }
         );
+        Ok(())
     }
 
     #[test]
-    fn workflow_is_transparent_list() {
+    fn workflow_is_transparent_list() -> Result<(), Box<dyn std::error::Error>> {
         let toml = r#"
             [[x]]
             action = "wait"
@@ -381,17 +385,19 @@ seconds = 0.25"#,
         struct Wrap {
             x: Workflow,
         }
-        let w: Wrap = toml_edit::de::from_str(toml).unwrap();
+        let w: Wrap = toml_edit::de::from_str(toml)?;
         assert_eq!(w.x.steps.len(), 2);
         assert!(!w.x.is_empty());
+        Ok(())
     }
 
     #[test]
-    fn empty_workflow_is_default() {
+    fn empty_workflow_is_default() -> Result<(), Box<dyn std::error::Error>> {
         let w = Workflow::default();
         assert!(w.is_empty());
-        let s = serde_json::to_string(&w).unwrap();
+        let s = serde_json::to_string(&w)?;
         assert_eq!(s, "[]");
+        Ok(())
     }
 
     #[test]
@@ -416,7 +422,7 @@ seconds = 0.25"#,
     }
 
     #[test]
-    fn trace_roundtrips_through_json() {
+    fn trace_roundtrips_through_json() -> Result<(), Box<dyn std::error::Error>> {
         let trace = Trace {
             started_at_ms: 1,
             ended_at_ms: 2,
@@ -436,9 +442,11 @@ seconds = 0.25"#,
                 },
             ],
         };
-        let j = serde_json::to_string(&trace).unwrap();
-        let back: Trace = serde_json::from_str(&j).unwrap();
+        let j = serde_json::to_string(&trace)?;
+        let back: Trace = serde_json::from_str(&j)?;
         assert_eq!(back.events.len(), 2);
-        assert!(matches!(&back.events[0], TraceEvent::Click { selector, .. } if selector == "#a"));
+        let first = back.events.first();
+        assert!(matches!(first, Some(TraceEvent::Click { selector, .. }) if selector == "#a"));
+        Ok(())
     }
 }

@@ -105,11 +105,12 @@ mod tests {
     }
 
     #[test]
-    fn finisher_defaults_round_trip() {
+    fn finisher_defaults_round_trip() -> Result<(), Box<dyn std::error::Error>> {
         let t = FinisherTuning::default();
-        let toml = toml_edit::ser::to_string(&t).expect("serialize");
-        let back: FinisherTuning = toml_edit::de::from_str(&toml).expect("deserialize");
+        let toml = toml_edit::ser::to_string(&t)?;
+        let back: FinisherTuning = toml_edit::de::from_str(&toml)?;
         assert_eq!(t, back);
+        Ok(())
     }
 
     #[test]

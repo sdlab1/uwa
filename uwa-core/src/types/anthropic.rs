@@ -196,42 +196,47 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn system_accepts_string_or_blocks() {
+    fn system_accepts_string_or_blocks() -> Result<(), Box<dyn std::error::Error>> {
         let a: MessagesRequest = serde_json::from_value(json!({
             "model": "claude-3-5-sonnet",
             "max_tokens": 10,
             "system": "be brief",
             "messages": []
-        }))
-        .unwrap();
-        assert_eq!(a.system.unwrap().as_text(), "be brief");
+        }))?;
+        assert_eq!(
+            a.system.as_ref().map(|s| s.as_text()).unwrap_or_default(),
+            "be brief"
+        );
 
         let b: MessagesRequest = serde_json::from_value(json!({
             "model": "claude-3-5-sonnet",
             "max_tokens": 10,
             "system": [{"type": "text", "text": "a"}, {"type": "text", "text": "b"}],
             "messages": []
-        }))
-        .unwrap();
-        assert_eq!(b.system.unwrap().as_text(), "a\nb");
+        }))?;
+        assert_eq!(
+            b.system.as_ref().map(|s| s.as_text()).unwrap_or_default(),
+            "a\nb"
+        );
+        Ok(())
     }
 
     #[test]
-    fn message_with_content_blocks_round_trips() {
+    fn message_with_content_blocks_round_trips() -> Result<(), Box<dyn std::error::Error>> {
         let m: AnthropicMessage = serde_json::from_value(json!({
             "role": "user",
             "content": [
                 {"type": "text", "text": "hello"},
                 {"type": "tool_result", "tool_use_id": "t1", "content": "22C"}
             ]
-        }))
-        .unwrap();
+        }))?;
         assert_eq!(m.role, "user");
         assert!(m.content.is_array());
+        Ok(())
     }
 
     #[test]
-    fn response_serializes_with_correct_type_tag() {
+    fn response_serializes_with_correct_type_tag() -> Result<(), Box<dyn std::error::Error>> {
         let r = MessagesResponse {
             id: "msg_1".into(),
             kind: "message".into(),
@@ -242,8 +247,15 @@ mod tests {
             stop_sequence: None,
             usage: AnthropicUsage::default(),
         };
-        let v = serde_json::to_value(&r).unwrap();
-        assert_eq!(v["type"], "message");
-        assert_eq!(v["content"][0]["type"], "text");
+        let v = serde_json::to_value(&r)?;
+        assert_eq!(v.get("type").and_then(|x| x.as_str()), Some("message"));
+        assert_eq!(
+            v.get("content")
+                .and_then(|c| c.get(0))
+                .and_then(|c| c.get("type"))
+                .and_then(|x| x.as_str()),
+            Some("text")
+        );
+        Ok(())
     }
 }
