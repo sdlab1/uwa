@@ -137,7 +137,7 @@ pub async fn run_pipeline(
         pinned_tab,
         profile,
         &mut recorder,
-        &hint,
+        hint,
     )
     .await;
 
@@ -263,7 +263,7 @@ pub async fn run_pipeline_streaming(
         profile,
         &mut recorder,
         &tx,
-        &hint,
+        hint,
     )
     .await;
 
