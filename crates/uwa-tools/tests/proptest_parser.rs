@@ -89,7 +89,7 @@ proptest! {
 
         prop_assert_eq!(out.calls.len(), 1);
         prop_assert_eq!(out.calls[0].name.as_str(), name);
-        let call = out.calls.get(0).expect("call exists");
+        let call = out.calls.first().expect("call exists");
         prop_assert_eq!(call.name.as_str(), name);
         prop_assert_eq!(call.arguments.get(&key), Some(&val));
         prop_assert!(out.text.contains("prefix"), "{:?}", out.text);
@@ -107,7 +107,7 @@ proptest! {
 
         let out = parse(&text, &known());
 
-        let call = out.calls.get(0).expect("call exists");
+        let call = out.calls.first().expect("call exists");
         prop_assert_eq!(call.arguments.get(&key), Some(&val));
         prop_assert!(!out.text.contains("```tool_call"), "{:?}", out.text);
     }

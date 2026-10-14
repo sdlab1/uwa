@@ -72,6 +72,7 @@ fn unknown_model(state: &AppState, model: &str) -> UwaError {
 }
 
 /// Why the streaming turn ended early.
+#[derive(Debug)]
 enum Abort {
     /// The consumer of the stream went away. Not the provider's fault: it
     /// must not count against the circuit breaker, and nobody is left to
@@ -950,5 +951,39 @@ mod tests {
         assert_eq!(r.kind, "function");
         assert_eq!(r.function.name, "echo");
         assert_eq!(r.function.arguments, r#"{"x":1}"#);
+    }
+
+    #[tokio::test]
+    async fn emit_returns_client_gone_when_receiver_dropped() {
+        let (tx, rx) = mpsc::channel::<StreamEvent>(1);
+        drop(rx); /* закрываем канал */
+
+        let result = emit(&tx, StreamEvent::Delta("hi".into())).await;
+        assert!(matches!(result, Err(Abort::ClientGone)));
+    }
+
+    #[test]
+    fn utf8_lossy_into_owned_preserves_content() {
+        let bytes = b"hello \xF0\x9F\x98\x80"; /* валидный UTF-8 с эмодзи */
+        let cow = String::from_utf8_lossy(bytes);
+        let owned = cow.into_owned();
+        assert_eq!(owned, "hello 😀");
+    }
+
+    #[tokio::test]
+    async fn empty_response_produces_done_event() {
+        /* эмулируем пустой поток */
+        let (tx, mut rx) = mpsc::channel::<StreamEvent>(1);
+        emit(
+            &tx,
+            StreamEvent::Done {
+                finish: uwa_core::types::FinishReason::Stop,
+                tool_calls: vec![],
+            },
+        )
+        .await
+        .unwrap();
+        let ev = rx.recv().await.unwrap();
+        assert!(matches!(ev, StreamEvent::Done { .. }));
     }
 }
