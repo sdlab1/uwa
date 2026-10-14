@@ -190,6 +190,8 @@ R="$(fresh r10)"; base_env; cd "$R" || exit 1
 "$DEVH" init >/dev/null
 "$DEVH" doctor >"$T/out" 2>&1 && pass "doctor exit 0" || { fail "doctor exit 0"; cat "$T/out"; }
 grep -q "fail=0" "$T/out" && pass "doctor чист" || fail "doctor чист"
+HARNESS_COLOR=always "$DEVH" doctor >"$T/out" 2>&1; grep -q $'\033\[3' "$T/out" && pass "HARNESS_COLOR=always даёт ANSI" || fail "HARNESS_COLOR=always даёт ANSI"
+"$DEVH" doctor >"$T/out" 2>&1; ! grep -q $'\033' "$T/out" && pass "piped вывод без ANSI" || fail "piped вывод без ANSI"
 
 echo "== 11. per-item агент: маршрутизация по сложности =="
 R="$(fresh r11)"; base_env; export HARNESS_VERIFY='test -f done2.txt'; cd "$R" || exit 1

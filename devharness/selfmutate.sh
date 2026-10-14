@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # devharness/selfmutate.sh — мутационная проверка СОБСТВЕННЫХ тестов харнесса.
 # Вносим известные баги в ИЗОЛИРОВАННУЮ копию devh и проверяем, что test.sh их убивает.
-# «Тесты на вес золота» — применимо и к тестам самого харнесса (kill-rate).
+# «Тесты на вес золота» — применимо и к тестам самого харнесса.
+# Патчер — чистый awk (ENVIRON, без escape-ловушек -v); python-зависимости нет.
 # Гейт: 13/13. Новые гейты devh должны сопровождаться новым мутантом здесь.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -18,11 +19,31 @@ if ! bash "$W/h/test.sh" >/dev/null 2>&1; then
 fi
 echo "базовый suite на чистой копии: зелёный (kill-rate будет валиден)"
 
-mutant() { # $1=имя, $2=py-файл патча
-  local name="$1" patch="$2"
+# awk-патчер: заменяет ПЕРВОЕ точное многострочное вхождение old → new в $W/h/devh.
+# Значения — через ENVIRON (в отличие от -v, НЕ обрабатывают escape-последовательности).
+apply_mutant() { # $1=old-файл $2=new-файл; rc≠0 — якорь не найден
+  OF="$(cat "$1")" NF_="$(cat "$2")" awk '
+    BEGIN { n = split(ENVIRON["OF"], ol, "\n") }
+    { buf[NR] = $0 }
+    END {
+      replaced = 0
+      for (i = 1; i <= NR; i++) {
+        if (!replaced && n > 0 && buf[i] == ol[1] && i + n - 1 <= NR) {
+          ok = 1
+          for (j = 2; j <= n; j++) if (buf[i+j-1] != ol[j]) { ok = 0; break }
+          if (ok) { printf "%s\n", ENVIRON["NF_"]; i += n - 1; replaced = 1; continue }
+        }
+        print buf[i]
+      }
+      exit replaced ? 0 : 1
+    }' "$W/h/devh" > "$W/h/devh.new" && mv -f "$W/h/devh.new" "$W/h/devh"
+}
+
+mutant() { # $1=имя $2=old $3=new
+  local name="$1"
   TOTAL=$((TOTAL+1))
   cp "$W/h/devh.orig" "$W/h/devh"
-  if ! (cd "$W/h" && python3 "$patch") 2>"$W/err"; then
+  if ! apply_mutant "$2" "$3"; then
     echo "  SKIP $name (якорь мутанта устарел — обнови selfmutate.sh)"; SKIP=$((SKIP+1)); return
   fi
   bash -n "$W/h/devh" || { echo "  SKIP $name (сломан синтаксис — невалидный мутант)"; SKIP=$((SKIP+1)); return; }
@@ -33,119 +54,130 @@ mutant() { # $1=имя, $2=py-файл патча
   fi
 }
 
-cat > "$W/m1.py" <<'P1'
-s = open('devh', encoding='utf-8').read()
-o = '''    if [ "$NO_IGNORED" = 1 ] && ! no_ignored_ok "$log"; then which=NO-IGNORED; return 1; fi'''
-n = '''    if false; then which=NO-IGNORED; return 1; fi'''
-assert s.count(o) == 1
-open('devh', 'w', encoding='utf-8').write(s.replace(o, n))
-P1
-cat > "$W/m2.py" <<'P2'
-s = open('devh', encoding='utf-8').read()
-o = '''  if [ -n "$MSG_DENY" ] && printf '%s\\n' "$msg" | grep -qiE "$MSG_DENY"; then
-    echo "FAIL: сообщение коммита нарушает гигиену ($MSG_DENY): «$msg»" >&2'''
-n = '''  if false && printf '%s\\n' "$msg" | grep -qiE "$MSG_DENY"; then
-    echo "FAIL: сообщение коммита нарушает гигиену ($MSG_DENY): «$msg»" >&2'''
-assert s.count(o) == 1
-open('devh', 'w', encoding='utf-8').write(s.replace(o, n))
-P2
-cat > "$W/m3.py" <<'P3'
-s = open('devh', encoding='utf-8').read()
-o = '''    if [ "$na" -ge "$MAX_ACTIVE" ]; then'''
-n = '''    if [ "$na" -lt 0 ]; then'''
-assert s.count(o) == 1
-open('devh', 'w', encoding='utf-8').write(s.replace(o, n))
-P3
-cat > "$W/m4.py" <<'P4'
-s = open('devh', encoding='utf-8').read()
-o = '''    echo "OK resume worktree: $wt"
-    fresh=0'''
-n = '''    echo "OK resume worktree: $wt"'''
-assert s.count(o) == 1
-open('devh', 'w', encoding='utf-8').write(s.replace(o, n))
-P4
-cat > "$W/m5.py" <<'P5'
-s = open('devh', encoding='utf-8').read()
-o = '''  if [ -f "$d/red.cmd" ] && [ ! -s "$d/no-red" ]; then'''
-n = '''  if false; then'''
-assert s.count(o) == 1
-open('devh', 'w', encoding='utf-8').write(s.replace(o, n))
-P5
-cat > "$W/m6.py" <<'P6'
-s = open('devh', encoding='utf-8').read()
-o = '''  if [ -n "$MSG_DENY" ] && printf '%s\\n' "$msg" | grep -qiE "$MSG_DENY"; then
-    echo "FAIL: сообщение всё ещё нарушает гигиену: «$msg» — правь $sum" >&2; exit 1'''
-n = '''  if false; then
-    echo "FAIL: сообщение всё ещё нарушает гигиену: «$msg» — правь $sum" >&2; exit 1'''
-assert s.count(o) == 1
-open('devh', 'w', encoding='utf-8').write(s.replace(o, n))
-P6
-cat > "$W/m7.py" <<'P7'
-s = open('devh', encoding='utf-8').read()
-o = '''  if [ "$(git -C "$wt" rev-list --count "$MAIN..HEAD")" -eq 0 ] 2>/dev/null; then'''
-n = '''  if [ "$(git -C "$wt" rev-list --count "$MAIN..HEAD")" -eq 99 ] 2>/dev/null; then'''
-assert s.count(o) == 1
-open('devh', 'w', encoding='utf-8').write(s.replace(o, n))
-P7
-cat > "$W/m8.py" <<'P8'
-s = open('devh', encoding='utf-8').read()
-o = '''        if [ "$pct" -lt "$MIN_KILL" ]; then
-          echo "mutation FAIL $f: kill-rate'''
-n = '''        if false; then
-          echo "mutation FAIL $f: kill-rate'''
-assert s.count(o) == 1
-open('devh', 'w', encoding='utf-8').write(s.replace(o, n))
-P8
-cat > "$W/m9.py" <<'P9'
-s = open('devh', encoding='utf-8').read()
-o = '''  elif [ ! -f "$d/red.cmd" ]; then'''
-n = '''  elif false; then'''
-assert s.count(o) == 1
-open('devh', 'w', encoding='utf-8').write(s.replace(o, n))
-P9
-cat > "$W/m10.py" <<'P10'
-s = open('devh', encoding='utf-8').read()
-o = '''        timeout "$AGENT_TIMEOUT" $AGENT "$1" ) > "$HDIR/logs/$id-agent.log" 2>&1 \\'''
-n = '''        timeout 300 $AGENT "$1" ) > "$HDIR/logs/$id-agent.log" 2>&1 \\'''
-assert s.count(o) == 1
-open('devh', 'w', encoding='utf-8').write(s.replace(o, n))
-P10
-cat > "$W/m11.py" <<'P11'
-s = open('devh', encoding='utf-8').read()
-o = '''    flock -n 8 || { echo "devh: $1 сейчас в работе (run.lock занят) — $2 отклонён" >&2; exit 1; }'''
-n = '''    flock -x 8 || { echo "devh: $1 сейчас в работе (run.lock занят) — $2 отклонён" >&2; exit 1; }'''
-assert s.count(o) == 1
-open('devh', 'w', encoding='utf-8').write(s.replace(o, n))
-P11
-cat > "$W/m12.py" <<'P12'
-s = open('devh', encoding='utf-8').read()
-o = '''  if head -1 "$sum" | grep -q '^BLOCKED'; then'''
-n = '''  if false; then'''
-assert s.count(o) == 1
-open('devh', 'w', encoding='utf-8').write(s.replace(o, n))
-P12
-cat > "$W/m13.py" <<'P13'
-s = open('devh', encoding='utf-8').read()
-o = '''        [ "$pct" -lt "$MIN_KILL" ] && { echo "mutation FAIL: kill-rate ${pct}% < ${MIN_KILL}%"; return 1; }'''
-n = '''        false && { echo "mutation FAIL: kill-rate ${pct}% < ${MIN_KILL}%"; return 1; }'''
-assert s.count(o) == 1
-open('devh', 'w', encoding='utf-8').write(s.replace(o, n))
-P13
+# ─── M1: NO-IGNORED гейт отключён ───
+cat > "$W/m.old" <<'S'
+    if [ "$NO_IGNORED" = 1 ] && ! no_ignored_ok "$log"; then which=NO-IGNORED; return 1; fi
+S
+cat > "$W/m.new" <<'S'
+    if false; then which=NO-IGNORED; return 1; fi
+S
+mutant "M1: NO-IGNORED гейт отключён" "$W/m.old" "$W/m.new"
 
-echo "Мутационная проверка тестов devh (изолированная копия: $W/h):"
-mutant "M1: NO-IGNORED гейт отключён" "$W/m1.py"
-mutant "M2: гигиена сообщения (MSG_DENY) отключена" "$W/m2.py"
-mutant "M3: WIP-лимит отключён" "$W/m3.py"
-mutant "M4: resume ломает RED pre-check (старый баг)" "$W/m4.py"
-mutant "M5: RED пост-гейт отключён (позеленение не проверяется)" "$W/m5.py"
-mutant "M6: гигиена в devh commit отключена (2-я линия)" "$W/m6.py"
-mutant "M7: merge-guard «нет коммитов» отключён" "$W/m7.py"
-mutant "M8: kill-rate MIN_KILL не проверяется (мутации не гейтят)" "$W/m8.py"
-mutant "M9: обязательность RED отключена (нет red.cmd → run идёт)" "$W/m9.py"
-mutant "M10: watchdog-timeout игнорируется (всегда 300с)" "$W/m10.py"
-mutant "M11: run.lock блокирующий вместо отказного (гонка merge/run)" "$W/m11.py"
-mutant "M12: BLOCKED-детект отключён" "$W/m12.py"
-mutant "M13: kill-rate в single-run ветке не проверяется" "$W/m13.py"
+# ─── M2: гигиена сообщения (run) отключена ───
+cat > "$W/m.old" <<'S'
+  if [ -n "$MSG_DENY" ] && printf '%s\n' "$msg" | grep -qiE "$MSG_DENY"; then
+    echo "${C_R}FAIL: сообщение коммита нарушает гигиену ($MSG_DENY): «$msg»${C_0}" >&2
+S
+cat > "$W/m.new" <<'S'
+  if false && printf '%s\n' "$msg" | grep -qiE "$MSG_DENY"; then
+    echo "${C_R}FAIL: сообщение коммита нарушает гигиену ($MSG_DENY): «$msg»${C_0}" >&2
+S
+mutant "M2: гигиена сообщения (MSG_DENY) отключена" "$W/m.old" "$W/m.new"
+
+# ─── M3: WIP-лимит отключён ───
+cat > "$W/m.old" <<'S'
+    if [ "$na" -ge "$MAX_ACTIVE" ]; then
+S
+cat > "$W/m.new" <<'S'
+    if [ "$na" -lt 0 ]; then
+S
+mutant "M3: WIP-лимит отключён" "$W/m.old" "$W/m.new"
+
+# ─── M4: resume ломает RED pre-check (старый баг) ───
+cat > "$W/m.old" <<'S'
+    echo "${C_G}OK resume worktree: $wt${C_0}"
+    fresh=0
+S
+cat > "$W/m.new" <<'S'
+    echo "${C_G}OK resume worktree: $wt${C_0}"
+S
+mutant "M4: resume ломает RED pre-check (старый баг)" "$W/m.old" "$W/m.new"
+
+# ─── M5: RED пост-гейт отключён ───
+cat > "$W/m.old" <<'S'
+  if [ -f "$d/red.cmd" ] && [ ! -s "$d/no-red" ]; then
+S
+cat > "$W/m.new" <<'S'
+  if false; then
+S
+mutant "M5: RED пост-гейт отключён (позеленение не проверяется)" "$W/m.old" "$W/m.new"
+
+# ─── M6: гигиена в devh commit отключена (2-я линия) ───
+cat > "$W/m.old" <<'S'
+  if [ -n "$MSG_DENY" ] && printf '%s\n' "$msg" | grep -qiE "$MSG_DENY"; then
+    echo "${C_R}FAIL: сообщение всё ещё нарушает гигиену: «$msg» — правь $sum${C_0}" >&2; exit 1
+S
+cat > "$W/m.new" <<'S'
+  if false; then
+    echo "${C_R}FAIL: сообщение всё ещё нарушает гигиену: «$msg» — правь $sum${C_0}" >&2; exit 1
+S
+mutant "M6: гигиена в devh commit отключена (2-я линия)" "$W/m.old" "$W/m.new"
+
+# ─── M7: merge-guard «нет коммитов» отключён ───
+cat > "$W/m.old" <<'S'
+  if [ "$(git -C "$wt" rev-list --count "$MAIN..HEAD")" -eq 0 ] 2>/dev/null; then
+S
+cat > "$W/m.new" <<'S'
+  if [ "$(git -C "$wt" rev-list --count "$MAIN..HEAD")" -eq 99 ] 2>/dev/null; then
+S
+mutant "M7: merge-guard «нет коммитов» отключён" "$W/m.old" "$W/m.new"
+
+# ─── M8: kill-rate (per-file) не проверяется ───
+cat > "$W/m.old" <<'S'
+        if [ "$pct" -lt "$MIN_KILL" ]; then
+          echo "mutation FAIL $f: kill-rate ${pct}% < ${MIN_KILL}% — тесты не ловят мутантов"
+S
+cat > "$W/m.new" <<'S'
+        if false; then
+          echo "mutation FAIL $f: kill-rate ${pct}% < ${MIN_KILL}% — тесты не ловят мутантов"
+S
+mutant "M8: kill-rate MIN_KILL не проверяется (per-file)" "$W/m.old" "$W/m.new"
+
+# ─── M9: обязательность RED отключена ───
+cat > "$W/m.old" <<'S'
+  elif [ ! -f "$d/red.cmd" ]; then
+S
+cat > "$W/m.new" <<'S'
+  elif false; then
+S
+mutant "M9: обязательность RED отключена (нет red.cmd → run идёт)" "$W/m.old" "$W/m.new"
+
+# ─── M10: watchdog-timeout игнорируется ───
+cat > "$W/m.old" <<'S'
+        timeout "$AGENT_TIMEOUT" $AGENT "$1" ) > "$HDIR/logs/$id-agent.log" 2>&1 \
+S
+cat > "$W/m.new" <<'S'
+        timeout 300 $AGENT "$1" ) > "$HDIR/logs/$id-agent.log" 2>&1 \
+S
+mutant "M10: watchdog-timeout игнорируется (всегда 300с)" "$W/m.old" "$W/m.new"
+
+# ─── M11: run.lock блокирующий вместо отказного ───
+cat > "$W/m.old" <<'S'
+    flock -n 8 || { echo "devh: $1 сейчас в работе (run.lock занят) — $2 отклонён" >&2; exit 1; }
+S
+cat > "$W/m.new" <<'S'
+    flock -x 8 || { echo "devh: $1 сейчас в работе (run.lock занят) — $2 отклонён" >&2; exit 1; }
+S
+mutant "M11: run.lock блокирующий вместо отказного (гонка merge/run)" "$W/m.old" "$W/m.new"
+
+# ─── M12: BLOCKED-детект отключён ───
+cat > "$W/m.old" <<'S'
+  if head -1 "$sum" | grep -q '^BLOCKED'; then
+S
+cat > "$W/m.new" <<'S'
+  if false; then
+S
+mutant "M12: BLOCKED-детект отключён" "$W/m.old" "$W/m.new"
+
+# ─── M13: kill-rate (single-run) не проверяется ───
+cat > "$W/m.old" <<'S'
+        [ "$pct" -lt "$MIN_KILL" ] && { echo "mutation FAIL: kill-rate ${pct}% < ${MIN_KILL}%"; return 1; }
+S
+cat > "$W/m.new" <<'S'
+        false && { echo "mutation FAIL: kill-rate ${pct}% < ${MIN_KILL}%"; return 1; }
+S
+mutant "M13: kill-rate в single-run ветке не проверяется" "$W/m.old" "$W/m.new"
+
 echo
 echo "KILL-RATE: $KILLED/$TOTAL (skip=$SKIP)"
 [ "$KILLED" -eq "$TOTAL" ] && [ "$SKIP" -eq 0 ]

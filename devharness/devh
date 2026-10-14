@@ -70,6 +70,18 @@ need_conf() {
   done
 }
 
+# ─── цвета (cargo-стиль): auto по tty; HARNESS_COLOR=always|never; NO_COLOR ──
+case "${HARNESS_COLOR:-auto}" in
+  always) FORCE_C=1 ;;
+  never)  FORCE_C=0 ;;
+  *)      FORCE_C="" ;;
+esac
+if [ "${FORCE_C:-0}" = 1 ] || { [ -z "$FORCE_C" ] && [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; }; then
+  C_G=$'\033[32m'; C_R=$'\033[31m'; C_Y=$'\033[33m'; C_C=$'\033[36m'; C_B=$'\033[1m'; C_D=$'\033[2m'; C_0=$'\033[0m'
+else
+  C_G=''; C_R=''; C_Y=''; C_C=''; C_B=''; C_D=''; C_0=''
+fi
+
 has_flock() { command -v flock >/dev/null 2>&1; }
 has_remote() { git -C "$ROOT" remote | grep -q . ; }
 
@@ -245,8 +257,8 @@ EOF
   # локальный ignore — workflow не попадает в git вообще
   touch "$ROOT/.git/info/exclude"
   grep -qx '.harness/' "$ROOT/.git/info/exclude" || echo '.harness/' >> "$ROOT/.git/info/exclude"
-  echo "OK init: $CONF"
-  [ -n "$VERIFY" ] || echo "⚠  VERIFY не задетектирован — пропиши в $CONF"
+  echo "${C_G}OK init: $CONF${C_0}"
+  [ -n "$VERIFY" ] || echo "${C_Y}⚠  VERIFY не задетектирован — пропиши в $CONF${C_0}"
 }
 
 # ─── new ───────────────────────────────────────────────────────────
@@ -270,7 +282,7 @@ cmd_new() {
     title="$(head -1 "$d/spec.md")"; title="${title#\# }"; [ -n "$title" ] || title="Session $arg"
     echo "$title" > "$d/title"; echo open > "$d/status"; : > "$d/plan.md"
     [ -n "$no_red" ] && echo "$no_red" > "$d/no-red"
-    echo "OK $id: $title (спека из todo/$arg.md)${no_red:+ [RED пропущен: $no_red]}"
+    echo "${C_G}OK $id: $title (спека из todo/$arg.md)${no_red:+ [RED пропущен: $no_red]}${C_0}"
     echo "   RED-пруф ОБЯЗАТЕЛЕН (в первую очередь): $d/red.cmd — команда, падающая на чистом HEAD"
     return 0
   fi
@@ -282,7 +294,7 @@ cmd_new() {
   if [ ! -t 0 ]; then cat > "$d/spec.md"
   else : > "$d/spec.md"; "${EDITOR:-vi}" "$d/spec.md"; fi
   [ -n "$no_red" ] && echo "$no_red" > "$d/no-red"
-  echo "OK $id: $title (спека: $d/spec.md)${no_red:+ [RED пропущен: $no_red]}"
+  echo "${C_G}OK $id: $title (спека: $d/spec.md)${no_red:+ [RED пропущен: $no_red]}${C_0}"
   echo "   RED-пруф ОБЯЗАТЕЛЕН (в первую очередь): $d/red.cmd — команда, падающая на чистом HEAD"
 }
 
@@ -294,8 +306,14 @@ cmd_list() {
   for d in "$(items_dir)"/W-*; do
     [ -d "$d" ] || continue
     id="${d##*/}"; st="$(item_status "$id")"
+    case "$st" in
+      open)   stc="${C_Y}$st${C_0}" ;;
+      active) stc="${C_C}$st${C_0}" ;;
+      done)   stc="${C_G}$st${C_0}" ;;
+      *)      stc="$st" ;;
+    esac
     wt="-"; [ -d "$(wt_of "$id")" ] && wt=yes
-    printf '%-7s %-8s %-3s %s\n' "$id" "$st" "$wt" "$(cat "$d/title" 2>/dev/null)"
+    printf '%-7s %-8s %-3s %s\n' "$id" "$stc" "$wt" "$(cat "$d/title" 2>/dev/null)"
   done
   return 0
 }
@@ -402,14 +420,14 @@ cmd_run() {
   fi
   [ "$prev_st" != active ] && set_status "$id" active
   crit_end
-  [ "$prev_st" = active ] && echo "OK resume: $id уже active — продолжаем"
+  [ "$prev_st" = active ] && echo "${C_G}OK resume: $id уже active — продолжаем${C_0}"
 
   run_agent() { # $1 = промпт; timeout = watchdog «агент сдох»
     # shellcheck disable=SC2086  # $AGENT — команда+аргументы агента; слово-разбиение намеренно
     ( cd "$wt" && env HARNESS_WORKTREE="$wt" HARNESS_SPEC="$d/spec.md" \
         HARNESS_PLAN="$d/plan.md" HARNESS_SUMMARY="$sum" \
         timeout "$AGENT_TIMEOUT" $AGENT "$1" ) > "$HDIR/logs/$id-agent.log" 2>&1 \
-      || { echo "FAIL агент (код выше; timeout=${AGENT_TIMEOUT}s; лог: $HDIR/logs/$id-agent.log)" >&2; set_status "$id" active; exit 1; }
+      || { echo "${C_R}FAIL агент (код выше; timeout=${AGENT_TIMEOUT}s; лог: $HDIR/logs/$id-agent.log)${C_0}" >&2; set_status "$id" active; exit 1; }
     tstage "agent-r$((round+1))"
   }
 
@@ -420,31 +438,31 @@ cmd_run() {
     else
       git -C "$ROOT" worktree add -b "$br" "$wt" HEAD >/dev/null
     fi
-    echo "OK worktree: $wt (ветка $br)"
+    echo "${C_G}OK worktree: $wt (ветка $br)${C_0}"
     if [ -n "$BOOTSTRAP" ]; then
       echo ".. bootstrap: $BOOTSTRAP"
       (cd "$wt" && bash -c "$BOOTSTRAP") > "$HDIR/logs/$id-bootstrap.log" 2>&1 \
-        || { echo "FAIL bootstrap (лог: $HDIR/logs/$id-bootstrap.log)" >&2; exit 1; }
+        || { echo "${C_R}FAIL bootstrap (лог: $HDIR/logs/$id-bootstrap.log)${C_0}" >&2; exit 1; }
     fi
   else
-    echo "OK resume worktree: $wt"
+    echo "${C_G}OK resume worktree: $wt${C_0}"
     fresh=0
   fi
   tstage "worktree(+bootstrap)"
 
   # 2. RED-пруф — В ПЕРВУЮ ОЧЕРЕДЬ: обязательный гейт
   if [ -s "$d/no-red" ]; then
-    echo "⚠  RED пропущен (записанный обход): $(cat "$d/no-red")"
+    echo "${C_Y}⚠  RED пропущен (записанный обход): $(cat "$d/no-red")${C_0}"
   elif [ ! -f "$d/red.cmd" ]; then
-    echo "FAIL: RED-пруф ОБЯЗАТЕЛЕН (в первую очередь). Напиши $d/red.cmd — команду, падающую на чистом HEAD и зеленеющую после работы; либо записанный обход: echo \"<причина>\" > $d/no-red" >&2
+    echo "${C_R}FAIL: RED-пруф ОБЯЗАТЕЛЕН (в первую очередь). Напиши $d/red.cmd — команду, падающую на чистом HEAD и зеленеющую после работы; либо записанный обход: echo \"<причина>\" > $d/no-red${C_0}" >&2
     exit 1
   elif [ "$fresh" = 0 ] && [ -n "$(git -C "$wt" status --porcelain)" ]; then
-    echo "OK resume: RED pre-check пропущен — дерево уже содержит работу; доказательство RED было на чистом HEAD первой попытки, позеленение проверит пост-гейт"
+    echo "${C_G}OK resume: RED pre-check пропущен — дерево уже содержит работу; доказательство RED было на чистом HEAD первой попытки, позеленение проверит пост-гейт${C_0}"
   elif (cd "$wt" && bash "$d/red.cmd") >/dev/null 2>&1; then
-    echo "FAIL: red.cmd уже зелёный на чистом HEAD — это не баг. Почини red.cmd или удали." >&2
+    echo "${C_R}FAIL: red.cmd уже зелёный на чистом HEAD — это не баг. Почини red.cmd или удали.${C_0}" >&2
     exit 1
   else
-    echo "OK red: падает на HEAD (пруф воспроизводится)"
+    echo "${C_G}OK red: падает на HEAD (пруф воспроизводится)${C_0}"
   fi
   tstage "red-pre"
 
@@ -459,7 +477,7 @@ cmd_run() {
       mrc=$?
       tstage "mutate-r$((round+1))"
       if [ "$mrc" -eq 2 ]; then
-        echo "FAIL: mutation env-блокер — инструмент не распознан. Блокер СРЕДЫ, не работа агента: установи (gobot: muex; rust: cargo-mutants) или исправь MUTATE в $CONF. Детали: $mlog" >&2
+        echo "${C_R}FAIL: mutation env-блокер — инструмент не распознан. Блокер СРЕДЫ, не работа агента: установи (gobot: muex; rust: cargo-mutants) или исправь MUTATE в $CONF. Детали: $mlog${C_0}" >&2
         set_status "$id" active; exit 1
       fi
       if [ "$mrc" -ne 0 ]; then which=MUTATE; return 1; fi
@@ -475,7 +493,7 @@ cmd_run() {
   while ! gate; do
     round=$((round+1))
     if [ "$round" -gt "$MAX_FIX" ]; then
-      echo "FAIL: гейт $which красный после $MAX_FIX раундов фикса (логи: $HDIR/logs/$id-*.log)" >&2
+      echo "${C_R}FAIL: гейт $which красный после $MAX_FIX раундов фикса (логи: $HDIR/logs/$id-*.log)${C_0}" >&2
       set_status "$id" active; exit 1
     fi
     echo ".. гейт $which упал — раунд фикса $round/$MAX_FIX"
@@ -498,18 +516,18 @@ $(tail -40 "$blog")
 Разберись с производительностью изменённого кода (алгоритм, а не микромагия). git не трогай. Обнови summary: $sum" ;;
     esac
   done
-  echo "OK гейты: verify${MUTATE:+ +mutation}${BENCH:+ +bench}"
+  echo "${C_G}OK гейты: verify${MUTATE:+ +mutation}${BENCH:+ +bench}${C_0}"
 
   # 4. RED-пруф: после работы обязан проходить
   if [ -f "$d/red.cmd" ] && [ ! -s "$d/no-red" ]; then
     (cd "$wt" && bash "$d/red.cmd") >/dev/null 2>&1 \
-      || { echo "FAIL: red.cmd не позеленел — фикс не доказан" >&2; set_status "$id" active; exit 1; }
-    echo "OK red: позеленел"
+      || { echo "${C_R}FAIL: red.cmd не позеленел — фикс не доказан${C_0}" >&2; set_status "$id" active; exit 1; }
+    echo "${C_G}OK red: позеленел${C_0}"
   fi
   tstage "red-post"
 
   # 5. summary / BLOCKED
-  if [ ! -s "$sum" ]; then echo "FAIL: агент не написал summary ($sum)" >&2; set_status "$id" active; exit 1; fi
+  if [ ! -s "$sum" ]; then echo "${C_R}FAIL: агент не написал summary ($sum)${C_0}" >&2; set_status "$id" active; exit 1; fi
   if head -1 "$sum" | grep -q '^BLOCKED'; then
     head -1 "$sum"; set_status "$id" active; exit 1
   fi
@@ -518,34 +536,34 @@ $(tail -40 "$blog")
   msg="$(head -1 "$sum" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | cut -c1-72)"
   [ -n "$msg" ] || msg="$id: $(cut -c1-60 "$d/title")"
   if [ -n "$MSG_DENY" ] && printf '%s\n' "$msg" | grep -qiE "$MSG_DENY"; then
-    echo "FAIL: сообщение коммита нарушает гигиену ($MSG_DENY): «$msg»" >&2
+    echo "${C_R}FAIL: сообщение коммита нарушает гигиену ($MSG_DENY): «$msg»${C_0}" >&2
     echo "      поправь ПЕРВУЮ строку $sum (без упоминаний workflow) и: devh commit $id" >&2
     set_status "$id" active; exit 1
   fi
   if ( cd "$wt" && git add -A && git diff --cached --quiet ); then
-    echo "FAIL: агент не оставил изменений" >&2; set_status "$id" active; exit 1
+    echo "${C_R}FAIL: агент не оставил изменений${C_0}" >&2; set_status "$id" active; exit 1
   fi
   echo "— staged:"; git -C "$wt" diff --cached --stat | tail -5
   dels="$(git -C "$wt" diff --cached --diff-filter=D --name-only | wc -l)"
-  if [ "$dels" -gt 5 ]; then echo "⚠  удалений в коммите: $dels — проверь, что это задумано"; fi
+  if [ "$dels" -gt 5 ]; then echo "${C_Y}⚠  удалений в коммите: $dels — проверь, что это задумано${C_0}"; fi
   git -C "$wt" commit -q -m "$msg"
-  echo "OK commit: $msg"
+  echo "${C_G}OK commit: $msg${C_0}"
   printf 'fix-rounds=%d gates=verify%s%s duration=%ds\n' \
     "$round" "${MUTATE:+,mutation}" "${BENCH:+,bench}" "$(( $(date +%s) - t0 ))" > "$d/last-run"
   printf 'timing: %s\n' "$(awk '{printf "%s=%ss ", $1, $2}' "$TIMES")" >> "$d/last-run"
 
   # 7. push ветки (ревью перед main — двухфазный merge)
   if has_remote; then
-    if (cd "$wt" && git push -q -u "$REMOTE" "$br"); then echo "OK push: $REMOTE/$br"
-    else echo "⚠  push не прошёл — коммит локальный; продолжай: devh merge $id"; fi
+    if (cd "$wt" && git push -q -u "$REMOTE" "$br"); then echo "${C_G}OK push: $REMOTE/$br${C_0}"
+    else echo "${C_Y}⚠  push не прошёл — коммит локальный; продолжай: devh merge $id${C_0}"; fi
   fi
   tstage "commit+push"
   echo
-  echo "— тайминг стадий (сек):"
-  awk '{printf "  %-24s %ss\n", $1, $2}' "$TIMES"
+  echo "${C_C}— тайминг стадий (сек):${C_0}"
+  awk -v D="$C_D" -v Z="$C_0" '{printf "%s  %-24s %ss%s\n", D, $1, $2, Z}' "$TIMES"
   set_status "$id" active
   echo
-  echo "ГОТОВО: $id на ветке $br. Ревью: git -C $wt diff $MAIN..$br — затем: devh merge $id"
+  echo "${C_B}ГОТОВО: $id на ветке $br.${C_0} Ревью: git -C $wt diff $MAIN..$br — затем: ${C_B}devh merge $id${C_0}"
 }
 
 # ─── commit (повтор commit/push по готовой работе) ─────────────────
@@ -557,24 +575,24 @@ cmd_commit() {
   local d wt br sum msg
   d="$(items_dir)/$id"; wt="$(wt_of "$id")"; br="$(branch_of "$id")"; sum="$HDIR/summaries/$id.md"
   [ -d "$wt" ] || { echo "devh: нет worktree $wt (сначала devh run $id)" >&2; exit 1; }
-  [ -s "$sum" ] || { echo "FAIL: нет summary ($sum)" >&2; exit 1; }
+  [ -s "$sum" ] || { echo "${C_R}FAIL: нет summary ($sum)${C_0}" >&2; exit 1; }
   head -1 "$sum" | grep -q '^BLOCKED' && { head -1 "$sum"; exit 1; }
   msg="$(head -1 "$sum" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | cut -c1-72)"
   [ -n "$msg" ] || msg="$id: $(cut -c1-60 "$d/title")"
   if [ -n "$MSG_DENY" ] && printf '%s\n' "$msg" | grep -qiE "$MSG_DENY"; then
-    echo "FAIL: сообщение всё ещё нарушает гигиену: «$msg» — правь $sum" >&2; exit 1
+    echo "${C_R}FAIL: сообщение всё ещё нарушает гигиену: «$msg» — правь $sum${C_0}" >&2; exit 1
   fi
   if [ -n "$(git -C "$wt" status --porcelain)" ]; then
     git -C "$wt" add -A
-    if git -C "$wt" diff --cached --quiet; then echo "FAIL: изменений нет" >&2; exit 1; fi
+    if git -C "$wt" diff --cached --quiet; then echo "${C_R}FAIL: изменений нет${C_0}" >&2; exit 1; fi
     git -C "$wt" commit -q -m "$msg"
-    echo "OK commit: $msg"
+    echo "${C_G}OK commit: $msg${C_0}"
   else
-    echo "OK: изменений нет — только push"
+    echo "${C_G}OK: изменений нет — только push${C_0}"
   fi
   if has_remote; then
-    (cd "$wt" && git push -q -u "$REMOTE" "$br") && echo "OK push: $REMOTE/$br" \
-      || echo "⚠  push не прошёл — потом: devh merge $id"
+    (cd "$wt" && git push -q -u "$REMOTE" "$br") && echo "${C_G}OK push: $REMOTE/$br${C_0}" \
+      || echo "${C_Y}⚠  push не прошёл — потом: devh merge $id${C_0}"
   fi
   echo "далее: devh merge $id"
 }
@@ -590,29 +608,29 @@ cmd_merge() {
 
   # гейты: worktree чист и на ветке есть коммиты сверх MAIN
   if [ -n "$(git -C "$wt" status --porcelain)" ]; then
-    echo "FAIL: в worktree незакоммиченные изменения — разберись в $wt (или devh abort $id)" >&2; exit 1
+    echo "${C_R}FAIL: в worktree незакоммиченные изменения — разберись в $wt (или devh abort $id)${C_0}" >&2; exit 1
   fi
   if [ "$(git -C "$wt" rev-list --count "$MAIN..HEAD")" -eq 0 ] 2>/dev/null; then
-    echo "FAIL: на $br нет коммитов сверх $MAIN — работы нет (devh abort $id?)" >&2; exit 1
+    echo "${C_R}FAIL: на $br нет коммитов сверх $MAIN — работы нет (devh abort $id?)${C_0}" >&2; exit 1
   fi
 
   local upstream="$MAIN"
   if has_remote; then git -C "$ROOT" fetch -q "$REMOTE" "$MAIN"; upstream="$REMOTE/$MAIN"; fi
   echo ".. rebase $br на $upstream"
   git -C "$wt" rebase "$upstream" \
-    || { echo "FAIL rebase — разреши конфликты в $wt, затем: git -C $wt rebase --continue && devh merge $id" >&2; exit 1; }
+    || { echo "${C_R}FAIL rebase — разреши конфликты в $wt, затем: git -C $wt rebase --continue && devh merge $id${C_0}" >&2; exit 1; }
   local sha; sha="$(git -C "$wt" rev-parse --short HEAD)"
 
   if has_remote; then
-    git -C "$wt" push -q "$REMOTE" "HEAD:$MAIN" && echo "OK push $REMOTE/$MAIN ($sha)" \
-      || { echo "FAIL push в $MAIN — разреши руками из $wt" >&2; exit 1; }
+    git -C "$wt" push -q "$REMOTE" "HEAD:$MAIN" && echo "${C_G}OK push $REMOTE/$MAIN ($sha)${C_0}" \
+      || { echo "${C_R}FAIL push в $MAIN — разреши руками из $wt${C_0}" >&2; exit 1; }
     git -C "$wt" push -q "$REMOTE" --delete "$br" 2>/dev/null || true
     git -C "$ROOT" fetch -q . "$br:$MAIN" 2>/dev/null \
       || git -C "$ROOT" merge -q --ff-only "$br" 2>/dev/null \
-      || echo "⚠  локальный $MAIN не обновлён (грязное дерево/не ff) — подтяни руками"
+      || echo "${C_Y}⚠  локальный $MAIN не обновлён (грязное дерево/не ff) — подтяни руками${C_0}"
   else
-    git -C "$ROOT" merge -q --ff-only "$br" && echo "OK локальный ff в $MAIN ($sha)" \
-      || { echo "FAIL: $MAIN не ff — разреши руками: git merge --ff-only $br" >&2; exit 1; }
+    git -C "$ROOT" merge -q --ff-only "$br" && echo "${C_G}OK локальный ff в $MAIN ($sha)${C_0}" \
+      || { echo "${C_R}FAIL: $MAIN не ff — разреши руками: git merge --ff-only $br${C_0}" >&2; exit 1; }
   fi
 
   { echo "## $id — $(cat "$(items_dir)/$id/title") ($(date +%F))"
@@ -631,8 +649,8 @@ cmd_merge() {
   git -C "$ROOT" worktree remove --force "$wt" 2>/dev/null || true
   git -C "$ROOT" branch -D "$br" >/dev/null 2>&1 || true
   set_status "$id" "done"
-  echo "OK $id → done. Лог: .harness/log.md"
-  local nx; nx="$(first_live)" && echo "next: $nx — $(cat "$(items_dir)/$nx/title" 2>/dev/null)" || echo "next: очередь пуста 🎉"
+  echo "${C_G}OK $id → done. Лог: .harness/log.md${C_0}"
+  local nx; nx="$(first_live)" && echo "${C_B}next: $nx — $(cat "$(items_dir)/$nx/title" 2>/dev/null)${C_0}" || echo "${C_B}next: очередь пуста 🎉${C_0}"
 }
 
 # ─── logs (наблюдаемость) ───────────────────────────────────────────
@@ -665,11 +683,11 @@ cmd_abort() {
   local id; id="$(resolve "${1:-}")"
   item_runlock "$id" "abort"    # не выбрасывать worktree из-под живого run
   local wt br; wt="$(wt_of "$id")"; br="$(branch_of "$id")"
-  if [ -d "$wt" ]; then git -C "$ROOT" worktree remove --force "$wt"; echo "OK worktree убран"; fi
+  if [ -d "$wt" ]; then git -C "$ROOT" worktree remove --force "$wt"; echo "${C_G}OK worktree убран${C_0}"; fi
   git -C "$ROOT" branch -D "$br" >/dev/null 2>&1 || true
   if has_remote; then git -C "$ROOT" push -q "$REMOTE" --delete "$br" 2>/dev/null || true; fi
   set_status "$id" open
-  echo "OK $id → open (работа выброшена)"
+  echo "${C_G}OK $id → open (работа выброшена)${C_0}"
 }
 
 cmd_clean() {
@@ -687,13 +705,20 @@ cmd_clean() {
   if [ "$LOG_DAYS" -gt 0 ] 2>/dev/null; then
     find "$HDIR/logs" -type f -mtime +"$LOG_DAYS" -delete 2>/dev/null && echo "retention: логи старше ${LOG_DAYS}д убраны"
   fi
-  echo "OK clean ($n)"
+  echo "${C_G}OK clean ($n)${C_0}"
 }
 
 cmd_doctor() {
   need_conf
   local fail=0 warn=0 ag="${AGENT%% *}" d id st wt
-  say() { echo "$1"; }
+  say() {
+  case "$1" in
+    ok*)   echo "${C_G}$1${C_0}" ;;
+    FAIL*) echo "${C_R}$1${C_0}" ;;
+    WARN*) echo "${C_Y}$1${C_0}" ;;
+    *)     echo "$1" ;;
+  esac
+}
   command -v git >/dev/null 2>&1 && say "ok   git $(git --version | cut -d' ' -f3)" || { say "FAIL нет git"; fail=1; }
   [ -n "$VERIFY" ] && say "ok   VERIFY: $VERIFY" || { say "FAIL VERIFY не задан"; fail=1; }
   command -v "$ag" >/dev/null 2>&1 && say "ok   агент: $ag" || { say "WARN агент '$ag' не найден в PATH"; warn=1; }

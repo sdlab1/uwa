@@ -114,6 +114,7 @@ devh merge                                   # rebase → ff-push в MAIN → л
 | RULES / RULES_LOG | todo/report.md | справочник граблей в промпте / куда дописывать «## Session N» |
 | MSG_DENY | `todo/\|report\.md\|Session [0-9]+` | гигиена сообщения коммита |
 | NO_IGNORED | 1 | гейт ignored-тестов |
+| HARNESS_COLOR / NO_COLOR | auto / — | always/never/auto — цветной вывод в стиле cargo; NO_COLOR уважается |
 
 ## Самопроверка харнесса — четыре слоя (+CI)
 
