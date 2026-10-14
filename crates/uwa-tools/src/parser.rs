@@ -279,48 +279,122 @@ fn scan_bare(
     consumed: &mut Vec<Range<usize>>,
 ) {
     let fenced = fenced_regions(text);
-    // Collect lines with their byte offsets for neighbor checks.
-    let mut lines: Vec<(usize, usize, &str)> = Vec::new();
-    let mut offset = 0usize;
-    for line in text.split_inclusive('\n') {
-        let start = offset;
-        let end = offset.saturating_add(line.len());
-        offset = end;
-        lines.push((start, end, line));
-    }
 
-    for (idx, (start, end, line)) in lines.iter().enumerate() {
-        if fenced.iter().any(|r| overlaps(r, &(*start..*end))) {
+    // Scan for bare JSON objects that may span multiple lines.
+    // Uses string-aware brace counting to find matching { } pairs.
+    let mut i = 0usize;
+    while i < text.len() {
+        // Find the next '{' that could start a JSON object.
+        let Some(rel) = text[i..].find('{') else {
+            break;
+        };
+        let start = i.saturating_add(rel);
+
+        // Check if this position is inside a fenced region.
+        if fenced
+            .iter()
+            .any(|r| overlaps(r, &(start..start.saturating_add(1))))
+        {
+            i = start.saturating_add(1);
             continue;
         }
-        let trimmed = line.trim();
-        if !trimmed.starts_with('{') || !trimmed.ends_with('}') {
+
+        // Check if already consumed by another strategy.
+        if consumed
+            .iter()
+            .any(|r| overlaps(r, &(start..start.saturating_add(1))))
+        {
+            i = start.saturating_add(1);
             continue;
         }
-        if consumed.iter().any(|r| overlaps(r, &(*start..*end))) {
+
+        // Check for inline fence pattern: previous non-whitespace content on same line
+        // or previous line contains ``` and next line is just ```.
+        let line_start = text[..start].rfind('\n').map_or(0, |p| p.saturating_add(1));
+        let line_prefix = text[line_start..start].trim();
+        if !line_prefix.is_empty() {
+            // Not at start of line - could be inline.
+            i = start.saturating_add(1);
             continue;
         }
-        // Check for inline fence opener pattern: previous line contains ```
-        // and next line is just ```. This catches cases where scan_fence
-        // rejected an inline opener but the JSON body is still present.
-        if idx > 0 && idx.saturating_add(1) < lines.len() {
-            let prev_line = lines
-                .get(idx.saturating_sub(1))
-                .map(|(_, _, l)| *l)
-                .unwrap_or("");
-            let next_line = lines
-                .get(idx.saturating_add(1))
-                .map(|(_, _, l)| l.trim())
-                .unwrap_or("");
-            if prev_line.contains("```") && next_line == "```" {
-                continue; // Skip - likely inside an inline-opened fence block.
+
+        // Check for inline fence opener pattern: previous non-empty line contains ```
+        // and the line after the JSON object is just ```. This catches cases where
+        // scan_fence rejected an inline opener but the JSON body is still present.
+        let prev_non_empty_line = text[..line_start]
+            .lines()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("");
+        if prev_non_empty_line.contains("```") {
+            // Check if the line after the JSON object is just ```
+            if let Some(end) = find_json_object_end(text, start) {
+                let after_obj = &text[end..];
+                let next_non_empty = after_obj
+                    .lines()
+                    .find(|l| !l.trim().is_empty())
+                    .unwrap_or("");
+                if next_non_empty.trim() == "```" {
+                    i = start.saturating_add(1);
+                    continue;
+                }
             }
         }
-        if let Some(call) = parse_call_json(trimmed, known) {
-            out.push(call);
-            consumed.push(*start..*end);
+
+        // Try to find the matching '}' using string-aware brace counting.
+        if let Some(end) = find_json_object_end(text, start) {
+            let obj_text = &text[start..end];
+            let trimmed = obj_text.trim();
+            if let Some(call) = parse_call_json(trimmed, known) {
+                out.push(call);
+                consumed.push(start..end);
+                i = end;
+                continue;
+            }
         }
+        // Not a valid tool call JSON or no matching brace found.
+        i = start.saturating_add(1);
     }
+}
+
+/// Find the end of a JSON object starting at `start` (which must be a '{').
+/// Returns the byte index *after* the matching '}', or None if not found.
+/// Handles nested objects/arrays and string escaping.
+fn find_json_object_end(text: &str, start: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escape = false;
+    let mut i = start;
+
+    while i < text.len() {
+        let ch = text[i..].chars().next()?;
+        let ch_len = ch.len_utf8();
+
+        if in_string {
+            if escape {
+                escape = false;
+            } else if ch == '\\' {
+                escape = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+        } else {
+            match ch {
+                '"' => in_string = true,
+                '{' => depth = depth.saturating_add(1),
+                '}' => {
+                    if depth == 1 {
+                        // This '}' closes the outermost object.
+                        return Some(i.saturating_add(ch_len));
+                    }
+                    depth = depth.saturating_sub(1);
+                }
+                _ => {}
+            }
+        }
+        i = i.saturating_add(ch_len);
+    }
+    None
 }
 
 fn overlaps(a: &Range<usize>, b: &Range<usize>) -> bool {
