@@ -1,0 +1,572 @@
+#!/usr/bin/env bash
+# devh — финальный dev harness. Один файл. Зависимости: git, bash 4+, агент (goose), flock (желательно).
+#
+# Модель: харнесс владеет git и циклом; агент (goose headless) делает только
+# работу в изолированном worktree и никогда не запускает git.
+#
+# Надёжность состояния (вместо БД):
+#   * все записи статусов атомарны (tmp + mv в той же ФС)
+#   * claim-секции под flock (.harness/.lock) — next_id/WIP/статусы без гонок
+#   * per-item run.lock (flock -n): параллельный run/merge/abort того же item невозможен;
+#     лок держит открытый fd — ядро отпускает его при смерти процесса, stale-локов не бывает
+#   * логи: retention LOG_DAYS в `clean`
+#
+# Гейты (все опциональны, пустой конфиг = пропуск):
+#   VERIFY   — тесты/сборка обязаны проходить
+#   MUTATE   — мутационное тестирование изменённых файлов; kill-rate >= MIN_KILL%
+#   BENCH    — произвольная команда перф-гейта (напр. criterion против baseline)
+#   red.cmd  — RED-пруф: до работы обязан падать, после — проходить
+#
+# Команды:
+#   devh init / new "title" / list / hint [id] / run [id] / merge [id]
+#   devh abort [id] / clean / doctor
+#
+# State: .harness/ у ЦЕЛЕВОГО репо (в git не попадает — локальный exclude). Без БД.
+# Дом харнесса: project_uwa/devharness; сам скрипт location-independent (ROOT по cwd).
+
+set -euo pipefail
+
+ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || { echo "devh: не git-репозиторий" >&2; exit 1; }
+HDIR="$ROOT/.harness"
+CONF="$HDIR/config"
+
+# ─── config: дефолты → config-файл → env-override ─────────────────
+VERIFY="${HARNESS_VERIFY:-}"
+BOOTSTRAP="${HARNESS_BOOTSTRAP:-}"
+AGENT="${HARNESS_AGENT:-goose run --no-session -t}"
+MAX_FIX="${HARNESS_MAX_FIX:-3}"
+REMOTE="${HARNESS_REMOTE:-origin}"
+MAIN="${HARNESS_MAIN:-main}"
+WT_ROOT="${HARNESS_WT_ROOT:-/tmp}"
+MAX_ACTIVE="${HARNESS_MAX_ACTIVE:-3}"
+MIN_KILL="${HARNESS_MIN_KILL:-90}"
+MUTATE="${HARNESS_MUTATE:-}"
+MUTATE_SCOPE="${HARNESS_MUTATE_SCOPE:-}"
+BENCH="${HARNESS_BENCH:-}"
+AGENT_TIMEOUT="${HARNESS_AGENT_TIMEOUT:-1800}"
+LOG_DAYS="${HARNESS_LOG_DAYS:-30}"
+
+need_conf() {
+  [ -f "$CONF" ] || { echo "devh: нет $CONF — сначала: devh init" >&2; exit 1; }
+  # shellcheck disable=SC1090
+  . "$CONF"
+  local v env
+  for v in VERIFY BOOTSTRAP AGENT MAX_FIX REMOTE MAIN WT_ROOT MAX_ACTIVE MIN_KILL MUTATE MUTATE_SCOPE BENCH AGENT_TIMEOUT LOG_DAYS; do
+    env="HARNESS_$v"
+    # shellcheck disable=SC2086
+    if [ -n "${!env:-}" ]; then printf -v "$v" '%s' "${!env}"; fi
+  done
+}
+
+has_flock() { command -v flock >/dev/null 2>&1; }
+has_remote() { git -C "$ROOT" remote | grep -q . ; }
+
+# глобальная крит-секция (claim): next_id, WIP-лимит, статусы
+NO_FLOCK_WARNED=0
+crit_begin() {
+  if has_flock; then exec 9>"$HDIR/.lock"; flock -x 9
+  elif [ "$NO_FLOCK_WARNED" = 0 ]; then
+    echo "devh ⚠: нет flock — состояние без блокировок (гонки при параллельных вызовах)" >&2; NO_FLOCK_WARNED=1
+  fi
+}
+crit_end() { if has_flock; then flock -u 9; fi; }
+
+# per-item лок «в работе»: flock -n; держится до конца процесса
+item_runlock() { # $1=id, $2=действие
+  if has_flock; then
+    exec 8>"$(items_dir)/$1/run.lock"
+    flock -n 8 || { echo "devh: $1 сейчас в работе (run.lock занят) — $2 отклонён" >&2; exit 1; }
+  fi
+}
+
+# ─── items ─────────────────────────────────────────────────────────
+items_dir() { echo "$HDIR/items"; }
+
+next_id() {
+  local n=0 x
+  for x in "$(items_dir)"/W-*; do
+    [ -d "$x" ] || continue
+    x="${x##*/W-}"; case "$x" in ''|*[!0-9]*) continue;; esac
+    [ "$x" -gt "$n" ] && n="$x"
+  done
+  printf 'W-%03d' $((n + 1))
+}
+
+first_live() {
+  local d st
+  for d in "$(items_dir)"/W-*; do
+    [ -d "$d" ] || continue
+    st="$(cat "$d/status" 2>/dev/null || echo open)"
+    [ "$st" = done ] && continue
+    echo "${d##*/}"; return 0
+  done
+  return 1
+}
+
+count_active() {
+  local d n=0
+  for d in "$(items_dir)"/W-*; do
+    [ -d "$d" ] || continue
+    [ "$(cat "$d/status" 2>/dev/null || echo open)" = active ] && n=$((n+1))
+  done
+  echo "$n"
+}
+
+resolve() {  # $1 = id или пусто → первый не-done
+  local id="${1:-}"
+  if [ -z "$id" ]; then
+    id="$(first_live)" || { echo "devh: нет открытых items (devh new)" >&2; exit 1; }
+  fi
+  [ -d "$(items_dir)/$id" ] || { echo "devh: нет item $id" >&2; exit 1; }
+  echo "$id"
+}
+
+item_status() { cat "$(items_dir)/$1/status" 2>/dev/null || echo open; }
+set_status()  { # атомарно: tmp + mv в той же ФС
+  local f; f="$(items_dir)/$1/status"
+  printf '%s\n' "$2" > "$f.tmp" && mv -f "$f.tmp" "$f"
+}
+branch_of()   { echo "devh/$1"; }
+repo_slug() { printf '%s' "$ROOT" | cksum | cut -d' ' -f1; }
+wt_of()       { echo "$WT_ROOT/devh-$(repo_slug)-$1"; }
+
+# путь → имя модуля для {module}: gobot/lib/foo/bar.ex → Foo.Bar
+mod_of() {
+  local p="$1" seg out=""
+  p="${p#"$MUTATE_SCOPE"/}"; p="${p#./}"; p="${p%.ex}"
+  while [ -n "$p" ]; do
+    seg="${p%%/*}"; [ "$seg" = "$p" ] && p="" || p="${p#*/}"
+    out="${out}$(printf '%s' "${seg:0:1}" | tr '[:lower:]' '[:upper:]')${seg:1}."
+  done
+  printf '%s' "${out%.}"
+}
+
+# ─── промпт агента ────────────────────────────────────────────────
+prompt_for() { # $1=id
+  local id="$1" extra=""
+  if [ -f "$(items_dir)/$id/red.cmd" ]; then
+    extra="${extra}Есть RED-пруф: поведение, которое сейчас падает, после твоих правок обязано проходить.
+"
+  fi
+  if [ -n "$MUTATE" ]; then
+    extra="${extra}Тесты будут проверены мутационным гейтом: они обязаны УБИВАТЬ мутантов (kill-rate ≥ ${MIN_KILL}%). Пиши точные ассерты на реальное поведение; толерантные/тривиальные тесты гейт не пропустит.
+"
+  fi
+  cat <<EOF
+Ты работаешь в изолированном git-worktree: $(wt_of "$id"). Все правки — только здесь.
+
+ЗАДАЧА: реализуй спеку $HDIR/items/$id/spec.md (прочитай её полностью).
+Заметки прошлых попыток (если есть): $HDIR/items/$id/plan.md — если не закончишь, допиши туда кратко: что сделано / что дальше.
+
+ЖЕЛЕЗНЫЕ ПРАВИЛА:
+1. НИКОГДА не запускай git (add/commit/push/checkout/stash...) — харнесс владеет git.
+2. Реализуй спеку целиком: код + тесты, по стандартам проекта.
+3. Перед завершением прогони проверку сам: \`$VERIFY\` (из корня worktree). Она обязана проходить.
+${extra}4. В конце напиши summary по-русски в файл $HDIR/summaries/$id.md:
+   первая строка — готовое описание коммита одним предложением (про изменения в проекте, без упоминания харнесса/спеки),
+   дальше — детали и что проверено.
+   Если застрял: первая строка 'BLOCKED: <причина>'.
+
+Окружение: HARNESS_WORKTREE, HARNESS_SPEC, HARNESS_PLAN, HARNESS_SUMMARY — абсолютные пути.
+EOF
+}
+
+# ─── init ─────────────────────────────────────────────────────────
+cmd_init() {
+  [ -f "$CONF" ] && { echo "devh: $CONF уже есть (перезапись: rm $CONF)" >&2; exit 1; }
+  mkdir -p "$HDIR/items" "$HDIR/summaries" "$HDIR/logs"
+  if [ -z "$VERIFY" ]; then
+    if   [ -x "$ROOT/scripts/verify.sh" ]; then VERIFY='./scripts/verify.sh'
+    elif [ -f "$ROOT/gobot/mix.exs" ];       then VERIFY='cd gobot && mix test'; BOOTSTRAP='cd gobot && mix deps.get && mix compile'
+    elif [ -f "$ROOT/mix.exs" ];             then VERIFY='mix test'; BOOTSTRAP='mix deps.get && mix compile'
+    elif [ -f "$ROOT/Cargo.toml" ];          then VERIFY='cargo test'; BOOTSTRAP='cargo fetch'
+    elif grep -q '^verify:' "$ROOT/Makefile" 2>/dev/null; then VERIFY='make verify'
+    fi
+  fi
+  if [ -f "$ROOT/gobot/mix.exs" ] && [ -z "$MUTATE" ]; then
+    MUTATE='cd gobot && mix mutants --module {module}'   # muex; нет muex → гейт честно деградирует
+    MUTATE_SCOPE='gobot/lib'
+  fi
+  [ -n "$MUTATE_SCOPE" ] || MUTATE_SCOPE='lib'
+  MAIN="$(git -C "$ROOT" branch --show-current 2>/dev/null || true)"
+  [ -n "$MAIN" ] || MAIN=main
+  cat > "$CONF" <<EOF
+# devh config (source-ится bash'ем). Env-переменные HARNESS_* перекрывают.
+VERIFY='$VERIFY'            # команда проверки; обязана проходить после работы агента
+BOOTSTRAP='$BOOTSTRAP'       # однократная подготовка свежего worktree (deps и т.п.)
+AGENT='$AGENT'               # агент; промпт передаётся одним аргументом
+AGENT_TIMEOUT=$AGENT_TIMEOUT # сек на один запуск агента (watchdog: «агент сдох»)
+MAX_FIX=$MAX_FIX             # раундов «гейт упал → агент чинит»
+MAX_ACTIVE=$MAX_ACTIVE       # WIP-лимит: сколько items могут быть active одновременно (0 = выкл)
+REMOTE='$REMOTE'             # git remote; репо без remote — пуш пропускается
+MAIN='$MAIN'                 # ветка, куда мержим (текущая на момент init)
+WT_ROOT='$WT_ROOT'           # где живут worktree'ы
+LOG_DAYS=$LOG_DAYS            # retention логов в .harness/logs (0 = не чистить)
+# ── гейты качества тестов/кода (пусто = выкл) ──
+MUTATE='$MUTATE'  # мутационный гейт; {module}/{file} подставляются на каждый изменённый файл
+MUTATE_SCOPE='$MUTATE_SCOPE'  # какие пути считать «прод-кодом» для мутаций
+MIN_KILL=$MIN_KILL           # минимальный kill-rate, %
+BENCH=''                     # перф-гейт, пример: bash devharness/examples/check_bench.sh
+EOF
+  # локальный ignore — workflow не попадает в git вообще
+  touch "$ROOT/.git/info/exclude"
+  grep -qx '.harness/' "$ROOT/.git/info/exclude" || echo '.harness/' >> "$ROOT/.git/info/exclude"
+  echo "OK init: $CONF"
+  [ -n "$VERIFY" ] || echo "⚠  VERIFY не задетектирован — пропиши в $CONF"
+}
+
+# ─── new ───────────────────────────────────────────────────────────
+cmd_new() {
+  need_conf
+  local title="${1:?devh new \"title\"}"
+  local id d
+  crit_begin                       # next_id под глобальным локом: параллельные new не склеятся
+  id="$(next_id)"; d="$(items_dir)/$id"
+  mkdir -p "$d"; echo "$title" > "$d/title"; echo open > "$d/status"; : > "$d/plan.md"
+  crit_end
+  if [ ! -t 0 ]; then cat > "$d/spec.md"
+  else : > "$d/spec.md"; "${EDITOR:-vi}" "$d/spec.md"; fi
+  echo "OK $id: $title (спека: $d/spec.md)"
+  echo "   опционально RED-пруф: $d/red.cmd (до работы ОБЯЗАН падать, после — проходить)"
+}
+
+# ─── list ──────────────────────────────────────────────────────────
+cmd_list() {
+  need_conf
+  local d id st wt
+  printf '%-7s %-8s %-3s %s\n' ID STATUS WT TITLE
+  for d in "$(items_dir)"/W-*; do
+    [ -d "$d" ] || continue
+    id="${d##*/}"; st="$(item_status "$id")"
+    wt="-"; [ -d "$(wt_of "$id")" ] && wt=yes
+    printf '%-7s %-8s %-3s %s\n' "$id" "$st" "$wt" "$(cat "$d/title" 2>/dev/null)"
+  done
+  return 0
+}
+
+# ─── hint ──────────────────────────────────────────────────────────
+cmd_hint() {
+  need_conf
+  local id; id="$(resolve "${1:-}")"
+  echo "# $id — $(cat "$(items_dir)/$id/title")  [$(item_status "$id")]"
+  if [ -s "$(items_dir)/$id/plan.md" ]; then echo; echo '## План/заметки:'; cat "$(items_dir)/$id/plan.md"; fi
+  echo; echo '## Спека:'; cat "$(items_dir)/$id/spec.md"
+  echo; echo '## Контекст для следующей модели:'; prompt_for "$id"
+}
+
+# ─── mutation-гейт ─────────────────────────────────────────────────
+# Вывод инструмента: 'Mutants: N, Killed: M' (muex-формат). Нет вывода → честная деградация.
+mutate_gate() {
+  local files f mod out t k pct fail=0 warned=0
+  files="$(git -C "$wt" diff --name-only HEAD -- "$MUTATE_SCOPE" 2>/dev/null | sort -u)"
+  if [ -z "$files" ] && [ -n "$(git -C "$wt" status --porcelain -- "$MUTATE_SCOPE")" ]; then
+    files="$(git -C "$wt" status --porcelain -- "$MUTATE_SCOPE" 2>/dev/null | cut -c4- | sort -u)"
+  fi
+  if [[ "$MUTATE" != *'{'* ]]; then   # без плейсхолдеров — один прогон на всё
+    out="$(cd "$wt" && bash -c "$MUTATE" 2>&1)" || true
+    if [[ "$out" =~ Mutants:[[:space:]]*([0-9]+),[[:space:]]*Killed:[[:space:]]*([0-9]+) ]]; then
+      t="${BASH_REMATCH[1]}"; k="${BASH_REMATCH[2]}"
+      if [ "$t" -gt 0 ]; then
+        pct=$(( k * 100 / t ))
+        echo "mutation: Mutants $t, killed $k (${pct}%)"
+        [ "$pct" -lt "$MIN_KILL" ] && { echo "mutation FAIL: kill-rate ${pct}% < ${MIN_KILL}%"; return 1; }
+      else
+        echo "mutation: 0 мутантов — нечего убивать, пропуск"
+      fi
+    else
+      echo "mutation ⚠: вывод без 'Mutants: N, Killed: M' — гейт пропущен (инструмент не установлен?)"
+    fi
+    return 0
+  fi
+  [ -n "$files" ] || { echo "mutation: нет изменённых файлов в $MUTATE_SCOPE — гейт пропущен"; return 0; }
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    mod="$(mod_of "$f")"
+    local cmd; cmd="${MUTATE//\{module\}/$mod}"; cmd="${cmd//\{file\}/$f}"
+    out="$(cd "$wt" && bash -c "$cmd" 2>&1)" || true
+    if [[ "$out" =~ Mutants:[[:space:]]*([0-9]+),[[:space:]]*Killed:[[:space:]]*([0-9]+) ]]; then
+      t="${BASH_REMATCH[1]}"; k="${BASH_REMATCH[2]}"
+      if [ "$t" -gt 0 ]; then
+        pct=$(( k * 100 / t ))
+        echo "mutation $f: Mutants $t, killed $k (${pct}%)"
+        if [ "$pct" -lt "$MIN_KILL" ]; then
+          echo "mutation FAIL $f: kill-rate ${pct}% < ${MIN_KILL}% — тесты не ловят мутантов"
+          fail=1
+        fi
+      else
+        echo "mutation $f: 0 мутантов — пропуск"
+      fi
+    else
+      echo "mutation ⚠ $f: вывод без 'Mutants: N, Killed: M' — пропуск файла (инструмент не установлен?)"
+      warned=1
+    fi
+  done <<EOF2
+$files
+EOF2
+  if [ "$warned" = 1 ] && [ "$fail" = 0 ]; then echo "mutation ⚠: гейт деградировал (нет распознанных прогонов) — считается пройденным"; fi
+  [ "$fail" = 0 ]
+}
+
+# ─── run ────────────────────────────────────────────────────────────
+cmd_run() {
+  need_conf
+  [ -n "$VERIFY" ] || { echo "devh: VERIFY не задан ($CONF)" >&2; exit 1; }
+  local id; id="$(resolve "${1:-}")"
+  item_runlock "$id" "run"      # per-item лок: два run на один item невозможны
+  local d wt br log sum round=0 msg dels prev_st
+  d="$(items_dir)/$id"; wt="$(wt_of "$id")"; br="$(branch_of "$id")"
+  log="$HDIR/logs/$id-verify.log"; sum="$HDIR/summaries/$id.md"
+  local mlog="$HDIR/logs/$id-mutate.log" blog="$HDIR/logs/$id-bench.log" which=VERIFY
+
+  # claim: WIP-лимит + статус под глобальным локом
+  crit_begin
+  prev_st="$(item_status "$id")"
+  if [ "$MAX_ACTIVE" -gt 0 ] && [ "$prev_st" != active ]; then
+    local na; na="$(count_active)"
+    if [ "$na" -ge "$MAX_ACTIVE" ]; then
+      crit_end
+      echo "devh: WIP-лимит — уже $na active (MAX_ACTIVE=$MAX_ACTIVE). Заверши их (devh merge / abort) прежде чем брать новое." >&2
+      exit 1
+    fi
+  fi
+  [ "$prev_st" != active ] && set_status "$id" active
+  crit_end
+  [ "$prev_st" = active ] && echo "OK resume: $id уже active — продолжаем"
+
+  run_agent() { # $1 = промпт; timeout = watchdog «агент сдох»
+    ( cd "$wt" && HARNESS_WORKTREE="$wt" HARNESS_SPEC="$d/spec.md" \
+        HARNESS_PLAN="$d/plan.md" HARNESS_SUMMARY="$sum" \
+        timeout "$AGENT_TIMEOUT" $AGENT "$1" ) > "$HDIR/logs/$id-agent.log" 2>&1 \
+      || { echo "FAIL агент (код выше; timeout=${AGENT_TIMEOUT}s; лог: $HDIR/logs/$id-agent.log)" >&2; set_status "$id" active; exit 1; }
+  }
+
+  # 1. worktree (+ однократный bootstrap)
+  if [ ! -d "$wt" ]; then
+    if git -C "$ROOT" show-ref -q --verify "refs/heads/$br"; then
+      git -C "$ROOT" worktree add "$wt" "$br" >/dev/null
+    else
+      git -C "$ROOT" worktree add -b "$br" "$wt" HEAD >/dev/null
+    fi
+    echo "OK worktree: $wt (ветка $br)"
+    if [ -n "$BOOTSTRAP" ]; then
+      echo ".. bootstrap: $BOOTSTRAP"
+      (cd "$wt" && bash -c "$BOOTSTRAP") > "$HDIR/logs/$id-bootstrap.log" 2>&1 \
+        || { echo "FAIL bootstrap (лог: $HDIR/logs/$id-bootstrap.log)" >&2; exit 1; }
+    fi
+  else
+    echo "OK resume worktree: $wt"
+  fi
+
+  # 2. RED-пруф: до работы обязан падать
+  if [ -f "$d/red.cmd" ]; then
+    if (cd "$wt" && bash "$d/red.cmd") >/dev/null 2>&1; then
+      echo "FAIL: red.cmd уже зелёный на чистом HEAD — это не баг. Почини red.cmd или удали." >&2
+      exit 1
+    fi
+    echo "OK red: падает на HEAD (пруф воспроизводится)"
+  fi
+
+  # 3. агент → гейт-цикл (verify → mutation → bench; падение → fix-раунд агенту)
+  gate() {
+    if ! (cd "$wt" && bash -c "$VERIFY") > "$log" 2>&1; then which=VERIFY; return 1; fi
+    if [ -n "$MUTATE" ]; then
+      if ! mutate_gate > "$mlog" 2>&1; then which=MUTATE; return 1; fi
+    fi
+    if [ -n "$BENCH" ]; then
+      if ! (cd "$wt" && bash -c "$BENCH") > "$blog" 2>&1; then which=BENCH; return 1; fi
+    fi
+    return 0
+  }
+  echo ".. агент: $AGENT"
+  run_agent "$(prompt_for "$id")"
+  while ! gate; do
+    round=$((round+1))
+    if [ "$round" -gt "$MAX_FIX" ]; then
+      echo "FAIL: гейт $which красный после $MAX_FIX раундов фикса (логи: $HDIR/logs/$id-*.log)" >&2
+      set_status "$id" active; exit 1
+    fi
+    echo ".. гейт $which упал — раунд фикса $round/$MAX_FIX"
+    case "$which" in
+      VERIFY) run_agent "Verify не прошёл. Хвост лога:
+
+$(tail -40 "$log")
+
+Почини по логу. Правила те же: git не трогать, после фикса сам прогони: \`$VERIFY\`. Обнови summary: $sum" ;;
+      MUTATE) run_agent "Mutation-гейт не прошёл: твои тесты НЕ УБИВАЮТ мутантов на изменённом коде (kill-rate < ${MIN_KILL}%). Лог:
+
+$(tail -40 "$mlog")
+
+УСИЛЬ тесты изменённых модулей: точные ассерты на реальное поведение, граничные случаи, никаких ослаблений ассертов и удаления проверок. Ослабить тест, чтобы «позеленело», запрещено. git не трогай. Обнови summary: $sum" ;;
+      BENCH) run_agent "Bench-гейт не прошёл (перф-регрессия против baseline). Лог:
+
+$(tail -40 "$blog")
+
+Разберись с производительностью изменённого кода (алгоритм, а не микромагия). git не трогай. Обнови summary: $sum" ;;
+    esac
+  done
+  echo "OK гейты: verify${MUTATE:+ +mutation}${BENCH:+ +bench}"
+
+  # 4. RED-пруф: после работы обязан проходить
+  if [ -f "$d/red.cmd" ]; then
+    (cd "$wt" && bash "$d/red.cmd") >/dev/null 2>&1 \
+      || { echo "FAIL: red.cmd не позеленел — фикс не доказан" >&2; set_status "$id" active; exit 1; }
+    echo "OK red: позеленел"
+  fi
+
+  # 5. summary / BLOCKED
+  if [ ! -s "$sum" ]; then echo "FAIL: агент не написал summary ($sum)" >&2; set_status "$id" active; exit 1; fi
+  if head -1 "$sum" | grep -q '^BLOCKED'; then
+    head -1 "$sum"; set_status "$id" active; exit 1
+  fi
+
+  # 6. commit — только харнесс; гейты гигиены
+  msg="$(head -1 "$sum" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | cut -c1-72)"
+  [ -n "$msg" ] || msg="$id: $(cut -c1-60 "$d/title")"
+  if ( cd "$wt" && git add -A && git diff --cached --quiet ); then
+    echo "FAIL: агент не оставил изменений" >&2; set_status "$id" active; exit 1
+  fi
+  echo "— staged:"; git -C "$wt" diff --cached --stat | tail -5
+  dels="$(git -C "$wt" diff --cached --diff-filter=D --name-only | wc -l)"
+  if [ "$dels" -gt 5 ]; then echo "⚠  удалений в коммите: $dels — проверь, что это задумано"; fi
+  git -C "$wt" commit -q -m "$msg"
+  echo "OK commit: $msg"
+
+  # 7. push ветки (ревью перед main — двухфазный merge)
+  if has_remote; then
+    if (cd "$wt" && git push -q -u "$REMOTE" "$br"); then echo "OK push: $REMOTE/$br"
+    else echo "⚠  push не прошёл — коммит локальный; продолжай: devh merge $id"; fi
+  fi
+  set_status "$id" active
+  echo
+  echo "ГОТОВО: $id на ветке $br. Ревью: git -C $wt diff $MAIN..$br — затем: devh merge $id"
+}
+
+# ─── merge ─────────────────────────────────────────────────────────
+cmd_merge() {
+  need_conf
+  local id; id="$(resolve "${1:-}")"
+  [ "$(item_status "$id")" = active ] || { echo "devh: $id не в active (нет закрытой работы)" >&2; exit 1; }
+  item_runlock "$id" "merge"    # не мержить, пока run жив
+  local wt br sum; wt="$(wt_of "$id")"; br="$(branch_of "$id")"; sum="$HDIR/summaries/$id.md"
+  [ -d "$wt" ] || { echo "devh: нет worktree $wt (сначала devh run $id)" >&2; exit 1; }
+
+  # гейты: worktree чист и на ветке есть коммиты сверх MAIN
+  if [ -n "$(git -C "$wt" status --porcelain)" ]; then
+    echo "FAIL: в worktree незакоммиченные изменения — разберись в $wt (или devh abort $id)" >&2; exit 1
+  fi
+  if [ "$(git -C "$wt" rev-list --count "$MAIN..HEAD")" -eq 0 ] 2>/dev/null; then
+    echo "FAIL: на $br нет коммитов сверх $MAIN — работы нет (devh abort $id?)" >&2; exit 1
+  fi
+
+  local upstream="$MAIN"
+  if has_remote; then git -C "$ROOT" fetch -q "$REMOTE" "$MAIN"; upstream="$REMOTE/$MAIN"; fi
+  echo ".. rebase $br на $upstream"
+  git -C "$wt" rebase "$upstream" \
+    || { echo "FAIL rebase — разреши конфликты в $wt, затем: git -C $wt rebase --continue && devh merge $id" >&2; exit 1; }
+  local sha; sha="$(git -C "$wt" rev-parse --short HEAD)"
+
+  if has_remote; then
+    git -C "$wt" push -q "$REMOTE" "HEAD:$MAIN" && echo "OK push $REMOTE/$MAIN ($sha)" \
+      || { echo "FAIL push в $MAIN — разреши руками из $wt" >&2; exit 1; }
+    git -C "$wt" push -q "$REMOTE" --delete "$br" 2>/dev/null || true
+    git -C "$ROOT" fetch -q . "$br:$MAIN" 2>/dev/null \
+      || git -C "$ROOT" merge -q --ff-only "$br" 2>/dev/null \
+      || echo "⚠  локальный $MAIN не обновлён (грязное дерево/не ff) — подтяни руками"
+  else
+    git -C "$ROOT" merge -q --ff-only "$br" && echo "OK локальный ff в $MAIN ($sha)" \
+      || { echo "FAIL: $MAIN не ff — разреши руками: git merge --ff-only $br" >&2; exit 1; }
+  fi
+
+  { echo "## $id — $(cat "$(items_dir)/$id/title") ($(date +%F))"
+    echo "- commit: $sha"
+    sed -n '2,$p' "$sum" 2>/dev/null | sed 's/^/  /'
+    echo
+  } >> "$HDIR/log.md"
+  git -C "$ROOT" worktree remove --force "$wt" 2>/dev/null || true
+  git -C "$ROOT" branch -D "$br" >/dev/null 2>&1 || true
+  set_status "$id" done
+  echo "OK $id → done. Лог: .harness/log.md"
+  local nx; nx="$(first_live)" && echo "next: $nx — $(cat "$(items_dir)/$nx/title" 2>/dev/null)" || echo "next: очередь пуста 🎉"
+}
+
+# ─── abort / clean / doctor ────────────────────────────────────────
+cmd_abort() {
+  need_conf
+  local id; id="$(resolve "${1:-}")"
+  item_runlock "$id" "abort"    # не выбрасывать worktree из-под живого run
+  local wt br; wt="$(wt_of "$id")"; br="$(branch_of "$id")"
+  if [ -d "$wt" ]; then git -C "$ROOT" worktree remove --force "$wt"; echo "OK worktree убран"; fi
+  git -C "$ROOT" branch -D "$br" >/dev/null 2>&1 || true
+  if has_remote; then git -C "$ROOT" push -q "$REMOTE" --delete "$br" 2>/dev/null || true; fi
+  set_status "$id" open
+  echo "OK $id → open (работа выброшена)"
+}
+
+cmd_clean() {
+  need_conf
+  local d id st wt br n=0
+  for d in "$(items_dir)"/W-*; do
+    [ -d "$d" ] || continue
+    id="${d##*/}"; st="$(item_status "$id")"; wt="$(wt_of "$id")"; br="$(branch_of "$id")"
+    if [ "$st" = done ] && { [ -d "$wt" ] || git -C "$ROOT" show-ref -q --verify "refs/heads/$br"; }; then
+      git -C "$ROOT" worktree remove --force "$wt" 2>/dev/null || true
+      git -C "$ROOT" branch -D "$br" >/dev/null 2>&1 || true
+      n=$((n+1)); echo "clean: $id"
+    fi
+  done
+  if [ "$LOG_DAYS" -gt 0 ] 2>/dev/null; then
+    find "$HDIR/logs" -type f -mtime +"$LOG_DAYS" -delete 2>/dev/null && echo "retention: логи старше ${LOG_DAYS}д убраны"
+  fi
+  echo "OK clean ($n)"
+}
+
+cmd_doctor() {
+  need_conf
+  local fail=0 warn=0 ag="${AGENT%% *}" d id st wt
+  say() { echo "$1"; }
+  command -v git >/dev/null 2>&1 && say "ok   git $(git --version | cut -d' ' -f3)" || { say "FAIL нет git"; fail=1; }
+  [ -n "$VERIFY" ] && say "ok   VERIFY: $VERIFY" || { say "FAIL VERIFY не задан"; fail=1; }
+  command -v "$ag" >/dev/null 2>&1 && say "ok   агент: $ag" || { say "WARN агент '$ag' не найден в PATH"; warn=1; }
+  has_flock && say "ok   flock (блокировки состояний)" || { say "WARN нет flock — состояние без блокировок"; warn=1; }
+  command -v timeout >/dev/null 2>&1 && say "ok   timeout (watchdog)" || { say "WARN нет coreutils timeout"; warn=1; }
+  if has_remote; then
+    git -C "$ROOT" ls-remote -q "$REMOTE" HEAD >/dev/null 2>&1 && say "ok   remote $REMOTE" || { say "WARN remote $REMOTE недоступен"; warn=1; }
+  else
+    say "ok   репо без remote (локальный режим)"
+  fi
+  grep -qx '.harness/' "$ROOT/.git/info/exclude" 2>/dev/null && say "ok   .harness/ в exclude" || { say "WARN .harness/ не в .git/info/exclude"; warn=1; }
+  if [ -n "$MUTATE" ]; then
+    command -v mix >/dev/null 2>&1 && say "ok   mutation: mix в PATH ($MUTATE_SCOPE)" || { say "WARN mutation: нет mix — гейт деградирует"; warn=1; }
+  else
+    say "ok   mutation-гейт выключен"
+  fi
+  [ -n "$BENCH" ] && say "ok   bench-гейт: $BENCH" || say "ok   bench-гейт выключен"
+  # crash-recovery: сироты после прерванных run
+  for d in "$(items_dir)"/W-*; do
+    [ -d "$d" ] || continue
+    id="${d##*/}"; st="$(item_status "$id")"; wt="$(wt_of "$id")"
+    if [ "$st" = active ] && [ ! -d "$wt" ]; then
+      say "WARN $id active без worktree (прерванный run?) — devh run $id продолжит или devh abort $id"; warn=1
+    fi
+    if [ "$st" = open ] && [ -d "$wt" ]; then
+      say "WARN $id: worktree есть, статус open — devh run $id продолжит с места обрыва"; warn=1
+    fi
+  done
+  [ "$(count_active)" -gt 0 ] && say "ok   active items: $(count_active) (WIP-лимит $MAX_ACTIVE)" || say "ok   очередей в работе нет"
+  echo "doctor: fail=$fail warn=$warn"
+  [ "$fail" -eq 0 ]
+}
+
+# ─── dispatch ──────────────────────────────────────────────────────
+case "${1:-help}" in
+  init)  shift; cmd_init "$@" ;;
+  new)   shift; cmd_new "$@" ;;
+  list|status) shift; cmd_list "$@" ;;
+  hint)  shift; cmd_hint "$@" ;;
+  run)   shift; cmd_run "$@" ;;
+  merge) shift; cmd_merge "$@" ;;
+  abort) shift; cmd_abort "$@" ;;
+  clean) shift; cmd_clean "$@" ;;
+  doctor) shift; cmd_doctor "$@" ;;
+  *) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//' ;;
+esac
