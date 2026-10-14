@@ -57,9 +57,10 @@ impl SseParser {
             self.buf.push_str(chunk);
         }
         let mut out = Vec::new();
-        while let Some(nl) = self.buf.find('\n') {
-            let line = self.buf[..nl].trim_end_matches('\r').to_string();
-            self.buf.drain(..=nl);
+        while let Some((line_end, sep_len)) = Self::find_line_end(&self.buf) {
+            let line = self.buf[..line_end].to_string();
+            self.buf.drain(..line_end.saturating_add(sep_len));
+            let line = line.trim_end_matches('\r');
             if line.is_empty() {
                 // Blank line = end of frame.
                 if self.cur_event.is_some() || !self.cur_data.is_empty() {
@@ -79,6 +80,25 @@ impl SseParser {
             // Other SSE fields (`id:`, `retry:`, comments) ignored for our use.
         }
         out
+    }
+
+    /// Find the end of the next line in `buf`, handling all SSE line separators:
+    /// `\n` (LF), `\r\n` (CRLF), and `\r` (CR).
+    /// Returns `(line_end_pos, separator_len)` where `line_end_pos` is the
+    /// byte index of the last character of the line content (before the separator),
+    /// and `separator_len` is the length of the separator (1 for `\n` or `\r`,
+    /// 2 for `\r\n`).
+    fn find_line_end(buf: &str) -> Option<(usize, usize)> {
+        // Check for \r\n first (most specific)
+        if let Some(pos) = buf.find("\r\n") {
+            return Some((pos, 2));
+        }
+        // Check for lone \r
+        if let Some(pos) = buf.find('\r') {
+            return Some((pos, 1));
+        }
+        // Check for \n
+        buf.find('\n').map(|pos| (pos, 1))
     }
 
     /// Flush any pending frame at end-of-stream (some servers omit the final
@@ -490,6 +510,15 @@ mod tests {
     fn sse_crlf_tolerated() {
         let mut p = SseParser::new();
         let frames = p.feed("data: x\r\n\r\n");
+        assert_eq!(frames[0].data, "x");
+    }
+
+    #[test]
+    fn sse_lone_cr_tolerated() {
+        let mut p = SseParser::new();
+        // SSE spec: \r is also a valid line separator
+        let frames = p.feed("data: x\r\r");
+        assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, "x");
     }
 
