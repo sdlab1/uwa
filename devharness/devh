@@ -18,7 +18,7 @@
 #   red.cmd  — RED-пруф: до работы обязан падать, после — проходить
 #
 # Команды:
-#   devh init / new "title" | new <N> (из todo/N.md) / list / hint [id]
+#   devh init / new "title" [--no-red "причина"] | new <N> (из todo/N.md) / list / hint [id]
 #   devh run [id] / commit [id] (правка summary) / merge [id]
 #   devh abort [id] / clean / doctor
 #
