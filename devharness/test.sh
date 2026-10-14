@@ -169,6 +169,10 @@ R="$(fresh r8)"; base_env; cd "$R" || exit 1
 ( printf 's2\n' | "$DEVH" new "t2" >/dev/null 2>&1 ) &
 wait
 [ -d .harness/items/W-001 ] && [ -d .harness/items/W-002 ] && pass "W-001 и W-002 существуют" || fail "параллельные new склеились"
+mkdir -p .harness/items/W-008 .harness/items/W-009   # октал-ловушка: 009 как октал невалиден
+printf 'next
+' | "$DEVH" new "after octal ids" >/dev/null
+[ -d .harness/items/W-010 ] && pass "next_id пережил W-008/W-009 (10#)" || fail "next_id: октал-ловушка на W-008/009"
 
 echo "== 9. run.lock: merge не идёт при живом run =="
 R="$(fresh r9)"; base_env; cd "$R" || exit 1

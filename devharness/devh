@@ -99,6 +99,7 @@ next_id() {
   for x in "$(items_dir)"/W-*; do
     [ -d "$x" ] || continue
     x="${x##*/W-}"; case "$x" in ''|*[!0-9]*) continue;; esac
+    x=$((10#$x))
     [ "$x" -gt "$n" ] && n="$x"
   done
   printf 'W-%03d' $((n + 1))
@@ -129,7 +130,7 @@ resolve() {  # $1 = id или пусто → первый не-done
   if [ -z "$id" ]; then
     id="$(first_live)" || { echo "devh: нет открытых items (devh new)" >&2; exit 1; }
   fi
-  case "$id" in [0-9]*) id="$(printf 'W-%03d' "$id")";; esac
+  case "$id" in [0-9]*) id="$(printf 'W-%03d' "$((10#$id))")";; esac
   [ -d "$(items_dir)/$id" ] || { echo "devh: нет item $id" >&2; exit 1; }
   echo "$id"
 }
