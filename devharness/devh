@@ -329,6 +329,7 @@ mutate_gate() {
   [ -n "$files" ] || { echo "mutation: нет изменённых файлов в $MUTATE_SCOPE — гейт пропущен"; return 0; }
   while IFS= read -r f; do
     [ -n "$f" ] || continue
+    if [ ! -f "$wt/$f" ]; then echo "mutation: $f удалён агентом — мутации не требуется"; continue; fi
     mod="$(mod_of "$f")"
     local cmd; cmd="${MUTATE//\{module\}/$mod}"; cmd="${cmd//\{file\}/$f}"
     out="$(cd "$wt" && bash -c "$cmd" 2>&1)" || true
@@ -425,7 +426,7 @@ cmd_run() {
     fi
     echo "OK red: падает на HEAD (пруф воспроизводится)"
   else
-    echo "FAIL: RED-пруф ОБЯЗАТЕЛЕН (в первую очередь). Напиши $d/red.cmd — команду, падающую на чистом HEAD и зеленеющую после работы; либо записанный обход: devh abort $id && devh new --no-red \"<причина>\" …" >&2
+    echo "FAIL: RED-пруф ОБЯЗАТЕЛЕН (в первую очередь). Напиши $d/red.cmd — команду, падающую на чистом HEAD и зеленеющую после работы; либо записанный обход: echo \"<причина>\" > $d/no-red" >&2
     exit 1
   fi
 
@@ -654,7 +655,8 @@ cmd_doctor() {
   fi
   grep -qx '.harness/' "$ROOT/.git/info/exclude" 2>/dev/null && say "ok   .harness/ в exclude" || { say "WARN .harness/ не в .git/info/exclude"; warn=1; }
   if [ -n "$MUTATE" ]; then
-    command -v mix >/dev/null 2>&1 && say "ok   mutation: mix в PATH ($MUTATE_SCOPE)" || { say "WARN mutation: нет mix — гейт деградирует"; warn=1; }
+    local mbin="${MUTATE##*&& }"; mbin="${mbin%% *}"
+    command -v "$mbin" >/dev/null 2>&1 && say "ok   mutation: $mbin доступен ($MUTATE_SCOPE)" || { say "WARN mutation: '$mbin' не найден — run будет заблокирован (установи инструмент)"; warn=1; }
   else
     say "ok   mutation-гейт выключен"
   fi

@@ -234,6 +234,20 @@ printf 'спека\n' | "$DEVH" new "ign item" --no-red x >/dev/null
 "$DEVH" run >"$T/out" 2>&1 && pass "run exit 0" || { fail "run exit 0"; cat "$T/out"; }
 grep -q "гейт NO-IGNORED упал" "$T/out" && pass "NO-IGNORED fix-раунд был" || fail "NO-IGNORED fix-раунд был"
 
+echo "== 18. mutation: удалённый агентом файл пропускается, не env-блокер =="
+cat > "$T/stub-del.sh" <<'S'
+#!/usr/bin/env bash
+rm -f "$HARNESS_WORKTREE/b.txt"
+echo marker > "$HARNESS_WORKTREE/done.txt"
+printf 'feat: рефактор с удалением\n\nдетали\n' > "$HARNESS_SUMMARY"
+S
+chmod +x "$T/stub-del.sh"
+R="$(fresh r18)"; base_env; cd "$R"
+"$DEVH" init >/dev/null
+printf 'спека\n' | "$DEVH" new "del item" --no-red x >/dev/null
+HARNESS_AGENT="$T/stub-del.sh" "$DEVH" run >"$T/out" 2>&1 && pass "run exit 0 (удаление не блокер)" || { fail "run exit 0"; cat "$T/out"; }
+grep -q "удалён агентом — мутации не требуется" .harness/logs/W-001-mutate.log && pass "удалённый файл пропущен" || fail "удалённый файл пропущен"
+
 echo
 echo "ИТОГО: PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" -eq 0 ]
