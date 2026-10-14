@@ -348,6 +348,7 @@ mod tests {
             url: "https://x".into(),
             body: "data".into(),
             mime: "text/event-stream".into(),
+            cf_mitigated_challenge: false,
         }]);
         let mut rx = p.network_events().await.expect("subscribed");
         let ev = tokio::time::timeout(Duration::from_secs(1), rx.recv())

@@ -83,6 +83,20 @@ impl NodriverTransport {
                 };
                 match name {
                     "network.response" => {
+                        let header_marker = data
+                            .get("cf_mitigated")
+                            .and_then(|v| v.as_str())
+                            .is_some_and(|v| v.eq_ignore_ascii_case("challenge"));
+                        let header_map_marker = data
+                            .get("headers")
+                            .and_then(|v| v.as_object())
+                            .and_then(|headers| {
+                                headers
+                                    .iter()
+                                    .find(|(name, _)| name.eq_ignore_ascii_case("cf-mitigated"))
+                            })
+                            .and_then(|(_, value)| value.as_str())
+                            .is_some_and(|v| v.eq_ignore_ascii_case("challenge"));
                         let _ = tx.send(NetworkEvent::ResponseBody {
                             request_id: data
                                 .get("request_id")
@@ -100,6 +114,7 @@ impl NodriverTransport {
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("")
                                 .to_string(),
+                            cf_mitigated_challenge: header_marker || header_map_marker,
                         });
                     }
                     "network.finished" => {
@@ -116,6 +131,7 @@ impl NodriverTransport {
                                 url: String::new(),
                                 body: body.to_string(),
                                 mime: String::new(),
+                                cf_mitigated_challenge: false,
                             });
                         }
                         let _ = tx.send(NetworkEvent::Finished {

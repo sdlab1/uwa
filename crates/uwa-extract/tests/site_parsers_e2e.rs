@@ -39,6 +39,7 @@ async fn chatgpt_cumulative_becomes_incremental() {
         )
         .into(),
         mime: "text/event-stream".into(),
+        cf_mitigated_challenge: false,
     })
     .unwrap();
     tx.send(NetworkEvent::Finished {
@@ -70,6 +71,7 @@ async fn claude_text_deltas_pass_through() {
         )
         .into(),
         mime: "text/event-stream".into(),
+        cf_mitigated_challenge: false,
     })
     .unwrap();
     tx.send(NetworkEvent::Finished {
@@ -95,6 +97,7 @@ async fn gemini_batchexecute_cumulative_diffed() {
         url: "https://gemini.google.com/batchexecute".into(),
         body: format!("data: {f1}\n\ndata: {f2}\n\ndata: [DONE]\n\n"),
         mime: "text/event-stream".into(),
+        cf_mitigated_challenge: false,
     })
     .unwrap();
     tx.send(NetworkEvent::Finished {
@@ -121,6 +124,7 @@ async fn unknown_site_name_yields_nothing() {
         url: "https://x.com/api/stream".into(),
         body: "data: {}\n\n".into(),
         mime: "text/event-stream".into(),
+        cf_mitigated_challenge: false,
     })
     .unwrap();
     tx.send(NetworkEvent::Finished {

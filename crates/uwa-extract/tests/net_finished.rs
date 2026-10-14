@@ -34,6 +34,7 @@ async fn unrelated_finished_does_not_end_the_stream() {
             url: "https://site/backend/stream".into(),
             body: sse("a"),
             mime: "text/event-stream".into(),
+            cf_mitigated_challenge: false,
         },
         // An unrelated request finishing used to `return` out of the loop
         // here, so "b" never arrived.
@@ -45,6 +46,7 @@ async fn unrelated_finished_does_not_end_the_stream() {
             url: "https://site/backend/stream".into(),
             body: sse("b"),
             mime: "text/event-stream".into(),
+            cf_mitigated_challenge: false,
         },
         NetworkEvent::Finished {
             request_id: "ours".into(),

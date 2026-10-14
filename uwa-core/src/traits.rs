@@ -98,6 +98,9 @@ pub enum NetworkEvent {
         url: String,
         body: String,
         mime: String,
+        /// Cloudflare documents this response header as the definitive
+        /// marker for an interstitial challenge: `cf-mitigated: challenge`.
+        cf_mitigated_challenge: bool,
     },
     Finished {
         request_id: String,

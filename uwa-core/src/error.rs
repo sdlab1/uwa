@@ -176,6 +176,14 @@ pub enum UwaError {
     #[error("upstream unavailable: {0}")]
     Unavailable(String),
 
+    /// A human must complete a browser challenge before the upstream can be used.
+    #[error("human verification required for provider `{provider}` in tab `{tab_id}` at `{url}`; complete the challenge in the logged-in browser and retry the request manually")]
+    HumanVerificationRequired {
+        provider: String,
+        tab_id: String,
+        url: String,
+    },
+
     #[error("internal error: {0}")]
     Internal(String),
 }
@@ -195,6 +203,9 @@ impl UwaError {
             UwaError::Extraction(_) => (502, "server_error", "extraction_error"),
             UwaError::Timeout(_) => (504, "server_error", "timeout"),
             UwaError::Unavailable(_) => (503, "server_error", "unavailable"),
+            UwaError::HumanVerificationRequired { .. } => {
+                (409, "server_error", "human_verification_required")
+            }
             UwaError::Internal(_) => (500, "server_error", "internal_error"),
         }
     }
@@ -218,6 +229,15 @@ mod tests {
                 .openai_shape()
                 .0,
             504
+        );
+        assert_eq!(
+            UwaError::HumanVerificationRequired {
+                provider: "deepseek".into(),
+                tab_id: "tab_1".into(),
+                url: "https://challenges.cloudflare.com/".into(),
+            }
+            .openai_shape(),
+            (409, "server_error", "human_verification_required")
         );
     }
 

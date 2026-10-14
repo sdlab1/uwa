@@ -8,6 +8,24 @@
 devh new → run → merge        # полный цикл; двухфазный merge (ревью до MAIN)
 ```
 
+## Установка (один раз)
+
+```bash
+ln -sf /home/user/project_uwa/devharness/devh ~/.local/bin/devh   # уже сделано
+devh help                                                          # проверка; PATH-строка в ~/.bashrc/.profile есть
+```
+Если в текущей сессии `command not found`: `export PATH="$HOME/.local/bin:$PATH"`
+(новые терминалы подхватят автоматически).
+
+## Где что живёт
+
+| Что | Где |
+|---|---|
+| код харнесса | `~/project_uwa/devharness/` (в git, этот репозиторий) |
+| состояние целевого репо | `<репо>/.harness/` (создаёт `devh init`; в git НЕ попадает) |
+| логи прогонов | `<репо>/.harness/logs/W-NNN-*.log` |
+| журнал закрытых сессий | `<репо>/.harness/log.md` |
+
 ## Быстрый старт
 
 ```bash

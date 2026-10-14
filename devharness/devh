@@ -207,6 +207,10 @@ cmd_init() {
     MUTATE='cd gobot && mix mutants --module {module}'   # muex; нет muex → env-блокер на run (установи)
     MUTATE_SCOPE='gobot/lib'
   fi
+  if [ -f "$ROOT/Cargo.toml" ] && [ -z "$MUTATE" ]; then
+    MUTATE='cargo mutants -f {file}'   # cargo-mutants; установи: cargo install cargo-mutants
+    MUTATE_SCOPE='src'
+  fi
   [ -n "$MUTATE_SCOPE" ] || MUTATE_SCOPE='lib'
   if [ -f "$ROOT/todo/report.md" ]; then
     RULES='todo/report.md'; RULES_LOG='todo/report.md'
@@ -309,9 +313,11 @@ cmd_hint() {
 # Вывод инструмента: 'Mutants: N, Killed: M' (muex-формат). Нет вывода → env-блокер (rc=2): среда ≠ работа агента.
 mutate_gate() {
   local files f mod out t k pct fail=0
-  files="$(git -C "$wt" diff --name-only HEAD -- "$MUTATE_SCOPE" 2>/dev/null | sort -u)"
-  if [ -z "$files" ] && [ -n "$(git -C "$wt" status --porcelain -- "$MUTATE_SCOPE")" ]; then
-    files="$(git -C "$wt" status --porcelain -- "$MUTATE_SCOPE" 2>/dev/null | cut -c4- | sort -u)"
+  # shellcheck disable=SC2086  # MUTATE_SCOPE — список pathspec, слово-разбиение намеренно
+  files="$(git -C "$wt" diff --name-only HEAD -- $MUTATE_SCOPE 2>/dev/null | sort -u)"
+  # shellcheck disable=SC2086  # MUTATE_SCOPE — список pathspec, слово-разбиение намеренно
+  if [ -z "$files" ] && [ -n "$(git -C "$wt" status --porcelain -- $MUTATE_SCOPE)" ]; then
+    files="$(git -C "$wt" status --porcelain -- $MUTATE_SCOPE 2>/dev/null | cut -c4- | sort -u)"
   fi
   if [[ "$MUTATE" != *'{'* ]]; then   # без плейсхолдеров — один прогон на всё
     out="$(cd "$wt" && bash -c "$MUTATE" 2>&1)" || true

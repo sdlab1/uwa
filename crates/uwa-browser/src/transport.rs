@@ -447,7 +447,7 @@ async fn pump_page(
     // OOPIF lifecycle: listeners were pre-registered in register_target.
 
     let mut frame_map = FrameMap::for_target(target_id.clone());
-    let mut inflight: HashMap<String, (String, String, String)> = HashMap::new();
+    let mut inflight: HashMap<String, (String, String, String, bool)> = HashMap::new();
     // `tokio::select!` picks a ready branch at random, so `loadingFinished` is
     // regularly handled before the `responseReceived` that precedes it on the
     // wire. Remember those ids and publish as soon as the response lands —
@@ -498,9 +498,20 @@ async fn pump_page(
                             .and_then(|f| frame_map.target_for(f.inner()).map(str::to_string))
                             .unwrap_or_else(|| target_id.clone());
                         debug!(target = %target_id, req = %req, url = %ev.response.url, "response");
+                        let cf_mitigated_challenge = ev.response.headers.inner().as_object().map(|obj| {
+                            obj.iter().any(|(name, value)| {
+                                name.eq_ignore_ascii_case("cf-mitigated")
+                                    && value.as_str().is_some_and(|value| value.eq_ignore_ascii_case("challenge"))
+                            })
+                        }).unwrap_or(false);
                         inflight.insert(
                             req.clone(),
-                            (ev.response.url.clone(), ev.response.mime_type.clone(), owner),
+                            (
+                                ev.response.url.clone(),
+                                ev.response.mime_type.clone(),
+                                owner,
+                                cf_mitigated_challenge,
+                            ),
                         );
                         if finished_first.remove(&req) {
                             debug!(target = %target_id, req = %req, "response caught up with its finish");
@@ -609,10 +620,10 @@ async fn resolve_body(
     page: &CdpPage,
     bus: &NetBus,
     req: &str,
-    inflight: &mut HashMap<String, (String, String, String)>,
+    inflight: &mut HashMap<String, (String, String, String, bool)>,
     oopif: &Arc<OopifRegistry>,
 ) {
-    let Some((url, mime, owner)) = inflight.remove(req) else {
+    let Some((url, mime, owner, cf_mitigated_challenge)) = inflight.remove(req) else {
         return;
     };
     let body = match page
@@ -635,6 +646,7 @@ async fn resolve_body(
         url,
         body,
         mime,
+        cf_mitigated_challenge,
     });
     let _ = tx.send(NetworkEvent::Finished {
         request_id: req.to_string(),

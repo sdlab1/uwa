@@ -354,6 +354,7 @@ impl NetExtractor for DefaultNetExtractor {
                 };
                 match ev {
                     NetworkEvent::ResponseBody {
+                        cf_mitigated_challenge: _,
                         request_id,
                         url,
                         body,
