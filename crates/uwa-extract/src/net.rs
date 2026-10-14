@@ -58,7 +58,7 @@ impl SseParser {
         }
         let mut out = Vec::new();
         while let Some((line_end, sep_len)) = Self::find_line_end(&self.buf) {
-            let line = self.buf[..line_end].to_string();
+            let line = self.buf.get(..line_end).unwrap_or("").to_string();
             self.buf.drain(..line_end.saturating_add(sep_len));
             let line = line.trim_end_matches('\r');
             if line.is_empty() {
@@ -110,7 +110,12 @@ impl SseParser {
         // final blank line; a caller may also call finish() without a prior
         // feed() that ended on a newline).
         while let Some(nl) = self.buf.find('\n') {
-            let line = self.buf[..nl].trim_end_matches('\r').to_string();
+            let line = self
+                .buf
+                .get(..nl)
+                .unwrap_or("")
+                .trim_end_matches('\r')
+                .to_string();
             self.buf.drain(..=nl);
             self.process_line(&line);
         }

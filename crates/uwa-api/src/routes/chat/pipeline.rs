@@ -492,10 +492,12 @@ async fn run_pipeline_streaming_inner(
         // protocol markers or call JSON in the visible stream.
         let target_end = safe_emit_end_for(&acc, &known_names);
         if target_end > emitted_until {
-            let piece = acc[emitted_until..target_end].to_string();
-            if !piece.is_empty() && tx.send(StreamEvent::Delta(piece)).await.is_err() {
-                let _ = site.cancel(page.as_ref()).await;
-                return Err(Abort::ClientGone);
+            if let Some(piece) = acc.get(emitted_until..target_end) {
+                let piece = piece.to_string();
+                if !piece.is_empty() && tx.send(StreamEvent::Delta(piece)).await.is_err() {
+                    let _ = site.cancel(page.as_ref()).await;
+                    return Err(Abort::ClientGone);
+                }
             }
             emitted_until = target_end;
         }
@@ -545,8 +547,9 @@ async fn run_pipeline_streaming_inner(
     } else {
         // Trailing text no tool call froze out of the stream.
         if emitted_until < acc.len() {
-            let piece = acc[emitted_until..].to_string();
-            emit(tx, StreamEvent::Delta(piece)).await?;
+            if let Some(piece) = acc.get(emitted_until..) {
+                emit(tx, StreamEvent::Delta(piece.to_string())).await?;
+            }
         }
         (first.text, Vec::new(), FinishReason::Stop)
     };
