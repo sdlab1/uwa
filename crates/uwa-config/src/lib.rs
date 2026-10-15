@@ -433,14 +433,11 @@ impl Config {
         let mut cfg: Config = serde_path_to_error::deserialize(de)
             .map_err(|e| UwaError::Config(format!("{}: {}", e.path(), e.inner())))?;
         cfg.apply_registry(registry);
-        // Only apply the named profile if it's not Custom; Custom means the
-        // user supplied their own ranges and we must not overwrite them.
-        // Capture the profile *before* `take` resets `cfg.timing` to its
-        // default (which would otherwise overwrite the requested profile
-        // with `Natural`).
+        // Overlay the named profile's ranges. `Custom` means the user
+        // supplied their own ranges and we must not overwrite them.
         let profile = cfg.timing.profile;
         if profile != TimingProfile::Custom {
-            cfg.timing = std::mem::take(&mut cfg.timing).apply_profile(profile);
+            cfg.timing = cfg.timing.apply_profile(profile);
         }
         cfg.validate()?;
         Ok(cfg)
@@ -581,13 +578,14 @@ impl Config {
                     "proxy.enabled = true but proxy.address is empty".into(),
                 ));
             }
-            // 8. Timing config must have sane ranges.
-            self.timing.validate().map_err(UwaError::Config)?;
 
             Url::parse(&self.proxy.address).map_err(|e| {
                 UwaError::Config(format!("proxy.address `{}`: {e}", self.proxy.address))
             })?;
         }
+
+        // 8. Timing config must have sane ranges.
+        self.timing.validate().map_err(UwaError::Config)?;
 
         Ok(())
     }
@@ -1151,6 +1149,16 @@ mod tests {
         let cfg = Config::load_from_str(&toml).unwrap();
         assert_eq!(cfg.timing.profile, TimingProfile::Slow);
         assert!(cfg.timing.key_ms[0] >= 100);
+    }
+
+    #[test]
+    fn timing_fast_profile_zeroes_ranges() {
+        let toml = format!("{}\n[timing]\nprofile = \"fast\"\n", SAMPLE);
+        let cfg = Config::load_from_str(&toml).unwrap();
+        assert_eq!(cfg.timing.profile, TimingProfile::Fast);
+        assert_eq!(cfg.timing.key_ms, [0, 0]);
+        assert_eq!(cfg.timing.pre_send_ms, [0, 0]);
+        assert!(!cfg.timing.burst);
     }
 
     #[test]

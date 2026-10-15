@@ -7,7 +7,7 @@
 //! conformance suite can be exact when they want to be.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use uwa_config::{TimingCfg, TimingProfile};
 
@@ -33,6 +33,23 @@ fn pick(r: &dyn Rng, range: [u64; 2]) -> Duration {
     let span = range[1].saturating_sub(range[0]) as f64;
     let v = range[0] as f64 + r.next_f64() * span;
     Duration::from_millis(v.round() as u64)
+}
+
+/// Hard ceiling, in milliseconds, on the total sleep a single
+/// [`TimingGate::type_run`] may produce. Pacing is a cosmetic signal; a
+/// multi-thousand-character prompt on a non-`fast` profile otherwise
+/// blocks the caller for minutes.
+const MAX_TYPE_SLEEP_MS: u64 = 2_000;
+
+/// `true` while `need` ms still fits in the [`MAX_TYPE_SLEEP_MS`] budget
+/// spent since `started`.
+///
+/// `need` is the top of a configured range, so a sleep that is allowed to
+/// start is also allowed to finish: the ceiling is overshot only by timer
+/// slack, never by a whole range.
+fn room_for(need: u64, started: Instant) -> bool {
+    let used_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    MAX_TYPE_SLEEP_MS.saturating_sub(used_ms) >= need
 }
 
 pub struct TimingGate {
@@ -88,14 +105,19 @@ impl TimingGate {
     /// injection isn't a single instantaneous event from the site's
     /// point of view.
     ///
-    /// The caller passes the total char count and gets back the number
-    /// of pauses it should have produced — no partial state.
+    /// `chars` is the total char count and there is no partial state.
+    /// Pauses stop once `MAX_TYPE_SLEEP_MS` has been spent on the call, so
+    /// a long prompt never stalls the run.
     pub async fn type_run(&self, chars: usize) {
         if chars == 0 {
             return;
         }
+        let started = Instant::now();
         if !self.cfg.burst {
             for _ in 0..chars {
+                if !room_for(self.cfg.key_ms[1], started) {
+                    break;
+                }
                 self.key().await;
             }
             return;
@@ -103,12 +125,18 @@ impl TimingGate {
         let burst = self.cfg.burst_chars.max(1) as usize;
         let mut left = chars;
         while left > 0 {
+            if !room_for(self.cfg.key_ms[1], started) {
+                break;
+            }
             let take = left.min(burst);
             for _ in 0..take {
+                if !room_for(self.cfg.key_ms[1], started) {
+                    break;
+                }
                 self.key().await;
             }
             left = left.saturating_sub(take);
-            if left > 0 {
+            if left > 0 && room_for(self.cfg.burst_pause_ms[1], started) {
                 self.burst_pause().await;
             }
         }
@@ -196,5 +224,103 @@ mod tests {
             assert!(d >= Duration::from_millis(40));
             assert!(d <= Duration::from_millis(140));
         }
+    }
+
+    /// Always draws 0.0 — so `pick` returns the low end of a range — but
+    /// records every draw, letting a test assert exactly how many sleeps
+    /// `type_run` asked for. (`pick` skips the RNG when `lo == hi`, hence
+    /// the `[0, 1]` ranges: 0 ms sleeps that still draw.)
+    struct CountingRng {
+        draws: AtomicU64,
+    }
+    impl CountingRng {
+        fn new() -> Self {
+            Self {
+                draws: AtomicU64::new(0),
+            }
+        }
+        fn draws(&self) -> u64 {
+            self.draws.load(Ordering::SeqCst)
+        }
+    }
+    impl Rng for CountingRng {
+        fn next_f64(&self) -> f64 {
+            self.draws.fetch_add(1, Ordering::SeqCst);
+            0.0
+        }
+    }
+
+    /// Burst-on config whose every sleep is 0 ms, so the run never meets
+    /// the sleep budget and the draw count stays exact.
+    fn cfg_burst5() -> TimingCfg {
+        TimingCfg {
+            key_ms: [0, 1],
+            burst: true,
+            burst_chars: 5,
+            burst_pause_ms: [0, 1],
+            ..TimingCfg::default()
+        }
+    }
+
+    fn counting_gate(cfg: TimingCfg) -> (TimingGate, Arc<CountingRng>) {
+        let r = Arc::new(CountingRng::new());
+        (TimingGate::with_rng(cfg, r.clone()), r)
+    }
+
+    #[tokio::test]
+    async fn type_run_zero_chars_is_noop() {
+        let (gate, r) = counting_gate(cfg_burst5());
+        let start = Instant::now();
+        gate.type_run(0).await;
+        assert!(start.elapsed() < Duration::from_millis(10));
+        assert_eq!(r.draws(), 0);
+    }
+
+    /// A single character is one keystroke: no `burst_pause` after it.
+    #[tokio::test]
+    async fn type_run_one_char_no_burst_pause() {
+        let (gate, r) = counting_gate(cfg_burst5());
+        gate.type_run(1).await;
+        assert_eq!(r.draws(), 1);
+    }
+
+    /// Text exactly the length of a burst: `burst_chars` keystrokes and
+    /// no pause, because nothing is left to start a second burst with.
+    #[tokio::test]
+    async fn type_run_exact_burst_boundary() {
+        let (gate, r) = counting_gate(cfg_burst5());
+        gate.type_run(5).await;
+        assert_eq!(r.draws(), 5);
+    }
+
+    /// 5 chars + pause + 2 chars: one pause, 7 keystrokes → 8 draws.
+    #[tokio::test]
+    async fn type_run_partial_last_burst() {
+        let (gate, r) = counting_gate(cfg_burst5());
+        gate.type_run(7).await;
+        assert_eq!(r.draws(), 8);
+    }
+
+    /// Real `natural` pacing: ten keystrokes must actually take time.
+    #[tokio::test]
+    async fn type_run_short_text_still_sleeps() {
+        let gate = TimingGate::new(TimingCfg::default().apply_profile(TimingProfile::Natural));
+        let start = Instant::now();
+        gate.type_run(10).await;
+        let took = start.elapsed();
+        // `key_ms = [40, 140]` for ten characters → 400..1400 ms.
+        assert!(took >= Duration::from_millis(300), "{took:?}");
+        assert!(took < Duration::from_millis(2_000), "{took:?}");
+    }
+
+    /// Regression: without a sleep budget this took minutes.
+    #[tokio::test]
+    async fn type_run_bounded_even_for_very_long_text() {
+        let gate = TimingGate::new(TimingCfg::default().apply_profile(TimingProfile::Natural));
+        let start = Instant::now();
+        gate.type_run(10_000).await;
+        let took = start.elapsed();
+        assert!(took >= Duration::from_millis(100), "{took:?}");
+        assert!(took < Duration::from_millis(2_500), "{took:?}");
     }
 }

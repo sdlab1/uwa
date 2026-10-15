@@ -238,3 +238,30 @@ fn cdp_backend_http_url_ok() {
     );
     assert!(load(&toml).is_ok());
 }
+
+/// Timing ranges are checked on every load — not only when a proxy is
+/// enabled (they used to share that guard).
+#[test]
+fn timing_inverted_range_errors() {
+    let toml = format!("{BASE}\n[timing]\nprofile = \"custom\"\nkey_ms = [100, 50]\n");
+    let e = expect_err(load(&toml));
+    assert!(e.contains("key_ms"), "got: {e}");
+}
+
+/// Typing is chunked into `burst_chars`-sized bursts; with `burst` on
+/// (its default) a zero chunk size would never advance. `profile` must be
+/// `custom` for a user value to reach the validator at all — a named
+/// profile overwrites the table it is applied to.
+#[test]
+fn timing_burst_chars_zero_errors() {
+    let toml = format!("{BASE}\n[timing]\nprofile = \"custom\"\nburst_chars = 0\n");
+    let e = expect_err(load(&toml));
+    assert!(e.contains("burst_chars"), "got: {e}");
+}
+
+/// …and `burst_chars = 0` is fine once bursts are off.
+#[test]
+fn timing_burst_chars_zero_ok_when_burst_disabled() {
+    let toml = format!("{BASE}\n[timing]\nprofile = \"custom\"\nburst = false\nburst_chars = 0\n");
+    assert!(load(&toml).is_ok());
+}

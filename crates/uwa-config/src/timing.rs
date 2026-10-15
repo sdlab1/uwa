@@ -90,23 +90,30 @@ fn default_burst_pause_ms() -> [u64; 2] {
 
 impl Default for TimingCfg {
     fn default() -> Self {
+        // One code path for the numbers: the default *is* the default
+        // profile, so `Default`, `apply_profile` and the serde field
+        // defaults cannot drift apart.
+        let profile = TimingProfile::default();
         Self {
-            profile: TimingProfile::default(),
-            key_ms: default_key_ms(),
-            pre_send_ms: default_pre_send_ms(),
-            post_send_ms: default_post_send_ms(),
-            focus_ms: default_focus_ms(),
-            burst: default_burst(),
-            burst_chars: default_burst_chars(),
-            burst_pause_ms: default_burst_pause_ms(),
+            profile,
+            key_ms: [0; 2],
+            pre_send_ms: [0; 2],
+            post_send_ms: [0; 2],
+            focus_ms: [0; 2],
+            burst: false,
+            burst_chars: 0,
+            burst_pause_ms: [0; 2],
         }
+        .apply_profile(profile)
     }
 }
 
 impl TimingCfg {
-    /// Overwrite the numeric ranges with the ones for a named profile.
-    /// `Custom` leaves whatever the caller supplied.
+    /// Overwrite the numeric ranges with the ones for a named profile and
+    /// record which profile was applied. `Custom` leaves whatever the
+    /// caller supplied.
     pub fn apply_profile(mut self, p: TimingProfile) -> Self {
+        self.profile = p;
         match p {
             TimingProfile::Fast => {
                 self.key_ms = [0, 0];
@@ -194,6 +201,55 @@ mod tests {
         };
         let applied = t.apply_profile(TimingProfile::Custom);
         assert_eq!(applied.key_ms, [7, 7]);
+        assert_eq!(applied.profile, TimingProfile::Custom);
+    }
+
+    /// A profile must be *recorded*, not just applied: `Config` readers
+    /// and `TimingGate::profile` both report it afterwards.
+    #[test]
+    fn apply_profile_sets_profile_field() {
+        let t = TimingCfg::default();
+        assert_eq!(t.profile, TimingProfile::Natural);
+
+        let t = t.apply_profile(TimingProfile::Slow);
+        assert_eq!(t.profile, TimingProfile::Slow);
+        assert_eq!(t.key_ms, [120, 260]);
+
+        let t = t.apply_profile(TimingProfile::Fast);
+        assert_eq!(t.profile, TimingProfile::Fast);
+        assert_eq!(t.key_ms, [0, 0]);
+        assert!(!t.burst);
+    }
+
+    #[test]
+    fn default_matches_apply_profile_natural() {
+        let d = TimingCfg::default();
+        let n = TimingCfg::default().apply_profile(TimingProfile::Natural);
+        assert_eq!(d.profile, n.profile);
+        assert_eq!(d.key_ms, n.key_ms);
+        assert_eq!(d.pre_send_ms, n.pre_send_ms);
+        assert_eq!(d.post_send_ms, n.post_send_ms);
+        assert_eq!(d.focus_ms, n.focus_ms);
+        assert_eq!(d.burst, n.burst);
+        assert_eq!(d.burst_chars, n.burst_chars);
+        assert_eq!(d.burst_pause_ms, n.burst_pause_ms);
+    }
+
+    /// The serde field defaults and `Default` are two code paths to the
+    /// same numbers; an omitted `[timing]` table must land on
+    /// `TimingCfg::default()`.
+    #[test]
+    fn serde_defaults_match_default_impl() {
+        let parsed: TimingCfg = toml::from_str("").unwrap();
+        let d = TimingCfg::default();
+        assert_eq!(parsed.profile, d.profile);
+        assert_eq!(parsed.key_ms, d.key_ms);
+        assert_eq!(parsed.pre_send_ms, d.pre_send_ms);
+        assert_eq!(parsed.post_send_ms, d.post_send_ms);
+        assert_eq!(parsed.focus_ms, d.focus_ms);
+        assert_eq!(parsed.burst, d.burst);
+        assert_eq!(parsed.burst_chars, d.burst_chars);
+        assert_eq!(parsed.burst_pause_ms, d.burst_pause_ms);
     }
 
     #[test]
@@ -212,5 +268,28 @@ mod tests {
             ..TimingCfg::default()
         };
         assert!(t.validate().is_err());
+    }
+
+    /// With bursts off, `burst_chars` is inert: the checker only cares
+    /// that it is non-zero while `burst` is on.
+    #[test]
+    fn validate_accepts_zero_burst_chars_when_burst_disabled() {
+        let t = TimingCfg {
+            burst: false,
+            burst_chars: 0,
+            ..TimingCfg::default()
+        };
+        assert!(t.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_zero_burst_chars_when_burst_enabled() {
+        let t = TimingCfg {
+            burst: true,
+            burst_chars: 0,
+            ..TimingCfg::default()
+        };
+        let e = t.validate().unwrap_err();
+        assert!(e.contains("burst_chars"), "got: {e}");
     }
 }
