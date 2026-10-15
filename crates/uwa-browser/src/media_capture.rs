@@ -18,22 +18,23 @@
 //! auto-downloads. `fetch_blob` can pull a `blob:` URL from inside the
 //! page when a caller explicitly asks.
 
-use serde_json::Value;
-use uwa_core::{MediaKind, MediaResource, Page, Result, UwaError};
+use uwa_core::Result;
 
-pub async fn start_capture(page: &dyn Page) -> Result<()> {
+pub async fn start_capture(page: &dyn uwa_core::Page) -> Result<()> {
     let js = include_str!("js/audio_capture_start.js");
     let v = page.eval(js).await?;
-    if v.get("ok").and_then(Value::as_bool) != Some(true) {
-        return Err(UwaError::Transport(format!("audio capture start: {v:?}")));
+    if v.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
+        return Err(uwa_core::UwaError::Transport(format!(
+            "audio capture start: {v:?}"
+        )));
     }
     Ok(())
 }
 
-pub async fn stop_capture(page: &dyn Page) -> Result<Option<Vec<u8>>> {
+pub async fn stop_capture(page: &dyn uwa_core::Page) -> Result<Option<Vec<u8>>> {
     let js = include_str!("js/audio_capture_stop.js");
     let v = page.eval(js).await?;
-    let Some(chunks) = v.get("chunks").and_then(Value::as_array) else {
+    let Some(chunks) = v.get("chunks").and_then(serde_json::Value::as_array) else {
         return Ok(None);
     };
     if chunks.is_empty() {
@@ -54,7 +55,7 @@ pub async fn stop_capture(page: &dyn Page) -> Result<Option<Vec<u8>>> {
     Ok(Some(buf))
 }
 
-pub async fn scan_media(page: &dyn Page) -> Result<Vec<MediaResource>> {
+pub async fn scan_media(page: &dyn uwa_core::Page) -> Result<Vec<uwa_core::MediaResource>> {
     let js = include_str!("js/media_scan.js");
     let v = page.eval(js).await?;
     let Some(arr) = v.as_array() else {
@@ -62,22 +63,25 @@ pub async fn scan_media(page: &dyn Page) -> Result<Vec<MediaResource>> {
     };
     let mut out = Vec::with_capacity(arr.len());
     for item in arr {
-        let kind = match item.get("kind").and_then(Value::as_str) {
-            Some("video") => MediaKind::Video,
-            Some("audio") => MediaKind::Audio,
+        let kind = match item.get("kind").and_then(serde_json::Value::as_str) {
+            Some("video") => uwa_core::MediaSourceKind::Video,
+            Some("audio") => uwa_core::MediaSourceKind::Audio,
             _ => continue,
         };
-        let Some(url) = item.get("src").and_then(Value::as_str) else {
+        let Some(url) = item.get("src").and_then(serde_json::Value::as_str) else {
             continue;
         };
         if url.is_empty() {
             continue;
         }
-        out.push(MediaResource {
+        out.push(uwa_core::MediaResource {
             kind,
             url: url.to_string(),
-            mime: item.get("mime").and_then(Value::as_str).map(str::to_string),
-            duration_secs: item.get("duration").and_then(Value::as_f64),
+            mime: item
+                .get("mime")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
+            duration_secs: item.get("duration").and_then(serde_json::Value::as_f64),
         });
     }
     Ok(out)
@@ -85,7 +89,7 @@ pub async fn scan_media(page: &dyn Page) -> Result<Vec<MediaResource>> {
 
 /// Fetch a media URL from inside the page and return it as bytes.
 /// Works for `blob:` URLs, which aren't reachable from outside the page.
-pub async fn fetch_blob(page: &dyn Page, url: &str) -> Result<Vec<u8>> {
+pub async fn fetch_blob(page: &dyn uwa_core::Page, url: &str) -> Result<Vec<u8>> {
     let js = format!(
         r#"(async () => {{
             try {{
@@ -105,18 +109,21 @@ pub async fn fetch_blob(page: &dyn Page, url: &str) -> Result<Vec<u8>> {
         u = serde_json::to_string(url).unwrap_or_else(|_| format!("{url:?}")),
     );
     let v = page.eval(&js).await?;
-    if v.get("ok").and_then(Value::as_bool) != Some(true) {
-        let err = v.get("error").and_then(Value::as_str).unwrap_or("unknown");
-        return Err(UwaError::Transport(format!("fetch blob: {err}")));
+    if v.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
+        let err = v
+            .get("error")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown");
+        return Err(uwa_core::UwaError::Transport(format!("fetch blob: {err}")));
     }
     let b64 = v
         .get("b64")
-        .and_then(Value::as_str)
-        .ok_or_else(|| UwaError::Transport("fetch blob: no b64".into()))?;
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| uwa_core::UwaError::Transport("fetch blob: no b64".into()))?;
     use base64::Engine;
     base64::engine::general_purpose::STANDARD
         .decode(b64)
-        .map_err(|e| UwaError::Transport(format!("decode b64: {e}")))
+        .map_err(|e| uwa_core::UwaError::Transport(format!("decode b64: {e}")))
 }
 
 #[cfg(test)]
@@ -170,10 +177,10 @@ mod tests {
         ]));
         let media = scan_media(&p).await.unwrap();
         assert_eq!(media.len(), 2);
-        assert_eq!(media[0].kind, MediaKind::Audio);
+        assert_eq!(media[0].kind, uwa_core::MediaSourceKind::Audio);
         assert_eq!(media[0].url, "blob:https://x/1");
         assert_eq!(media[0].mime.as_deref(), Some("audio/webm"));
-        assert_eq!(media[1].kind, MediaKind::Video);
+        assert_eq!(media[1].kind, uwa_core::MediaSourceKind::Video);
         assert_eq!(media[1].duration_secs, Some(10.0));
     }
 
@@ -182,4 +189,66 @@ mod tests {
         let p = MockPage::new().expect_default(json!({"ok": true}));
         assert!(scan_media(&p).await.unwrap().is_empty());
     }
+}
+
+use uwa_core::types::media::{MediaAsset, MediaKind};
+
+const COLLECT_TEMPLATE: &str = include_str!("js/media_collect.js");
+
+/// Collect media inside the last assistant message.
+///
+/// `blob:` URLs are returned verbatim; the caller decides whether to
+/// fetch them via [`fetch_blob`].
+pub async fn collect_media(
+    page: &dyn uwa_core::Page,
+    container_selector: &str,
+    max_assets: usize,
+    max_bytes: u64,
+) -> Result<Vec<MediaAsset>> {
+    let js = format!(
+        "{}({}, {}, {})",
+        COLLECT_TEMPLATE.trim_end_matches(';'),
+        serde_json::to_string(container_selector).unwrap_or_else(|_| "\"\"".into()),
+        max_assets.min(64),
+        max_bytes,
+    );
+    let v = page.eval(&js).await?;
+    let Some(arr) = v.as_array() else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::with_capacity(arr.len());
+    for item in arr {
+        let Some(kind) = item.get("kind").and_then(|x| x.as_str()) else {
+            continue;
+        };
+        let kind = match kind {
+            "image" => MediaKind::Image,
+            "audio" => MediaKind::Audio,
+            "video" => MediaKind::Video,
+            "canvas" => MediaKind::Canvas,
+            _ => continue,
+        };
+        let Some(url) = item.get("url").and_then(|x| x.as_str()) else {
+            continue;
+        };
+        if url.is_empty() {
+            continue;
+        }
+        out.push(MediaAsset {
+            kind,
+            url: url.to_string(),
+            mime: item
+                .get("mime")
+                .and_then(|x| x.as_str())
+                .map(str::to_string),
+            size_bytes: item.get("size_bytes").and_then(|x| x.as_u64()),
+            local_path: None,
+            alt: item.get("alt").and_then(|x| x.as_str()).map(str::to_string),
+            source: item
+                .get("source")
+                .and_then(|x| x.as_str())
+                .map(str::to_string),
+        });
+    }
+    Ok(out)
 }

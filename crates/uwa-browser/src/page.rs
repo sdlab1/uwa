@@ -269,4 +269,13 @@ impl uwa_core::Page for CdpPageAdapter {
     async fn scan_media(&self) -> Result<Vec<uwa_core::MediaResource>> {
         crate::media_capture::scan_media(self).await
     }
+
+    async fn collect_media(
+        &self,
+        container_selector: &str,
+        max_assets: usize,
+        max_bytes: u64,
+    ) -> Result<Vec<uwa_core::MediaAsset>> {
+        crate::media_capture::collect_media(self, container_selector, max_assets, max_bytes).await
+    }
 }

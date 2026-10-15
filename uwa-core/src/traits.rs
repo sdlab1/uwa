@@ -3,6 +3,7 @@
 
 use crate::error::{Result, UwaError};
 use crate::ids::TabId;
+use crate::types::media::MediaAsset;
 use async_trait::async_trait;
 use futures::stream::Stream;
 use serde_json::Value;
@@ -68,12 +69,31 @@ pub trait Page: Send + Sync {
     async fn scan_media(&self) -> Result<Vec<MediaResource>> {
         Ok(Vec::new())
     }
+
+    /// Collect media assets (images, canvas snapshots, audio, video)
+    /// inside the last assistant message, if the selector identifies
+    /// one. Returns an empty vec when the container has no media.
+    ///
+    /// `max_assets` caps the response; a chatty page with hundreds of
+    /// avatars shouldn't flood the response. `max_bytes` is a hint for
+    /// inline `data:` assets — the implementation may refuse to
+    /// materialize one larger than this.
+    ///
+    /// Default: empty (test mocks, providers without media support).
+    async fn collect_media(
+        &self,
+        _container_selector: &str,
+        _max_assets: usize,
+        _max_bytes: u64,
+    ) -> Result<Vec<MediaAsset>> {
+        Ok(Vec::new())
+    }
 }
 
-/// One detected media element on a page.
+/// One detected media element on a page (for scan_media).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MediaResource {
-    pub kind: MediaKind,
+    pub kind: MediaSourceKind,
     pub url: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mime: Option<String>,
@@ -81,9 +101,10 @@ pub struct MediaResource {
     pub duration_secs: Option<f64>,
 }
 
+/// Kind of media element found by `Page::scan_media`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum MediaKind {
+pub enum MediaSourceKind {
     Audio,
     Video,
 }

@@ -3,7 +3,47 @@
 //! Deliberately hand-rolled instead of pulling `async-openai-types`:
 //! we need stability + full control over (de)serialization.
 
-use super::Role;
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Role {
+    System,
+    User,
+    Assistant,
+    Tool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FinishReason {
+    Stop,
+    Length,
+    ToolCalls,
+    ContentFilter,
+}
+
+/// Maximum characters per stream chunk. OpenAI splits long completions
+/// into chunks of roughly this size.
+pub const STREAM_CHUNK_CHARS: usize = 4096;
+
+/// Split text into chunks of roughly `STREAM_CHUNK_CHARS` characters,
+/// preserving word boundaries where possible.
+pub fn stream_chunks(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut remaining = text;
+    while !remaining.is_empty() {
+        if remaining.len() <= STREAM_CHUNK_CHARS {
+            out.push(remaining.to_string());
+            break;
+        }
+        let split_at = remaining[..STREAM_CHUNK_CHARS]
+            .rfind(char::is_whitespace)
+            .unwrap_or(STREAM_CHUNK_CHARS);
+        out.push(remaining[..split_at].to_string());
+        remaining = remaining[split_at..].trim_start();
+    }
+    out
+}
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -171,7 +211,7 @@ pub struct ChatCompletionResponse {
 pub struct ChatChoice {
     pub index: u32,
     pub message: ChatMessage,
-    pub finish_reason: Option<super::FinishReason>,
+    pub finish_reason: Option<FinishReason>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

@@ -6,7 +6,7 @@
 //! ## Passport (public API)
 //! - [`error::UwaError`], [`error::Result`]
 //! - [`ids::{RequestId, SessionId, TabId, ConversationId}`]
-//! - [`types::openai`], [`types::anthropic`]
+//! - [`types::openai`], [`types::anthropic`], [`types::media`]
 //! - [`net::{NetRules, NetDecoder, ExtractionStrategy, FinisherTuning}`]
 //! - [`traits::{Page, SiteProvider, Transport, NetworkEvent, Capabilities}`]
 //!
@@ -24,6 +24,7 @@ pub use error::{ModelNotFound, Result, UwaError};
 pub use ids::{ConversationId, RequestId, SessionId, TabId};
 pub use net::{ExtractionStrategy, FinisherTuning, NetDecoder, NetRules};
 pub use traits::{
-    Capabilities, MediaKind, MediaResource, NetworkEvent, Page, ResponseStream, SiteProvider,
+    Capabilities, MediaResource, MediaSourceKind, NetworkEvent, Page, ResponseStream, SiteProvider,
     ToolSpec, Transport,
 };
+pub use types::media::{MediaAsset, MediaKind, MediaSummary};

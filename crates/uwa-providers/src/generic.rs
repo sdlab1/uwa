@@ -414,7 +414,7 @@ impl SiteProvider for GenericProvider {
             if let Ok(media) = page.scan_media().await {
                 let videos = media
                     .iter()
-                    .filter(|m| m.kind == uwa_core::MediaKind::Video)
+                    .filter(|m| m.kind == uwa_core::MediaSourceKind::Video)
                     .count();
                 if videos > 0 {
                     tracing::info!(

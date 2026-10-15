@@ -24,7 +24,7 @@ async fn scan_media_detects_video_tag() {
 
     let media = page.scan_media().await.unwrap();
     assert_eq!(media.len(), 1, "one video element expected: {media:?}");
-    assert_eq!(media[0].kind, uwa_core::MediaKind::Video);
+    assert_eq!(media[0].kind, uwa_core::MediaSourceKind::Video);
     assert!(media[0].url.contains("v.mp4"), "url: {}", media[0].url);
 }
 
