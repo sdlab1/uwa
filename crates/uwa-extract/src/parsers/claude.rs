@@ -16,6 +16,7 @@
 //! tool_use) are ignored — tool calls are handled by `uwa-tools`.
 
 use super::SiteStreamParser;
+use crate::net::NetDelta;
 use serde_json::Value;
 
 pub struct ClaudeParser;
@@ -36,8 +37,7 @@ impl SiteStreamParser for ClaudeParser {
     fn name(&self) -> &str {
         "claude"
     }
-
-    fn extract_delta(&self, data: &str) -> Option<String> {
+    fn extract_delta(&self, data: &str) -> Option<NetDelta> {
         let data = data.trim();
         if data == "[DONE]" {
             return None;
@@ -52,7 +52,7 @@ impl SiteStreamParser for ClaudeParser {
             return None;
         }
         let text = delta.get("text").and_then(Value::as_str)?;
-        Some(text.to_string())
+        Some(NetDelta::Append(text.to_string()))
     }
 
     fn is_done(&self, data: &str) -> bool {
@@ -78,7 +78,7 @@ mod tests {
         let d = p.extract_delta(
             r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}"#,
         );
-        assert_eq!(d.as_deref(), Some("Hello"));
+        assert_eq!(d.map(|d| d.as_str().to_string()), Some("Hello".to_string()));
     }
 
     #[test]

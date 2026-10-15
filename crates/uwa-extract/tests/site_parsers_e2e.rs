@@ -135,3 +135,38 @@ async fn unknown_site_name_yields_nothing() {
     let text = collect_deltas(stream).await;
     assert_eq!(text, "");
 }
+
+/// UWA-112 regression: a ChatGPT rewrite mid-stream must not leave the
+/// stale prefix in the accumulated text. The full path is exercised:
+/// CDP events → SSE frames → site parser → NetDelta::Replace → accumulator.
+#[tokio::test]
+async fn chatgpt_rewrite_discards_stale_prefix() {
+    let page = MockPage::new();
+    let extractor = DefaultNetExtractor;
+    let stream = extractor
+        .deltas(&page, &rules_for("chatgpt"))
+        .await
+        .unwrap_or_else(|e| panic!("deltas failed: {e}"));
+    let tx = page.network_sender();
+    tx.send(NetworkEvent::ResponseBody {
+        request_id: "r1".into(),
+        url: "https://chatgpt.com/backend-api/f/conversation".into(),
+        body: concat!(
+            "data: {\"v\":{\"message\":{\"content\":{\"parts\":[\"Hello\"]}}}}\n\n",
+            "data: {\"v\":{\"message\":{\"content\":{\"parts\":[\"Goodbye\"]}}}}\n\n",
+            "data: {\"v\":{\"message\":{\"content\":{\"parts\":[\"Goodbye world\"]}}}}\n\n",
+            "data: [DONE]\n\n",
+        )
+        .into(),
+        mime: "text/event-stream".into(),
+        cf_mitigated_challenge: false,
+    })
+    .unwrap_or_else(|e| panic!("send failed: {e}"));
+    tx.send(NetworkEvent::Finished {
+        request_id: "r1".into(),
+    })
+    .unwrap_or_else(|e| panic!("send failed: {e}"));
+    let text = collect_deltas(stream).await;
+    // The rewrite must win: "Hello" is discarded, not prepended.
+    assert_eq!(text, "Goodbye world");
+}

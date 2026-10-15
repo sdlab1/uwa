@@ -144,3 +144,59 @@ The registry commit landed code that did not compile and a failing test:
   (`clippy::string_slice` is pedantic, not forbidden) — only Vec/slice
   indexing is. The chain work still removed most raw offsets where the
   rewrite made the code more obviously total.
+
+## Session 4 — ChatGPT/Gemini rewrite corruption + dead code (this change)
+
+### 1. ChatGPT / Gemini parser rewrite corrupts accumulated text (UWA-141)
+
+Both `ChatGptParser` and `GeminiParser` consume *cumulative* text from
+the server and emit deltas by prefix-diffing. When the model rewrites
+(regenerate / edit / candidate switch), the new text is **not** a
+prefix-extension of the old one — the diff function returned the whole
+new text, and the pipeline accumulator appended it to the stale prefix,
+producing concatenated garbage (e.g. `"HelloGoodbye world"` instead of
+`"Goodbye world"`).
+
+**Root cause:** the type `NetDelta(pub String)` could not express
+"replace everything accumulated so far".
+
+**Fix:** introduced `NetDelta::{Append,Replace}` enum:
+
+- `Append(s)` — normal growth, suffix appended to accumulated text
+- `Replace(s)` — site rewrote its message; accumulator clears and
+  replaces with `s`
+
+The diff functions (`diff` in chatgpt, inline in gemini) now emit
+`Replace` when `!new_full.starts_with(last)`. The pipeline accumulator
+(`pipeline.rs`) handles `Replace` by `text = s` instead of `push_str`.
+
+**Files changed:**
+- `crates/uwa-extract/src/net.rs` — `NetDelta` enum, `as_str()`, `is_empty()`, `collect_deltas()`, `DefaultNetExtractor`
+- `crates/uwa-extract/src/parsers/mod.rs` — trait returns `Option<NetDelta>`
+- `crates/uwa-extract/src/parsers/chatgpt.rs` — `diff()` returns `NetDelta`, `.get()` instead of slicing
+- `crates/uwa-extract/src/parsers/gemini.rs` — `extract_delta()` returns `Replace` on candidate switch, `.get()`
+- `crates/uwa-extract/src/parsers/claude.rs` — wraps in `NetDelta::Append`
+- `crates/uwa-extract/src/pipeline.rs` — accumulator honours `Replace`
+- `crates/uwa-providers/src/generic.rs` — uses `d.as_str().to_string()`
+
+**Tests added (all pass):**
+- `rewrite_signals_replace_not_append` (chatgpt unit)
+- `rewrite_delta_is_replace_variant` (chatgpt unit)
+- `diff_handles_multibyte_boundary` (chatgpt unit — Cyrillic)
+- `candidate_switch_signals_replace` (gemini unit)
+- `chatgpt_rewrite_discards_stale_prefix` (e2e: CDP → SSE → parser → accumulator)
+- `replace_delta_clears_accumulated_text` (pipeline unit with fake extractor)
+
+All existing tests pass; no behaviour change for normal prefix-extension
+streams (Claude, standard SSE, JSON path).
+
+### 2. Dead code in `fenced_regions` (UWA-142, trivial)
+
+`crates/uwa-tools/src/parser.rs:283`:
+```rust
+let is_fence_boundary = trimmed.starts_with("```") || trimmed == "```";
+```
+The right side is always covered by the left — a line equal to ```````
+also `starts_with("```")`. Removed the redundant `|| trimmed == "```"`.
+
+No test changes; full suite green.

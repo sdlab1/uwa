@@ -96,10 +96,21 @@ impl ExtractionPipeline {
         let mut got_any = false;
         let max_wait = cfg.finisher.max_wait;
         let net_fut = async {
-            while let Some(NetDelta(s)) = stream.next().await {
-                if !s.is_empty() {
-                    text.push_str(&s);
-                    got_any = true;
+            while let Some(d) = stream.next().await {
+                match d {
+                    NetDelta::Append(s) => {
+                        if !s.is_empty() {
+                            text.push_str(&s);
+                            got_any = true;
+                        }
+                    }
+                    NetDelta::Replace(s) => {
+                        // Site rewrote its message: discard the stale prefix.
+                        if !s.is_empty() {
+                            text = s;
+                            got_any = true;
+                        }
+                    }
                 }
             }
         };

@@ -9,6 +9,39 @@ use uwa_extract::net::{NetDecoder, NetDelta, NetExtractor, NetRules};
 use uwa_extract::pipeline::{ExtractionPipeline, ExtractionSource, PipelineCfg};
 use uwa_testkit::MockPage;
 
+/// UWA-112: the pipeline accumulator must honour `NetDelta::Replace` —
+/// a rewrite mid-stream clears what was accumulated so far.
+#[tokio::test]
+async fn replace_delta_clears_accumulated_text() {
+    struct RewriteNet;
+    #[async_trait]
+    impl NetExtractor for RewriteNet {
+        async fn deltas(
+            &self,
+            _page: &dyn Page,
+            _rules: &NetRules,
+        ) -> Result<ReceiverStream<NetDelta>> {
+            let (tx, rx) = tokio::sync::mpsc::channel(16);
+            tokio::spawn(async move {
+                let _ = tx.send(NetDelta::Append("old ".into())).await;
+                let _ = tx.send(NetDelta::Append("text".into())).await;
+                // Site rewrote: everything before is stale.
+                let _ = tx.send(NetDelta::Replace("new text".into())).await;
+                let _ = tx.send(NetDelta::Append(" and more".into())).await;
+            });
+            Ok(ReceiverStream::new(rx))
+        }
+    }
+    let page = MockPage::new().with_html("");
+    let pipe = ExtractionPipeline::with_net(Arc::new(RewriteNet));
+    let out = pipe
+        .run(&page, &base_cfg(ExtractionStrategy::NetworkFirst))
+        .await
+        .unwrap_or_else(|e| panic!("pipeline failed: {e}"));
+    assert_eq!(out.source, ExtractionSource::Network);
+    assert_eq!(out.text, "new text and more");
+}
+
 // ---- Fake NetExtractor that just emits deltas directly. ----
 
 struct FakeNet(Vec<&'static str>);
@@ -24,7 +57,7 @@ impl NetExtractor for FakeNet {
         let parts: Vec<String> = self.0.iter().map(|s| s.to_string()).collect();
         tokio::spawn(async move {
             for p in parts {
-                let _ = tx.send(NetDelta(p)).await;
+                let _ = tx.send(NetDelta::Append(p)).await;
             }
             // Close on drop.
         });

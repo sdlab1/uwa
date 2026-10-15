@@ -62,10 +62,10 @@ async fn unrelated_finished_does_not_end_the_stream() {
         .expect("stream must not stall")
     {
         // The empty delta is the end-of-stream marker emitted on `Finished`.
-        if d.0.is_empty() {
+        if d.is_empty() {
             break;
         }
-        got.push(d.0);
+        got.push(d.as_str().to_string());
     }
     // "b" arriving after the unrelated Finished is the regression signal;
     // the loop then ends on the empty end-of-stream marker.

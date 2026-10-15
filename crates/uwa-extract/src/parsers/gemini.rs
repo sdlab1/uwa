@@ -19,6 +19,7 @@
 //! DOM extraction.
 
 use super::SiteStreamParser;
+use crate::net::NetDelta;
 use serde_json::Value;
 use std::sync::Mutex;
 
@@ -44,8 +45,7 @@ impl SiteStreamParser for GeminiParser {
     fn name(&self) -> &str {
         "gemini"
     }
-
-    fn extract_delta(&self, data: &str) -> Option<String> {
+    fn extract_delta(&self, data: &str) -> Option<NetDelta> {
         let data = data.trim();
         if data == "[DONE]" || data.is_empty() {
             return None;
@@ -70,15 +70,17 @@ impl SiteStreamParser for GeminiParser {
         }
         let mut last = self.last_full.lock().unwrap_or_else(|p| p.into_inner());
         if latest == last.as_str() {
-            return Some(String::new());
+            return Some(NetDelta::Append(String::new()));
         }
         if latest.starts_with(last.as_str()) {
-            let d = latest[last.len()..].to_string();
+            let d = latest.get(last.len()..).unwrap_or_default().to_string();
             *last = latest;
-            d.into()
+            Some(NetDelta::Append(d))
         } else {
+            // Rewrite (candidate switch): signal replacement so the
+            // accumulator discards the stale prefix.
             *last = latest.clone();
-            Some(latest)
+            Some(NetDelta::Replace(latest))
         }
     }
 
@@ -134,15 +136,24 @@ mod tests {
         let p = GeminiParser::new();
         let f1 = r#"[["wrb.fr", null, "{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Hello\"}]}}]}"]]"#;
         let f2 = r#"[["wrb.fr", null, "{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Hello world\"}]}}]}"]]"#;
-        assert_eq!(p.extract_delta(f1).as_deref(), Some("Hello"));
-        assert_eq!(p.extract_delta(f2).as_deref(), Some(" world"));
+        assert_eq!(
+            p.extract_delta(f1).map(|d| d.as_str().to_string()),
+            Some(NetDelta::Append("Hello".into()).as_str().to_string())
+        );
+        assert_eq!(
+            p.extract_delta(f2).map(|d| d.as_str().to_string()),
+            Some(NetDelta::Append(" world".into()).as_str().to_string())
+        );
     }
 
     #[test]
     fn xssi_guard_stripped() {
         let p = GeminiParser::new();
         let f = ")]}'\n[[\"wrb.fr\",null,\"{\\\"candidates\\\":[{\\\"content\\\":{\\\"parts\\\":[{\\\"text\\\":\\\"hi\\\"}]}}]}\"]]";
-        assert_eq!(p.extract_delta(f).as_deref(), Some("hi"));
+        assert_eq!(
+            p.extract_delta(f).map(|d| d.as_str().to_string()),
+            Some(NetDelta::Append("hi".into()).as_str().to_string())
+        );
     }
 
     #[test]
@@ -158,5 +169,35 @@ mod tests {
         assert!(p.is_done("[DONE]"));
         assert!(p.is_done("[\"wrb.fr\",null,\"e\"]"));
         assert!(!p.is_done("[\"wrb.fr\"]"));
+    }
+
+    /// UWA-112: candidate switch (shorter→longer non-prefix) must signal
+    /// `Replace` so the accumulator discards the stale prefix.
+    #[test]
+    fn candidate_switch_signals_replace() {
+        let p = GeminiParser::new();
+        let f1 = r#"[["wrb.fr", null, "{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"first answer\"}]}}]}"]]"#;
+        // A different candidate wins — not a prefix extension.
+        let f2 = r#"[["wrb.fr", null, "{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"second answer\"}]}}]}"]]"#;
+        let d1 = p
+            .extract_delta(f1)
+            .unwrap_or_else(|| NetDelta::Append(String::new()));
+        let d2 = p
+            .extract_delta(f2)
+            .unwrap_or_else(|| NetDelta::Append(String::new()));
+        let mut text = String::new();
+        for d in [d1, d2] {
+            match d {
+                NetDelta::Append(s) => text.push_str(&s),
+                NetDelta::Replace(s) => {
+                    text.clear();
+                    text.push_str(&s);
+                }
+            }
+        }
+        assert_eq!(
+            text, "second answer",
+            "candidate switch must replace, not append"
+        );
     }
 }

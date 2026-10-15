@@ -156,11 +156,20 @@ impl CircuitBreaker {
             if inner.state == CircuitState::Open {
                 return;
             }
-            inner.state = CircuitState::Closed;
+            if inner.state == CircuitState::HalfOpen {
+                // Decrement the in-flight probe count. Only transition to
+                // Closed when all probes have succeeded (UWA-130).
+                inner.half_open_in_flight = inner.half_open_in_flight.saturating_sub(1);
+                if inner.half_open_in_flight == 0 {
+                    inner.state = CircuitState::Closed;
+                    inner.failures.clear();
+                    inner.opened_at = None;
+                    inner.half_open_probe_at = None;
+                }
+                return;
+            }
+            // Closed state: success resets failure tracking.
             inner.failures.clear();
-            inner.opened_at = None;
-            inner.half_open_in_flight = 0;
-            inner.half_open_probe_at = None;
         });
     }
 
@@ -369,8 +378,12 @@ mod tests {
         assert!(cb.allow().is_ok());
         // Fourth should fail
         assert!(cb.allow().is_err());
-        // Success on one of them closes the breaker
-        cb.record_success();
+        // All three probes must succeed to close the breaker (UWA-130 fix)
+        cb.record_success(); // 1 of 3
+        assert_eq!(cb.state(), CircuitState::HalfOpen);
+        cb.record_success(); // 2 of 3
+        assert_eq!(cb.state(), CircuitState::HalfOpen);
+        cb.record_success(); // 3 of 3
         assert_eq!(cb.state(), CircuitState::Closed);
         assert!(cb.allow().is_ok());
     }

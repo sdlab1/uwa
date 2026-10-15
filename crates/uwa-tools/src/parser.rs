@@ -111,11 +111,11 @@ fn fenced_regions(text: &str) -> Vec<Range<usize>> {
     for line in text.split_inclusive('\n') {
         let start = offset;
         offset = offset.saturating_add(line.len());
-        // Treat a line as a fence boundary if it STARTS with ``` (after whitespace)
-        // OR if the ENTIRE LINE is just ``` (standalone closer).
-        // This avoids false positives from ``` inside content/arguments.
+        // A line is a fence boundary if it STARTS with ``` (after
+        // whitespace). This avoids false positives from ``` inside
+        // content/arguments, and covers both openers and closers.
         let trimmed = line.trim_start();
-        let is_fence_boundary = trimmed.starts_with("```") || trimmed == "```";
+        let is_fence_boundary = trimmed.starts_with("```");
         if is_fence_boundary {
             match open.take() {
                 Some(s) => regions.push(s..offset),

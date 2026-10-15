@@ -168,6 +168,28 @@ once in `resolve_tool_calls` (when validation passes) and once in
 Fixed by removing the duplicate call in the streaming path.
 Buffered path was already correct.
 
+### UWA-141 ✅ ChatGPT/Gemini parser rewrite corrupts accumulated text
+Both `ChatGptParser` and `GeminiParser` use cumulative text from the
+server and emit deltas by prefix-diffing. When the model rewrites
+(regenerate / edit / candidate switch) the new text is **not** a
+prefix-extension of the old one — the old prefix was appended instead of
+replaced, producing concatenated garbage ("HelloGoodbye world").
+**Fix:** introduced `NetDelta::{Append,Replace}` enum; the diff functions
+now emit `Replace` when `!new.starts_with(last)`. The pipeline accumulator
+clears on `Replace`. All sites now stream correct text.
+Tests: `rewrite_signals_replace_not_append`,
+`rewrite_delta_is_replace_variant`,
+`diff_handles_multibyte_boundary`,
+`candidate_switch_signals_replace`,
+`chatgpt_rewrite_discards_stale_prefix` (e2e),
+`replace_delta_clears_accumulated_text` (pipeline).
+
+### UWA-142 ✅ Dead code in `fenced_regions` (trivial)
+`crates/uwa-tools/src/parser.rs:283` — `trimmed.starts_with("```") ||
+trimmed == "```"`; the right side is always covered by the left (a line
+equal to ``````` `` also `starts_with("```")`). Removed the redundant
+condition. Test suite unchanged (all pass).
+
 ---
 
 ## ⬜ Open
@@ -233,9 +255,14 @@ OpenAI enum. Strict clients may choke.
 On self-heal producing plain text, the original response prefix already
 streamed to client may duplicate.
 
-### UWA-130 ⚪ HalfOpen late record_success closes breaker
+### UWA-130 ✅ HalfOpen late record_success closes breaker
 A late `record_success` from a call that started before half-open opens
 closes the breaker without proper probing.
+**Fix:** `record_success()` in HalfOpen state now decrements
+`half_open_in_flight` instead of immediately transitioning to Closed.
+The breaker only closes when the counter reaches zero (all probes
+succeeded). Test updated: `half_open_allows_multiple_probes_when_configured`
+now asserts the breaker stays HalfOpen until all 3 probes report success.
 
 ### UWA-131 ⚪ Identical opening messages get same conversation_id
 Two chats with same system prompt and first user message ("hi") get the

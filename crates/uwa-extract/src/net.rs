@@ -359,9 +359,29 @@ fn make_seg(s: &str) -> Segment {
 // Net-side extractor: subscribes to `NetworkEvent`s, matches URL patterns,
 // decodes SSE or JSON bodies, and produces an async stream of deltas.
 
-/// Stream item: an incremental piece of text.
+/// One item in a network-extraction stream.
 #[derive(Debug, Clone, PartialEq)]
-pub struct NetDelta(pub String);
+pub enum NetDelta {
+    /// Append this text to what has already been emitted.
+    Append(String),
+    /// The site rewrote its message: replace all previously accumulated
+    /// text with this. Emitted by cumulative-diffing parsers (ChatGPT,
+    /// Gemini) when the new full text is not a prefix-extension of the
+    /// old one — appending would concatenate stale and fresh text.
+    Replace(String),
+}
+impl NetDelta {
+    /// The text payload, regardless of append/replace semantics.
+    pub fn as_str(&self) -> &str {
+        match self {
+            NetDelta::Append(s) | NetDelta::Replace(s) => s,
+        }
+    }
+    /// True when the payload is empty.
+    pub fn is_empty(&self) -> bool {
+        self.as_str().is_empty()
+    }
+}
 
 #[async_trait]
 pub trait NetExtractor: Send + Sync {
@@ -426,12 +446,12 @@ impl NetExtractor for DefaultNetExtractor {
                         active_request = Some(request_id.clone());
                         if mime.contains("event-stream") {
                             for frame in sse.feed(&body) {
-                                if let Some(s) = decode_sse_frame(
+                                if let Some(d) = decode_sse_frame(
                                     &frame.data,
                                     &rules.decoder,
                                     site_parser.as_ref(),
                                 ) {
-                                    if !s.is_empty() && tx.send(NetDelta(s)).await.is_err() {
+                                    if !d.is_empty() && tx.send(d).await.is_err() {
                                         return;
                                     }
                                 }
@@ -443,13 +463,13 @@ impl NetExtractor for DefaultNetExtractor {
                                     _ => frame.data.trim() == "[DONE]",
                                 };
                                 if frame_done {
-                                    let _ = tx.send(NetDelta(String::new())).await;
+                                    let _ = tx.send(NetDelta::Append(String::new())).await;
                                     return;
                                 }
                             }
                         } else {
                             if let Some(s) = decode_json(&body, &rules.decoder) {
-                                if !s.is_empty() && tx.send(NetDelta(s)).await.is_err() {
+                                if !s.is_empty() && tx.send(NetDelta::Append(s)).await.is_err() {
                                     return;
                                 }
                             }
@@ -464,13 +484,13 @@ impl NetExtractor for DefaultNetExtractor {
                         }
                         if active_url.is_some() && active_is_sse {
                             if let Some(tail) = sse.finish() {
-                                if let Some(s) = decode_sse_frame(
+                                if let Some(d) = decode_sse_frame(
                                     &tail.data,
                                     &rules.decoder,
                                     site_parser.as_ref(),
                                 ) {
-                                    if !s.is_empty() {
-                                        let _ = tx.send(NetDelta(s)).await;
+                                    if !d.is_empty() {
+                                        let _ = tx.send(d).await;
                                     }
                                 }
                             }
@@ -489,18 +509,18 @@ fn decode_sse_frame(
     data: &str,
     decoder: &NetDecoder,
     site: Option<&std::sync::Arc<dyn parsers::SiteStreamParser>>,
-) -> Option<String> {
+) -> Option<NetDelta> {
     match decoder {
         NetDecoder::Sse { json_path } => {
             if json_path == "__raw__" {
-                return Some(data.to_string());
+                return Some(NetDelta::Append(data.to_string()));
             }
             let v: Value = serde_json::from_str(data).ok()?;
-            json_path_str(&v, json_path)
+            json_path_str(&v, json_path).map(NetDelta::Append)
         }
         NetDecoder::Json { json_path } => {
             let v: Value = serde_json::from_str(data).ok()?;
-            json_path_str(&v, json_path)
+            json_path_str(&v, json_path).map(NetDelta::Append)
         }
         NetDecoder::Site { .. } => {
             let p = site?;
@@ -525,8 +545,14 @@ fn decode_json(body: &str, decoder: &NetDecoder) -> Option<String> {
 pub async fn collect_deltas(mut stream: ReceiverStream<NetDelta>) -> String {
     use tokio_stream::StreamExt;
     let mut out = String::new();
-    while let Some(NetDelta(s)) = stream.next().await {
-        out.push_str(&s);
+    while let Some(d) = stream.next().await {
+        match d {
+            NetDelta::Append(s) => out.push_str(&s),
+            NetDelta::Replace(s) => {
+                out.clear();
+                out.push_str(&s);
+            }
+        }
     }
     out
 }
@@ -698,7 +724,10 @@ mod tests {
         let d = NetDecoder::Sse {
             json_path: "delta.content".into(),
         };
-        assert_eq!(decode_sse_frame(frame, &d, None).as_deref(), Some("hello"));
+        assert_eq!(
+            decode_sse_frame(frame, &d, None).map(|d| d.as_str().to_string()),
+            Some("hello".to_string())
+        );
     }
 
     #[test]
@@ -708,8 +737,8 @@ mod tests {
             json_path: "__raw__".into(),
         };
         assert_eq!(
-            decode_sse_frame(frame, &d, None).as_deref(),
-            Some("plain text chunk")
+            decode_sse_frame(frame, &d, None).map(|d| d.as_str().to_string()),
+            Some("plain text chunk".to_string())
         );
     }
 

@@ -19,7 +19,7 @@
 pub mod chatgpt;
 pub mod claude;
 pub mod gemini;
-
+use crate::net::NetDelta;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -30,8 +30,11 @@ use std::sync::Arc;
 pub trait SiteStreamParser: Send + Sync {
     fn name(&self) -> &str;
     /// Extract a delta from a single SSE frame's `data` payload. Returns
-    /// `None` if the frame carries no user-visible text.
-    fn extract_delta(&self, data: &str) -> Option<String>;
+    /// `None` if the frame carries no user-visible text. Cumulative sites
+    /// emit `NetDelta::Append` for normal growth and `NetDelta::Replace`
+    /// when the message was rewritten (the new text is not a
+    /// prefix-extension of the old one).
+    fn extract_delta(&self, data: &str) -> Option<NetDelta>;
     /// True if this frame signals end-of-stream (e.g. `[DONE]`,
     /// `message_stop`).
     fn is_done(&self, data: &str) -> bool {
