@@ -1,0 +1,37 @@
+name: devharness-rs
+on:
+  push:
+    paths: ["devharness/**"]
+  pull_request:
+    paths: ["devharness/**"]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy, llvm-tools
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+      - run: cargo fmt -p devh --check
+      - run: cargo clippy -p devh --all-targets -- -D warnings # shellcheck-слой
+      - run: cargo test -p devh # юниты ядра + порт 95 ассертов test.sh
+      - name: oracle: test.sh против Rust-бинаря
+        run: |
+          cargo build -p devh
+          DEVH="$PWD/target/debug/devh" bash devharness/test.sh
+      - name: coverage-гейт (selfcov-замена, нативно)
+        run: |
+          cargo install cargo-llvm-cov --locked
+          cargo llvm-cov -p devh --fail-under-lines 80
+      - name: selfmutate (selfmutate-замена)
+        run: |
+          cargo install cargo-mutants --locked
+          cargo mutants -p devh --config devharness/cargo-mutants.toml --in-place

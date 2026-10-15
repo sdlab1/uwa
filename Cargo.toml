@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/*", "uwa-core"]
+members = ["crates/*", "uwa-core", "devharness"]
 
 [workspace.package]
 version      = "0.1.0"

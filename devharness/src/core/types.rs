@@ -1,0 +1,106 @@
+use std::path::PathBuf;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ItemId(pub u16);
+
+impl ItemId {
+    pub fn dir_name(&self) -> String {
+        format!("W-{:03}", self.0)
+    }
+
+    pub fn branch(&self) -> String {
+        format!("devh/W-{:03}", self.0)
+    }
+
+    pub fn resolve(s: &str) -> Option<Self> {
+        let s = s.trim();
+        let digits = s.trim_start_matches(['W', 'w']).trim_start_matches('-');
+        if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_digit()) {
+            return None;
+        }
+        digits.parse().ok().map(ItemId)
+    }
+}
+
+impl std::fmt::Display for ItemId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.dir_name())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct MutateCfg {
+    pub tool: String,
+    pub scope: String,
+    pub min_kill: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct RunConfig {
+    pub verify: String,
+    pub bootstrap: String,
+    pub agent: String,
+    pub agent_timeout: u32,
+    pub max_fix: u32,
+    pub max_active: u32,
+    pub remote: String,
+    pub main_branch: String,
+    pub wt_root: PathBuf,
+    pub log_days: u32,
+    pub mutate: Option<MutateCfg>,
+    pub bench: Option<String>,
+    pub no_ignored: bool,
+    pub lint: bool,
+    pub lint_cmd: String,
+    pub review: bool,
+    pub msg_deny: Option<String>,
+    pub rules: Option<PathBuf>,
+    pub rules_log: Option<PathBuf>,
+}
+
+impl Default for RunConfig {
+    fn default() -> Self {
+        Self {
+            verify: String::new(),
+            bootstrap: String::new(),
+            agent: "goose run --no-session -t".into(),
+            agent_timeout: 1800,
+            max_fix: 3,
+            max_active: 3,
+            remote: "origin".into(),
+            main_branch: "main".into(),
+            wt_root: PathBuf::from("/tmp"),
+            log_days: 30,
+            mutate: None,
+            bench: None,
+            no_ignored: true,
+            lint: true,
+            lint_cmd: String::new(),
+            review: true,
+            msg_deny: None,
+            rules: None,
+            rules_log: None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_accepts_variants() {
+        assert_eq!(ItemId::resolve("40"), Some(ItemId(40)));
+        assert_eq!(ItemId::resolve("W-040"), Some(ItemId(40)));
+        assert_eq!(ItemId::resolve("w-40"), Some(ItemId(40)));
+        assert_eq!(ItemId::resolve("008"), Some(ItemId(8)));
+        assert_eq!(ItemId::resolve("W-"), None);
+        assert_eq!(ItemId::resolve("abc"), None);
+    }
+
+    #[test]
+    fn dir_name_is_zero_padded() {
+        assert_eq!(ItemId(7).dir_name(), "W-007");
+        assert_eq!(ItemId(7).branch(), "devh/W-007");
+    }
+}

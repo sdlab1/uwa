@@ -1,0 +1,158 @@
+use std::path::Path;
+
+use crate::shell::color::colors;
+use crate::shell::git;
+
+fn env_or(k: &str, d: &str) -> String {
+    match std::env::var(format!("HARNESS_{k}")) {
+        Ok(v) if !v.is_empty() => v,
+        _ => d.to_string(),
+    }
+}
+
+fn env_num_or(k: &str, d: u32) -> u32 {
+    env_or(k, &d.to_string()).trim().parse().unwrap_or(d)
+}
+
+pub fn init(root: &Path) -> anyhow::Result<()> {
+    let col = colors();
+    let conf = root.join(".harness/config");
+    if conf.exists() {
+        anyhow::bail!(
+            "devh: {} уже есть (перезапись: rm {})",
+            conf.display(),
+            conf.display()
+        );
+    }
+
+    let mut verify = env_or("VERIFY", "");
+    let mut bootstrap = env_or("BOOTSTRAP", "");
+    if verify.is_empty() {
+        if is_exec(root.join("scripts/verify.sh")) {
+            verify = "./scripts/verify.sh".into();
+        } else if root.join("gobot/mix.exs").exists() {
+            verify = "cd gobot && mix test".into();
+            bootstrap = "cd gobot && mix deps.get && mix compile".into();
+        } else if root.join("mix.exs").exists() {
+            verify = "mix test".into();
+            bootstrap = "mix deps.get && mix compile".into();
+        } else if root.join("Cargo.toml").exists() {
+            verify = "cargo test".into();
+            bootstrap = "cargo fetch".into();
+        } else if makefile_has_verify(root.join("Makefile")) {
+            verify = "make verify".into();
+        }
+    }
+
+    let mut mutate = env_or("MUTATE", "");
+    let mut mutate_scope = env_or("MUTATE_SCOPE", "");
+    if mutate.is_empty() && root.join("gobot/mix.exs").exists() {
+        mutate = "cd gobot && mix mutants --module {module}".into();
+        mutate_scope = "gobot/lib".into();
+    }
+    if mutate.is_empty() && root.join("Cargo.toml").exists() {
+        mutate = "cargo mutants -f {file}".into();
+        mutate_scope = "src".into();
+    }
+    if mutate_scope.is_empty() {
+        mutate_scope = "lib".into();
+    }
+
+    let mut rules = env_or("RULES", "");
+    let mut rules_log = env_or("RULES_LOG", "");
+    if root.join("todo/report.md").exists() && rules.is_empty() {
+        rules = "todo/report.md".into();
+        rules_log = "todo/report.md".into();
+    }
+    let msg_deny = env_or("MSG_DENY", r"todo/|report\.md|Session [0-9]+");
+
+    let main = git::branch_current(root).unwrap_or_else(|| "main".into());
+    let agent = env_or("AGENT", "goose run --no-session -t");
+    let agent_timeout = env_num_or("AGENT_TIMEOUT", 1800);
+    let max_fix = env_num_or("MAX_FIX", 3);
+    let max_active = env_num_or("MAX_ACTIVE", 3);
+    let remote = env_or("REMOTE", "origin");
+    let wt_root = env_or("WT_ROOT", "/tmp");
+    let log_days = env_num_or("LOG_DAYS", 30);
+    let min_kill = env_num_or("MIN_KILL", 90);
+    let bench = env_or("BENCH", "");
+    let no_ignored = env_num_or("NO_IGNORED", 1);
+    let lint = env_num_or("LINT", 1);
+    let lint_cmd = env_or("LINT_CMD", "");
+    let review = env_num_or("REVIEW", 1);
+
+    let mut c = String::new();
+    c += "# devh config (source-ится bash'ем). Env-переменные HARNESS_* перекрывают.\n";
+    c += &format!(
+        "VERIFY='{verify}'            # команда проверки; обязана проходить после работы агента\n"
+    );
+    c += &format!(
+        "BOOTSTRAP='{bootstrap}'       # однократная подготовка свежего worktree (deps и т.п.)\n"
+    );
+    c += &format!("AGENT='{agent}'               # агент; промпт передаётся одним аргументом\n");
+    c += &format!(
+        "AGENT_TIMEOUT={agent_timeout} # сек на один запуск агента (watchdog: «агент сдох»)\n"
+    );
+    c += &format!("MAX_FIX={max_fix}             # раундов «гейт упал → агент чинит»\n");
+    c += &format!("MAX_ACTIVE={max_active}       # WIP-лимит: сколько items могут быть active одновременно (0 = выкл)\n");
+    c += &format!(
+        "REMOTE='{remote}'             # git remote; репо без remote — пуш пропускается\n"
+    );
+    c += &format!("MAIN='{main}'                 # ветка, куда мержим (текущая на момент init)\n");
+    c += &format!("WT_ROOT='{wt_root}'           # где живут worktree'ы\n");
+    c += &format!(
+        "LOG_DAYS={log_days}            # retention логов в .harness/logs (0 = не чистить)\n"
+    );
+    c += "# ── гейты качества тестов/кода (пусто = выкл) ──\n";
+    c += &format!("MUTATE='{mutate}'  # мутационный гейт; {{module}}/{{file}} подставляются на каждый изменённый файл\n");
+    c += &format!("MUTATE_SCOPE='{mutate_scope}'  # какие пути считать «прод-кодом» для мутаций\n");
+    c += &format!("MIN_KILL={min_kill}           # минимальный kill-rate, %\n");
+    c += &format!("BENCH='{bench}'                     # перф-гейт, пример: bash devharness/examples/check_bench.sh\n");
+    c += "# ── session-workflow (uwa: todo/report.md) ──\n";
+    c += &format!("RULES='{rules}'               # файл правил проекта; промпт: «прочитай полностью, исполняй беспрекословно»\n");
+    c += &format!("RULES_LOG='{rules_log}'       # куда дописывать «## Session N …» после merge (пусто = выкл)\n");
+    c += &format!("MSG_DENY='{msg_deny}'         # гигиена сообщения коммита (grep -E): матч → reject, лечение: devh commit\n");
+    c += &format!("NO_IGNORED={no_ignored}          # 1 = ни одного ignored-теста в выводе verify (0 = выкл для чужих форматов)\n");
+    c += &format!("LINT={lint}                      # 1 = авто-shellcheck изменённых *.sh\n");
+    c += &format!("LINT_CMD='{lint_cmd}'         # проектный линтер (напр. cargo clippy -- -D warnings); пусто = выкл\n");
+    c += &format!("REVIEW={review}                  # 1 = self-review диффа вторым запросом агенту (VERDICT: OK|ISSUES)\n");
+
+    std::fs::create_dir_all(root.join(".harness/items"))?;
+    std::fs::create_dir_all(root.join(".harness/summaries"))?;
+    std::fs::create_dir_all(root.join(".harness/logs"))?;
+    std::fs::write(&conf, &c)?;
+
+    let excl = root.join(".git/info/exclude");
+    if let Some(parent) = excl.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    let mut text = std::fs::read_to_string(&excl).unwrap_or_default();
+    if !text.lines().any(|l| l.trim() == ".harness/") {
+        text += ".harness/\n";
+        std::fs::write(&excl, text)?;
+    }
+
+    println!("{}OK init: {}{}", col.g, conf.display(), col.z);
+    if verify.is_empty() {
+        println!(
+            "{}⚠  VERIFY не задетектирован — пропиши в {}{}",
+            col.y,
+            conf.display(),
+            col.z
+        );
+    }
+    Ok(())
+}
+
+fn is_exec(p: std::path::PathBuf) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    p.metadata()
+        .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+fn makefile_has_verify(p: std::path::PathBuf) -> bool {
+    std::fs::read_to_string(p)
+        .map(|t| t.lines().any(|l| l.starts_with("verify:")))
+        .unwrap_or(false)
+}

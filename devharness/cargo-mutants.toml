@@ -1,0 +1,11 @@
+# Эквивалент selfmutate.sh (16 мутантов ручной работы): мутации
+# генерируются автоматически. Kill-rate 100% на core/ обязателен —
+# как 15/15 у bash-версии, но без ручного патчера.
+# Прогон: cargo mutants -p devh --config devharness/cargo-mutants.toml --in-place
+# (пути glob — относительно корня workspace, не пакета)
+exclude_globs = [
+    "devharness/src/main.rs",        # диспетчер: мутации неинформативны
+    "devharness/src/commands/**",    # оркестраторы: покрыты integration-сьютом
+    "devharness/src/shell/**",       # I/O-слой: покрыты integration-сьютом
+    "devharness/tests/**",
+]

@@ -7,7 +7,7 @@
 
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
-DEVH="$HERE/devh"
+DEVH="${DEVH:-$HERE/devh}"
 T="$(mktemp -d /tmp/devh-test-XXXXXX)"
 trap 'rm -rf "$T"' EXIT
 PASS=0; FAIL=0
