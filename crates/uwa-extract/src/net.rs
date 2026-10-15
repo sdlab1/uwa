@@ -88,17 +88,80 @@ impl SseParser {
     /// byte index of the last character of the line content (before the separator),
     /// and `separator_len` is the length of the separator (1 for `\n` or `\r`,
     /// 2 for `\r\n`).
+    ///
+    /// Finds the **earliest** terminator. Per the SSE spec, lines can be
+    /// terminated by LF (`\n`), CRLF (`\r\n`), or CR (`\r`) — and mixed
+    /// terminators in the same buffer are legal. The previous implementation
+    /// prioritized `\r\n` over earlier `\n`/`\r`, silently merging lines
+    /// when a server mixed conventions.
+    ///
+    /// If a `\r` is the last byte of the buffer, it *might* be the first
+    /// half of a CRLF pair whose `\n` hasn't arrived yet — this function
+    /// returns `None` in that case so the next `feed()` chunk can
+    /// disambiguate. Call `find_line_end_at_eof()` instead when no more
+    /// data will arrive.
     fn find_line_end(buf: &str) -> Option<(usize, usize)> {
-        // Check for \r\n first (most specific)
-        if let Some(pos) = buf.find("\r\n") {
-            return Some((pos, 2));
+        let lf_pos = buf.find('\n');
+        let cr_pos = buf.find('\r');
+
+        match (cr_pos, lf_pos) {
+            // No terminator found.
+            (None, None) => None,
+            // Only \n present.
+            (None, Some(lf)) => Some((lf, 1)),
+            // Only \r present.
+            // If \r is the last byte, wait for more data to disambiguate
+            // a possible CRLF pair.
+            (Some(cr), None) => {
+                if cr.saturating_add(1) >= buf.len() {
+                    None // Could be start of \r\n; hold off.
+                } else {
+                    // Lone \r: the next char is not \n (otherwise lf_pos
+                    // would be Some).
+                    Some((cr, 1))
+                }
+            }
+            // Both \r and \n present.
+            (Some(cr), Some(lf)) => {
+                if lf == cr.saturating_add(1) {
+                    // CRLF pair: \r immediately followed by \n.
+                    Some((cr, 2))
+                } else if cr < lf {
+                    // Lone \r appears before the \n.
+                    Some((cr, 1))
+                } else {
+                    // \n appears before the \r.
+                    Some((lf, 1))
+                }
+            }
         }
-        // Check for lone \r
-        if let Some(pos) = buf.find('\r') {
-            return Some((pos, 1));
+    }
+
+    /// Like `find_line_end`, but a trailing `\r` at the very end of the
+    /// buffer is treated as a complete lone-CR terminator — at EOF no more
+    /// data can arrive to complete a CRLF pair.
+    fn find_line_end_at_eof(buf: &str) -> Option<(usize, usize)> {
+        let lf_pos = buf.find('\n');
+        let cr_pos = buf.find('\r');
+
+        match (cr_pos, lf_pos) {
+            (None, None) => None,
+            (None, Some(lf)) => Some((lf, 1)),
+            // At EOF, a trailing \r is always a terminator.
+            (Some(cr), None) => Some((cr, 1)),
+            (Some(cr), Some(lf)) => {
+                if lf == cr.saturating_add(1) {
+                    // CRLF pair.
+                    Some((cr, 2))
+                } else if cr < lf {
+                    // Lone \r before \n.
+                    Some((cr, 1))
+                } else {
+                    // \n before \r.
+                    Some((lf, 1))
+                }
+            }
         }
-        // Check for \n
-        buf.find('\n').map(|pos| (pos, 1))
     }
 
     /// Flush any pending frame at end-of-stream (some servers omit the final
@@ -106,26 +169,21 @@ impl SseParser {
     /// (some servers omit newlines; callers may call finish() without a
     /// prior feed() that ended on a newline).
     pub fn finish(&mut self) -> Option<SseFrame> {
-        // Process *all* remaining lines in the buffer (some servers omit the
-        // final blank line; a caller may also call finish() without a prior
-        // feed() that ended on a newline).
-        while let Some(nl) = self.buf.find('\n') {
-            let line = self
-                .buf
-                .get(..nl)
-                .unwrap_or("")
-                .trim_end_matches('\r')
-                .to_string();
-            self.buf.drain(..=nl);
-            self.process_line(&line);
+        // Process *all* remaining lines using the same line-splitting logic
+        // as feed(), but treating a trailing \r as a complete terminator
+        // (no more data will arrive to disambiguate a CRLF pair).
+        while let Some((line_end, sep_len)) = Self::find_line_end_at_eof(&self.buf) {
+            let line = self.buf.get(..line_end).unwrap_or("").to_string();
+            self.buf.drain(..line_end.saturating_add(sep_len));
+            let line = line.trim_end_matches('\r');
+            self.process_line(line);
         }
-        // Final line without a trailing newline.
+        // Handle any residual content without a terminator.
         if !self.buf.is_empty() {
             let line = self.buf.trim_end_matches('\r').to_string();
             self.buf.clear();
             self.process_line(&line);
         }
-
         if self.cur_event.is_some() || !self.cur_data.is_empty() {
             let f = SseFrame {
                 event: self.cur_event.take(),
@@ -522,10 +580,12 @@ mod tests {
     #[test]
     fn sse_lone_cr_tolerated() {
         let mut p = SseParser::new();
-        // SSE spec: \r is also a valid line separator
-        let frames = p.feed("data: x\r\r");
-        assert_eq!(frames.len(), 1);
-        assert_eq!(frames[0].data, "x");
+        // SSE spec: \r is also a valid line separator.
+        // Trailing \r in feed() is held back (Bug 3 fix: CRLF split across chunks).
+        // The frame is emitted at finish().
+        assert!(p.feed("data: x\r\r").is_empty());
+        let f = p.finish().unwrap();
+        assert_eq!(f.data, "x");
     }
 
     #[test]

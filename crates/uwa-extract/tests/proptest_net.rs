@@ -36,6 +36,16 @@ fn encode_frame(event: Option<&str>, data: &str) -> String {
     s
 }
 
+/// Encodes an SSE frame with a randomly-chosen legal line terminator.
+fn encode_frame_mixed(event: Option<&str>, data: &str, term: &str) -> String {
+    let mut s = String::new();
+    if let Some(e) = event {
+        s.push_str(&format!("event: {e}{term}"));
+    }
+    s.push_str(&format!("data: {data}{term}{term}"));
+    s
+}
+
 // ---------- guarantee 1: never panics ----------
 
 proptest! {
@@ -106,6 +116,36 @@ proptest! {
         prop_assert_eq!(bulk_frames, one_frames);
     }
 
+    /// Chunk invariance with mixed line terminators.
+    #[test]
+    fn sse_char_by_char_equals_bulk_mixed_terms(
+        events in proptest::collection::vec(
+            (proptest::option::of("[a-z]{1,10}"), data_line(),
+             proptest::sample::select(vec!["\n", "\r\n", "\r"])),
+            0..8,
+        ),
+    ) {
+        let full: String = events
+            .iter()
+            .map(|(e, d, t)| encode_frame_mixed(e.as_deref(), d, t))
+            .collect();
+        let mut bulk = SseParser::new();
+        let mut bulk_frames = bulk.feed(&full);
+        if let Some(last) = bulk.finish() {
+            bulk_frames.push(last);
+        }
+        let mut one_by_one = SseParser::new();
+        let mut one_frames = Vec::new();
+        for ch in full.chars() {
+            one_frames.extend(one_by_one.feed(&ch.to_string()));
+        }
+        if let Some(last) = one_by_one.finish() {
+            one_frames.push(last);
+        }
+        prop_assert_eq!(bulk_frames.len(), events.len());
+        prop_assert_eq!(bulk_frames, one_frames);
+    }
+
     /// Splitting at arbitrary char boundaries also produces identical frames.
     #[test]
     fn sse_random_chunk_boundaries(
@@ -157,6 +197,117 @@ proptest! {
 
         prop_assert_eq!(bulk.finish(), charwise.finish());
     }
+}
+
+// ---------- mixed line terminator handling (bugfix regression) ----------
+
+/// A buffer with `\n` before `\r\n` must split at the earlier `\n`,
+/// not merge both lines into one.
+#[test]
+fn feed_splits_at_earliest_lf_before_crlf() {
+    let mut p = SseParser::new();
+    // "data: first\n" then "data: second\r\n" then blank line.
+    let frames = p.feed("data: first\ndata: second\r\n\r\n");
+    assert_eq!(frames.len(), 1);
+    assert_eq!(frames[0].data, "first\nsecond");
+}
+
+/// A lone `\r` before a `\n` (not adjacent) must split at the `\r`.
+/// Per SSE spec, \r IS a line terminator, so "data: a\rb\n" yields
+/// lines "data: a" and "b". Since "b" lacks "data:" prefix, only "a"
+/// becomes frame data. To get multi-line data, each line needs "data:".
+#[test]
+fn feed_splits_at_lone_cr_before_lf() {
+    let mut p = SseParser::new();
+    // \r terminates first line; "b" is a separate line without data: prefix.
+    let frames = p.feed("data: a\rb\n\n");
+    assert_eq!(frames.len(), 1);
+    assert_eq!(frames[0].data, "a");
+}
+
+/// Two data lines separated by \r produce joined data.
+#[test]
+fn feed_joins_data_lines_separated_by_cr() {
+    let mut p = SseParser::new();
+    // Each line has data: prefix; \r separates them.
+    let frames = p.feed("data: a\rdata: b\n\n");
+    assert_eq!(frames.len(), 1);
+    assert_eq!(frames[0].data, "a\nb");
+}
+
+/// A `\r` at the very end of a chunk must be held back until the next
+/// chunk disambiguates CRLF vs lone CR.
+#[test]
+fn feed_holds_trailing_cr_until_next_chunk() {
+    let mut p = SseParser::new();
+    // First chunk ends with \r — must NOT emit a frame yet.
+    let frames1 = p.feed("data: hello\r");
+    assert!(
+        frames1.is_empty(),
+        "trailing \\r must not terminate a line yet"
+    );
+    // Second chunk completes the CRLF and the frame.
+    let frames2 = p.feed("\n\n");
+    assert_eq!(frames2.len(), 1);
+    assert_eq!(frames2[0].data, "hello");
+}
+
+/// A `\r` at end-of-stream (in `finish`) IS treated as a terminator,
+/// because no more data can arrive.
+#[test]
+fn finish_treats_trailing_cr_as_terminator() {
+    let mut p = SseParser::new();
+    p.feed("data: hello\r");
+    let frame = p.finish();
+    assert!(frame.is_some());
+    assert_eq!(frame.map(|f| f.data), Some("hello".to_string()));
+}
+
+/// `finish()` must split `\r`-terminated lines in the residual buffer.
+#[test]
+fn finish_splits_cr_terminated_lines() {
+    let mut p = SseParser::new();
+    // Feed data with \r separators; each line has data: prefix.
+    p.feed("data: a\rdata: b\rdata: c");
+    let frame = p.finish();
+    assert!(frame.is_some());
+    assert_eq!(frame.map(|f| f.data), Some("a\nb\nc".to_string()));
+}
+
+/// Mixed terminators across chunk boundaries produce the same result
+/// as a single bulk feed (chunk invariance).
+#[test]
+fn mixed_terminators_chunk_invariance() {
+    let full = "event: e1\ndata: one\r\n\ndata: two\n\ndata: three\r\r\n";
+    let mut bulk = SseParser::new();
+    let mut bulk_frames = bulk.feed(full);
+
+    let mut chunked = SseParser::new();
+    let mut chunked_frames = Vec::new();
+    // Split at every character boundary.
+    for ch in full.chars() {
+        chunked_frames.extend(chunked.feed(&ch.to_string()));
+    }
+    if let Some(last) = chunked.finish() {
+        chunked_frames.push(last);
+    }
+    if let Some(last) = bulk.finish() {
+        bulk_frames.push(last);
+    }
+    assert_eq!(bulk_frames, chunked_frames);
+}
+
+/// CRLF split across chunk boundaries is handled correctly.
+#[test]
+fn crlf_split_across_chunks() {
+    let mut p = SseParser::new();
+    let f1 = p.feed("data: split\r");
+    assert!(f1.is_empty());
+    let f2 = p.feed("\n\r");
+    assert!(f2.is_empty());
+    let f3 = p.feed("\n");
+    assert_eq!(f3.len(), 1);
+    assert_eq!(f3[0].data, "split");
 }
 
 // ---------- guarantee 3: json_path finds what exists ----------
