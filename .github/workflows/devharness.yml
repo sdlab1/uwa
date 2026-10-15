@@ -1,9 +1,9 @@
 name: devharness
 on:
   push:
-    paths: ['devharness/**']
+    paths: ['devharness/**', '.github/workflows/devharness.yml']
   pull_request:
-    paths: ['devharness/**']
+    paths: ['devharness/**', '.github/workflows/devharness.yml']
   workflow_dispatch:
 jobs:
   selfcheck:

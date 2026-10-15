@@ -1,9 +1,9 @@
 name: devharness-rs
 on:
   push:
-    paths: ["devharness/**"]
+    paths: ["devharness/**", ".github/workflows/devharness-rs.yml"]
   pull_request:
-    paths: ["devharness/**"]
+    paths: ["devharness/**", ".github/workflows/devharness-rs.yml"]
   workflow_dispatch:
 
 env:
