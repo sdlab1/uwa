@@ -60,6 +60,9 @@ devh merge                                   # rebase → ff-push в MAIN → л
 | clean | `devh clean` | worktree/ветки done-items + retention логов (LOG_DAYS) |
 | doctor | `devh doctor` | окружение: git/VERIFY/агент/flock/timeout/remote/exclude/mutation-инструмент/shellcheck/bench + crash-recovery сироты; exit≠0 при fail |
 | logs | `devh logs [id]` | все пути логов item + хвосты agent/verify; без id — свежие логи всех items |
+| bg | `devh bg [id]` | detached-прогон: setsid+nohup (свой session, immune to HUP), лог в bg.log; параллельная работа — безопасно (run.lock + WIP) |
+| ps | `devh ps` | кто в полёте: item, PID, elapsed, текущая стадия из timing.log; мёртвые pid-файлы помечаются |
+| tickets | `devh tickets [--import]` | OnFlyAnalysis-наблюдения агентов: показать / превратить в items (без red-идеи — отклоняется; идея уходит в спеку тикета) |
 
 ## Гейты — ОБЯЗАТЕЛЬНЫ (проза report.md переведена в код); опционален только bench
 
@@ -69,7 +72,9 @@ devh merge                                   # rebase → ff-push в MAIN → л
 | NO-IGNORED | `NO_IGNORED=1` | ни одного ignored-теста в выводе verify; `N ignored > 0` = скрытый красный |
 | MUTATE | `MUTATE`, `MIN_KILL=90` | kill-rate ≥ MIN_KILL% на изменённых `MUTATE_SCOPE`-файлах (`{module}`/`{file}`); формат вывода `Mutants: N, Killed: M` (muex / cargo-mutants); инструмент не установлен = **блокер среды** (rc=2), не fix-раунд |
 | RED | `items/W-NNN/red.cmd` | В ПЕРВУЮ ОЧЕРЕДЬ: падает на чистом HEAD до работы, зеленеет после; обход только записанный (`--no-red`) |
-| BENCH | `BENCH` (опционален) | перф против baseline: `examples/check_bench.sh` (criterion, gobot) |
+| LINT | `LINT=1`, `LINT_CMD` | авто-shellcheck изменённых *.sh + проектный линтер; нет shellcheck при .sh-диффе = блокер среды |
+| REVIEW | `REVIEW=1` | self-review диффа ВТОРЫМ запросом той же модели («review code for inconsistencies and bugs»); вердикт `VERDICT: OK` / `VERDICT: ISSUES: …` → fix-раунд; упал/не распознан = блокер среды |
+| BENCH | `BENCH` (единственный опциональный) | перф против baseline: `examples/check_bench.sh` (criterion, gobot) |
 
 Маппинг «железные правила → гейты»: №1 CI-зелёный→VERIFY, №2 ignored=0→NO-IGNORED,
 №3 гигиена сообщений→MSG_DENY (+`devh commit` для лечения), №4 выводы→логи,
@@ -90,6 +95,7 @@ devh merge                                   # rebase → ff-push в MAIN → л
 | `.harness/log.md` | append-only журнал закрытых сессий: commit, `fix-rounds/gates/duration`, summary |
 | `.harness/summaries/W-NNN.md` | summary агента (1-я строка = сообщение коммита) |
 | `.harness/items/W-NNN/` | spec.md, plan.md (заметки между попытками), red.cmd, status, agent (override) |
+| `.harness/observations.md` | очередь OnFlyAnalysis: `<файл>:<строка> | <подозрение> | red-тест: <идея>` — каждый прочитанный агентом файл должен дать наблюдение или чистоту; `devh tickets --import` превращает в items |
 
 - **Живой прогон**: `tail -f .harness/logs/W-001-agent.log` (или `devh logs W-001`).
 - **Что сейчас в работе**: `devh list` (active+WT=yes), `devh doctor`.
@@ -114,14 +120,16 @@ devh merge                                   # rebase → ff-push в MAIN → л
 | RULES / RULES_LOG | todo/report.md | справочник граблей в промпте / куда дописывать «## Session N» |
 | MSG_DENY | `todo/\|report\.md\|Session [0-9]+` | гигиена сообщения коммита |
 | NO_IGNORED | 1 | гейт ignored-тестов |
+| LINT / LINT_CMD | 1 / '' | авто-shellcheck *.sh / проектный линтер |
+| REVIEW | 1 | self-review диффа вторым запросом агенту |
 | HARNESS_COLOR / NO_COLOR | auto / — | always/never/auto — цветной вывод в стиле cargo; NO_COLOR уважается |
 
 ## Самопроверка харнесса — четыре слоя (+CI)
 
 1. **Строгий режим** — `set -euo pipefail` везде.
 2. **Статика** — `shellcheck devh test.sh selfmutate.sh examples/check_bench.sh` = 0 findings (гейт: префет в test.sh + doctor + CI).
-3. **Чёрный ящик** — `test.sh`: 21 секций / 68 ассертов; реальные git-репо в песочнице, стабы только на границах (агент, мутатор). Полностью герметично, ~40 сек.
-4. **Самомутация** — `selfmutate.sh`: 13 известных багов вносятся в изолированную копию devh, suite обязан убить каждый (kill-rate **13/13**); kill-rate валиден только на зелёном базовом — вшито предусловием.
+3. **Чёрный ящик** — `test.sh`: 25 секций / 87 ассертов; реальные git-репо в песочнице, стабы только на границах (агент, мутатор). Полностью герметично, ~40 сек.
+4. **Самомутация** — `selfmutate.sh`: 15 известных багов вносятся в изолированную копию devh, suite обязан убить каждый (kill-rate **15/15**); kill-rate валиден только на зелёном базовом — вшито предусловием.
 
 CI: `.github/workflows/devharness.yml` — shellcheck + test.sh + selfmutate.sh
 на каждый пуш в `devharness/**`.

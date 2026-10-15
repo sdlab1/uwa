@@ -3,7 +3,7 @@
 # Вносим известные баги в ИЗОЛИРОВАННУЮ копию devh и проверяем, что test.sh их убивает.
 # «Тесты на вес золота» — применимо и к тестам самого харнесса.
 # Патчер — чистый awk (ENVIRON, без escape-ловушек -v); python-зависимости нет.
-# Гейт: 13/13. Новые гейты devh должны сопровождаться новым мутантом здесь.
+# Гейт: 15/15. Новые гейты devh должны сопровождаться новым мутантом здесь.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 W="$(mktemp -d /tmp/devh-selfmut-XXXXXX)"
@@ -177,6 +177,24 @@ cat > "$W/m.new" <<'S'
         false && { echo "mutation FAIL: kill-rate ${pct}% < ${MIN_KILL}%"; return 1; }
 S
 mutant "M13: kill-rate в single-run ветке не проверяется" "$W/m.old" "$W/m.new"
+
+# ─── M14: LINT-гейт инвертирован ───
+cat > "$W/m.old" <<'S'
+      if ! shellcheck "$wt/$f"; then bad=1; fi
+S
+cat > "$W/m.new" <<'S'
+      if shellcheck "$wt/$f" >/dev/null 2>&1; then bad=1; fi
+S
+mutant "M14: LINT-гейт инвертирован (грязный код проходит, чистый падает)" "$W/m.old" "$W/m.new"
+
+# ─── M15: REVIEW-вердикт ISSUES не матчится ───
+cat > "$W/m.old" <<'S'
+    *"VERDICT: ISSUES"*) return 1 ;;
+S
+cat > "$W/m.new" <<'S'
+    *"VERDICT: NEVER"*) return 1 ;;
+S
+mutant "M15: REVIEW-вердикт ISSUES не матчится (замечания ревьюера игнорируются)" "$W/m.old" "$W/m.new"
 
 echo
 echo "KILL-RATE: $KILLED/$TOTAL (skip=$SKIP)"

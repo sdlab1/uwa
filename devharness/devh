@@ -25,6 +25,8 @@
 #   devh run [id] / commit [id] (правка summary) / merge [id]
 #   devh abort [id] / clean / doctor
 #   devh logs [id]             логи item: пути ко всем логам + хвосты agent/verify
+#   devh bg [id] / ps          detached-прогон (setsid+nohup) / кто в полёте: PID+стадия
+#   devh tickets [--import]    наблюдения агентов (OnFlyAnalysis) → items с red-идеей
 #
 # State: .harness/ у ЦЕЛЕВОГО репо (в git не попадает — локальный exclude). Без БД.
 # Дом харнесса: project_uwa/devharness; сам скрипт location-independent (ROOT по cwd).
@@ -57,13 +59,16 @@ RULES="${HARNESS_RULES:-}"
 RULES_LOG="${HARNESS_RULES_LOG:-}"
 MSG_DENY="${HARNESS_MSG_DENY:-}"
 NO_IGNORED="${HARNESS_NO_IGNORED:-1}"
+LINT="${HARNESS_LINT:-1}"
+LINT_CMD="${HARNESS_LINT_CMD:-}"
+REVIEW="${HARNESS_REVIEW:-1}"
 
 need_conf() {
   [ -f "$CONF" ] || { echo "devh: нет $CONF — сначала: devh init" >&2; exit 1; }
   # shellcheck disable=SC1090
   . "$CONF"
   local v env
-  for v in VERIFY BOOTSTRAP AGENT MAX_FIX REMOTE MAIN WT_ROOT MAX_ACTIVE MIN_KILL MUTATE MUTATE_SCOPE BENCH AGENT_TIMEOUT LOG_DAYS RULES RULES_LOG MSG_DENY NO_IGNORED; do
+  for v in VERIFY BOOTSTRAP AGENT MAX_FIX REMOTE MAIN WT_ROOT MAX_ACTIVE MIN_KILL MUTATE MUTATE_SCOPE BENCH AGENT_TIMEOUT LOG_DAYS RULES RULES_LOG MSG_DENY NO_IGNORED LINT LINT_CMD REVIEW; do
     env="HARNESS_$v"
     # shellcheck disable=SC2086
     if [ -n "${!env:-}" ]; then printf -v "$v" '%s' "${!env}"; fi
@@ -182,6 +187,8 @@ prompt_for() { # $1=id
     extra="${extra}Тесты будут проверены мутационным гейтом: они обязаны УБИВАТЬ мутантов (kill-rate ≥ ${MIN_KILL}%). Пиши точные ассерты на реальное поведение; толерантные/тривиальные тесты гейт не пропустит.
 "
   fi
+  extra="${extra}ON-FLY ANALYSIS: каждый файл, который открываешь/читаешь/правишь, анализируй ПОПУТНО — ни одно чтение в пустую: неоптимальность, избыточность, мёртвый код, дыра в тестах, подозрительный контракт → это ТИКЕТ (НЕ чинить — вне спеки!). Дописывай строкой в $HDIR/observations.md: <файл>:<строка> | <подозрение> | red-тест: <идея>. Тикет без red-теста не считается.
+"
   cat <<EOF
 Ты работаешь в изолированном git-worktree: $(wt_of "$id"). Все правки — только здесь.
 
@@ -253,6 +260,9 @@ RULES='$RULES'               # файл правил проекта; промп�
 RULES_LOG='$RULES_LOG'       # куда дописывать «## Session N …» после merge (пусто = выкл)
 MSG_DENY='$MSG_DENY'         # гигиена сообщения коммита (grep -E): матч → reject, лечение: devh commit
 NO_IGNORED=$NO_IGNORED          # 1 = ни одного ignored-теста в выводе verify (0 = выкл для чужих форматов)
+LINT=$LINT                      # 1 = авто-shellcheck изменённых *.sh
+LINT_CMD='$LINT_CMD'         # проектный линтер (напр. cargo clippy -- -D warnings); пусто = выкл
+REVIEW=$REVIEW                  # 1 = self-review диффа вторым запросом агенту (VERDICT: OK|ISSUES)
 EOF
   # локальный ignore — workflow не попадает в git вообще
   touch "$ROOT/.git/info/exclude"
@@ -382,6 +392,47 @@ mutate_gate() {
   [ "$fail" = 0 ]
 }
 
+# гейт LINT: авто-shellcheck изменённых *.sh + проектный LINT_CMD
+lint_gate() { # rc: 0 ok, 1 findings, 2 env-блокер
+  local files f bad=0
+  files="$( { git -C "$wt" diff --name-only HEAD 2>/dev/null || true; git -C "$wt" status --porcelain 2>/dev/null | cut -c4- || true; } | sort -u )"
+  if [ "$LINT" = 1 ]; then
+    if ! command -v shellcheck >/dev/null 2>&1 && printf '%s\n' "$files" | grep -q '\.sh$'; then
+      echo "lint env: нет shellcheck, а изменены .sh — блокер СРЕДЫ (установи)" >&2; return 2
+    fi
+    while IFS= read -r f; do
+      [ -n "$f" ] || continue
+      case "$f" in *.sh) ;; *) continue ;; esac
+      [ -f "$wt/$f" ] || continue
+      echo "lint: shellcheck $f"
+      # shellcheck disable=SC2015
+      if ! shellcheck "$wt/$f"; then bad=1; fi
+    done <<<"$files"
+  fi
+  if [ -n "$LINT_CMD" ]; then
+    echo "lint: $LINT_CMD"
+    if ! (cd "$wt" && bash -c "$LINT_CMD"); then bad=1; fi
+  fi
+  [ "$bad" = 0 ]
+}
+
+# гейт REVIEW: дифф → отдельный запрос той же модели; вердикт
+review_gate() { # rc: 0 ok, 1 issues, 2 env-блокер
+  local out verdict
+  out="$(cd "$wt" && git add -N . >/dev/null 2>&1; git diff HEAD 2>/dev/null | head -400)"
+  [ -n "$out" ] || { echo "review: диффа нет — пропуск"; return 0; }
+  # shellcheck disable=SC2086  # $AGENT — команда+аргументы агента; слово-разбиение намеренно
+  verdict="$( cd "$wt" && HARNESS_WORKTREE="$wt" timeout "$AGENT_TIMEOUT" $AGENT "Ты — независимый ревьюер, отдельный запрос. Ниже дифф сгенерированной работы. Review code for inconsistencies and bugs: логика, edge-cases, контракт спеки, качество тестов. Ответ — РОВНО одна строка: VERDICT: OK  — или —  VERDICT: ISSUES: <кратко, через ;>.
+
+$out" 2>&1 )" || { echo "review: агент-ревьюер упал (API/timeout)" >&2; return 2; }
+  printf '%s\n' "$verdict"
+  case "$verdict" in
+    *"VERDICT: ISSUES"*) return 1 ;;
+    *"VERDICT: OK"*) return 0 ;;
+    *) echo "review: вердикт не распознан (нужна строка VERDICT: …)" >&2; return 2 ;;
+  esac
+}
+
 # железное правило №2: ни одного ignored-теста в выводе verify
 no_ignored_ok() { # $1 = лог verify
   local n
@@ -398,10 +449,11 @@ cmd_run() {
   item_runlock "$id" "run"      # per-item лок: два run на один item невозможны
   local d wt br log sum round=0 msg dels prev_st fresh=1
   d="$(items_dir)/$id"; wt="$(wt_of "$id")"; br="$(branch_of "$id")"
+  echo $$ > "$d/run.pid"; RUN_PIDFILE="$d/run.pid"; trap 'rm -f "$RUN_PIDFILE"' EXIT
   log="$HDIR/logs/$id-verify.log"; sum="$HDIR/summaries/$id.md"
   # per-item маршрутизация агента (лёгкое — дешёвой модели, сложное — сильной)
   if [ -s "$d/agent" ]; then AGENT="$(cat "$d/agent")"; echo ".. агент (per-item): $AGENT"; fi
-  local mlog="$HDIR/logs/$id-mutate.log" blog="$HDIR/logs/$id-bench.log" which=VERIFY
+  local mlog="$HDIR/logs/$id-mutate.log" blog="$HDIR/logs/$id-bench.log" llog="$HDIR/logs/$id-lint.log" rlog="$HDIR/logs/$id-review.log" which=VERIFY
 
   # claim: WIP-лимит + статус под глобальным локом
   local t0; t0="$(date +%s)"
@@ -468,10 +520,28 @@ cmd_run() {
 
   # 3. агент → гейт-цикл (verify → mutation → bench; падение → fix-раунд агенту)
   gate() {
-    local mrc
+    local mrc lrc rrc
     if ! (cd "$wt" && bash -c "$VERIFY") > "$log" 2>&1; then which=VERIFY; return 1; fi
     tstage "verify-r$((round+1))"
     if [ "$NO_IGNORED" = 1 ] && ! no_ignored_ok "$log"; then which=NO-IGNORED; return 1; fi
+    lint_gate > "$llog" 2>&1
+    lrc=$?
+    tstage "lint-r$((round+1))"
+    if [ "$lrc" -eq 2 ]; then
+      cat "$llog" >&2; echo "FAIL: lint env-блокер. Блокер СРЕДЫ, не работа агента (детали выше)." >&2
+      set_status "$id" active; exit 1
+    fi
+    if [ "$lrc" -ne 0 ]; then which=LINT; return 1; fi
+    if [ "$REVIEW" = 1 ]; then
+      review_gate > "$rlog" 2>&1
+      rrc=$?
+      tstage "review-r$((round+1))"
+      if [ "$rrc" -eq 2 ]; then
+        cat "$rlog" >&2; echo "FAIL: review env-блокер (агент-ревьюер упал/вердикт не распознан). Блокер СРЕДЫ." >&2
+        set_status "$id" active; exit 1
+      fi
+      if [ "$rrc" -ne 0 ]; then which=REVIEW; return 1; fi
+    fi
     if [ -n "$MUTATE" ]; then
       mutate_gate > "$mlog" 2>&1
       mrc=$?
@@ -503,6 +573,16 @@ cmd_run() {
 $(tail -40 "$log")
 
 Почини по логу. Правила те же: git не трогать, после фикса сам прогони: \`$VERIFY\`. Обнови summary: $sum" ;;
+      LINT) run_agent "Линтер нашёл проблемы в изменённых файлах. Хвост лога:
+
+$(tail -30 "$llog")
+
+Почини так, чтобы линтер был чист (стиль — по замечаниям линтера, не глуши его). git не трогай. Обнови summary: $sum" ;;
+      REVIEW) run_agent "Независимый ревьюер нашёл замечания (второй запрос той же модели):
+
+$(tail -5 "$rlog")
+
+Почини эти проблемы в рамках спеки, не расширяя скоуп. git не трогай. Обнови summary: $sum" ;;
       NO-IGNORED) run_agent "Verify прошёл, но в выводе есть ignored-тесты (>0). Железное правило: ни одного ignored — ignored = скрытый красный. Хвост лога:\n\n$(grep -E '[0-9]+ ignored' "$log" | head -10)\n\nРазбери причину игнора: почини тест и включи его; удаление проверки или новый ignore без причины запрещены. git не трогай. Обнови summary: $sum" ;;
       MUTATE) run_agent "Mutation-гейт не прошёл: твои тесты НЕ УБИВАЮТ мутантов на изменённом коде (kill-rate < ${MIN_KILL}%). Лог:
 
@@ -653,6 +733,69 @@ cmd_merge() {
   local nx; nx="$(first_live)" && echo "${C_B}next: $nx — $(cat "$(items_dir)/$nx/title" 2>/dev/null)${C_0}" || echo "${C_B}next: очередь пуста 🎉${C_0}"
 }
 
+# ─── bg / ps: detached-прогоны ───────────────────────────────────────
+cmd_bg() { # run в фоне: setsid (свой session, immune to HUP) + nohup
+  need_conf
+  local id; id="$(resolve "${1:-}")"
+  local bglog="$HDIR/logs/$id-bg.log"
+  setsid nohup "$0" run "$id" >>"$bglog" 2>&1 </dev/null &
+  echo "${C_G}OK bg${C_0}: $id → ${C_B}PID $!${C_0}; лог: $bglog"
+  echo "   следить: ${C_B}devh ps${C_0} | tail -f $bglog | по завершении: devh merge $id"
+}
+
+cmd_ps() { # кто в полёте: PID, elapsed, текущая стадия из timing.log
+  need_conf
+  local d id pid el stage found=0
+  for d in "$(items_dir)"/W-*; do
+    [ -f "$d/run.pid" ] || continue
+    id="${d##*/}"; pid="$(cat "$d/run.pid" 2>/dev/null || true)"; found=$((found+1))
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+      el=$(( $(date +%s) - $(stat -c %Y "$d/run.pid") ))
+      stage="$(tail -1 "$HDIR/logs/$id-timing.log" 2>/dev/null | awk '{print $1}')"
+      printf '%-7s PID %-8s %5ss   стадия: %s\n' "$id" "$pid" "$el" "${stage:-старт}"
+    else
+      echo "${C_Y}$id: pid-файл есть, процесс мёртв (обрыв?) — статус: $(item_status "$id")${C_0}"
+    fi
+  done
+  [ "$found" = 0 ] && echo "нет прогонов в полёте"
+  return 0
+}
+
+# ─── tickets: OnFlyAnalysis-наблюдения агентов → items ────────────────
+cmd_tickets() { # без аргумента — показать; --import — превратить в items
+  need_conf
+  local obs="$HDIR/observations.md"
+  if [ "${1:-}" != "--import" ]; then
+    if [ -s "$obs" ]; then cat "$obs"; else echo "нет наблюдений ($obs) — агенты пишут сюда по ходу работы"; fi
+    return 0
+  fi
+  [ -s "$obs" ] || { echo "нет наблюдений"; return 0; }
+  local line n=0 skipped=0 title idea id d
+  crit_begin
+  while IFS= read -r line; do
+    case "$line" in ''|'#'*) continue ;; esac
+    if ! printf '%s\n' "$line" | grep -q 'red-тест:'; then
+      echo "  пропущено (нет red-идеи): $line"; skipped=$((skipped+1)); continue
+    fi
+    title="$(printf '%s' "$line" | awk -F'|' 'NF>=2 {gsub(/^ +| +$/,"",$1); gsub(/^ +| +$/,"",$2); printf "obs: %s — %s", $1, $2}' | cut -c1-72)"
+    idea="$(printf '%s' "$line" | sed -n 's/.*red-тест: *//p' | cut -c1-200)"
+    id="$(next_id)"; d="$(items_dir)/$id"; mkdir -p "$d"
+    echo "$title" > "$d/title"; echo open > "$d/status"; : > "$d/plan.md"
+    { echo "Тикет из OnFlyAnalysis (наблюдение агента по ходу чужой спеки):"
+      echo "$line"
+      echo
+      echo "RED-тест ОБЯЗАТЕЛЕН при взятии в работу: $idea"
+      echo
+      echo "Уточни по месту наблюдения: что чинить и чем доказывать. Не чини смежное — только предмет тикета."
+    } > "$d/spec.md"
+    echo "  + $id: $title"
+    n=$((n+1))
+  done < "$obs"
+  crit_end
+  : > "$obs"
+  echo "${C_G}OK tickets${C_0}: $n импортировано (red-идея в спеке каждого), пропущено: $skipped"
+}
+
 # ─── logs (наблюдаемость) ───────────────────────────────────────────
 cmd_logs() {
   need_conf
@@ -683,6 +826,7 @@ cmd_abort() {
   local id; id="$(resolve "${1:-}")"
   item_runlock "$id" "abort"    # не выбрасывать worktree из-под живого run
   local wt br; wt="$(wt_of "$id")"; br="$(branch_of "$id")"
+  rm -f "$(items_dir)/$id/run.pid" 2>/dev/null || true
   if [ -d "$wt" ]; then git -C "$ROOT" worktree remove --force "$wt"; echo "${C_G}OK worktree убран${C_0}"; fi
   git -C "$ROOT" branch -D "$br" >/dev/null 2>&1 || true
   if has_remote; then git -C "$ROOT" push -q "$REMOTE" --delete "$br" 2>/dev/null || true; fi
@@ -697,6 +841,7 @@ cmd_clean() {
     [ -d "$d" ] || continue
     id="${d##*/}"; st="$(item_status "$id")"; wt="$(wt_of "$id")"; br="$(branch_of "$id")"
     if [ "$st" = "done" ] && { [ -d "$wt" ] || git -C "$ROOT" show-ref -q --verify "refs/heads/$br"; }; then
+      rm -f "$d/run.pid" 2>/dev/null || true
       git -C "$ROOT" worktree remove --force "$wt" 2>/dev/null || true
       git -C "$ROOT" branch -D "$br" >/dev/null 2>&1 || true
       n=$((n+1)); echo "clean: $id"
@@ -767,5 +912,8 @@ case "${1:-help}" in
   clean) shift; cmd_clean "$@" ;;
   doctor) shift; cmd_doctor "$@" ;;
   logs) shift; cmd_logs "$@" ;;
+  bg) shift; cmd_bg "$@" ;;
+  ps) shift; cmd_ps "$@" ;;
+  tickets) shift; cmd_tickets "$@" ;;
   *) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//' ;;
 esac

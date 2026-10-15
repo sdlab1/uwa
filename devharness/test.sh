@@ -32,6 +32,7 @@ base_env() {
   export HARNESS_MUTATE="$T/mut-ok.sh {module}" HARNESS_MUTATE_SCOPE='.'
   export HARNESS_BENCH='' HARNESS_MAX_ACTIVE=3 HARNESS_MAX_FIX=3 HARNESS_AGENT_TIMEOUT=60
   export HARNESS_LOG_DAYS=30 HARNESS_NO_IGNORED=1 T_MUT_GOOD="$T/mut-good"
+  export HARNESS_REVIEW=0 HARNESS_LINT=1
 }
 
 cat > "$T/stub.sh" <<'S'
@@ -305,6 +306,68 @@ printf 'спека
 "$DEVH" run >"$T/out" 2>&1 && pass "run exit 0 (single-run mutation)" || { fail "run exit 0"; cat "$T/out"; }
 grep -q "раунд фикса" "$T/out" && pass "fix-раунд был (single-run)" || fail "fix-раунд был (single-run)"
 grep -q "killed 10 (100%)" .harness/logs/W-001-mutate.log && pass "kill-rate 100% (single-run)" || fail "kill-rate 100% (single-run)"
+
+echo "== 21. bg/ps: detached-прогон и наблюдение за ним =="
+R="$(fresh r21)"; base_env; export HARNESS_VERIFY='sleep 6; test -f done.txt'; cd "$R" || exit 1
+"$DEVH" init >/dev/null
+printf 'спека
+' | "$DEVH" new "bg item" --no-red x >/dev/null
+"$DEVH" bg W-001 >"$T/out" 2>&1 && pass "bg вернул управление сразу" || { fail "bg вернул управление"; cat "$T/out"; }
+grep -q "PID" "$T/out" && pass "bg печатает PID" || fail "bg печатает PID"
+sleep 1
+"$DEVH" ps >"$T/out" 2>&1; grep -q "W-001" "$T/out" && pass "ps видит прогон в полёте" || { fail "ps видит прогон"; cat "$T/out"; }
+n=0; while [ -f .harness/items/W-001/run.pid ] && [ "$n" -lt 40 ]; do sleep 1; n=$((n+1)); done
+[ ! -f .harness/items/W-001/run.pid ] && pass "прогон завершился (pid-файл убран trap-ом)" || fail "pid-файл завис"
+[ "$(cat .harness/items/W-001/status)" = active ] && pass "bg-прогон дошёл до конца (active)" || fail "bg-прогон не дошёл"
+"$DEVH" merge >/dev/null 2>&1 && pass "merge после bg" || fail "merge после bg"
+
+echo "== 22. tickets: OnFlyAnalysis-наблюдения → items с red-идеей =="
+R="$(fresh r22)"; base_env; cd "$R" || exit 1
+"$DEVH" init >/dev/null
+printf 'crates/foo.rs:42 | дублирование логики с bar.rs | red-тест: тест на общий хелпер\nстрока без red-идеи — должна быть отклонена\n' > .harness/observations.md
+"$DEVH" tickets >"$T/out" 2>&1 && grep -q "foo.rs:42" "$T/out" && pass "tickets: список показывает наблюдения" || fail "tickets: список"
+"$DEVH" tickets --import >"$T/out" 2>&1 && pass "tickets --import ок" || { fail "tickets --import"; cat "$T/out"; }
+[ -d .harness/items/W-001 ] && grep -q "RED-тест ОБЯЗАТЕЛЕН" .harness/items/W-001/spec.md && pass "тикет с red-идеей в спеке" || fail "тикет с red-идеей"
+[ ! -s .harness/observations.md ] && pass "очередь наблюдений опустошена" || fail "очередь не опустошена"
+grep -q "нет red-идеи" "$T/out" && pass "наблюдение без red-идеи отклонено" || fail "наблюдение без red-идеи не отклонено"
+
+echo "== 23. LINT-гейт: авто-shellcheck на изменённых *.sh =="
+cat > "$T/stub-lint.sh" <<'S'
+#!/usr/bin/env bash
+if [ -f "$HARNESS_WORKTREE/clean.sh" ]; then
+  printf '#!/usr/bin/env bash\nx="$1"\necho "$x"\n' > "$HARNESS_WORKTREE/clean.sh"
+else
+  printf 'x=$1\necho $x\n' > "$HARNESS_WORKTREE/clean.sh"
+fi
+echo marker > "$HARNESS_WORKTREE/done.txt"
+printf 'feat: lint-фикс\n\nдетали\n' > "$HARNESS_SUMMARY"
+S
+chmod +x "$T/stub-lint.sh"
+R="$(fresh r23)"; base_env; cd "$R" || exit 1
+"$DEVH" init >/dev/null
+printf 'спека
+' | "$DEVH" new "lint item" --no-red x >/dev/null
+HARNESS_AGENT="$T/stub-lint.sh" "$DEVH" run >"$T/out" 2>&1 && pass "run ок после lint-фикс-раунда" || { fail "run ок после lint"; cat "$T/out"; }
+grep -q "гейт LINT упал" "$T/out" && pass "LINT fix-раунд был" || fail "LINT fix-раунд был"
+
+echo "== 24. REVIEW-гейт: self-review диффа вторым запросом =="
+cat > "$T/stub-rev.sh" <<'S'
+#!/usr/bin/env bash
+if printf '%s' "$1" | grep -q "независимый ревьюер"; then
+  if [ -f "$T_REV_OK" ]; then echo "VERDICT: OK"; else touch "$T_REV_OK"; echo "VERDICT: ISSUES: race в хелпере; нет edge-case теста"; fi
+else
+  echo marker > "$HARNESS_WORKTREE/done.txt"
+  printf 'feat: review-фикс\n\nдетали\n' > "$HARNESS_SUMMARY"
+fi
+S
+chmod +x "$T/stub-rev.sh"
+R="$(fresh r24)"; base_env; export HARNESS_REVIEW=1 T_REV_OK="$T/rev-ok"; rm -f "$T/rev-ok"; cd "$R" || exit 1
+"$DEVH" init >/dev/null
+printf 'спека
+' | "$DEVH" new "rev item" --no-red x >/dev/null
+HARNESS_AGENT="$T/stub-rev.sh" "$DEVH" run >"$T/out" 2>&1 && pass "run ок после review-фикс-раунда" || { fail "run ок после review"; cat "$T/out"; }
+grep -q "гейт REVIEW упал" "$T/out" && pass "REVIEW fix-раунд был" || fail "REVIEW fix-раунд был"
+grep -q "VERDICT: OK" .harness/logs/W-001-review.log && pass "финальный вердикт OK в review-логе" || fail "финальный вердикт OK в review-логе"
 
 echo
 echo "ИТОГО: PASS=$PASS FAIL=$FAIL"
