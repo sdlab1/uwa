@@ -200,3 +200,34 @@ The right side is always covered by the left — a line equal to ```````
 also `starts_with("```")`. Removed the redundant `|| trimmed == "```"`.
 
 No test changes; full suite green.
+
+### 3. SSE parser lone \r not a line separator (UWA-132)
+
+The parser only accepted `\n` and `\r\n` as line terminators; lone `\r`
+was ignored, violating the SSE spec which allows all three (`\n`, `\r\n`,
+`\r`). Fixed in `crates/uwa-extract/src/net.rs`:
+
+- `find_line_end()`: finds the **earliest** terminator among LF, CRLF,
+  and CR. A trailing `\r` at chunk end is **held back** (could be the
+  first half of a CRLF pair whose `\n` arrives in the next chunk).
+- `find_line_end_at_eof()`: same logic, but a trailing `\r` at EOF is
+  treated as a complete lone-CR terminator (no more data can arrive).
+- `finish()`: uses `find_line_end_at_eof()` to process all remaining
+  `\r`-terminated lines in the buffer.
+
+Tests added (all pass): `sse_lone_cr_tolerated`,
+`feed_holds_trailing_cr_until_next_chunk`,
+`finish_treats_trailing_cr_as_terminator`,
+`finish_splits_cr_terminated_lines`,
+`crlf_split_across_chunks`,
+`mixed_terminators_chunk_invariance`.
+
+### 4. `finish_reason: "error"` not in OpenAI enum (UWA-128)
+
+The streaming chat pipeline emitted `finish_reason: "error"` on error
+frames — not a valid OpenAI enum value (valid: `stop`, `length`,
+`tool_calls`, `content_filter`, `function_call`). Fixed in
+`crates/uwa-api/src/routes/chat/stream.rs`: error frames now send
+`error` event + `[DONE]` without any `finish_reason` field. Test
+`streaming_reports_error_when_validation_never_passes` asserts
+`finish_reason == null` on the final error frame.

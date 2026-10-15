@@ -264,6 +264,23 @@ The breaker only closes when the counter reaches zero (all probes
 succeeded). Test updated: `half_open_allows_multiple_probes_when_configured`
 now asserts the breaker stays HalfOpen until all 3 probes report success.
 
+### UWA-132 ✅ SSE parser single \r not a line separator
+SSE parser didn't count lone `\r` as line separator (only `\n` and `\r\n`).
+**Fix:** `find_line_end()` / `find_line_end_at_eof()` in `net.rs` now treat
+lone `\r` as a valid terminator per SSE spec. `feed()` holds trailing `\r`
+to disambiguate CRLF across chunks; `finish()` treats it as a complete
+separator. Tests: `sse_lone_cr_tolerated`, `feed_holds_trailing_cr_until_next_chunk`,
+`finish_treats_trailing_cr_as_terminator`, `finish_splits_cr_terminated_lines`,
+`crlf_split_across_chunks`, `mixed_terminators_chunk_invariance`.
+
+### UWA-128 ✅ `finish_reason: "error"` not in OpenAI enum
+Chat Completions stream emitted `finish_reason: "error"` which is not in
+OpenAI enum. **Fix:** streaming code now sends error event + `[DONE]`
+without `finish_reason` (OpenAI spec: not a valid enum value; valid are
+stop, length, tool_calls, content_filter, function_call). Test:
+`streaming_reports_error_when_validation_never_passes` asserts
+`finish_reason == null` on error frames.
+
 ### UWA-131 ⚪ Identical opening messages get same conversation_id
 Two chats with same system prompt and first user message ("hi") get the
 same `conversation_id` and tab. Documented (intentional behavior, test
