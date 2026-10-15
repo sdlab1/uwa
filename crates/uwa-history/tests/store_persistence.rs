@@ -39,7 +39,8 @@ async fn writes_jsonl_to_disk() -> Result<(), Box<dyn std::error::Error>> {
         .filter_map(|e| e.ok())
         .collect();
     assert_eq!(entries.len(), 1, "expected one jsonl file");
-    let content = std::fs::read_to_string(&entries[0].path())?;
+    let first = entries.first().ok_or("expected one entry")?;
+    let content = std::fs::read_to_string(first.path())?;
     let lines: Vec<&str> = content.lines().collect();
     assert_eq!(lines.len(), 2, "two lines, got: {content}");
     let first_line = lines.first().ok_or("no first line")?;

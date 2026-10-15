@@ -319,8 +319,8 @@ mod tests {
         }
         let recent = store.recent(10).await;
         assert_eq!(recent.len(), 3);
-        assert_eq!(recent[0].id, "r4");
-        assert_eq!(recent[2].id, "r2");
+        assert_eq!(recent.first().map(|r| r.id.as_str()), Some("r4"));
+        assert_eq!(recent.get(2).map(|r| r.id.as_str()), Some("r2"));
         Ok(())
     }
 
@@ -360,7 +360,8 @@ mod tests {
         let mut r = rec("a", "chatgpt");
         r.request.user_preview = "x".repeat(100);
         store.append(r).await;
-        let rec = &store.recent(1).await[0];
+        let recent = store.recent(1).await;
+        let rec = recent.first().ok_or("expected one record")?;
         assert!(rec.request.user_preview.len() < 100);
         assert!(rec.request.user_preview.ends_with('…'));
         Ok(())

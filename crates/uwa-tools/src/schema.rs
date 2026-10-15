@@ -112,23 +112,29 @@ mod tests {
     }
 
     #[test]
-    fn rejects_missing_required() {
+    fn rejects_missing_required() -> Result<(), Box<dyn std::error::Error>> {
         let s = json!({
             "type": "object",
             "required": ["city"]
         });
-        let err = validate_arguments(&json!({}), &s).unwrap_err();
+        let Err(err) = validate_arguments(&json!({}), &s) else {
+            return Err("expected an error".into());
+        };
         assert!(err.contains("city"), "{err}");
+        Ok(())
     }
 
     #[test]
-    fn rejects_wrong_type() {
+    fn rejects_wrong_type() -> Result<(), Box<dyn std::error::Error>> {
         let s = json!({
             "type": "object",
             "properties": { "n": { "type": "integer" } }
         });
-        let err = validate_arguments(&json!({ "n": "five" }), &s).unwrap_err();
+        let Err(err) = validate_arguments(&json!({ "n": "five" }), &s) else {
+            return Err("expected an error".into());
+        };
         assert!(err.contains("integer"), "{err}");
+        Ok(())
     }
 
     #[test]
@@ -142,7 +148,7 @@ mod tests {
     }
 
     #[test]
-    fn nested_array_items_checked() {
+    fn nested_array_items_checked() -> Result<(), Box<dyn std::error::Error>> {
         let s = json!({
             "type": "object",
             "properties": {
@@ -153,8 +159,11 @@ mod tests {
             }
         });
         assert!(validate_arguments(&json!({ "cities": ["NYC", "SF"] }), &s).is_ok());
-        let err = validate_arguments(&json!({ "cities": ["NYC", 42] }), &s).unwrap_err();
+        let Err(err) = validate_arguments(&json!({ "cities": ["NYC", 42] }), &s) else {
+            return Err("expected an error".into());
+        };
         assert!(err.contains("[1]"), "{err}");
+        Ok(())
     }
 
     #[test]

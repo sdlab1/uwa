@@ -312,17 +312,18 @@ mod tests {
     }
 
     #[test]
-    fn per_provider_stats() {
+    fn per_provider_stats() -> Result<(), Box<dyn std::error::Error>> {
         let recs = vec![
             rec("a", RequestStatus::Success, 100),
             rec("a", RequestStatus::Error, 200),
             rec("a", RequestStatus::Success, 300),
         ];
         let s = compute(&recs, StatsWindow::All);
-        let a = &s.providers[0];
+        let a = s.providers.first().ok_or("expected provider stats")?;
         assert_eq!(a.provider, "a");
         assert_eq!(a.total, 3);
         assert!((a.error_rate - 0.333).abs() < 0.01);
+        Ok(())
     }
 
     #[test]
@@ -350,7 +351,7 @@ mod tests {
     }
 
     #[test]
-    fn per_provider_ignores_zero_durations() {
+    fn per_provider_ignores_zero_durations() -> Result<(), Box<dyn std::error::Error>> {
         // Pending/sub-ms records must not drag provider latency down.
         // `mark_success` recomputes timing, so set the duration afterwards.
         let mut slow = rec("a", RequestStatus::Success, 0);
@@ -361,9 +362,14 @@ mod tests {
             slow,
         ];
         let s = compute(&recs, StatsWindow::All);
-        let a = s.providers.iter().find(|p| p.provider == "a").unwrap();
+        let a = s
+            .providers
+            .iter()
+            .find(|p| p.provider == "a")
+            .ok_or("provider a missing")?;
         assert_eq!(a.avg_total_ms, s.avg_total_ms);
         assert_eq!(a.avg_total_ms, 1000);
+        Ok(())
     }
 
     #[test]
@@ -374,6 +380,6 @@ mod tests {
         let newest = new.started_at;
         // Newest-first, as HistoryStore::recent returns.
         let s = compute(&[new, old], StatsWindow::All);
-        assert_eq!(s.providers[0].last_seen, Some(newest));
+        assert_eq!(s.providers.first().and_then(|p| p.last_seen), Some(newest));
     }
 }

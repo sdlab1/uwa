@@ -1,5 +1,4 @@
 use uwa_core::NetworkEvent;
-use uwa_testkit::MockPage;
 
 /// Seed the log with deterministic events for testing.
 pub fn seed(log: &mut Vec<String>) -> Vec<NetworkEvent> {

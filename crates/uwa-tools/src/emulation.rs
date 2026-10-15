@@ -114,7 +114,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_required_reports_correction() {
+    fn missing_required_reports_correction() -> Result<(), Box<dyn std::error::Error>> {
         let defs = vec![def(
             "get_weather",
             json!({
@@ -123,23 +123,23 @@ mod tests {
             }),
         )];
         let calls = vec![call("get_weather", json!({}))];
-        match validate_calls(&calls, &defs) {
-            ValidationOutcome::Failed { corrections } => {
-                assert_eq!(corrections.len(), 1);
-                assert!(corrections[0].contains("city"));
-            }
-            other => panic!("expected Failed, got {other:?}"),
-        }
+        let ValidationOutcome::Failed { corrections } = validate_calls(&calls, &defs) else {
+            return Err("expected Failed".into());
+        };
+        assert_eq!(corrections.len(), 1);
+        assert!(corrections.first().is_some_and(|c| c.contains("city")));
+        Ok(())
     }
 
     #[test]
-    fn unknown_tool_is_a_separate_outcome() {
+    fn unknown_tool_is_a_separate_outcome() -> Result<(), Box<dyn std::error::Error>> {
         let defs = vec![def("get_weather", json!({}))];
         let calls = vec![call("invent_tool", json!({}))];
-        match validate_calls(&calls, &defs) {
-            ValidationOutcome::UnknownTools { names } => assert_eq!(names, vec!["invent_tool"]),
-            other => panic!("expected UnknownTools, got {other:?}"),
-        }
+        let ValidationOutcome::UnknownTools { names } = validate_calls(&calls, &defs) else {
+            return Err("expected UnknownTools".into());
+        };
+        assert_eq!(names, vec!["invent_tool"]);
+        Ok(())
     }
 
     #[test]

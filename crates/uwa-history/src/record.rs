@@ -174,13 +174,14 @@ mod tests {
     }
 
     #[test]
-    fn record_serializes_round_trip() {
+    fn record_serializes_round_trip() -> Result<(), Box<dyn std::error::Error>> {
         let mut r = RequestRecord::new("req_1", "gpt-4o", "chatgpt", snapshot());
         r.mark_error("boom");
-        let json = serde_json::to_string(&r).unwrap();
-        let back: RequestRecord = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&r)?;
+        let back: RequestRecord = serde_json::from_str(&json)?;
         assert_eq!(back.id, "req_1");
         assert_eq!(back.status, RequestStatus::Error);
         assert_eq!(back.error.as_deref(), Some("boom"));
+        Ok(())
     }
 }

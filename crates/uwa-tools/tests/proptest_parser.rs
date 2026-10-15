@@ -32,15 +32,13 @@ fn known() -> Vec<String> {
 
 /// Text that cannot contain a tool-call marker.
 fn plain_text() -> impl Strategy<Value = String> {
-    proptest::string::string_regex("[a-zA-Z0-9 ,.!?]{0,200}").unwrap()
+    "[a-zA-Z0-9 ,.!?]{0,200}"
 }
 
 /// A value that survives the JSON round-trip inside a marker body.
 fn json_scalar() -> impl Strategy<Value = serde_json::Value> {
     prop_oneof![
-        proptest::string::string_regex("[a-zA-Z0-9]{0,30}")
-            .unwrap()
-            .prop_map(serde_json::Value::String),
+        "[a-zA-Z0-9]{0,30}".prop_map(serde_json::Value::String),
         any::<i64>().prop_map(|n| json!(n)),
         any::<bool>().prop_map(|b| json!(b)),
     ]
@@ -88,10 +86,11 @@ proptest! {
         let out = parse(&text, &known());
 
         prop_assert_eq!(out.calls.len(), 1);
-        prop_assert_eq!(out.calls[0].name.as_str(), name);
-        let call = out.calls.first().expect("call exists");
-        prop_assert_eq!(call.name.as_str(), name);
-        prop_assert_eq!(call.arguments.get(&key), Some(&val));
+        prop_assert_eq!(out.calls.first().map(|c| c.name.as_str()), Some(name));
+        prop_assert_eq!(
+            out.calls.first().and_then(|c| c.arguments.get(&key)),
+            Some(&val)
+        );
         prop_assert!(out.text.contains("prefix"), "{:?}", out.text);
         prop_assert!(out.text.contains("suffix"), "{:?}", out.text);
     }
@@ -107,8 +106,10 @@ proptest! {
 
         let out = parse(&text, &known());
 
-        let call = out.calls.first().expect("call exists");
-        prop_assert_eq!(call.arguments.get(&key), Some(&val));
+        prop_assert_eq!(
+            out.calls.first().and_then(|c| c.arguments.get(&key)),
+            Some(&val)
+        );
         prop_assert!(!out.text.contains("```tool_call"), "{:?}", out.text);
     }
 

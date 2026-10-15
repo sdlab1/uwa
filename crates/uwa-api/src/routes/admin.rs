@@ -65,9 +65,9 @@ pub async fn history_record(
     let recent = store.recent(1000).await;
     let r = recent.into_iter().find(|r| r.id == id);
     match r {
-        Some(rec) => Ok(Json(
-            serde_json::to_value(rec).unwrap_or(serde_json::Value::Null),
-        )),
+        Some(rec) => Ok(Json(serde_json::to_value(rec).map_err(|e| {
+            UwaError::Internal(format!("history record serialisation failed: {e}"))
+        })?)),
         None => Err(UwaError::BadRequest(format!("no record `{id}`")).into()),
     }
 }

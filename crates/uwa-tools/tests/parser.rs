@@ -6,15 +6,17 @@ fn known() -> Vec<String> {
 }
 
 #[test]
-fn xml_block_basic() {
+fn xml_block_basic() -> Result<(), Box<dyn std::error::Error>> {
     let text = "Sure, checking.\n<tool_call>\n{\"name\":\"get_weather\",\"arguments\":{\"city\":\"NYC\"}}\n</tool_call>";
     let out = parse(text, &known());
     assert_eq!(out.calls.len(), 1);
-    assert_eq!(out.calls[0].name, "get_weather");
-    assert_eq!(out.calls[0].arguments, json!({"city":"NYC"}));
-    assert!(out.calls[0].id.starts_with("call_"));
+    let call = out.calls.first().ok_or("expected one call")?;
+    assert_eq!(call.name, "get_weather");
+    assert_eq!(call.arguments, json!({"city":"NYC"}));
+    assert!(call.id.starts_with("call_"));
     assert!(!out.text.contains("tool_call"));
     assert!(out.text.contains("Sure, checking."));
+    Ok(())
 }
 
 #[test]
@@ -32,7 +34,7 @@ fn fenced_tool_call() {
     let text = "```tool_call\n{\"name\":\"run_sql\",\"arguments\":{\"sql\":\"select 1\"}}\n```";
     let out = parse(text, &known());
     assert_eq!(out.calls.len(), 1);
-    assert_eq!(out.calls[0].name, "run_sql");
+    assert_eq!(out.calls.first().map(|c| c.name.as_str()), Some("run_sql"));
 }
 
 #[test]
@@ -40,7 +42,10 @@ fn fenced_json_with_tool_shape() {
     let text = "```json\n{\"name\":\"get_weather\",\"arguments\":{\"city\":\"LA\"}}\n```";
     let out = parse(text, &known());
     assert_eq!(out.calls.len(), 1);
-    assert_eq!(out.calls[0].arguments, json!({"city":"LA"}));
+    assert_eq!(
+        out.calls.first().map(|c| &c.arguments),
+        Some(&json!({"city":"LA"}))
+    );
 }
 
 #[test]
@@ -62,20 +67,24 @@ fn bare_json_line() {
 }
 
 #[test]
-fn arguments_as_string_is_decoded() {
+fn arguments_as_string_is_decoded() -> Result<(), Box<dyn std::error::Error>> {
     let text = "<tool_call>{\"name\":\"run_sql\",\"arguments\":\"{\\\"sql\\\":\\\"select 42\\\"}\"}</tool_call>";
     let out = parse(text, &known());
     assert_eq!(out.calls.len(), 1);
-    assert_eq!(out.calls[0].arguments, json!({"sql":"select 42"}));
+    let call = out.calls.first().ok_or("expected one call")?;
+    assert_eq!(call.arguments, json!({"sql":"select 42"}));
+    Ok(())
 }
 
 #[test]
-fn tool_parameters_alias() {
+fn tool_parameters_alias() -> Result<(), Box<dyn std::error::Error>> {
     let text =
         "<tool_call>{\"tool\":\"get_weather\",\"parameters\":{\"city\":\"Berlin\"}}</tool_call>";
     let out = parse(text, &known());
     assert_eq!(out.calls.len(), 1);
-    assert_eq!(out.calls[0].arguments, json!({"city":"Berlin"}));
+    let call = out.calls.first().ok_or("expected one call")?;
+    assert_eq!(call.arguments, json!({"city":"Berlin"}));
+    Ok(())
 }
 
 #[test]
@@ -121,15 +130,16 @@ fn overlap_between_strategies_does_not_duplicate() {
 }
 
 #[test]
-fn tool_calls_serialize_and_deserialize() {
+fn tool_calls_serialize_and_deserialize() -> Result<(), Box<dyn std::error::Error>> {
     let call = uwa_tools::ToolCall {
         id: "call_1".into(),
         name: "weather".into(),
         arguments: serde_json::json!({"city": "X"}),
     };
-    let s = serde_json::to_string(&call).unwrap();
-    let back: uwa_tools::ToolCall = serde_json::from_str(&s).unwrap();
+    let s = serde_json::to_string(&call)?;
+    let back: uwa_tools::ToolCall = serde_json::from_str(&s)?;
     assert_eq!(back, call);
+    Ok(())
 }
 
 #[test]
@@ -168,7 +178,7 @@ fn scan_fence_parses_valid_fence() {
     let known = vec!["foo".to_string()];
     let out = parse(text, &known);
     assert_eq!(out.calls.len(), 1);
-    assert_eq!(out.calls[0].name, "foo");
+    assert_eq!(out.calls.first().map(|c| c.name.as_str()), Some("foo"));
 }
 
 #[test]

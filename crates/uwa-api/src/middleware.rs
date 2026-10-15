@@ -275,25 +275,26 @@ mod tests {
         }
     }
 
-    fn headers(pairs: &[(&'static str, &str)]) -> HeaderMap {
+    fn headers(pairs: &[(&'static str, &str)]) -> Result<HeaderMap, Box<dyn std::error::Error>> {
         let mut m = HeaderMap::new();
         for (k, v) in pairs {
-            m.insert(*k, HeaderValue::from_str(v).unwrap());
+            m.insert(*k, HeaderValue::from_str(v)?);
         }
-        m
+        Ok(m)
     }
 
     #[test]
-    fn bearer_scheme_is_case_insensitive() {
+    fn bearer_scheme_is_case_insensitive() -> Result<(), Box<dyn std::error::Error>> {
         for v in ["Bearer k", "bearer k", "BEARER   k ", "Bearer\tk"] {
-            let h = headers(&[("authorization", v)]);
+            let h = headers(&[("authorization", v)])?;
             assert_eq!(bearer_token(&h), Some("k"), "{v:?}");
         }
         for v in ["Basic k", "Bearerk", "k", ""] {
-            let h = headers(&[("authorization", v)]);
+            let h = headers(&[("authorization", v)])?;
             assert_eq!(bearer_token(&h), None, "{v:?}");
         }
         assert_eq!(bearer_token(&HeaderMap::new()), None);
+        Ok(())
     }
 
     #[test]
@@ -305,6 +306,11 @@ mod tests {
         assert_eq!(percent_decode("%2"), None, "truncated escape");
         assert_eq!(percent_decode("%zz"), None, "non-hex escape");
         assert_eq!(percent_decode("%ff"), None, "invalid UTF-8");
+    }
+
+    #[test]
+    fn percent_decode_does_not_treat_plus_as_space() {
+        assert_eq!(percent_decode("a+b").as_deref(), Some("a+b"));
     }
 
     #[test]

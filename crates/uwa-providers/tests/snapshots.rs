@@ -11,11 +11,11 @@ use uwa_extract::ExtractionPipeline;
 use uwa_providers::GenericProvider;
 use uwa_testkit::MockPage;
 
-fn fixture(name: &str) -> String {
+fn fixture(name: &str) -> Result<String, Box<dyn std::error::Error>> {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures")
         .join(name);
-    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+    Ok(std::fs::read_to_string(&path)?)
 }
 
 fn provider() -> GenericProvider {
@@ -37,32 +37,33 @@ fn provider() -> GenericProvider {
     GenericProvider::new(cfg, Arc::new(ExtractionPipeline::new()))
 }
 
-async fn extract(fixture_name: &str) -> String {
+async fn extract(fixture_name: &str) -> Result<String, Box<dyn std::error::Error>> {
     let page = MockPage::new()
         .with_url("https://demo.test/chat")
-        .with_html(&fixture(fixture_name));
-    provider()
-        .wait_response(&page)
-        .await
-        .expect("extraction succeeds")
+        .with_html(&fixture(fixture_name)?);
+    Ok(provider().wait_response(&page).await?)
 }
 
 #[tokio::test]
-async fn single_assistant_message() {
-    insta::assert_snapshot!(extract("claude_simple.html").await);
+async fn single_assistant_message() -> Result<(), Box<dyn std::error::Error>> {
+    insta::assert_snapshot!(extract("claude_simple.html").await?);
+    Ok(())
 }
 
 #[tokio::test]
-async fn last_of_several_messages_wins() {
-    insta::assert_snapshot!(extract("claude_multi.html").await);
+async fn last_of_several_messages_wins() -> Result<(), Box<dyn std::error::Error>> {
+    insta::assert_snapshot!(extract("claude_multi.html").await?);
+    Ok(())
 }
 
 #[tokio::test]
-async fn code_block_is_kept_verbatim() {
-    insta::assert_snapshot!(extract("gemini_code.html").await);
+async fn code_block_is_kept_verbatim() -> Result<(), Box<dyn std::error::Error>> {
+    insta::assert_snapshot!(extract("gemini_code.html").await?);
+    Ok(())
 }
 
 #[tokio::test]
-async fn surrounding_whitespace_is_trimmed() {
-    insta::assert_snapshot!(extract("deepseek_whitespace.html").await);
+async fn surrounding_whitespace_is_trimmed() -> Result<(), Box<dyn std::error::Error>> {
+    insta::assert_snapshot!(extract("deepseek_whitespace.html").await?);
+    Ok(())
 }
