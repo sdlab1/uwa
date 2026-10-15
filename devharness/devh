@@ -27,6 +27,9 @@
 #   devh logs [id]             логи item: пути ко всем логам + хвосты agent/verify
 #   devh bg [id] / ps          detached-прогон (setsid+nohup) / кто в полёте: PID+стадия
 #   devh tickets [--import]    наблюдения агентов (OnFlyAnalysis) → items с red-идеей
+#   devh auto [--from <dir>] [--max N]   автопилот: импорт спек → run+merge всех,
+#                              спеки без строки "RED: <команда>" остаются в очереди
+#   devh selfcov               покрытие test.sh'ом самого devh (kcov)
 #
 # State: .harness/ у ЦЕЛЕВОГО репо (в git не попадает — локальный exclude). Без БД.
 # Дом харнесса: project_uwa/devharness; сам скрипт location-independent (ROOT по cwd).
@@ -796,6 +799,109 @@ cmd_tickets() { # без аргумента — показать; --import — �
   echo "${C_G}OK tickets${C_0}: $n импортировано (red-идея в спеке каждого), пропущено: $skipped"
 }
 
+# ─── auto: автопилот — папка спек → items → run → merge → tickets ─────
+cmd_auto() { # devh auto [--from <dir>] [--max N]: всё само, пока есть очередь
+  need_conf
+  local from="" max=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --from) from="${2:?--from требует каталог спек}"; shift 2 ;;
+      --max)  max="${2:?--max требует число}"; shift 2 ;;
+      *) echo "неизвестный аргумент: $1" >&2; exit 1 ;;
+    esac
+  done
+  export HARNESS_MAX_ACTIVE=0   # auto сериален — WIP-лимит избыточен
+  local imp=0 f title id d redl
+  if [ -n "$from" ]; then
+    for f in "$from"/*.md; do
+      [ -f "$f" ] || continue
+      title="$(head -1 "$f")"; title="${title#\# }"
+      [ -n "$title" ] || title="$(basename "${f%.md}")"
+      crit_begin
+      id="$(next_id)"; d="$(items_dir)/$id"; mkdir -p "$d"
+      crit_end
+      cp "$f" "$d/spec.md"
+      echo "$title" > "$d/title"; echo open > "$d/status"; : > "$d/plan.md"
+      redl="$(grep -m1 '^RED: ' "$f" 2>/dev/null | sed 's/^RED: *//' || true)"
+      [ -n "$redl" ] && echo "$redl" > "$d/red.cmd"
+      echo "  импорт: $id — $title${redl:+ (RED ✓)}"
+      imp=$((imp+1))
+    done
+    echo "auto: импортировано $imp спек из $from"
+  fi
+  local tried=" " done_n=0 fail_n=0 item rc
+  pick_next() { # $1=tried; первый не-done вне tried
+    local d st id
+    for d in "$(items_dir)"/W-*; do
+      [ -d "$d" ] || continue
+      id="${d##*/}"
+      case "$1" in *" $id "*) continue ;; esac
+      st="$(cat "$d/status" 2>/dev/null || echo open)"
+      [ "$st" = "done" ] && continue
+      echo "$id"; return 0
+    done
+    return 1
+  }
+  while item="$(pick_next "$tried")"; do
+    tried="$tried$item "
+    echo "── auto: $item — $(cat "$(items_dir)/$item/title" 2>/dev/null)"
+    if [ ! -f "$(items_dir)/$item/red.cmd" ] && [ ! -s "$(items_dir)/$item/no-red" ]; then
+      echo "   ⚠  нет RED-пруфа — добавь в спеку строку 'RED: <команда, падающая сейчас>'"
+      fail_n=$((fail_n+1)); continue
+    fi
+    if "$0" run "$item" >/dev/null 2>&1; then
+      if "$0" merge "$item" >/dev/null 2>&1; then
+        echo "   ${C_G}✓ done${C_0}"; done_n=$((done_n+1))
+      else
+        echo "   ⚠  run ок, merge отклонил — ревью руками"; fail_n=$((fail_n+1))
+      fi
+    else
+      rc=$?
+      echo "   ${C_R}✗ rc=$rc${C_0} — остаётся active; детали: devh logs $item"
+      fail_n=$((fail_n+1))
+    fi
+    "$0" tickets --import >/dev/null 2>&1 || true
+    if [ "$max" -gt 0 ] && [ $((done_n + fail_n)) -ge "$max" ]; then break; fi
+  done
+  echo "auto: конец — done=$done_n, не прошло=$fail_n"
+  local d st
+  for d in "$(items_dir)"/W-*; do
+    [ -d "$d" ] || continue
+    st="$(cat "$d/status" 2>/dev/null || echo open)"
+    [ "$st" = "done" ] && continue
+    echo "  остался: ${d##*/} ($st) — $(cat "$d/title" 2>/dev/null)"
+  done
+  return 0
+}
+
+# ─── selfcov: line-coverage devh — BASH_ENV + DEBUG trap, без внешних инструментов ──
+cmd_selfcov() {
+  local dh; dh="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+  SELF_COV_W="$(mktemp -d /tmp/devh-selfcov-XXXXXX)"
+  trap 'rm -rf "$SELF_COV_W"' EXIT
+  cat > "$SELF_COV_W/preamble.sh" <<'S'
+set -o functrace   # DEBUG-ловушка наследуется функциями и под-оболочками
+trap 'case "${BASH_SOURCE[0]}" in */devh) printf "%s:%s\n" "${BASH_SOURCE[0]}" "$LINENO" >> "${COV_OUT:?}" ;; esac' DEBUG
+S
+  : > "$SELF_COV_W/cov.txt"
+  echo "прогон suite с трассировкой строк devh (~40с, DEBUG-trap добавляет накладные)…"
+  BASH_ENV="$SELF_COV_W/preamble.sh" COV_OUT="$SELF_COV_W/cov.txt" bash "$dh/test.sh" >/dev/null 2>&1 || {
+    echo "❌ базовый suite красный — покрытие бессмысленно"; return 1; }
+  local covered total pct
+  covered="$(awk -F: '/(^|\/)devh:/ && $NF+0>0 {print $NF}' "$SELF_COV_W/cov.txt" | sort -n | uniq | wc -l)"
+  total="$(grep -cvE '^[[:space:]]*(#|$)' "$dh/devh")"
+  pct="$(awk -v c="$covered" -v t="$total" 'BEGIN{printf "%.0f%%", (t>0? c*100/t : 0)}')"
+  echo "${C_G}coverage devh: $covered/$total исполняемых строк (${pct})${C_0}"
+  echo "  (под-оболочки \$(…) не трассируются — число слегка занижено; HTML-подробности не нужны)"
+  echo "${C_C}непокрытые исполняемые строки (первые 25):${C_0}"
+  awk 'NR==FNR { if ($0 ~ /devh:/) { n=split($0, a, ":"); if (a[n]+0>0) cov[a[n]+0]=1 } next }
+       { if (!(FNR in cov) && $0 !~ /^[[:space:]]*(#|$)/) printf "  %d: %s\n", FNR, $0 }' \
+       "$SELF_COV_W/cov.txt" "$dh/devh" | head -25
+  echo "  полный список: $SELF_COV_W/cov.txt (каталог удалится с сессией — сохрани при необходимости)"
+  return 0
+}
+
+
 # ─── logs (наблюдаемость) ───────────────────────────────────────────
 cmd_logs() {
   need_conf
@@ -915,5 +1021,7 @@ case "${1:-help}" in
   bg) shift; cmd_bg "$@" ;;
   ps) shift; cmd_ps "$@" ;;
   tickets) shift; cmd_tickets "$@" ;;
+  auto) shift; cmd_auto "$@" ;;
+  selfcov) shift; cmd_selfcov "$@" ;;
   *) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//' ;;
 esac

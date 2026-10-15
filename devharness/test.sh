@@ -369,6 +369,21 @@ HARNESS_AGENT="$T/stub-rev.sh" "$DEVH" run >"$T/out" 2>&1 && pass "run ок по
 grep -q "гейт REVIEW упал" "$T/out" && pass "REVIEW fix-раунд был" || fail "REVIEW fix-раунд был"
 grep -q "VERDICT: OK" .harness/logs/W-001-review.log && pass "финальный вердикт OK в review-логе" || fail "финальный вердикт OK в review-логе"
 
+echo "== 25. auto: папка спек → всё само (RED из строки спеки) =="
+R="$(fresh r25)"; base_env; cd "$R" || exit 1
+"$DEVH" init >/dev/null
+mkdir -p specs
+printf '# Задача А\nRED: test -f done.txt\nСоздай done.txt.\n' > specs/spec-a.md
+printf '# Задача Б без RED\nСделай что-то.\n' > specs/spec-b.md
+"$DEVH" auto --from specs >"$T/out" 2>&1 && pass "auto завершился rc=0" || { fail "auto rc"; cat "$T/out"; }
+grep -q "импортировано 2 спек" "$T/out" && pass "импорт обеих спек" || fail "импорт обеих спек"
+grep -q "✓ done" "$T/out" && pass "спека А прошла цикл" || fail "спека А прошла цикл"
+grep -q "нет RED-пруфа" "$T/out" && pass "спека Б честно осталась (нет RED)" || fail "спека Б честно осталась"
+[ "$(cat .harness/items/W-001/status)" = "done" ] && pass "W-001 done" || fail "W-001 done"
+[ -f .harness/items/W-001/red.cmd ] && pass "RED извлечён из строки спеки" || fail "RED извлечён"
+[ "$(cat .harness/items/W-002/status)" = open ] && pass "W-002 осталась в очереди" || fail "W-002 потеряна"
+grep -q "остался: W-002" "$T/out" && pass "итог auto перечисляет остаток" || fail "итог auto"
+
 echo
 echo "ИТОГО: PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" -eq 0 ]

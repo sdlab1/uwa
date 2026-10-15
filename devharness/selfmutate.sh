@@ -3,7 +3,7 @@
 # Вносим известные баги в ИЗОЛИРОВАННУЮ копию devh и проверяем, что test.sh их убивает.
 # «Тесты на вес золота» — применимо и к тестам самого харнесса.
 # Патчер — чистый awk (ENVIRON, без escape-ловушек -v); python-зависимости нет.
-# Гейт: 15/15. Новые гейты devh должны сопровождаться новым мутантом здесь.
+# Гейт: 16/16. Новые гейты devh должны сопровождаться новым мутантом здесь.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 W="$(mktemp -d /tmp/devh-selfmut-XXXXXX)"
@@ -195,6 +195,15 @@ cat > "$W/m.new" <<'S'
     *"VERDICT: NEVER"*) return 1 ;;
 S
 mutant "M15: REVIEW-вердикт ISSUES не матчится (замечания ревьюера игнорируются)" "$W/m.old" "$W/m.new"
+
+# ─── M16: auto игнорирует обязательность RED ───
+cat > "$W/m.old" <<'S'
+    if [ ! -f "$(items_dir)/$item/red.cmd" ] && [ ! -s "$(items_dir)/$item/no-red" ]; then
+S
+cat > "$W/m.new" <<'S'
+    if false; then
+S
+mutant "M16: auto не требует RED-пруф (спека без RED уезжает в прогон)" "$W/m.old" "$W/m.new"
 
 echo
 echo "KILL-RATE: $KILLED/$TOTAL (skip=$SKIP)"

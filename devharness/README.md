@@ -202,6 +202,9 @@ worktree → RED воспроизведён → агент → гейты по �
 CI: `.github/workflows/devharness.yml` — shellcheck + test.sh + selfmutate.sh
 на каждый пуш в `devharness/**`.
 
+**Покрытие**: `devh selfcov` — line-coverage через BASH_ENV+DEBUG-trap
+   (kcov в Debian bash не трассирует — свой коллектор, чистый bash): **63%** (548/874).
+
 ## Аудит против старой системы dev/ (~107K строк)
 
 **Реализовано**: work-фасад, worktree-per-agent, RED-пруф, verify-loop,
