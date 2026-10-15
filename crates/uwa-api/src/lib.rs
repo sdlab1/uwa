@@ -236,6 +236,15 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/admin/recorder/start", post(routes::admin::recorder_start))
         .route("/admin/recorder/stop", post(routes::admin::recorder_stop))
+        .route("/admin/clients", get(routes::admin::clients_list))
+        .route(
+            "/admin/clients/install",
+            post(routes::admin::clients_install),
+        )
+        .route(
+            "/admin/clients/uninstall",
+            post(routes::admin::clients_uninstall),
+        )
         .route(
             "/admin/sessions/recover",
             post(routes::admin::recover_sessions),

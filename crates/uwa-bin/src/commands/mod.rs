@@ -1,4 +1,6 @@
 pub mod browser;
+pub mod clients;
+pub mod clients_watch;
 pub mod conformance;
 pub mod daemon;
 pub mod doctor;

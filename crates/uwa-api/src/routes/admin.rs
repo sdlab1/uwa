@@ -757,6 +757,91 @@ pub async fn reset_profile(
     })))
 }
 
+// ---------- client installer (delegates to the same code the CLI uses) ----------
+
+/// `GET /admin/clients` — list all supported clients and their state.
+pub async fn clients_list() -> ApiResult<Json<serde_json::Value>> {
+    let exe =
+        std::env::current_exe().map_err(|e| UwaError::Internal(format!("current_exe: {e}")))?;
+    let out = tokio::process::Command::new(&exe)
+        .args(["clients", "list", "--json"])
+        .output()
+        .await
+        .map_err(|e| UwaError::Internal(format!("spawn uwa clients: {e}")))?;
+    if !out.status.success() {
+        return Err(UwaError::Internal(format!(
+            "uwa clients list failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ))
+        .into());
+    }
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout)
+        .map_err(|e| UwaError::Internal(format!("clients list json: {e}")))?;
+    Ok(Json(v))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ClientsActionRequest {
+    pub id: String,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub base_url: Option<String>,
+    #[serde(default)]
+    pub api_key: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
+pub async fn clients_install(
+    Json(req): Json<ClientsActionRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let exe =
+        std::env::current_exe().map_err(|e| UwaError::Internal(format!("current_exe: {e}")))?;
+    let mut cmd = tokio::process::Command::new(&exe);
+    cmd.args(["clients", "install", &req.id]);
+    if let Some(p) = &req.path {
+        cmd.args(["--path", p]);
+    }
+    if let Some(b) = &req.base_url {
+        cmd.args(["--base-url", b]);
+    }
+    if let Some(k) = &req.api_key {
+        cmd.args(["--api-key", k]);
+    }
+    if let Some(m) = &req.model {
+        cmd.args(["--model", m]);
+    }
+    run_client_action(cmd).await
+}
+
+pub async fn clients_uninstall(
+    Json(req): Json<ClientsActionRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let exe =
+        std::env::current_exe().map_err(|e| UwaError::Internal(format!("current_exe: {e}")))?;
+    let mut cmd = tokio::process::Command::new(&exe);
+    cmd.args(["clients", "uninstall", &req.id]);
+    if let Some(p) = &req.path {
+        cmd.args(["--path", p]);
+    }
+    run_client_action(cmd).await
+}
+
+async fn run_client_action(mut cmd: tokio::process::Command) -> ApiResult<Json<serde_json::Value>> {
+    let out = cmd
+        .output()
+        .await
+        .map_err(|e| UwaError::Internal(format!("spawn uwa clients: {e}")))?;
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    Ok(Json(serde_json::json!({
+        "ok": out.status.success(),
+        "stdout": stdout,
+        "stderr": stderr,
+    })))
+}
+
 // ---------- recorder ----------
 
 #[derive(Debug, serde::Deserialize)]

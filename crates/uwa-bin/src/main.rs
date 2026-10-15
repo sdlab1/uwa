@@ -1,6 +1,7 @@
 //! `uwa` — the daemon. Parses the CLI and hands everything to [`wiring`]
 //! or [`commands`].
 
+mod clients;
 mod commands;
 mod wiring;
 
@@ -61,6 +62,9 @@ enum Command {
     /// Provider selector registry: list, show, diff, update, canary.
     Providers(commands::providers::ProvidersArgs),
 
+    /// Point installed editors at this uwa instance.
+    Clients(commands::clients::ClientsArgs),
+
     /// Print resolved config, provider list and detected browser.
     Doctor,
 }
@@ -120,6 +124,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Update { check, force } => commands::update::run(check, force).await,
         Command::Conformance(args) => commands::conformance::run(args).await,
         Command::Providers(args) => commands::providers::run(args).await,
+        Command::Clients(args) => commands::clients::run(args).await,
         Command::Doctor => commands::doctor::run(config_path.clone()).await,
     };
 

@@ -4,11 +4,23 @@
   import { getModels } from '../lib/api';
   import { toast } from '../lib/stores';
 
+  interface ClientRow {
+    id: string;
+    name: string;
+    format: string;
+    path: string | null;
+    state: string;
+    note: string;
+    last_backup: string | null;
+  }
+
   let base = $state('');
   let model = $state('');
   let key = $state('');
   let loading = $state(true);
   let err = $state<string | null>(null);
+  let installable = $state<ClientRow[]>([]);
+  let busy = $state<string | null>(null);
 
   async function load() {
     base = location.origin;
@@ -23,6 +35,21 @@
     } finally {
       loading = false;
     }
+    void refreshInstall();
+  }
+
+  async function refreshInstall() {
+    try {
+      const apiKey = localStorage.getItem('uwa:apiKey') ?? '';
+      const r = await fetch('/admin/clients', {
+        headers: { authorization: `Bearer ${apiKey}` },
+      });
+      if (!r.ok) throw new Error(`${r.status}`);
+      const v = (await r.json()) as { clients: ClientRow[] } | ClientRow[];
+      installable = Array.isArray(v) ? v : (v as any).clients ?? [];
+    } catch {
+      installable = [];
+    }
   }
 
   async function copy(text: string) {
@@ -31,6 +58,47 @@
       toast('Copied', 'ok');
     } catch {
       toast('Copy failed — select and copy manually', 'err');
+    }
+  }
+
+  async function doInstall(id: string) {
+    busy = id;
+    try {
+      const apiKey = localStorage.getItem('uwa:apiKey') ?? '';
+      const r = await fetch('/admin/clients/install', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({ id }),
+      });
+      const v = await r.json();
+      toast(v.ok ? `Installed ${id}` : `Install failed: ${v.stderr || v.stdout}`, v.ok ? 'ok' : 'err');
+      await refreshInstall();
+    } finally {
+      busy = null;
+    }
+  }
+
+  async function doUninstall(id: string) {
+    if (!confirm(`Undo uwa's patch for ${id}?`)) return;
+    busy = id;
+    try {
+      const apiKey = localStorage.getItem('uwa:apiKey') ?? '';
+      const r = await fetch('/admin/clients/uninstall', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({ id }),
+      });
+      const v = await r.json();
+      toast(v.ok ? `Uninstalled ${id}` : `Uninstall failed: ${v.stderr || v.stdout}`, v.ok ? 'ok' : 'err');
+      await refreshInstall();
+    } finally {
+      busy = null;
     }
   }
 
@@ -53,6 +121,51 @@
 {:else if loading}
   <div class="card"><p class="muted m-0">Loading…</p></div>
 {/if}
+
+<div class="card">
+  <div class="card-head">
+    <h3 class="m-0">Auto-install</h3>
+    <button class="btn-secondary" onclick={refreshInstall}>Refresh</button>
+  </div>
+  <p class="text-[12.5px] muted mt-0 mb-3">
+    One-click setup writes to the client's own config file. Every write
+    is backed up to <code>~/.uwa/client-backups/</code> first; uninstall
+    strips the uwa block and leaves your edits in place.
+  </p>
+  {#if installable.length === 0}
+    <p class="muted text-[12px] m-0">Not reachable. Ensure the daemon is running.</p>
+  {:else}
+    <table>
+      <thead>
+        <tr><th>Client</th><th>State</th><th>Path</th><th></th></tr>
+      </thead>
+      <tbody>
+        {#each installable as c (c.id)}
+          <tr>
+            <td>{c.name}</td>
+            <td class:ok={c.state === 'patched'} class:warn={c.state === 'not_patched' || c.state === 'missing_file'} class:muted={c.state === 'env_only'}>
+              {c.state}
+            </td>
+            <td class="font-mono text-[11px] truncate" title={c.path ?? ''}>{c.path ?? '—'}</td>
+            <td class="text-right whitespace-nowrap">
+              {#if c.state === 'patched'}
+                <button class="btn-secondary" disabled={busy === c.id} onclick={() => doUninstall(c.id)}>
+                  {busy === c.id ? '…' : 'Uninstall'}
+                </button>
+              {:else if c.format !== 'shell' && c.path}
+                <button class="btn-secondary" disabled={busy === c.id} onclick={() => doInstall(c.id)}>
+                  {busy === c.id ? '…' : 'Install'}
+                </button>
+              {:else}
+                <span class="text-[11px] muted">source <code>~/.uwa/clients/env.sh</code></span>
+              {/if}
+            </td>
+          </tr>
+        {/each}
+      </tbody>
+    </table>
+  {/if}
+</div>
 
 <div class="grid gap-3">
   {#each CLIENTS as c (c.id)}
