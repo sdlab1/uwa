@@ -8,6 +8,9 @@
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 DEVH="${DEVH:-$HERE/devh}"
+# CI-раннеры без git-identity; фиксируем тестовую — suite environment-независим
+export GIT_AUTHOR_NAME=devh-test GIT_AUTHOR_EMAIL=devh-test@localhost
+export GIT_COMMITTER_NAME=devh-test GIT_COMMITTER_EMAIL=devh-test@localhost
 T="$(mktemp -d /tmp/devh-test-XXXXXX)"
 trap 'rm -rf "$T"' EXIT
 PASS=0; FAIL=0

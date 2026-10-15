@@ -31,7 +31,7 @@ jobs:
         run: |
           cargo install cargo-llvm-cov --locked
           cargo llvm-cov -p devh --fail-under-lines 80
-      - name: selfmutate (selfmutate-замена, copy-mode: --in-place запрещает --jobs)
+      - name: "selfmutate (selfmutate-замена, copy-mode: --in-place запрещает --jobs)"
         run: |
           cargo install cargo-mutants --locked
           cargo mutants -p devh --config devharness/cargo-mutants.toml -j 4
