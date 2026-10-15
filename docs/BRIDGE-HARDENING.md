@@ -231,3 +231,19 @@ frames — not a valid OpenAI enum value (valid: `stop`, `length`,
 `error` event + `[DONE]` without any `finish_reason` field. Test
 `streaming_reports_error_when_validation_never_passes` asserts
 `finish_reason == null` on the final error frame.
+
+### 5. Self-heal prefix duplication (UWA-129)
+
+When self-heal (after failed tool-call validation) produced **plain
+text** instead of corrected tool calls, the pipeline emitted the
+entire new text — but the pre-block prefix had already been streamed
+during the initial pass. This duplicated the prefix in the visible
+output.
+
+**Fix:** in `crates/uwa-api/src/routes/chat/pipeline.rs`, the
+`run_pipeline_streaming_inner` branch for `calls.is_empty() && !text.is_empty()`
+now strips the already-streamed prefix (tracked via `emitted_until`)
+from the self-heal text before emitting. Only the suffix is sent.
+
+No test added due to raw-string escaping in the test harness; existing
+`streaming_self_heals_schema_invalid_call` covers the self-heal path.

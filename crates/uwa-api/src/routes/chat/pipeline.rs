@@ -529,7 +529,14 @@ async fn run_pipeline_streaming_inner(
         )
         .await?;
         if calls.is_empty() && !text.is_empty() {
-            emit(tx, StreamEvent::Delta(text.clone())).await?;
+            // Self-heal produced plain text (no tool calls). The pre-block
+            // prefix was already streamed during the initial pass; avoid
+            // duplicating it by emitting only the suffix.
+            let prefix = raw_snapshot.get(..emitted_until).unwrap_or("");
+            let piece = text.strip_prefix(prefix).unwrap_or(&text).to_string();
+            if !piece.is_empty() {
+                emit(tx, StreamEvent::Delta(piece)).await?;
+            }
         } else if !calls.is_empty() && !heal_needed {
             // UWA-110: the model's text outside the call blocks belongs to
             // the answer. The pre-block prefix already streamed; deliver

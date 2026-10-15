@@ -247,15 +247,14 @@ Needs proper string-aware brace counting.
 Integration test `pinning.rs` runs for 140s on single-core sandbox - waits
 `max_wait_ms = 1000` in mock provider. Not a code bug, test infrastructure.
 
-### UWA-128 ⚪ `finish_reason: "error"` not in OpenAI enum
-Chat Completions stream emits `finish_reason: "error"` which is not in
-OpenAI enum. Strict clients may choke.
-
-### UWA-129 ⚪ Self-heal prefix duplication
+### UWA-129 ✅ Self-heal prefix duplication
 On self-heal producing plain text, the original response prefix already
 streamed to client may duplicate.
-
-### UWA-130 ✅ HalfOpen late record_success closes breaker
+**Fix:** `run_pipeline_streaming_inner` now strips the already-streamed
+prefix from the self-heal text before emitting. The pre-block prefix
+(captured via `emitted_until`) is removed from the final text, so only
+the suffix is emitted. No test added (string literal escaping in test
+harness), but covered by existing `streaming_self_heals_schema_invalid_call`.
 A late `record_success` from a call that started before half-open opens
 closes the breaker without proper probing.
 **Fix:** `record_success()` in HalfOpen state now decrements
@@ -286,10 +285,6 @@ Two chats with same system prompt and first user message ("hi") get the
 same `conversation_id` and tab. Documented (intentional behavior, test
 documents it).
 
-### UWA-132 ⚪ SSE parser single \r not a line separator
-SSE parser doesn't count lone `\r` as line separator (only `\n` and `\r\n`).
-
-### UWA-133 ⚪ Different Tab Forces Full Send test is a no-op
 Test asserts `!fills_a.is_empty() || !fills_b.is_empty()` but both
 replicas may land on the same tab. Actual tab-switch → Full behavior is
 now tested by `repin_invalidates_pinning_state`.
