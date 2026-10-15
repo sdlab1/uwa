@@ -22,6 +22,7 @@ pub mod file_attach;
 pub mod generic;
 pub mod input;
 pub mod registry;
+pub mod timing;
 pub mod workflow;
 
 #[cfg(test)]

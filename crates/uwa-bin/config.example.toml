@@ -259,3 +259,26 @@ drain_secs = 30
 #
 # [profiles.personal]
 # label = "Personal"
+
+# ---------- Timing (human-like pacing) ----------
+#
+# How much delay to add between DOM actions. Not fingerprint evasion —
+# simply not hammering a site at robot precision. Values are in
+# milliseconds, ranges are `[lo, hi]` and a value is drawn uniformly.
+
+[timing]
+# fast    — no added delay (CI, conformance suite)
+# natural — jittered human pacing (default)
+# slow    — for sites that throttle hard
+# custom  — supply the ranges below yourself
+profile = "natural"
+
+# [timing] custom example:
+# profile = "custom"
+# key_ms = [40, 140]
+# pre_send_ms = [120, 400]
+# post_send_ms = [100, 300]
+# focus_ms = [60, 200]
+# burst = true
+# burst_chars = 48
+# burst_pause_ms = [250, 700]

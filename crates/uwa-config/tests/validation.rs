@@ -10,6 +10,12 @@ fn load(toml: &str) -> Result<Config, String> {
     Config::load_from_str(toml).map_err(|e| e.to_string())
 }
 
+fn expect_err(result: Result<Config, String>) -> String {
+    result
+        .err()
+        .unwrap_or_else(|| "<config unexpectedly accepted>".to_string())
+}
+
 const BASE: &str = r#"
     [server]
     bind = "127.0.0.1"
@@ -28,7 +34,7 @@ fn non_loopback_requires_key() {
         bind = "0.0.0.0"
         port = 8080
     "#;
-    let e = load(toml).unwrap_err();
+    let e = expect_err(load(toml));
     assert!(e.contains("api_key"), "got: {e}");
 }
 
@@ -51,7 +57,7 @@ fn dangling_model_alias_errors() {
         "gpt-4o" = "nonexistent"
         "#
     );
-    let e = load(&toml).unwrap_err();
+    let e = expect_err(load(&toml));
     assert!(e.contains("nonexistent"), "got: {e}");
 }
 
@@ -69,7 +75,7 @@ fn provider_key_mismatch_errors() {
         assistant_message = "#a"
         "##
     );
-    let e = load(&toml).unwrap_err();
+    let e = expect_err(load(&toml));
     assert!(e.contains("wrong") && e.contains("chatgpt"), "got: {e}");
 }
 
@@ -86,7 +92,7 @@ fn missing_selectors_error() {
         assistant_message = "#a"
         "##
     );
-    let e = load(&toml).unwrap_err();
+    let e = expect_err(load(&toml));
     assert!(e.contains("input"), "got: {e}");
 }
 
@@ -104,7 +110,7 @@ fn empty_url_patterns_error() {
         assistant_message = "#a"
         "##
     );
-    let e = load(&toml).unwrap_err();
+    let e = expect_err(load(&toml));
     assert!(e.contains("url_patterns"), "got: {e}");
 }
 
@@ -123,7 +129,7 @@ fn default_preset_must_exist() {
         assistant_message = "#a"
         "##
     );
-    let e = load(&toml).unwrap_err();
+    let e = expect_err(load(&toml));
     assert!(e.contains("ghost"), "got: {e}");
 }
 
@@ -136,7 +142,7 @@ fn group_references_missing_provider() {
         members = [{{ provider = "missing" }}]
         "#
     );
-    let e = load(&toml).unwrap_err();
+    let e = expect_err(load(&toml));
     assert!(e.contains("missing"), "got: {e}");
 }
 
@@ -149,7 +155,7 @@ fn scheduled_restart_at_must_parse() {
         at = "25:99"
         "#
     );
-    let e = load(&toml).unwrap_err();
+    let e = expect_err(load(&toml));
     assert!(e.contains("25:99"), "got: {e}");
 }
 
@@ -173,7 +179,7 @@ fn proxy_enabled_requires_address() {
         enabled = true
         "#
     );
-    let e = load(&toml).unwrap_err();
+    let e = expect_err(load(&toml));
     assert!(e.contains("address"), "got: {e}");
 }
 
@@ -199,7 +205,7 @@ fn cdp_backend_ws_url_must_parse() {
         ws_url = "not a url"
         "#
     );
-    let e = load(&toml).unwrap_err();
+    let e = expect_err(load(&toml));
     assert!(e.contains("ws_url"), "got: {e}");
 }
 
@@ -215,7 +221,7 @@ fn cdp_backend_bare_browser_ws_url_is_rejected() {
         ws_url = "ws://127.0.0.1:9222/devtools/browser"
         "#
     );
-    let e = load(&toml).unwrap_err();
+    let e = expect_err(load(&toml));
     assert!(e.contains("GUID"), "got: {e}");
 }
 

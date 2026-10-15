@@ -38,19 +38,36 @@ use uwa_extract::net::{DefaultNetExtractor, NetExtractor};
 use uwa_extract::pipeline::{ExtractionOutcome, ExtractionPipeline, PipelineCfg};
 
 use crate::input;
+use crate::timing::TimingGate;
 
 pub struct GenericProvider {
     cfg: ProviderCfg,
     pipeline: Arc<ExtractionPipeline>,
+    timing: Arc<TimingGate>,
 }
 
 impl GenericProvider {
     pub fn new(cfg: ProviderCfg, pipeline: Arc<ExtractionPipeline>) -> Self {
-        Self { cfg, pipeline }
+        // Default timing: no added delay. Caller (registry) should inject
+        // the shared gate via `with_timing`.
+        Self {
+            cfg,
+            pipeline,
+            timing: Arc::new(TimingGate::disabled()),
+        }
     }
 
     pub fn from_config(cfg: ProviderCfg) -> Self {
         Self::new(cfg, Arc::new(ExtractionPipeline::new()))
+    }
+
+    /// Inject a custom timing gate. `uwa-bin` builds one from the global
+    /// `[timing]` section at startup and passes it here for every
+    /// provider, so per-request timing is the *daemon's* policy, not
+    /// something each provider decides.
+    pub fn with_timing(mut self, timing: Arc<TimingGate>) -> Self {
+        self.timing = timing;
+        self
     }
 
     // -------- selector accessors --------
@@ -169,7 +186,14 @@ impl GenericProvider {
         let send_sel = self.send_selector()?;
 
         input::wait_exists(page, input_sel, Duration::from_secs(10)).await?;
+
+        // Human-like focus delay before typing
+        self.timing.focus().await;
+
         input::inject_text(page, input_sel, text).await?;
+
+        // Human-like typing pace
+        self.timing.type_run(text.chars().count()).await;
 
         // Send buttons are often disabled until the input has content.
         let started = std::time::Instant::now();
@@ -180,12 +204,18 @@ impl GenericProvider {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
 
+        // Human-like pre-send delay
+        self.timing.pre_send().await;
+
         // Click with one retry — element may be re-rendered between query
         // and click (audit B1).
         if input::click_js(page, send_sel).await.is_err() {
             tokio::time::sleep(Duration::from_millis(50)).await;
             input::click_js(page, send_sel).await?;
         }
+
+        // Human-like post-send delay
+        self.timing.post_send().await;
 
         // Confirm the click landed: input should be cleared within 2 s.
         let cleared = std::time::Instant::now();
@@ -236,8 +266,20 @@ impl GenericProvider {
         if self.cfg.file_paste.reacquire_input_after_upload {
             input::wait_exists(page, input_sel, Duration::from_secs(5)).await?;
         }
+
+        // Human-like focus delay
+        self.timing.focus().await;
+
         input::inject_text(page, input_sel, &self.cfg.file_paste.hint_text).await?;
+
+        // Human-like typing pace for hint text
+        self.timing
+            .type_run(self.cfg.file_paste.hint_text.chars().count())
+            .await;
+
+        self.timing.pre_send().await;
         input::click_js(page, send_sel).await?;
+        self.timing.post_send().await;
 
         // 5. Cleanup.
         let _ = tokio::fs::remove_file(&tmp).await;
@@ -320,6 +362,10 @@ impl SiteProvider for GenericProvider {
                 crate::file_attach::attach_file_via_dragdrop(page, &att.path).await?;
             }
             // Give the UI a moment to process the upload.
+            // Human-like pause between attachment uploads
+            if self.cfg.file_paste.enabled {
+                self.timing.key().await;
+            }
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
 

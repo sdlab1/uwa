@@ -21,6 +21,8 @@ pub mod features;
 pub mod groups;
 pub mod preset;
 pub mod registry;
+pub mod timing;
+pub use timing::{TimingCfg, TimingProfile};
 
 pub use features::{FilePasteCfg, MediaCfg, PromptPaddingCfg, ProxyCfg};
 pub use groups::{GroupCfg, GroupMember, GroupStrategy};
@@ -59,6 +61,9 @@ pub struct Config {
     /// default (unnamed) context is used otherwise.
     #[serde(default)]
     pub profiles: HashMap<String, ProfileCfg>,
+    /// Human-like timing between DOM actions (keystrokes, focus, send).
+    #[serde(default)]
+    pub timing: TimingCfg,
 }
 
 /// One profile in `[profiles.<name>]`. The map key is the profile name.
@@ -428,6 +433,15 @@ impl Config {
         let mut cfg: Config = serde_path_to_error::deserialize(de)
             .map_err(|e| UwaError::Config(format!("{}: {}", e.path(), e.inner())))?;
         cfg.apply_registry(registry);
+        // Only apply the named profile if it's not Custom; Custom means the
+        // user supplied their own ranges and we must not overwrite them.
+        // Capture the profile *before* `take` resets `cfg.timing` to its
+        // default (which would otherwise overwrite the requested profile
+        // with `Natural`).
+        let profile = cfg.timing.profile;
+        if profile != TimingProfile::Custom {
+            cfg.timing = std::mem::take(&mut cfg.timing).apply_profile(profile);
+        }
         cfg.validate()?;
         Ok(cfg)
     }
@@ -567,6 +581,9 @@ impl Config {
                     "proxy.enabled = true but proxy.address is empty".into(),
                 ));
             }
+            // 8. Timing config must have sane ranges.
+            self.timing.validate().map_err(UwaError::Config)?;
+
             Url::parse(&self.proxy.address).map_err(|e| {
                 UwaError::Config(format!("proxy.address `{}`: {e}", self.proxy.address))
             })?;
@@ -1120,5 +1137,36 @@ mod tests {
         .unwrap();
         assert_eq!(cfg.stealth.pack, "default");
         assert!(cfg.stealth.user_scripts_dir.is_none());
+    }
+
+    #[test]
+    fn timing_defaults_to_natural() {
+        let cfg = Config::load_from_str(SAMPLE).unwrap();
+        assert_eq!(cfg.timing.profile, TimingProfile::Natural);
+    }
+
+    #[test]
+    fn timing_profile_override_applies() {
+        let toml = format!("{}\n[timing]\nprofile = \"slow\"\n", SAMPLE);
+        let cfg = Config::load_from_str(&toml).unwrap();
+        assert_eq!(cfg.timing.profile, TimingProfile::Slow);
+        assert!(cfg.timing.key_ms[0] >= 100);
+    }
+
+    #[test]
+    fn timing_custom_values_survive() {
+        let toml = format!(
+            "{}\n[timing]\nprofile = \"custom\"\nkey_ms = [5, 10]\n",
+            SAMPLE
+        );
+        let cfg = Config::load_from_str(&toml).unwrap();
+        assert_eq!(cfg.timing.key_ms, [5, 10]);
+    }
+
+    #[test]
+    fn timing_bad_poll_is_rejected() {
+        let toml = format!("{}\n[timing]\npoll_ms = 10\n", SAMPLE);
+        let e = Config::load_from_str(&toml).unwrap_err();
+        assert!(e.to_string().contains("poll_ms"), "{e}");
     }
 }
