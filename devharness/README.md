@@ -7,7 +7,7 @@ State — `.harness/` у целевого репо (flock + atomic writes, бе�
 ## Установка
 
     cargo install --path devharness        # devh в PATH; в чекауте — ./devharness/devh
-                                           # (обёртка: cargo run того же пакета)
+                                           # (обёртка: готовый target/devh/debug/devh, иначе cargo run)
 
 `devh` в каталоге — обёртка над Rust-бинарём; bash-эталон сохранён как
 `devh-classic`. `test.sh` — 95 ассертов, по умолчанию гоняется против

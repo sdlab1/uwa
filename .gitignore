@@ -53,4 +53,6 @@ crates/uwa-api/static/.vite/
 crates/uwa-api/static/test-results/
 crates/uwa-api/static/playwright-report/
 crates/uwa-api/static/.playwright/
+# бинарь devh у корня (старые копии); канонический вход — tracked обёртка devharness/devh
 devh
+!/devharness/devh

@@ -1,6 +1,16 @@
 #!/usr/bin/env bash
-# devh — канонический вход харнесса: Rust-бинарь через cargo run.
+# devh — канонический вход харнесса: готовый бинарь → cargo run как fallback.
+# Бинарь живёт в выд target (target/devh) — сборки в основном target/ не берут его lock.
+# Свежесть: бинарь моложе src/*.rs, Cargo.toml'ов и Cargo.lock — иначе пересборка.
 # bash-оракул сохранён как devh-classic (см. README §Миграция).
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$HERE/.." && pwd)"
+TDIR="${CARGO_TARGET_DIR:-$ROOT/target/devh}"
+BIN="$TDIR/debug/devh"
+if [ -x "$BIN" ] &&
+  [ -z "$(find "$HERE/src" "$HERE/Cargo.toml" "$ROOT/Cargo.toml" "$ROOT/Cargo.lock" -newer "$BIN" -print -quit 2>/dev/null)" ]; then
+  exec "$BIN" "$@"
+fi
+export CARGO_TARGET_DIR="$TDIR"
 exec cargo run --quiet --manifest-path "$HERE/Cargo.toml" -- "$@"
