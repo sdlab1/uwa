@@ -465,7 +465,7 @@ impl SiteProvider for GenericProvider {
         };
         let net = DefaultNetExtractor;
         let deltas = net.deltas(page, &rules).await?;
-        let s = deltas.map(|d| Ok(d.0));
+        let s = deltas.map(|d| Ok(d.as_str().to_string()));
         Ok(Box::pin(s))
     }
 
