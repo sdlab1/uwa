@@ -23,10 +23,10 @@ jobs:
       - run: cargo fmt -p devh --check
       - run: cargo clippy -p devh --all-targets -- -D warnings # shellcheck-слой
       - run: cargo test -p devh # юниты ядра + порт 95 ассертов test.sh
-      - name: oracle: test.sh против Rust-бинаря
+      - name: oracle: test.sh через канонический вход devh (обёртка → Rust)
         run: |
           cargo build -p devh
-          DEVH="$PWD/target/debug/devh" bash devharness/test.sh
+          bash devharness/test.sh # DEVH по умолчанию → devharness/devh → target/debug/devh
       - name: coverage-гейт (selfcov-замена, нативно)
         run: |
           cargo install cargo-llvm-cov --locked

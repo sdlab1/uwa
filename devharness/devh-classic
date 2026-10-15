@@ -881,22 +881,22 @@ cmd_selfcov() {
   trap 'rm -rf "$SELF_COV_W"' EXIT
   cat > "$SELF_COV_W/preamble.sh" <<'S'
 set -o functrace   # DEBUG-ловушка наследуется функциями и под-оболочками
-trap 'case "${BASH_SOURCE[0]}" in */devh) printf "%s:%s\n" "${BASH_SOURCE[0]}" "$LINENO" >> "${COV_OUT:?}" ;; esac' DEBUG
+trap 'case "${BASH_SOURCE[0]}" in */devh-classic) printf "%s:%s\n" "${BASH_SOURCE[0]}" "$LINENO" >> "${COV_OUT:?}" ;; esac' DEBUG
 S
   : > "$SELF_COV_W/cov.txt"
   echo "прогон suite с трассировкой строк devh (~40с, DEBUG-trap добавляет накладные)…"
-  BASH_ENV="$SELF_COV_W/preamble.sh" COV_OUT="$SELF_COV_W/cov.txt" bash "$dh/test.sh" >/dev/null 2>&1 || {
+  DEVH="$dh/devh-classic" BASH_ENV="$SELF_COV_W/preamble.sh" COV_OUT="$SELF_COV_W/cov.txt" bash "$dh/test.sh" >/dev/null 2>&1 || {
     echo "❌ базовый suite красный — покрытие бессмысленно"; return 1; }
   local covered total pct
-  covered="$(awk -F: '/(^|\/)devh:/ && $NF+0>0 {print $NF}' "$SELF_COV_W/cov.txt" | sort -n | uniq | wc -l)"
-  total="$(grep -cvE '^[[:space:]]*(#|$)' "$dh/devh")"
+  covered="$(awk -F: '/(^|\/)devh-classic:/ && $NF+0>0 {print $NF}' "$SELF_COV_W/cov.txt" | sort -n | uniq | wc -l)"
+  total="$(grep -cvE '^[[:space:]]*(#|$)' "$dh/devh-classic")"
   pct="$(awk -v c="$covered" -v t="$total" 'BEGIN{printf "%.0f%%", (t>0? c*100/t : 0)}')"
   echo "${C_G}coverage devh: $covered/$total исполняемых строк (${pct})${C_0}"
   echo "  (под-оболочки \$(…) не трассируются — число слегка занижено; HTML-подробности не нужны)"
   echo "${C_C}непокрытые исполняемые строки (первые 25):${C_0}"
-  awk 'NR==FNR { if ($0 ~ /devh:/) { n=split($0, a, ":"); if (a[n]+0>0) cov[a[n]+0]=1 } next }
+  awk 'NR==FNR { if ($0 ~ /devh-classic:/) { n=split($0, a, ":"); if (a[n]+0>0) cov[a[n]+0]=1 } next }
        { if (!(FNR in cov) && $0 !~ /^[[:space:]]*(#|$)/) printf "  %d: %s\n", FNR, $0 }' \
-       "$SELF_COV_W/cov.txt" "$dh/devh" | head -25
+       "$SELF_COV_W/cov.txt" "$dh/devh-classic" | head -25
   echo "  полный список: $SELF_COV_W/cov.txt (каталог удалится с сессией — сохрани при необходимости)"
   return 0
 }

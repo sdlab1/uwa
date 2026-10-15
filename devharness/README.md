@@ -6,12 +6,15 @@ State — `.harness/` у целевого репо (flock + atomic writes, бе�
 
 ## Установка
 
-    cargo install --path devharness        # или: cargo build -p devh
+    cargo install --path devharness        # devh в PATH; в чекауте — ./devharness/devh
+                                           # (обёртка: cargo run того же пакета)
 
-bash-`devh` (тот же каталог) остаётся оракулом: `test.sh` — 95 ассертов,
-гоняется и против bash-бинаря (CI `devharness.yml`), и против Rust-:
+`devh` в каталоге — обёртка над Rust-бинарём; bash-эталон сохранён как
+`devh-classic`. `test.sh` — 95 ассертов, по умолчанию гоняется против
+Rust-`devh` (CI `devharness-rs.yml`), отдельно — против bash:
 
-    DEVH=$PWD/target/debug/devh bash devharness/test.sh
+    bash devharness/test.sh                                    # Rust (по умолчанию)
+    DEVH=$PWD/devharness/devh-classic bash devharness/test.sh  # bash-эталон
 
 ## Дневной цикл
 
@@ -109,13 +112,14 @@ clippy (shellcheck-слой) → сьют 25 секций (порт `test.sh`, 9
 оракул гоняется напрямую: `DEVH=<rust-bin> bash devharness/test.sh`) →
 cargo-mutants на core/ (kill 100%) → llvm-cov ≥80%.
 
-CI: `.github/workflows/devharness-rs.yml` (Rust-порт: fmt → clippy →
-тесты → oracle → llvm-cov → cargo-mutants) и
-`.github/workflows/devharness.yml` (bash-оракул: shellcheck → test.sh
-→ selfmutate.sh).
+CI: `.github/workflows/devharness-rs.yml` (Rust: fmt → clippy →
+тесты → oracle через обёртку `devh` → llvm-cov → cargo-mutants) и
+`.github/workflows/devharness.yml` (bash-эталон `devh-classic`:
+shellcheck → test.sh → selfmutate.sh).
 
 ## Миграция
 
-- bash-`devh` остаётся oracle до полного паритета сьюта; после —
-  `mv devh devh-classic`, Rust-`devh` — единственный.
+- Выполнено: bash-`devh` → `devh-classic` (по-прежнему гейтится CI
+  `devharness.yml`: shellcheck + test.sh + selfmutate 16/16); `devh` —
+  обёртка над Rust, CI `devharness-rs.yml` гоняет оракул через неё.
 - Спеки старых сессий → по одной через `devh new <N>` / `devh new "..."`.

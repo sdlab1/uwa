@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # devharness/selfmutate.sh — мутационная проверка СОБСТВЕННЫХ тестов харнесса.
-# Вносим известные баги в ИЗОЛИРОВАННУЮ копию devh и проверяем, что test.sh их убивает.
+# Вносим известные баги в ИЗОЛИРОВАННУЮ копию devh-classic и проверяем, что test.sh их убивает.
 # «Тесты на вес золота» — применимо и к тестам самого харнесса.
 # Патчер — чистый awk (ENVIRON, без escape-ловушек -v); python-зависимости нет.
 # Гейт: 16/16. Новые гейты devh должны сопровождаться новым мутантом здесь.
@@ -9,17 +9,17 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 W="$(mktemp -d /tmp/devh-selfmut-XXXXXX)"
 trap 'rm -rf "$W"' EXIT
 cp -r "$HERE/." "$W/h"
-cp "$W/h/devh" "$W/h/devh.orig"
+cp "$W/h/devh-classic" "$W/h/devh.orig"
 KILLED=0; TOTAL=0; SKIP=0
 
 # kill-rate валиден ТОЛЬКО на зелёном базовом (иначе убит «любой» мутант)
-if ! bash "$W/h/test.sh" >/dev/null 2>&1; then
+if ! DEVH="$W/h/devh-classic" bash "$W/h/test.sh" >/dev/null 2>&1; then
   echo "❌ базовый suite на чистой копии КРАСНЫЙ — kill-rate невалиден, стоп"
   exit 1
 fi
 echo "базовый suite на чистой копии: зелёный (kill-rate будет валиден)"
 
-# awk-патчер: заменяет ПЕРВОЕ точное многострочное вхождение old → new в $W/h/devh.
+# awk-патчер: заменяет ПЕРВОЕ точное многострочное вхождение old → new в $W/h/devh-classic.
 # Значения — через ENVIRON (в отличие от -v, НЕ обрабатывают escape-последовательности).
 apply_mutant() { # $1=old-файл $2=new-файл; rc≠0 — якорь не найден
   OF="$(cat "$1")" NF_="$(cat "$2")" awk '
@@ -36,18 +36,18 @@ apply_mutant() { # $1=old-файл $2=new-файл; rc≠0 — якорь не �
         print buf[i]
       }
       exit replaced ? 0 : 1
-    }' "$W/h/devh" > "$W/h/devh.new" && mv -f "$W/h/devh.new" "$W/h/devh"
+    }' "$W/h/devh-classic" > "$W/h/devh.new" && mv -f "$W/h/devh.new" "$W/h/devh-classic"
 }
 
 mutant() { # $1=имя $2=old $3=new
   local name="$1"
   TOTAL=$((TOTAL+1))
-  cp "$W/h/devh.orig" "$W/h/devh"
+  cp "$W/h/devh.orig" "$W/h/devh-classic"
   if ! apply_mutant "$2" "$3"; then
     echo "  SKIP $name (якорь мутанта устарел — обнови selfmutate.sh)"; SKIP=$((SKIP+1)); return
   fi
-  bash -n "$W/h/devh" || { echo "  SKIP $name (сломан синтаксис — невалидный мутант)"; SKIP=$((SKIP+1)); return; }
-  if bash "$W/h/test.sh" >/dev/null 2>&1; then
+  bash -n "$W/h/devh-classic" || { echo "  SKIP $name (сломан синтаксис — невалидный мутант)"; SKIP=$((SKIP+1)); return; }
+  if DEVH="$W/h/devh-classic" bash "$W/h/test.sh" >/dev/null 2>&1; then
     echo "  ❌ ВЫЖИЛ: $name — suite НЕ ловит этот баг"
   else
     echo "  ✓ убит: $name"; KILLED=$((KILLED+1))

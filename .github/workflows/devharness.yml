@@ -11,6 +11,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
-      - run: shellcheck devharness/devh devharness/test.sh devharness/selfmutate.sh devharness/examples/check_bench.sh
-      - run: bash devharness/test.sh
+      - run: shellcheck devharness/devh devharness/devh-classic devharness/test.sh devharness/selfmutate.sh devharness/examples/check_bench.sh
+      - name: oracle против bash-эталона (devh-classic)
+        run: DEVH="$PWD/devharness/devh-classic" bash devharness/test.sh
       - run: bash devharness/selfmutate.sh

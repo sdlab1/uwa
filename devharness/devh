@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# devh — канонический вход харнесса: Rust-бинарь через cargo run.
+# bash-оракул сохранён как devh-classic (см. README §Миграция).
+set -euo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+exec cargo run --quiet --manifest-path "$HERE/Cargo.toml" -- "$@"

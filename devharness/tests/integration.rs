@@ -882,6 +882,7 @@ fn section00_shellcheck_oracle_files() {
     }
     for f in [
         "devh",
+        "devh-classic",
         "test.sh",
         "selfmutate.sh",
         "examples/check_bench.sh",
