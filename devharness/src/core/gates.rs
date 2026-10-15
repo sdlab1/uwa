@@ -348,4 +348,50 @@ mod tests {
             Verdict::Fail { .. }
         ));
     }
+
+    #[test]
+    fn tail_of_keeps_last_lines_in_order() {
+        assert_eq!(tail_of("a\nb\nc", 2), "b\nc");
+        assert_eq!(tail_of("a\nb\nc", 10), "a\nb\nc");
+        assert_eq!(tail_of("a\nb\nc\n", 3), "a\nb\nc");
+        assert_eq!(tail_of("a\nb\nc", 0), "");
+        assert_eq!(tail_of("", 5), "");
+    }
+
+    #[test]
+    fn no_ignored_disabled_by_config() {
+        let off = RunConfig {
+            no_ignored: false,
+            ..Default::default()
+        };
+        assert_eq!(
+            judge(&Gate::NoIgnored, &raw(Some(0), "2 passed; 2 ignored"), &off),
+            Verdict::Pass
+        );
+        assert!(matches!(
+            judge(
+                &Gate::NoIgnored,
+                &raw(Some(0), "2 passed; 2 ignored"),
+                &cfg()
+            ),
+            Verdict::Fail { .. }
+        ));
+    }
+
+    #[test]
+    fn review_verdict_issues_not_at_start() {
+        assert_eq!(
+            parse_review_verdict("подпись\nVERDICT: ISSUES: гонка; race"),
+            ReviewVerdict::Issues("гонка; race".into())
+        );
+    }
+
+    #[test]
+    fn ignored_lines_filters_matching() {
+        assert_eq!(
+            ignored_lines("test result: ok. 3 passed; 2 ignored\nsummary"),
+            vec!["test result: ok. 3 passed; 2 ignored"]
+        );
+        assert!(ignored_lines("ничего").is_empty());
+    }
 }

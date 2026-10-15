@@ -57,3 +57,41 @@ impl Timing {
         &self.stages
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stages_render_summary_and_flush() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path());
+        let id = ItemId(1);
+        let mut t = Timing::start();
+        t.stage("worktree", &store, &id);
+        t.stage("agent-r1", &store, &id);
+        assert_eq!(t.stages().len(), 2);
+        assert_eq!(t.stages().first().unwrap().0, "worktree");
+        assert_eq!(t.stages().last().unwrap().0, "agent-r1");
+        let r = t.render();
+        assert!(r.contains("worktree 0\n"), "{r}");
+        assert!(r.contains("agent-r1 0\n"), "{r}");
+        let s = t.summary_line();
+        assert!(s.starts_with("timing: "), "{s}");
+        assert!(s.contains("worktree=0s "), "{s}");
+        assert!(s.contains("agent-r1=0s"), "{s}");
+        assert!(t.elapsed() < 5);
+        let text =
+            std::fs::read_to_string(dir.path().join(".harness/logs/W-001-timing.log")).unwrap();
+        assert!(text.contains("agent-r1"), "{text}");
+    }
+
+    #[test]
+    fn elapsed_counts_real_seconds() {
+        let t = Timing::start();
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        assert!(t.elapsed() >= 1);
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        assert!(t.elapsed() >= 2);
+    }
+}

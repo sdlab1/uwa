@@ -149,3 +149,116 @@ pub fn msg_hygiene_violation(msg: &str, deny: &str) -> bool {
         Err(_) => false,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::gates::RedPhase;
+    use crate::core::types::MutateCfg;
+
+    #[test]
+    fn shquote_escapes_quotes() {
+        assert_eq!(shquote("plain"), "'plain'");
+        assert_eq!(shquote("it's"), r"'it'\''s'");
+        assert_eq!(shquote(""), "''");
+    }
+
+    #[test]
+    fn format_agent_run_composes_command() {
+        let cfg = RunConfig::default();
+        assert_eq!(
+            format_agent_run(&cfg, "do it"),
+            format!("{} 'do it'", cfg.agent)
+        );
+        let cfg = RunConfig {
+            agent: "stub.sh".into(),
+            ..Default::default()
+        };
+        assert_eq!(format_agent_run(&cfg, "x"), "stub.sh 'x'");
+    }
+
+    #[test]
+    fn review_prompt_embeds_diff() {
+        assert!(review_prompt("diff --git a/x").contains("diff --git a/x"));
+        assert!(review_prompt("").contains("VERDICT: OK"));
+    }
+
+    #[test]
+    fn fix_prompt_names_every_gate_and_tail() {
+        let cfg = RunConfig::default();
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path());
+        let id = ItemId(7);
+        let cases = [
+            (Gate::Verify, "Verify не прошёл"),
+            (Gate::NoIgnored, "ignored"),
+            (Gate::Lint, "Линтер нашёл"),
+            (Gate::Review, "Независимый ревьюер нашёл"),
+            (Gate::Mutate, "Mutation-гейт"),
+            (Gate::Bench, "Bench-гейт"),
+            (
+                Gate::Red {
+                    cmd: "true".into(),
+                    phase: RedPhase::Pre,
+                },
+                "RED-гейт не прошёл",
+            ),
+        ];
+        for (gate, needle) in cases {
+            let p = fix_prompt(&gate, "TAIL-МЯРКА", &cfg, &store, &id);
+            assert!(p.contains(needle), "{gate:?}: {p}");
+            assert!(p.contains("TAIL-МЯРКА"), "{gate:?}: {p}");
+            assert!(p.contains("W-007"), "{gate:?}: {p}");
+        }
+    }
+
+    #[test]
+    fn fix_prompt_mutate_carries_min_kill() {
+        let cfg = RunConfig {
+            mutate: Some(MutateCfg {
+                tool: "muex".into(),
+                scope: ".".into(),
+                min_kill: 80,
+            }),
+            ..Default::default()
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path());
+        let p = fix_prompt(&Gate::Mutate, "t", &cfg, &store, &ItemId(1));
+        assert!(p.contains("80%"), "{p}");
+    }
+
+    #[test]
+    fn commit_msg_prefers_summary_and_truncates() {
+        let id = ItemId(3);
+        assert_eq!(
+            commit_msg_from_summary("fix: то-то\nдетали", &id, "титул"),
+            "fix: то-то"
+        );
+        let long = "x".repeat(100);
+        assert_eq!(commit_msg_from_summary(&long, &id, "титул").len(), 72);
+        assert_eq!(commit_msg_from_summary("", &id, "титул"), "W-003: титул");
+        let long_title = "я".repeat(100);
+        assert_eq!(
+            commit_msg_from_summary("  \n", &id, &long_title),
+            format!("W-003: {}", "я".repeat(60))
+        );
+    }
+
+    #[test]
+    fn blocked_detection() {
+        assert!(is_blocked("BLOCKED: нет доступа\nдетали"));
+        assert!(is_blocked("  BLOCKED: пробел слева"));
+        assert!(!is_blocked("fix: блокированно-выглядящее"));
+        assert!(!is_blocked(""));
+    }
+
+    #[test]
+    fn hygiene_deny() {
+        assert!(msg_hygiene_violation("todo/файл поправить", "todo/"));
+        assert!(msg_hygiene_violation("Session 12 done", "Session [0-9]+"));
+        assert!(msg_hygiene_violation("см. TODO/report.md", "todo/"));
+        assert!(!msg_hygiene_violation("feat: чисто", "todo/"));
+        assert!(!msg_hygiene_violation("любое", "(["));
+    }
+}

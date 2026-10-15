@@ -96,6 +96,8 @@ mod tests {
         assert_eq!(ItemId::resolve("008"), Some(ItemId(8)));
         assert_eq!(ItemId::resolve("W-"), None);
         assert_eq!(ItemId::resolve("abc"), None);
+        assert_eq!(ItemId::resolve("+42"), None);
+        assert_eq!(ItemId::resolve("W-+42"), None);
     }
 
     #[test]
