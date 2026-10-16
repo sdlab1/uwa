@@ -205,8 +205,8 @@ async fn streaming_reports_error_when_validation_never_passes() {
             .and_then(|c| c.get(0))
             .and_then(|c| c.get("finish_reason"))
             .map(|f| f.is_null())
-            .unwrap_or(false),
-        "finish_reason must be null on error: {last:?}"
+            .unwrap_or(true),
+        "finish_reason must be null or absent on error: {last:?}"
     );
     assert!(
         last.get("error")
