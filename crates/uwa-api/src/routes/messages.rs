@@ -79,17 +79,17 @@ async fn messages_inner(
 
     // Validate model early: alias table + fallback_model — unless a routing
     // hint pinned the provider explicitly.
+    let config = state.cfg();
     let (provider_cfg, effective_model) = if let Some(p) = hint.provider.as_deref() {
-        let cfg = state
-            .config
+        let cfg = config
             .providers
             .get(p)
             .ok_or_else(|| UwaError::NoProviderForUrl(p.to_string()))?;
         (cfg, req.model.clone())
     } else {
-        state.config.resolve_model(&req.model)?
+        config.resolve_model(&req.model)?
     };
-    let site = state.providers.get(&provider_cfg.name)?;
+    let site = state.registry().get(&provider_cfg.name)?;
 
     let tool_choice_disabled = match &req.tool_choice {
         Some(choice) => {

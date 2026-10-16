@@ -123,7 +123,7 @@ pub async fn resolve_hint(
         if let Some(domain) = p.strip_prefix("url:") {
             // Find a provider whose URL patterns include the given domain.
             let provider_name = state
-                .config
+                .cfg()
                 .providers
                 .iter()
                 .find(|(_, cfg)| cfg.url_patterns.iter().any(|pat| pat.contains(domain)))
@@ -132,22 +132,8 @@ pub async fn resolve_hint(
             out.provider = Some(provider_name);
         }
     }
-    if let Some(profile) = &out.profile {
-        if profile != uwa_session::ProfileName::DEFAULT
-            && !state.config.profiles.contains_key(profile)
-        {
-            let mut known: Vec<&str> = state.config.profiles.keys().map(String::as_str).collect();
-            known.sort();
-            let list = if known.is_empty() {
-                "(none)".to_string()
-            } else {
-                known.join(", ")
-            };
-            return Err(UwaError::BadRequest(format!(
-                "unknown profile `{profile}`; configured profiles: {list}. \
-                 Omit the `X-UWA-Session` header to use the default context."
-            )));
-        }
-    }
+    // Profile from X-UWA-Session is passed through to the session manager
+    // without validation. The session manager will handle creating the
+    // browser context if the transport supports profiles.
     Ok(out)
 }

@@ -60,11 +60,12 @@ pub async fn chat_completions(
 
     // Hint override wins; otherwise the alias table + fallback_model.
     let (site, effective_model) = if let Some(p) = hint.provider.as_deref() {
-        let site = state.providers.get(p)?;
+        let site = state.registry().get(p)?;
         (site, req.model.clone())
     } else {
-        let (prov_cfg, resolved) = state.config.resolve_model(&req.model)?;
-        (state.providers.get(&prov_cfg.name)?, resolved)
+        let cfg = state.cfg();
+        let (prov_cfg, resolved) = cfg.resolve_model(&req.model)?;
+        (state.registry().get(&prov_cfg.name)?, resolved)
     };
 
     let tool_choice_disabled = matches!(

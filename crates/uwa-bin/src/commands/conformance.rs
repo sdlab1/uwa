@@ -206,7 +206,7 @@ struct LiveBackend {
 impl LiveBackend {
     fn new(state: uwa_api::AppState, provider: String) -> Result<Self> {
         // Fail fast if the provider is unknown.
-        if !state.config.providers.contains_key(&provider) {
+        if !state.cfg().providers.contains_key(&provider) {
             bail!("provider `{provider}` is not in the config");
         }
         Ok(Self { state, provider })
@@ -226,10 +226,7 @@ impl ConformanceBackend for LiveBackend {
         // Find a model alias that routes to this provider; if there are
         // several, the first one wins — it only affects the response's
         // `model` field, which conformance ignores.
-        let model = self
-            .state
-            .config
-            .model_aliases
+        let model = self.state.cfg().model_aliases
             .iter()
             .find(|(_, p)| p.as_str() == self.provider)
             .map(|(m, _)| m.clone())

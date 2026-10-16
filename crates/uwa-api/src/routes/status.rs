@@ -8,7 +8,7 @@ use crate::state::AppState;
 /// setup wizard can probe login state), capabilities, extraction strategy.
 pub async fn provider_status(State(state): State<AppState>) -> Json<Value> {
     let mut out = Map::new();
-    for (name, cfg) in &state.config.providers {
+    for (name, cfg) in &state.cfg().providers {
         out.insert(
             name.clone(),
             json!({

@@ -183,7 +183,7 @@ pub async fn selector_test(
     let start = std::time::Instant::now();
 
     // Verify the provider exists.
-    let cfg = state.config.clone();
+    let cfg = state.cfg().clone();
     let Some(_provider) = cfg.providers.get(&req.provider) else {
         return Err(UwaError::UnknownModel(uwa_core::ModelNotFound::new(
             req.provider.clone(),
@@ -399,7 +399,7 @@ pub async fn selector_generate(
     Json(req): Json<GenerateRequest>,
 ) -> ApiResult<Json<uwa_providers::autogen::PageAnalysis>> {
     // Verify the provider exists.
-    let cfg = state.config.clone();
+    let cfg = state.cfg().clone();
     let Some(_provider) = cfg.providers.get(&req.provider) else {
         return Err(UwaError::UnknownModel(uwa_core::ModelNotFound::new(
             req.provider.clone(),
@@ -451,7 +451,7 @@ pub async fn selector_apply(
     State(state): State<AppState>,
     Json(req): Json<ApplySelectorsRequest>,
 ) -> ApiResult<Json<ApplySelectorsResponse>> {
-    let cfg = state.config.clone();
+    let cfg = state.cfg().clone();
     let p = cfg.providers.get(&req.provider).ok_or_else(|| {
         UwaError::UnknownModel(uwa_core::ModelNotFound::new(req.provider.clone(), vec![]))
     })?;
@@ -599,10 +599,11 @@ pub async fn list_profiles(State(state): State<AppState>) -> ApiResult<Json<serd
     });
 
     // Configured profiles, sorted for a stable dashboard order.
-    let mut names: Vec<&String> = state.config.profiles.keys().collect();
+    let config = state.cfg();
+    let mut names: Vec<&String> = config.profiles.keys().collect();
     names.sort();
     for name in names {
-        let Some(cfg) = state.config.profiles.get(name) else {
+        let Some(cfg) = config.profiles.get(name) else {
             continue;
         };
         let tabs: Vec<String> = state
@@ -653,7 +654,7 @@ pub async fn open_profile_tab(
     Json(req): Json<OpenProfileRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let is_default = name == uwa_session::ProfileName::DEFAULT;
-    if !is_default && !state.config.profiles.contains_key(&name) {
+    if !is_default && !state.cfg().profiles.contains_key(&name) {
         return Err(UwaError::BadRequest(format!("unknown profile `{name}`")).into());
     }
     if !is_default && !state.transport.supports_profiles() {
@@ -736,7 +737,7 @@ pub async fn reset_profile(
         )
         .into());
     }
-    if !state.config.profiles.contains_key(&name) {
+    if !state.cfg().profiles.contains_key(&name) {
         return Err(UwaError::BadRequest(format!("unknown profile `{name}`")).into());
     }
 
@@ -890,14 +891,14 @@ pub async fn recorder_start(
     }
 
     let provider_cfg = state
-        .config
+        .cfg()
         .providers
         .get(&req.provider)
         .cloned()
         .ok_or_else(|| {
             UwaError::UnknownModel(uwa_core::ModelNotFound::new(
                 req.provider.clone(),
-                state.config.available_models(),
+                state.cfg().available_models(),
             ))
         })?;
 
@@ -959,7 +960,7 @@ pub async fn recorder_stop(State(state): State<AppState>) -> ApiResult<Json<Reco
     let provider = rec.provider.clone();
     let trace = rec.stop().await;
 
-    let proposal = match state.config.providers.get(&provider) {
+    let proposal = match state.cfg().providers.get(&provider) {
         Some(p) => uwa_providers::workflow::propose_workflow(&trace, &p.selectors),
         None => uwa_providers::workflow::ProposedWorkflow {
             workflow: uwa_core::workflow::Workflow::default(),

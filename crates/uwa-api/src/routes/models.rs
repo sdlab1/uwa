@@ -6,16 +6,15 @@ use crate::state::AppState;
 
 pub async fn list_models(State(state): State<AppState>) -> Json<ModelList> {
     let created = 0u64;
-    let data = state
-        .config
+    let cfg = state.cfg();
+    let data = cfg
         .model_aliases
         .keys()
         .map(|m| ModelObject {
             id: m.clone(),
             object: "model",
             created,
-            owned_by: state
-                .config
+            owned_by: cfg
                 .model_aliases
                 .get(m)
                 .cloned()

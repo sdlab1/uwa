@@ -179,6 +179,7 @@ mod tests {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                uwa_media: Vec::new(),
             }],
             stream: None,
             stream_options: None,

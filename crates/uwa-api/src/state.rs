@@ -3,8 +3,10 @@
 //! breakers, history).
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
+use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use uwa_config::Config;
 use uwa_core::{Result, SiteProvider, Transport, UwaError};
@@ -12,14 +14,65 @@ use uwa_resilience::circuit::{CircuitBreaker, CircuitCfg};
 use uwa_resilience::semaphore::ProviderSemaphores;
 use uwa_session::SessionManager;
 
+/// Registry of site providers by name.
+#[derive(Clone, Default)]
+pub struct ProviderRegistry {
+    by_name: HashMap<String, Arc<dyn SiteProvider>>,
+}
+
+impl ProviderRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn register(&mut self, p: Arc<dyn SiteProvider>) {
+        self.by_name.insert(p.name().to_string(), p);
+    }
+
+    pub fn get(&self, name: &str) -> Result<Arc<dyn SiteProvider>> {
+        self.by_name.get(name).cloned().ok_or_else(|| {
+            UwaError::UnknownModel(uwa_core::ModelNotFound::new(name.to_string(), vec![]))
+        })
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.by_name.is_empty()
+    }
+}
+
 /// State handed to every route. Cheap to clone: everything behind it is
 /// behind an `Arc`.
 #[derive(Clone)]
 pub struct AppState {
-    pub config: Arc<Config>,
-    pub providers: Arc<ProviderRegistry>,
+    /// Hot-reloadable config. Use `cfg()` to read, `reload()` to swap.
+    pub config: Arc<ArcSwap<Config>>,
+    /// Hot-reloadable provider registry. Use `registry()` to read.
+    pub providers: Arc<ArcSwap<ProviderRegistry>>,
     pub transport: Arc<dyn Transport>,
     pub runtime: Arc<RuntimeServices>,
+}
+
+impl AppState {
+    /// Read a snapshot of the current config (cloned from the `ArcSwap`).
+    pub fn cfg(&self) -> Arc<Config> {
+        self.config.load_full()
+    }
+
+    /// Read a snapshot of the current provider registry.
+    pub fn registry(&self) -> Arc<ProviderRegistry> {
+        self.providers.load_full()
+    }
+
+    /// Atomically swap in a new config. Callers that hold `Arc<AppState>`
+    //  will see the new value on the next `cfg()` call.
+    pub fn reload(&self, new_config: Config) {
+        self.config.store(Arc::new(new_config));
+    }
+
+    /// Atomically swap in a new provider registry.
+    pub fn reload_providers(&self, new_registry: ProviderRegistry) {
+        self.providers.store(Arc::new(new_registry));
+    }
 }
 
 /// The services the pipeline reaches for on every request. It is replaced
@@ -62,9 +115,11 @@ impl AppState {
         providers: Arc<ProviderRegistry>,
         transport: Arc<dyn Transport>,
     ) -> Self {
+        let config_swap: ArcSwap<Config> = ArcSwap::new(config);
+        let providers_swap: ArcSwap<ProviderRegistry> = ArcSwap::new(providers);
         Self {
-            config,
-            providers,
+            config: Arc::new(config_swap),
+            providers: Arc::new(providers_swap),
             transport,
             runtime: Arc::new(RuntimeServices::default()),
         }
@@ -109,33 +164,8 @@ impl AppState {
     pub fn breaker(&self, provider: &str) -> Arc<CircuitBreaker> {
         self.runtime
             .breakers
-            .entry(provider.into())
-            .or_insert_with(|| Arc::new(CircuitBreaker::new(provider, CircuitCfg::default())))
+            .entry(provider.to_string())
+            .or_insert_with(|| Arc::new(CircuitBreaker::new(provider.to_string(), CircuitCfg::default())))
             .clone()
-    }
-}
-
-#[derive(Default)]
-pub struct ProviderRegistry {
-    by_name: HashMap<String, Arc<dyn SiteProvider>>,
-}
-
-impl ProviderRegistry {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn register(&mut self, p: Arc<dyn SiteProvider>) {
-        self.by_name.insert(p.name().to_string(), p);
-    }
-
-    pub fn get(&self, name: &str) -> Result<Arc<dyn SiteProvider>> {
-        self.by_name.get(name).cloned().ok_or_else(|| {
-            UwaError::UnknownModel(uwa_core::ModelNotFound::new(name.to_string(), vec![]))
-        })
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.by_name.is_empty()
     }
 }

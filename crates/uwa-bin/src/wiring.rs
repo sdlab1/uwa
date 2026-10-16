@@ -242,7 +242,7 @@ mod tests {
     async fn state_assembles_without_mcp() {
         // Bridge semantics: the state carries no MCP anything.
         let state = state_without_browser();
-        assert!(state.providers.is_empty());
+        assert!(state.registry().is_empty());
         assert!(state.runtime.history.is_none());
     }
 

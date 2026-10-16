@@ -288,10 +288,10 @@ pub fn router(state: AppState) -> Router {
         .merge(api)
         .layer(axum::middleware::from_fn(middleware::inject_request_id))
         .layer(TraceLayer::new_for_http())
-        .layer(cors_layer(&state.config.server.bind))
+        .layer(cors_layer(&state.cfg().server.bind))
         .layer(tower_http::timeout::TimeoutLayer::new(Duration::from_secs(
             // Constant divisor is lint-safe; the +5 grace must saturate.
-            (state.config.server.request_timeout_ms / 1000).saturating_add(5),
+            (state.cfg().server.request_timeout_ms / 1000).saturating_add(5),
         )))
         .with_state(state)
 }

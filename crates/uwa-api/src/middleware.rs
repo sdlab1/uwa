@@ -53,11 +53,12 @@ pub async fn require_api_key(
     // A local client (Cursor, Continue, curl) can use a placeholder string
     // and never has to match `[server].api_key`. This is the #1 cause of
     // "Authorization: Bearer dummy-key" failures in the wild.
-    if is_loopback_bind(&state.config.server.bind) {
+    if is_loopback_bind(&state.cfg().server.bind) {
         return Ok(next.run(req).await);
     }
 
-    let Some(expected) = state.config.server.api_key.as_deref() else {
+    let config = state.cfg();
+    let Some(expected) = config.server.api_key.as_deref() else {
         return Ok(next.run(req).await);
     };
     // Accepted credentials, in order:
@@ -179,7 +180,7 @@ pub async fn guard_browser_origin(
     req: Request,
     next: Next,
 ) -> Response {
-    if !is_loopback_bind(&state.config.server.bind) {
+    if !is_loopback_bind(&state.cfg().server.bind) {
         return next.run(req).await;
     }
     if let Some(host) = req.headers().get(HOST).and_then(|v| v.to_str().ok()) {

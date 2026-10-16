@@ -351,6 +351,10 @@ impl SessionManager {
     /// funnel everyone onto the profile's first tab. Load counts only
     /// sessions of the same profile: a tab shared with another profile is
     /// a different cookie jar and must not be counted as busy for this one.
+    ///
+    /// If the requested profile has no tabs, fall back to the default
+    /// profile's tabs. This allows X-UWA-Session to differentiate
+    /// conversations even when browser profiles are not fully configured.
     async fn pick_tab_in(
         &self,
         profile: &ProfileName,
@@ -358,6 +362,13 @@ impl SessionManager {
         avoid: Option<&TabId>,
     ) -> Result<TabId> {
         let tabs = transport.list_tabs_in(profile.as_str()).await?;
+        let tabs = if tabs.is_empty() && !profile.is_default() {
+            // Fall back to default profile's tabs for conversation
+            // differentiation when browser profiles aren't configured.
+            transport.list_tabs_in(ProfileName::DEFAULT).await?
+        } else {
+            tabs
+        };
         if tabs.is_empty() {
             return Err(UwaError::Unavailable(format!(
                 "no browser tabs available for profile `{profile}`"

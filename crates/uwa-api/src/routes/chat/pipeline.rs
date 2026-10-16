@@ -115,10 +115,11 @@ pub async fn run_pipeline(
     profile: &ProfileName,
     hint: &RoutingHint,
 ) -> Result<PipelineOutcome, UwaError> {
-    let provider_cfg = state.config.provider_for_model(&req.model).ok_or_else(|| {
+    let config = state.cfg();
+    let provider_cfg = config.provider_for_model(&req.model).ok_or_else(|| {
         UwaError::UnknownModel(uwa_core::ModelNotFound::new(
             req.model.clone(),
-            state.config.available_models(),
+            config.available_models(),
         ))
     })?;
 
@@ -239,10 +240,11 @@ pub async fn run_pipeline_streaming(
     tx: mpsc::Sender<StreamEvent>,
     hint: &RoutingHint,
 ) -> Result<(), UwaError> {
-    let provider_cfg = state.config.provider_for_model(&req.model).ok_or_else(|| {
+    let config = state.cfg();
+    let provider_cfg = config.provider_for_model(&req.model).ok_or_else(|| {
         UwaError::UnknownModel(uwa_core::ModelNotFound::new(
             req.model.clone(),
-            state.config.available_models(),
+            config.available_models(),
         ))
     })?;
 
@@ -349,13 +351,14 @@ async fn run_pipeline_streaming_inner(
     tx: &mpsc::Sender<StreamEvent>,
     hint: &RoutingHint,
 ) -> Result<PipelineOutcome, Abort> {
-    let provider_cfg = state.config.provider_for_model(&req.model).ok_or_else(|| {
+    let config = state.cfg();
+    let provider_cfg = config.provider_for_model(&req.model).ok_or_else(|| {
         UwaError::UnknownModel(uwa_core::ModelNotFound::new(
             req.model.clone(),
-            state.config.available_models(),
+            config.available_models(),
         ))
     })?;
-    let site = state.providers.get(&provider_cfg.name)?;
+    let site = state.registry().get(&provider_cfg.name)?;
 
     // --- identical setup to the buffered path ---
     let defs: Vec<ToolDefinition> = all_specs
@@ -381,7 +384,7 @@ async fn run_pipeline_streaming_inner(
 
     let conversation: Vec<ChatMessage> = req.messages.clone();
     let known_names: Vec<String> = all_specs.iter().map(|s| s.name.clone()).collect();
-    let send_timeout = Duration::from_millis(state.config.server.request_timeout_ms.max(1_000));
+    let send_timeout = Duration::from_millis(state.cfg().server.request_timeout_ms.max(1_000));
 
     let _attachments = AttachmentGuard(
         uwa_providers::attachments::extract_attachments(req)
@@ -612,13 +615,14 @@ async fn run_pipeline_inner(
     recorder: &mut RequestRecorder,
     hint: &RoutingHint,
 ) -> Result<PipelineOutcome, UwaError> {
-    let provider_cfg = state.config.provider_for_model(&req.model).ok_or_else(|| {
+    let config = state.cfg();
+    let provider_cfg = config.provider_for_model(&req.model).ok_or_else(|| {
         UwaError::UnknownModel(uwa_core::ModelNotFound::new(
             req.model.clone(),
-            state.config.available_models(),
+            config.available_models(),
         ))
     })?;
-    let site = state.providers.get(&provider_cfg.name)?;
+    let site = state.registry().get(&provider_cfg.name)?;
 
     // Tool-defs → system prompt. Empty when the client sent no tools.
     let defs: Vec<ToolDefinition> = all_specs
@@ -645,7 +649,7 @@ async fn run_pipeline_inner(
 
     let conversation: Vec<ChatMessage> = req.messages.clone();
     let known_names: Vec<String> = all_specs.iter().map(|s| s.name.clone()).collect();
-    let send_timeout = Duration::from_millis(state.config.server.request_timeout_ms.max(1_000));
+    let send_timeout = Duration::from_millis(state.cfg().server.request_timeout_ms.max(1_000));
 
     // Multimodal: decode image parts into temp files (skipped quietly on
     // error — a bad image must not fail the chat turn). The guard removes

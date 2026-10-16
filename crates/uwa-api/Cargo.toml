@@ -36,6 +36,7 @@ uwa-session = { path = "../uwa-session" }
 dashmap.workspace = true
 metrics = "0.23"
 subtle = "2"  # constant-time compare for api_key
+arc-swap = "1.9.2"
 
 [dev-dependencies]
 uwa-testkit = { path = "../uwa-testkit" }
