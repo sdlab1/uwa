@@ -1,5 +1,7 @@
 # devharness (Rust) — KISS dev harness
 
+[English](README.en.md)
+
 Один бинарник `devh`. Модель прежняя: **харнесс владеет git и циклом;
 агент работает в изолированном worktree и никогда не запускает git.**
 State — `.harness/` у целевого репо (flock + atomic writes, без БД).
@@ -8,6 +10,12 @@ State — `.harness/` у целевого репо (flock + atomic writes, бе�
 
     cargo install --path devharness        # devh в PATH; в чекауте — ./devharness/devh
                                            # (обёртка: готовый target/devh/debug/devh, иначе cargo run)
+
+Статик для дистрибуции (flock/fs2/setsid проверены полным oracle — 95/95):
+
+    rustup target add x86_64-unknown-linux-musl
+    cargo build --release --target x86_64-unknown-linux-musl -p devh
+    # → target/x86_64-unknown-linux-musl/release/devh (static-pie)
 
 `devh` в каталоге — обёртка над Rust-бинарём; bash-эталон сохранён как
 `devh-classic`. `test.sh` — 95 ассертов, по умолчанию гоняется против
@@ -27,7 +35,9 @@ Rust-`devh` (CI `devharness-rs.yml`), отдельно — против bash:
 
 Автопилот: `devh auto --from specs/ --max 5` — спеки → items (RED из
 строки `RED:`) → run+merge+tickets; item без RED честно остаётся в
-очереди.
+очереди. Фоном: `devh bg auto --from specs/ --max 5` — detached-автопилот
+(лог `.harness/logs/bg-auto.log`); `devh ps` показывает и живые
+авто-прогоны (`.harness/auto.pid`).
 
 ## Гейты (обязательны, кроме bench)
 
@@ -50,7 +60,7 @@ RED-пруф первым, MSG_DENY-гигиена последней. Паде�
 | Команда | Синтаксис | Что делает |
 |---|---|---|
 | init | `devh init` | конфиг с автодетектом (uwa→scripts/verify.sh; gobot→mix test+muex; rust→cargo test), todo/report.md→RULES/RULES_LOG/MSG_DENY; `.harness/` в локальный exclude |
-| new | `devh new "title" [--no-red "причина"]` / `devh new <N>` | item + spec.md; `<N>` — копия `todo/N.md` → `W-0NN` |
+| new | `devh new "title" [--no-red "причина"]` / `devh new <N>` | item + spec.md; на TTY stdin — редактор (`$EDITOR`, дефолт vi); `<N>` — копия `todo/N.md` → `W-0NN` |
 | list | `devh list` | таблица: ID / STATUS(open→active→done) / WT / TITLE |
 | hint | `devh hint [id]` | спека + план + готовый промпт следующей модели |
 | run | `devh run [id]` | claim (WIP-лимит, flock) → worktree → RED pre → агент → гейт-цикл (падение → fix-раунд с хвостом лога) → RED post → гигиена → commit → push ветки |
@@ -60,8 +70,8 @@ RED-пруф первым, MSG_DENY-гигиена последней. Паде�
 | clean | `devh clean` | worktree/ветки done-items + retention логов (LOG_DAYS) |
 | doctor | `devh doctor` | окружение: git/VERIFY/агент/flock/timeout/remote/exclude/mutation/shellcheck/bench + crash-recovery сироты; exit≠0 при fail |
 | logs | `devh logs [id]` | пути логов item + хвосты agent/verify; без id — свежие логи всех items |
-| bg | `devh bg [id]` | detached-прогон: setsid+nohup (свой session, immune to HUP), лог в bg.log; параллельная работа безопасна (run.lock + WIP) |
-| ps | `devh ps` | PID, elapsed, текущая стадия из timing.log; мёртвые pid-файлы помечаются |
+| bg | `devh bg [id]` / `devh bg auto --from <dir> [--max N]` | detached-прогон: setsid+nohup (свой session, immune to HUP), лог в bg.log / bg-auto.log; параллельная работа безопасна (run.lock + WIP) |
+| ps | `devh ps` | PID, elapsed, текущая стадия из timing.log; живые авто-прогоны (auto.pid); мёртвые pid-файлы помечаются |
 | tickets | `devh tickets [--import]` | OnFlyAnalysis-наблюдения: показать / превратить в items (без red-идеи — отклоняется) |
 
 ## Наблюдаемость — где что смотреть
@@ -109,8 +119,9 @@ RED-пруф первым, MSG_DENY-гигиена последней. Паде�
 ## Self-test — тот же стек, что гейтит чужие проекты
 
 clippy (shellcheck-слой) → сьют 25 секций (порт `test.sh`, 95 ассертов;
-оракул гоняется напрямую: `DEVH=<rust-bin> bash devharness/test.sh`) →
-cargo-mutants на core/ (kill 100%) → llvm-cov ≥80%.
+оракул гоняется напрямую: `DEVH=<rust-bin> bash devhament/test.sh`) →
+cargo-mutants на core/ (kill 100%) → llvm-cov ≥80% → oracle на
+musl-статике (flock/fs2/setsid на static-pie).
 
 CI: `.github/workflows/devharness-rs.yml` (Rust: fmt → clippy →
 тесты → oracle через обёртку `devh` → llvm-cov → cargo-mutants) и
@@ -123,3 +134,18 @@ shellcheck → test.sh → selfmutate.sh).
   `devharness.yml`: shellcheck + test.sh + selfmutate 16/16); `devh` —
   обёртка над Rust, CI `devharness-rs.yml` гоняет оракул через неё.
 - Спеки старых сессий → по одной через `devh new <N>` / `devh new "..."`.
+
+### Burn-in → ретировка classic (критерий выхода)
+
+Шаг 2b: 1–2 недели эксплуатации через обёртку (двойной CI). Ретировка
+Step 3 (`git rm devh-classic selfmutate.sh`, удаление `devharness.yml`,
+selfcov уходит; мутационный oracle = cargo-mutants) — **ТОЛЬКО** при
+выполнении ВСЕХ критериев:
+
+- ≥14 календарных дней с даты свитча (edd64c6, 2026-10-16) — не раньше
+  2026-10-30;
+- оба CI зелёные на всех прогонах `devharness/**` за период;
+- ни одного патча/фикса в `devh-classic` за период;
+- ≥1 реальная рабочая сессия через обёртку (`.harness/log.md` содержит
+  Session после свитча);
+- cargo-mutants: 100% viable kill-rate удерживается.

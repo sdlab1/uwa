@@ -27,6 +27,11 @@ jobs:
         run: |
           cargo build -p devh
           bash devharness/test.sh # DEVH по умолчанию → devharness/devh → target/debug/devh
+      - name: "musl-статик (дистрибуция): полный oracle на статике — flock/fs2/setsid"
+        run: |
+          rustup target add x86_64-unknown-linux-musl
+          cargo build --release --target x86_64-unknown-linux-musl -p devh
+          DEVH="$PWD/target/x86_64-unknown-linux-musl/release/devh" bash devharness/test.sh
       - name: coverage-гейт (selfcov-замена, нативно)
         run: |
           cargo install cargo-llvm-cov --locked

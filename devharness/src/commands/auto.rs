@@ -7,10 +7,22 @@ use crate::core::types::{ItemId, RunConfig};
 use crate::shell::color::colors;
 use crate::shell::store::{item_rel, Store};
 
+struct AutoPidGuard<'a> {
+    store: &'a Store,
+}
+
+impl Drop for AutoPidGuard<'_> {
+    fn drop(&mut self) {
+        self.store.remove_auto_pid();
+    }
+}
+
 pub fn auto(store: &Store, cfg: &RunConfig, from: Option<&str>, max: u32) -> anyhow::Result<()> {
     let c = colors();
     let exe = std::env::current_exe()?;
     let _ = cfg;
+    store.write_auto_pid(std::process::id())?;
+    let _guard = AutoPidGuard { store };
     let mut imp = 0usize;
 
     if let Some(from) = from {

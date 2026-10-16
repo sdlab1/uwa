@@ -38,6 +38,23 @@ pub fn ps(store: &Store) {
             );
         }
     }
+    let ap = store.auto_pid_path();
+    if let Ok(pid_text) = std::fs::read_to_string(&ap) {
+        let pid: i32 = pid_text.trim().parse().unwrap_or(0);
+        if pid > 0 && kill_ok(pid) {
+            let el = ap
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.elapsed().ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            println!("auto    PID {pid:<8} {el:>5}s   стадия: авто-прогон");
+            found += 1;
+        } else {
+            let _ = std::fs::remove_file(&ap);
+        }
+    }
     if found == 0 {
         println!("нет прогонов в полёте");
     }

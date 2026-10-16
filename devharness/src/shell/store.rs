@@ -143,4 +143,16 @@ impl Store {
     pub fn remove_pid(&self, id: &ItemId) {
         let _ = std::fs::remove_file(self.item_dir(id).join("run.pid"));
     }
+
+    pub fn auto_pid_path(&self) -> PathBuf {
+        self.dir.join("auto.pid")
+    }
+
+    pub fn write_auto_pid(&self, pid: u32) -> std::io::Result<()> {
+        self.atomic_write("auto.pid", &pid.to_string())
+    }
+
+    pub fn remove_auto_pid(&self) {
+        let _ = std::fs::remove_file(self.auto_pid_path());
+    }
 }

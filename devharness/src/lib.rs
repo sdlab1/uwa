@@ -44,6 +44,10 @@ pub enum Cmd {
     },
     Bg {
         id: Option<String>,
+        #[arg(long)]
+        from: Option<String>,
+        #[arg(long)]
+        max: Option<u32>,
     },
     Ps,
     Tickets {

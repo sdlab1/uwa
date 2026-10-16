@@ -66,8 +66,26 @@ pub fn new_cmd(store: &Store, arg: Option<&str>, no_red: Option<&str>) -> anyhow
     }
 
     let title = arg;
-    let spec = read_spec_stdin()?;
-    let (id, d) = create_item(store, title, &spec, no_red)?;
+    let (id, d) = if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        let (id, d) = create_item(store, title, "", no_red)?;
+        let spec_path = d.join("spec.md");
+        let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
+        match std::process::Command::new(&editor).arg(&spec_path).status() {
+            Ok(s) if s.success() => {}
+            Ok(s) => println!("   ⚠  редактор «{editor}» завершился с {s} — проверь spec.md"),
+            Err(e) => anyhow::bail!("devh: не удалось запустить редактор «{editor}»: {e}"),
+        }
+        let spec = std::fs::read_to_string(&spec_path).unwrap_or_default();
+        if no_red.is_none() {
+            if let Some(red) = red_from_spec(&spec) {
+                std::fs::write(d.join("red.cmd"), &red)?;
+            }
+        }
+        (id, d)
+    } else {
+        let spec = read_spec_stdin()?;
+        create_item(store, title, &spec, no_red)?
+    };
     println!(
         "{}OK {}: {} (спека: {}){}{}",
         c.g,

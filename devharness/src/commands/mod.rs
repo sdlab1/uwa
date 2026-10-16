@@ -180,10 +180,18 @@ pub fn dispatch(cmd: &Cmd, root: &Path) -> anyhow::Result<()> {
             let id = resolve_id(&store, &Some(id.clone()))?;
             misc::logs(&store, &id);
         }
-        Cmd::Bg { id } => {
-            let id = resolve_id(&store, id)?;
-            bg::bg(&store, &id)?;
-        }
+        Cmd::Bg { id, from, max } => match id.as_deref() {
+            Some("auto") => {
+                let from = from
+                    .as_deref()
+                    .ok_or_else(|| anyhow::anyhow!("devh bg auto --from <dir> [--max N]"))?;
+                bg::bg_auto(&store, from, max.unwrap_or(0))?;
+            }
+            _ => {
+                let id = resolve_id(&store, id)?;
+                bg::bg(&store, &id)?;
+            }
+        },
         Cmd::Ps => ps::ps(&store),
         Cmd::Tickets { import: false } => {
             let obs = store.read("observations.md").unwrap_or_default();

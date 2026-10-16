@@ -760,6 +760,135 @@ fn section21_bg_ps() {
 }
 
 #[test]
+fn section21b_editor_mode_pty() {
+    let sb = Sandbox::new("r21b");
+    sb.run_ok(&["init"]);
+    let stub = sb.stubs.join("editor-stub.sh");
+    write_exec(
+        &stub,
+        "#!/usr/bin/env bash\nprintf 'спека из редактора\\nRED: true\\n' > \"$1\"\n",
+    );
+    if Command::new("script")
+        .arg("--version")
+        .output()
+        .map(|o| !o.status.success())
+        .unwrap_or(true)
+    {
+        eprintln!("SKIP: script(1) нет — pty-тест editor-режима пропущен");
+        return;
+    }
+    let cmdline = format!(
+        "EDITOR='{}' '{}' new 'from editor'",
+        stub.display(),
+        devh_bin()
+    );
+    let mut c = Command::new("script");
+    c.args(["-qec", &cmdline, "/dev/null"])
+        .current_dir(&sb.repo);
+    sb.base_env(&mut c);
+    let out = c.output().unwrap();
+    assert!(
+        out.status.success(),
+        "editor pty: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let all = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(contains(&all, "OK W-001"), "{all}");
+    let item = sb.item_dir("W-001");
+    let spec = fs::read_to_string(item.join("spec.md")).unwrap();
+    assert!(spec.contains("спека из редактора"), "spec.md: {spec}");
+    let red = fs::read_to_string(item.join("red.cmd")).unwrap();
+    assert_eq!(red.trim(), "true", "RED извлечён из спеки редактора");
+}
+
+#[test]
+fn section21c_auto_pid_ps() {
+    let sb = Sandbox::new("r21c");
+    sb.run_ok(&["init"]);
+    fs::create_dir_all(sb.repo.join("specs")).unwrap();
+    fs::write(
+        sb.repo.join("specs/a.md"),
+        "# Авто-А\nRED: test -f done.txt\nx\n",
+    )
+    .unwrap();
+    let mut c = sb.devh(&["auto", "--from", "specs", "--max", "1"]);
+    c.env("HARNESS_VERIFY", "sleep 6; test -f done.txt");
+    let mut child = c.spawn().unwrap();
+    let ap = sb.harness_file("auto.pid");
+    let mut n = 0;
+    while !ap.exists() && n < 50 {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        n += 1;
+    }
+    assert!(
+        ap.exists(),
+        "auto.pid должен появиться во время авто-прогона"
+    );
+    let (ok, ps_out) = sb.run_capture(&["ps"]);
+    assert!(ok);
+    assert!(
+        contains(&ps_out, "auto"),
+        "ps показывает авто-прогон: {ps_out}"
+    );
+    assert!(contains(&ps_out, "PID"), "{ps_out}");
+    let mut n = 0;
+    while ap.exists() && n < 90 {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        n += 1;
+    }
+    assert!(!ap.exists(), "auto.pid убирается guard'ом по завершении");
+    let _ = child.wait();
+    assert_eq!(sb.status("W-001"), "done");
+}
+
+#[test]
+fn section21d_bg_auto() {
+    let sb = Sandbox::new("r21d");
+    sb.run_ok(&["init"]);
+    fs::create_dir_all(sb.repo.join("specs")).unwrap();
+    fs::write(
+        sb.repo.join("specs/a.md"),
+        "# Бг-А\nRED: test -f done.txt\nx\n",
+    )
+    .unwrap();
+    let mut c = sb.devh(&["bg", "auto", "--from", "specs", "--max", "1"]);
+    c.env("HARNESS_VERIFY", "sleep 6; test -f done.txt");
+    let out = c.output().unwrap();
+    assert!(
+        out.status.success(),
+        "bg auto: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let all = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(contains(&all, "PID"), "{all}");
+    assert!(contains(&all, "bg-auto.log"), "{all}");
+    let ap = sb.harness_file("auto.pid");
+    let mut n = 0;
+    while !ap.exists() && n < 50 {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        n += 1;
+    }
+    let (ok, ps_out) = sb.run_capture(&["ps"]);
+    assert!(ok);
+    assert!(contains(&ps_out, "auto"), "ps видит bg-auto: {ps_out}");
+    let mut n = 0;
+    while ap.exists() && n < 90 {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        n += 1;
+    }
+    assert!(!ap.exists(), "auto.pid убран по завершении bg-auto");
+    assert_eq!(sb.status("W-001"), "done");
+}
+
+#[test]
 fn section22_tickets() {
     let sb = Sandbox::new("r22");
     sb.run_ok(&["init"]);
