@@ -110,6 +110,18 @@ if [ -f "$T_MUT_GOOD" ]; then echo "Mutants: 10, Killed: 10 (100%)"; else echo "
             &self.stubs.join("mut-garbage.sh"),
             "#!/usr/bin/env bash\necho \"какой-то чужой вывод без маркеров\"\nexit 0\n",
         );
+        write_exec(
+            &self.stubs.join("crap-ok.sh"),
+            r#"#!/usr/bin/env bash
+echo "src/lib.rs:10 parse_ok C=6 cov=45"
+echo "src/bin.rs:20 run_cli C=3 cov=0"
+echo "CRAP: functions=2"
+"#,
+        );
+        write_exec(
+            &self.stubs.join("crap-garbage.sh"),
+            "#!/usr/bin/env bash\necho \"какой-то чужой вывод без маркеров\"\n",
+        );
     }
 
     fn devh(&self, args: &[&str]) -> Command {
@@ -167,6 +179,28 @@ if [ -f "$T_MUT_GOOD" ]; then echo "Mutants: 10, Killed: 10 (100%)"; else echo "
             args.push("--no-red");
             args.push(&nr);
         }
+        let mut c = self.devh(&args);
+        c.stdin(Stdio::piped());
+        c.stdout(Stdio::piped());
+        c.stderr(Stdio::piped());
+        let mut child = c.spawn().unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(spec.as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert!(
+            out.status.success(),
+            "new failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    fn new_item_flags(&self, title: &str, spec: &str, flags: &[&str]) {
+        let mut args: Vec<&str> = vec!["new", title];
+        args.extend_from_slice(flags);
         let mut c = self.devh(&args);
         c.stdin(Stdio::piped());
         c.stdout(Stdio::piped());
@@ -1009,6 +1043,83 @@ fn section25_auto() {
     assert!(sb.item_dir("W-001").join("red.cmd").is_file());
     assert_eq!(sb.status("W-002"), "open");
     assert!(contains(&out, "остался: W-002"), "{out}");
+}
+
+#[test]
+fn section26_crap_gate() {
+    let sb = Sandbox::new("r26");
+    sb.run_ok(&["init"]);
+
+    // чистый прогон: crap-ok → зелёный, 0 violations в логе
+    sb.new_item("crap ok", "спека\n", Some("x"));
+    let mut c = sb.devh(&["run", "W-001"]);
+    c.env("HARNESS_CRAP", sb.stubs.join("crap-ok.sh"))
+        .env("HARNESS_CRAP_SCOPE", ".");
+    let out = c.output().unwrap();
+    let all = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.status.success(), "clean run: {all}");
+    let crap_log = fs::read_to_string(sb.log_file("W-001-crap.log")).unwrap();
+    assert!(contains(&crap_log, "0 violations"), "{crap_log}");
+
+    // env-блокер: мусорный инструмент → не fix-раунд, статус active
+    sb.new_item_flags("crap env", "спека\n", &["--no-red", "x"]);
+    let mut c = sb.devh(&["run", "W-002"]);
+    c.env("HARNESS_CRAP", sb.stubs.join("crap-garbage.sh"))
+        .env("HARNESS_CRAP_SCOPE", ".");
+    let out = c.output().unwrap();
+    let all = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!out.status.success(), "garbage tool must env-block: {all}");
+    assert!(contains(&all, "Блокер СРЕДЫ"), "{all}");
+    assert!(!contains(&all, "раунд фикса"), "{all}");
+    assert_eq!(sb.status("W-002"), "active");
+    sb.run_ok(&["abort", "W-002"]);
+
+    // записанный обход: --no-crap → мусорный инструмент не мешает
+    sb.new_item_flags(
+        "crap bypass",
+        "спека\n",
+        &["--no-red", "x", "--no-crap", "инструмент недоступен"],
+    );
+    let mut c = sb.devh(&["run", "W-003"]);
+    c.env("HARNESS_CRAP", sb.stubs.join("crap-garbage.sh"))
+        .env("HARNESS_CRAP_SCOPE", ".");
+    let out = c.output().unwrap();
+    let all = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.status.success(), "bypass run: {all}");
+    assert!(
+        contains(
+            &all,
+            "CRAP пропущен (записанный обход): инструмент недоступен"
+        ),
+        "{all}"
+    );
+
+    // doctor: не настроен → ok-строка; мусорный инструмент → FAIL и ненулевой rc
+    let (ok, out) = sb.run_capture(&["doctor"]);
+    assert!(ok, "doctor без CRAP: {out}");
+    assert!(contains(&out, "CRAP-гейт не настроен"), "{out}");
+    let mut c = sb.devh(&["doctor"]);
+    c.env("HARNESS_CRAP", sb.stubs.join("crap-garbage.sh"));
+    let out = c.output().unwrap();
+    let all = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!out.status.success(), "doctor со сломанным CRAP: {all}");
+    assert!(contains(&all, "FAIL") && contains(&all, "CRAP"), "{all}");
 }
 
 #[test]

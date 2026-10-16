@@ -41,7 +41,7 @@ Rust-`devh` (CI `devharness-rs.yml`), отдельно — против bash:
 
 ## Гейты (обязательны, кроме bench)
 
-verify → no-ignored → lint → review → mutation(kill≥MIN_KILL) → [bench];
+verify → no-ignored → lint → crap(score≤CRAP_MAX) → review → mutation(kill≥MIN_KILL) → [bench];
 RED-пруф первым, MSG_DENY-гигиена последней. Падение → fix-раунд с
 хвостом лога (≤ MAX_FIX); нет инструмента = блокер СРЕДЫ, не fix-раунд.
 
@@ -50,6 +50,7 @@ RED-пруф первым, MSG_DENY-гигиена последней. Паде�
 | VERIFY | `VERIFY` | тесты/сборка до коммита |
 | NO-IGNORED | `NO_IGNORED=1` | `N ignored > 0` = скрытый красный |
 | MUTATE | `MUTATE`, `MIN_KILL=90` | kill-rate ≥ MIN_KILL% на изменённых `MUTATE_SCOPE`-файлах (`{module}`/`{file}`); формат вывода `Mutants: N, Killed: M` (muex / cargo-mutants); инструмент не установлен = блокер среды (rc=2), не fix-раунд |
+| CRAP | `CRAP`, `CRAP_MAX=12` | guardrail №2 (Uncle Bob): score = C²·(1−cov)³ + C, нарушение = score > CRAP_MAX; формат вывода `file:line fun C=N cov=N` + итог `CRAP: functions=N`; контракт не распознан = блокер среды; обход только записанный (`--no-crap`) |
 | RED | `items/W-NNN/red.cmd` | в первую очередь: падает на чистом HEAD до работы, зеленеет после; обход только записанный (`--no-red`) |
 | LINT | `LINT=1`, `LINT_CMD` | авто-shellcheck изменённых *.sh + проектный линтер |
 | REVIEW | `REVIEW=1` | self-review диффа вторым запросом; `VERDICT: OK` / `VERDICT: ISSUES: …` → fix-раунд |
@@ -60,7 +61,7 @@ RED-пруф первым, MSG_DENY-гигиена последней. Паде�
 | Команда | Синтаксис | Что делает |
 |---|---|---|
 | init | `devh init` | конфиг с автодетектом (uwa→scripts/verify.sh; gobot→mix test+muex; rust→cargo test), todo/report.md→RULES/RULES_LOG/MSG_DENY; `.harness/` в локальный exclude |
-| new | `devh new "title" [--no-red "причина"]` / `devh new <N>` | item + spec.md; на TTY stdin — редактор (`$EDITOR`, дефолт vi); `<N>` — копия `todo/N.md` → `W-0NN` |
+| new | `devh new "title" [--no-red "причина"] [--no-crap "причина"]` / `devh new <N>` | item + spec.md; на TTY stdin — редактор (`$EDITOR`, дефолт vi); `<N>` — копия `todo/N.md` → `W-0NN` |
 | list | `devh list` | таблица: ID / STATUS(open→active→done) / WT / TITLE |
 | hint | `devh hint [id]` | спека + план + готовый промпт следующей модели |
 | run | `devh run [id]` | claim (WIP-лимит, flock) → worktree → RED pre → агент → гейт-цикл (падение → fix-раунд с хвостом лога) → RED post → гигиена → commit → push ветки |
@@ -68,7 +69,7 @@ RED-пруф первым, MSG_DENY-гигиена последней. Паде�
 | merge | `devh merge [id]` | guard (дерево чисто, есть коммиты) → rebase → ff-push в MAIN → `## Session N` в RULES_LOG → лог → cleanup → `next:` |
 | abort | `devh abort [id]` | worktree/ветку вон, item → open (работа выброшена) |
 | clean | `devh clean` | worktree/ветки done-items + retention логов (LOG_DAYS) |
-| doctor | `devh doctor` | окружение: git/VERIFY (+ smoke-запуск ≤120s)/агент/flock/timeout/remote/exclude/mutation/shellcheck/bench + crash-recovery сироты; exit≠0 при fail |
+| doctor | `devh doctor` | окружение: git/VERIFY (+ smoke-запуск ≤120s)/агент/flock/timeout/remote/exclude/mutation/CRAP (+ smoke)/shellcheck/bench + crash-recovery сироты; exit≠0 при fail |
 | logs | `devh logs [id]` | пути логов item + хвосты agent/verify; без id — свежие логи всех items |
 | bg | `devh bg [id]` / `devh bg auto --from <dir> [--max N]` | detached-прогон: setsid+nohup (свой session, immune to HUP), лог в bg.log / bg-auto.log; параллельная работа безопасна (run.lock + WIP) |
 | ps | `devh ps` | PID, elapsed, текущая стадия из timing.log; живые авто-прогоны (auto.pid); мёртвые pid-файлы помечаются |
@@ -81,9 +82,9 @@ RED-пруф первым, MSG_DENY-гигиена последней. Паде�
 | Путь | Что внутри |
 |---|---|
 | `.harness/logs/W-NNN-agent.log` | полный вывод агента за последний раунд |
-| `.harness/logs/W-NNN-verify.log` / `-mutate.log` / `-bench.log` | выводы гейтов последнего раунда |
+| `.harness/logs/W-NNN-verify.log` / `-mutate.log` / `-crap.log` / `-bench.log` | выводы гейтов последнего раунда |
 | `.harness/logs/W-NNN-bootstrap.log` | подготовка worktree (deps) |
-| `.harness/logs/W-NNN-timing.log` | тайминг стадий (сек): worktree / red / agent-rN / verify-rN / mutate-rN / bench-rN / commit — печатается в конце run и уходит в log.md; bottleneck ищется одним взглядом |
+| `.harness/logs/W-NNN-timing.log` | тайминг стадий (сек): worktree / red / agent-rN / verify-rN / crap-rN / mutate-rN / bench-rN / commit — печатается в конце run и уходит в log.md; bottleneck ищется одним взглядом |
 | `.harness/log.md` | append-only журнал закрытых сессий: commit, fix-rounds/gates/duration, summary |
 | `.harness/summaries/W-NNN.md` | summary агента (1-я строка = сообщение коммита) |
 | `.harness/items/W-NNN/` | spec.md, plan.md, red.cmd, status, agent (override) |
@@ -108,6 +109,7 @@ RED-пруф первым, MSG_DENY-гигиена последней. Паде�
 | WT_ROOT | /tmp | где worktree'и (слаг по репо — коллизий нет) |
 | LOG_DAYS | 30 | retention логов |
 | MUTATE / MUTATE_SCOPE / MIN_KILL | muex / lib / 90 | мутационный гейт (автодетект при init) |
+| CRAP / CRAP_SCOPE / CRAP_MAX | '' / '' / 12 | гейт CRAP (автодетект при init: gobot→mix crap.report, scripts/crap-rs.sh→bash); пустой CRAP = выкл |
 | BENCH | '' | перф-гейт (опционален) |
 | RULES / RULES_LOG | todo/report.md | справочник граблей в промпте / куда дописывать «## Session N» |
 | MSG_DENY | `todo/\|report\.md\|Session [0-9]+` | гигиена сообщения коммита |
@@ -118,8 +120,8 @@ RED-пруф первым, MSG_DENY-гигиена последней. Паде�
 
 ## Self-test — тот же стек, что гейтит чужие проекты
 
-clippy (shellcheck-слой) → сьют 25 секций (порт `test.sh`, 95 ассертов;
-оракул гоняется напрямую: `DEVH=<rust-bin> bash devhament/test.sh`) →
+clippy (shellcheck-слой) → сьют 26 секций (порт `test.sh`, 103 ассерта;
+оракул гоняется напрямую: `DEVH=<rust-bin> bash devharness/test.sh`) →
 cargo-mutants на core/ (kill 100%) → llvm-cov ≥80% → oracle на
 musl-статике (flock/fs2/setsid на static-pie).
 
@@ -131,7 +133,7 @@ shellcheck → test.sh → selfmutate.sh).
 ## Миграция
 
 - Выполнено: bash-`devh` → `devh-classic` (по-прежнему гейтится CI
-  `devharness.yml`: shellcheck + test.sh + selfmutate 16/16); `devh` —
+  `devharness.yml`: shellcheck + test.sh + selfmutate 18/18); `devh` —
   обёртка над Rust, CI `devharness-rs.yml` гоняет оракул через неё.
 - Спеки старых сессий → по одной через `devh new <N>` / `devh new "..."`.
 

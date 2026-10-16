@@ -18,7 +18,7 @@ Static binary for distribution (flock/fs2/setsid verified by the full oracle —
     # → target/x86_64-unknown-linux-musl/release/devh (static-pie)
 
 `devh` in the checkout is a wrapper over the Rust binary; the bash
-reference is kept as `devh-classic`. `test.sh` — 95 asserts, by default it
+reference is kept as `devh-classic`. `test.sh` — 103 asserts, by default it
 runs against the Rust `devh` (CI `devharness-rs.yml`), separately — against
 bash:
 
@@ -42,7 +42,7 @@ shows live autopilot runs (`.harness/auto.pid`).
 
 ## Gates (all mandatory except bench)
 
-verify → no-ignored → lint → review → mutation(kill≥MIN_KILL) → [bench];
+verify → no-ignored → lint → crap(score≤CRAP_MAX) → review → mutation(kill≥MIN_KILL) → [bench];
 RED proof first, MSG_DENY hygiene last. Failure → fix-round with the tail
 of the log (≤ MAX_FIX); a missing tool = an ENV blocker, not a fix-round.
 
@@ -51,6 +51,7 @@ of the log (≤ MAX_FIX); a missing tool = an ENV blocker, not a fix-round.
 | VERIFY | `VERIFY` | tests/build before commit |
 | NO-IGNORED | `NO_IGNORED=1` | `N ignored > 0` = hidden red |
 | MUTATE | `MUTATE`, `MIN_KILL=90` | kill-rate ≥ MIN_KILL% on changed `MUTATE_SCOPE` files (`{module}`/`{file}`); output format `Mutants: N, Killed: M` (muex / cargo-mutants); missing tool = env blocker (rc=2), not a fix-round |
+| CRAP | `CRAP`, `CRAP_MAX=12` | guardrail #2 (Uncle Bob): score = C²·(1−cov)³ + C, violation = score > CRAP_MAX; output format `file:line fun C=N cov=N` + summary `CRAP: functions=N`; unrecognized contract = env blocker; bypass only recorded (`--no-crap`) |
 | RED | `items/W-NNN/red.cmd` | first of all: fails on a clean HEAD before the work, goes green after; only recorded bypass (`--no-red`) |
 | LINT | `LINT=1`, `LINT_CMD` | auto-shellcheck of changed *.sh + project linter |
 | REVIEW | `REVIEW=1` | self-review of the diff with a second request; `VERDICT: OK` / `VERDICT: ISSUES: …` → fix-round |
@@ -61,7 +62,7 @@ of the log (≤ MAX_FIX); a missing tool = an ENV blocker, not a fix-round.
 | Command | Syntax | What it does |
 |---|---|---|
 | init | `devh init` | config with auto-detection (uwa→scripts/verify.sh; gobot→mix test+muex; rust→cargo test), todo/report.md→RULES/RULES_LOG/MSG_DENY; `.harness/` into the local exclude |
-| new | `devh new "title" [--no-red "reason"]` / `devh new <N>` | item + spec.md; on a TTY stdin — opens an editor (`$EDITOR`, default vi); `<N>` — copy of `todo/N.md` → `W-0NN` |
+| new | `devh new "title" [--no-red "reason"] [--no-crap "reason"]` / `devh new <N>` | item + spec.md; on a TTY stdin — opens an editor (`$EDITOR`, default vi); `<N>` — copy of `todo/N.md` → `W-0NN` |
 | list | `devh list` | table: ID / STATUS(open→active→done) / WT / TITLE |
 | hint | `devh hint [id]` | spec + plan + ready prompt for the next model |
 | run | `devh run [id]` | claim (WIP limit, flock) → worktree → RED pre → agent → gate cycle (failure → fix-round with the log tail) → RED post → hygiene → commit → push branch |
@@ -69,7 +70,7 @@ of the log (≤ MAX_FIX); a missing tool = an ENV blocker, not a fix-round.
 | merge | `devh merge [id]` | guard (clean tree, has commits) → rebase → ff-push to MAIN → `## Session N` into RULES_LOG → log → cleanup → `next:` |
 | abort | `devh abort [id]` | worktree/branch gone, item → open (work discarded) |
 | clean | `devh clean` | worktrees/branches of done items + log retention (LOG_DAYS) |
-| doctor | `devh doctor` | environment: git/VERIFY (+ a smoke run ≤120s)/agent/flock/timeout/remote/exclude/mutation/shellcheck/bench + crash-recovery for orphans; exit≠0 on fail |
+| doctor | `devh doctor` | environment: git/VERIFY (+ a smoke run ≤120s)/agent/flock/timeout/remote/exclude/mutation/CRAP (+ smoke)/shellcheck/bench + crash-recovery for orphans; exit≠0 on fail |
 | logs | `devh logs [id]` | item log paths + agent/verify tails; without id — fresh logs of all items |
 | bg | `devh bg [id]` / `devh bg auto --from <dir> [--max N]` | detached run: setsid+nohup (own session, immune to HUP), log in bg.log / bg-auto.log; parallel work is safe (run.lock + WIP) |
 | ps | `devh ps` | PID, elapsed, current stage from timing.log; live autopilot runs (auto.pid); dead pid files are flagged |
@@ -82,9 +83,9 @@ All state and logs live in the target repo under `.harness/` (never committed):
 | Path | What's inside |
 |---|---|
 | `.harness/logs/W-NNN-agent.log` | full agent output for the last round |
-| `.harness/logs/W-NNN-verify.log` / `-mutate.log` / `-bench.log` | gate outputs for the last round |
+| `.harness/logs/W-NNN-verify.log` / `-mutate.log` / `-crap.log` / `-bench.log` | gate outputs for the last round |
 | `.harness/logs/W-NNN-bootstrap.log` | worktree preparation (deps) |
-| `.harness/logs/W-NNN-timing.log` | stage timings (seconds): worktree / red / agent-rN / verify-rN / mutate-rN / bench-rN / commit — printed at the end of run and appended to log.md; bottleneck visible at a glance |
+| `.harness/logs/W-NNN-timing.log` | stage timings (seconds): worktree / red / agent-rN / verify-rN / crap-rN / mutate-rN / bench-rN / commit — printed at the end of run and appended to log.md; bottleneck visible at a glance |
 | `.harness/log.md` | append-only journal of closed sessions: commit, fix-rounds/gates/duration, summary |
 | `.harness/summaries/W-NNN.md` | agent summary (first line = commit message) |
 | `.harness/items/W-NNN/` | spec.md, plan.md, red.cmd, status, agent (override) |
@@ -109,6 +110,7 @@ All state and logs live in the target repo under `.harness/` (never committed):
 | WT_ROOT | /tmp | where worktrees live (slug per repo — no collisions) |
 | LOG_DAYS | 30 | log retention |
 | MUTATE / MUTATE_SCOPE / MIN_KILL | muex / lib / 90 | mutation gate (auto-detect on init) |
+| CRAP / CRAP_SCOPE / CRAP_MAX | '' / '' / 12 | CRAP gate (auto-detect on init: gobot→mix crap.report, scripts/crap-rs.sh→bash); empty CRAP = off |
 | BENCH | '' | perf gate (optional) |
 | RULES / RULES_LOG | todo/report.md | gotchas reference for the prompt / where «## Session N» is appended |
 | MSG_DENY | `todo/\|report\.md\|Session [0-9]+` | commit-message hygiene |
@@ -119,7 +121,7 @@ All state and logs live in the target repo under `.harness/` (never committed):
 
 ## Self-test — the same stack that gates other projects
 
-clippy (the shellcheck layer) → 25-section suite (port of `test.sh`, 95
+clippy (the shellcheck layer) → 26-section suite (port of `test.sh`, 103
 asserts; the oracle is run directly: `DEVH=<rust-bin> bash
 devharness/test.sh`) → cargo-mutants on core/ (100% kill) → llvm-cov ≥80%
 → oracle on the musl static binary (flock/fs2/setsid on static-pie).
@@ -132,7 +134,7 @@ shellcheck → test.sh → selfmutate.sh).
 ## Migration
 
 - Done: bash `devh` → `devh-classic` (still gated by CI `devharness.yml`:
-  shellcheck + test.sh + selfmutate 16/16); `devh` is a wrapper over the
+  shellcheck + test.sh + selfmutate 18/18); `devh` is a wrapper over the
   Rust binary, CI `devharness-rs.yml` runs the oracle through it.
 - Specs of old sessions → one by one via `devh new <N>` / `devh new "..."`.
 
