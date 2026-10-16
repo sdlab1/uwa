@@ -1,7 +1,8 @@
 //! P0: Real binary smoke tests — verifies `uwa start` actually launches
 //! Chromium, serves `/healthz`/`/readyz`, and cleans up on stop.
 //!
-//! This is the only test that runs the REAL binary against a REAL Chromium.
+use serde_json;
+// This is the only test that runs the REAL binary against a REAL Chromium.
 
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -36,7 +37,7 @@ fn wait_for_readyz(port: u16, timeout: Duration) -> bool {
     while Instant::now() < deadline {
         if let Ok(resp) = ureq::get(&format!("http://127.0.0.1:{port}/readyz")).call() {
             if (200..300).contains(&resp.status()) {
-                let body = resp.text().unwrap_or_default();
+                let body = resp.into_string().unwrap_or_default();
                 if body.contains("ok") || body.contains("ready") {
                     return true;
                 }
@@ -80,12 +81,15 @@ fn binary_starts_answers_readyz_and_stops_cleanly() {
     );
 
     // Verify provider status endpoint works (pipeline reached tab)
-    let status: serde_json::Value =
-        ureq::get(&format!("http://127.0.0.1:{port}/v1/provider/status"))
+    let status: serde_json::Value = {
+        let resp = ureq::get(&format!("http://127.0.0.1:{port}/v1/provider/status"))
             .call()
-            .unwrap_or_else(|e| panic!("provider status failed: {e}"))
-            .json()
-            .unwrap_or(serde_json::Value::Null);
+            .unwrap_or_else(|e| panic!("provider status failed: {e}"));
+        let body = resp
+            .into_string()
+            .unwrap_or_else(|e| panic!("provider status failed: {e}"));
+        serde_json::from_str(&body).unwrap_or_else(|e| panic!("provider status failed: {e}"))
+    };
     assert!(
         status.is_object(),
         "provider status returned non-object: {status}"
@@ -147,11 +151,13 @@ fn models_endpoint_lists_expected_providers() {
         "uwa did not become ready within 30s on port {port}"
     );
 
-    let resp: serde_json::Value = ureq::get(&format!("http://127.0.0.1:{port}/v1/models"))
-        .call()
-        .unwrap_or_else(|e| panic!("models failed: {e}"))
-        .json()
-        .unwrap_or(serde_json::Value::Null);
+    let resp: serde_json::Value = {
+        let resp = ureq::get(&format!("http://127.0.0.1:{port}/v1/models"))
+            .call()
+            .unwrap_or_else(|e| panic!("models failed: {e}"));
+        let body = resp.into_string().unwrap_or_else(|e| panic!("models failed: {e}"));
+        serde_json::from_str(&body).unwrap_or_else(|e| panic!("models failed: {e}"))
+    };
 
     let data = resp["data"].as_array().cloned().unwrap_or_default();
     assert!(
