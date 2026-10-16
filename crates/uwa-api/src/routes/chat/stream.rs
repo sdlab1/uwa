@@ -304,13 +304,13 @@ mod tests {
         assert!(frames.iter().any(|f| {
             f.json()
                 .get("choices")
-                .unwrap_or_else(|| unreachable!())
+                .unwrap_or(&serde_json::Value::Null)
                 .get(0)
-                .unwrap_or_else(|| unreachable!())
+                .unwrap_or(&serde_json::Value::Null)
                 .get("delta")
-                .unwrap_or_else(|| unreachable!())
+                .unwrap_or(&serde_json::Value::Null)
                 .get("content")
-                .unwrap_or_else(|| unreachable!())
+                .unwrap_or(&serde_json::Value::Null)
                 == "hello"
         }));
     }
@@ -375,32 +375,32 @@ mod tests {
         // No finish_reason on error (OpenAI spec: not a valid enum value)
         assert!(
             j.get("choices")
-                .unwrap_or_else(|| unreachable!())
+                .unwrap_or(&serde_json::Value::Null)
                 .get(0)
-                .unwrap_or_else(|| unreachable!())
+                .unwrap_or(&serde_json::Value::Null)
                 .get("finish_reason")
-                .unwrap_or_else(|| unreachable!())
+                .unwrap_or(&serde_json::Value::Null)
                 .is_null(),
             "finish_reason must be null on error: {j:?}"
         );
         assert!(
             j.get("error")
-                .unwrap_or_else(|| unreachable!())
+                .unwrap_or(&serde_json::Value::Null)
                 .get("message")
-                .unwrap_or_else(|| unreachable!())
+                .unwrap_or(&serde_json::Value::Null)
                 .as_str()
-                .unwrap_or_else(|| unreachable!())
+                .unwrap_or("")
                 .contains("dropped")
         );
         // ...and no clean `stop` finish chunk anywhere.
         assert!(frames.iter().all(|f| {
             f.json()
                 .get("choices")
-                .unwrap_or_else(|| unreachable!())
+                .unwrap_or(&serde_json::Value::Null)
                 .get(0)
-                .unwrap_or_else(|| unreachable!())
+                .unwrap_or(&serde_json::Value::Null)
                 .get("finish_reason")
-                .unwrap_or_else(|| unreachable!())
+                .unwrap_or(&serde_json::Value::Null)
                 != "stop"
         }));
     }

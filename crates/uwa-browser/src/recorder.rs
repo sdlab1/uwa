@@ -71,7 +71,7 @@ mod tests {
     #[tokio::test]
     async fn install_reports_ok() {
         let p = MockPage::new().expect_default(json!({ "ok": true, "installed": true }));
-        install(&p).await.unwrap();
+        install(&p).await.unwrap_or_else(|e| unreachable!("{e}"));
     }
 
     #[tokio::test]
@@ -88,16 +88,16 @@ mod tests {
                 { "kind": "click", "selector": "#a", "seq": 1, "at_ms": 10, "src": "https://x/" }
             ]
         }));
-        let (installed, events) = poll(&p, 0).await.unwrap();
+        let (installed, events) = poll(&p, 0).await.unwrap_or_else(|e| unreachable!("{e}"));
         assert!(installed);
         assert_eq!(events.len(), 1);
-        assert!(matches!(&events[0], TraceEvent::Click { selector, .. } if selector == "#a"));
+        assert!(matches!(events.first().unwrap_or_else(|| unreachable!()), TraceEvent::Click { selector, .. } if selector == "#a"));
     }
 
     #[tokio::test]
     async fn poll_not_installed_returns_empty() {
         let p = MockPage::new().expect_default(json!({ "installed": false, "events": [] }));
-        let (installed, events) = poll(&p, 0).await.unwrap();
+        let (installed, events) = poll(&p, 0).await.unwrap_or_else(|e| unreachable!("{e}"));
         assert!(!installed);
         assert!(events.is_empty());
     }
@@ -105,7 +105,7 @@ mod tests {
     #[tokio::test]
     async fn poll_substitutes_the_sequence_number() {
         let p = MockPage::new().expect_default(json!({ "installed": true, "events": [] }));
-        let _ = poll(&p, 42).await.unwrap();
+        let _ = poll(&p, 42).await.unwrap_or_else(|e| unreachable!("{e}"));
         let calls = p.log();
         let last = calls
             .iter()

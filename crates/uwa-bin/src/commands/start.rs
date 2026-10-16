@@ -38,7 +38,7 @@ impl StartArgs {
 
     pub fn from_matches(matches: &clap::ArgMatches) -> Self {
         StartArgs {
-            no_chromium: matches.get_flag("no-chromium"),
+            no_chromium: matches.get_flag("no_chromium"),
             cdp: matches.get_one::<String>("cdp").cloned(),
             quiet: matches.get_flag("quiet"),
         }

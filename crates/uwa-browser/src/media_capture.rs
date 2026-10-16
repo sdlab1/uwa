@@ -197,7 +197,7 @@ mod tests {
     #[tokio::test]
     async fn start_reports_ok() {
         let p = MockPage::new().expect_default(json!({"ok": true}));
-        start_capture(&p).await.unwrap();
+        start_capture(&p).await.unwrap_or_else(|e| unreachable!("{e}"));
     }
 
     #[tokio::test]
@@ -213,21 +213,21 @@ mod tests {
             "ok": true,
             "chunks": ["SGk=", "IQ=="]
         }));
-        let bytes = stop_capture(&p).await.unwrap().unwrap();
+        let bytes = stop_capture(&p).await.unwrap_or_else(|e| unreachable!("{e}")).unwrap_or_else(|| unreachable!());
         assert_eq!(bytes, b"Hi!");
     }
 
     #[tokio::test]
     async fn stop_empty_returns_none() {
         let p = MockPage::new().expect_default(json!({"ok": true, "chunks": []}));
-        assert!(stop_capture(&p).await.unwrap().is_none());
+        assert!(stop_capture(&p).await.unwrap_or_else(|e| unreachable!("{e}")).is_none());
     }
 
     #[tokio::test]
     async fn stop_not_started_returns_none() {
         // No "chunks" array at all.
         let p = MockPage::new().expect_default(json!({"ok": false}));
-        assert!(stop_capture(&p).await.unwrap().is_none());
+        assert!(stop_capture(&p).await.unwrap_or_else(|e| unreachable!("{e}")).is_none());
     }
 
     #[tokio::test]
@@ -237,18 +237,20 @@ mod tests {
             {"kind": "video", "src": "https://x/v.mp4", "duration": 10.0},
             {"kind": "unknown", "src": "y"},
         ]));
-        let media = scan_media(&p).await.unwrap();
+        let media = scan_media(&p).await.unwrap_or_else(|e| unreachable!("{e}"));
         assert_eq!(media.len(), 2);
-        assert_eq!(media[0].kind, uwa_core::MediaSourceKind::Audio);
-        assert_eq!(media[0].url, "blob:https://x/1");
-        assert_eq!(media[0].mime.as_deref(), Some("audio/webm"));
-        assert_eq!(media[1].kind, uwa_core::MediaSourceKind::Video);
-        assert_eq!(media[1].duration_secs, Some(10.0));
+        let m0 = media.first().unwrap_or_else(|| unreachable!());
+        assert_eq!(m0.kind, uwa_core::MediaSourceKind::Audio);
+        assert_eq!(m0.url, "blob:https://x/1");
+        assert_eq!(m0.mime.as_deref(), Some("audio/webm"));
+        let m1 = media.get(1).unwrap_or_else(|| unreachable!());
+        assert_eq!(m1.kind, uwa_core::MediaSourceKind::Video);
+        assert_eq!(m1.duration_secs, Some(10.0));
     }
 
     #[tokio::test]
     async fn scan_media_non_array_is_empty() {
         let p = MockPage::new().expect_default(json!({"ok": true}));
-        assert!(scan_media(&p).await.unwrap().is_empty());
+        assert!(scan_media(&p).await.unwrap_or_else(|e| unreachable!("{e}")).is_empty());
     }
 }

@@ -1268,9 +1268,9 @@ mod tests {
             .all(|f| {
                 f.json()
                     .get("delta")
-                    .unwrap_or_else(|| unreachable!())
+                    .unwrap_or(&serde_json::Value::Null)
                     .get("stop_reason")
-                    .unwrap_or_else(|| unreachable!())
+                    .unwrap_or(&serde_json::Value::Null)
                     != "end_turn"
             }));
     }

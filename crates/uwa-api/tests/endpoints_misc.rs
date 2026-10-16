@@ -669,7 +669,10 @@ async fn apply_dry_run_returns_diff() {
             .and_then(|n| n.as_str()),
         Some("#new-input")
     );
-    assert_eq!(v.get("persisted_to"), Some(&serde_json::Value::Null));
+    // `persisted_to` used to come back as JSON null on dry-run; the
+    // selector-apply response was narrowed to {applied, diff, hint}
+    // (see 73fa6a2), and dry-run never persists anything anyway —
+    // `applied: false` above is the real assertion.
 }
 
 #[tokio::test]

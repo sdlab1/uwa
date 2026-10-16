@@ -203,7 +203,28 @@ static CHILD_PROCESSES_SPAWNED: AtomicBool = AtomicBool::new(false);
 
 /// Register a panic hook to clean up child processes on panic.
 fn set_panic_hook() {
-    std::panic::set_hook(Box::new(|_panic_info| {
+    std::panic::set_hook(Box::new(|panic_info| {
+        // A custom hook *replaces* the default one, so without this a
+        // panic before `CHILD_PROCESSES_SPAWNED` is set (e.g. a clap
+        // arg-id/access mismatch during parsing) exits 101 in total
+        // silence — exactly the state that hid the `--no-chromium` bug.
+        let location = panic_info.location();
+        let payload = panic_info
+            .payload()
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| {
+                panic_info
+                    .payload()
+                    .downcast_ref::<String>()
+                    .map(String::as_str)
+            });
+        match (location, payload) {
+            (Some(loc), Some(msg)) => eprintln!("panic at {loc}: {msg}"),
+            (Some(loc), None) => eprintln!("panic at {loc}"),
+            (None, Some(msg)) => eprintln!("panic: {msg}"),
+            (None, None) => eprintln!("panic"),
+        }
         // Kill any child processes we spawned
         if CHILD_PROCESSES_SPAWNED.load(Ordering::SeqCst) {
             eprintln!("\n[panic] cleaning up child processes...");

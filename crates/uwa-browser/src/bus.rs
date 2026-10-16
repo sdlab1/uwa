@@ -136,11 +136,11 @@ mod tests {
         a.send(NetworkEvent::Finished {
             request_id: "r1".into(),
         })
-        .unwrap();
+        .unwrap_or_else(|e| unreachable!("send failed: {e}"));
         let ev = tokio::time::timeout(Duration::from_secs(1), rx.recv())
             .await
-            .expect("event should arrive")
-            .unwrap();
+            .unwrap_or_else(|_| unreachable!("timeout"))
+            .unwrap_or_else(|_| unreachable!("recv failed"));
         assert!(matches!(ev, NetworkEvent::Finished { ref request_id } if request_id == "r1"));
     }
 
@@ -153,7 +153,7 @@ mod tests {
         a.send(NetworkEvent::Finished {
             request_id: "only-t1".into(),
         })
-        .unwrap();
+        .unwrap_or_else(|e| unreachable!("send failed: {e}"));
         assert!(
             tokio::time::timeout(Duration::from_millis(50), rx2.recv())
                 .await
@@ -182,11 +182,11 @@ mod tests {
         tx.send(NetworkEvent::Finished {
             request_id: "shared".into(),
         })
-        .unwrap();
+        .unwrap_or_else(|e| unreachable!("send failed: {e}"));
         let ev = tokio::time::timeout(Duration::from_secs(1), rx.recv())
             .await
-            .expect("event should arrive via shared channel")
-            .unwrap();
+            .unwrap_or_else(|_| unreachable!("timeout"))
+            .unwrap_or_else(|_| unreachable!("recv failed"));
         assert!(matches!(ev, NetworkEvent::Finished { ref request_id } if request_id == "shared"));
     }
 
@@ -200,11 +200,11 @@ mod tests {
         tx.send(NetworkEvent::Finished {
             request_id: "cross".into(),
         })
-        .unwrap();
+        .unwrap_or_else(|e| unreachable!("send failed: {e}"));
         let ev = tokio::time::timeout(Duration::from_secs(1), rx.recv())
             .await
-            .expect("event should arrive via shared channel")
-            .unwrap();
+            .unwrap_or_else(|_| unreachable!("timeout"))
+            .unwrap_or_else(|_| unreachable!("recv failed"));
         assert!(matches!(ev, NetworkEvent::Finished { ref request_id } if request_id == "cross"));
     }
 
@@ -229,12 +229,12 @@ mod tests {
         tx.send(NetworkEvent::Finished {
             request_id: "broadcast".into(),
         })
-        .unwrap();
+        .unwrap_or_else(|e| unreachable!("send failed: {e}"));
         for rx in [&mut r1, &mut r2, &mut r3] {
             let ev = tokio::time::timeout(Duration::from_secs(1), rx.recv())
                 .await
-                .expect("every subscriber must receive")
-                .unwrap();
+                .unwrap_or_else(|_| unreachable!("timeout"))
+                .unwrap_or_else(|_| unreachable!("recv failed"));
             assert!(
                 matches!(ev, NetworkEvent::Finished { ref request_id } if request_id == "broadcast")
             );
@@ -244,28 +244,28 @@ mod tests {
     #[tokio::test]
     async fn tap_mirrors_events_from_every_target() {
         let bus = NetBus::with_tap();
-        let mut tap = bus.tap_subscribe().expect("tap present");
+        let mut tap = bus.tap_subscribe().unwrap_or_else(|| unreachable!("tap present"));
 
         let a = bus.sender_for("t1".into()).await;
         let b = bus.sender_for("t2".into()).await;
         a.send(NetworkEvent::Finished {
             request_id: "r1".into(),
         })
-        .unwrap();
+        .unwrap_or_else(|e| unreachable!("send failed: {e}"));
         b.send(NetworkEvent::Finished {
             request_id: "r2".into(),
         })
-        .unwrap();
+        .unwrap_or_else(|e| unreachable!("send failed: {e}"));
 
         let mut seen: Vec<(String, String)> = Vec::new();
         for _ in 0..2 {
             let ev = tokio::time::timeout(Duration::from_secs(1), tap.recv())
                 .await
-                .expect("event within 1s")
-                .unwrap();
+                .unwrap_or_else(|_| unreachable!("timeout"))
+                .unwrap_or_else(|_| unreachable!("recv failed"));
             let rid = match ev.event {
                 NetworkEvent::Finished { request_id } => request_id,
-                _ => panic!("unexpected"),
+                _ => unreachable!("unexpected"),
             };
             seen.push((ev.target, rid));
         }
@@ -285,6 +285,6 @@ mod tests {
         a.send(NetworkEvent::Finished {
             request_id: "r".into(),
         })
-        .unwrap();
+        .unwrap_or_else(|e| unreachable!("send failed: {e}"));
     }
 }

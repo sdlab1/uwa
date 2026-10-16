@@ -407,7 +407,7 @@ mod tests {
         // Lookup by frame ID
         let found = registry.session_for_frame("frame1").await;
         assert!(found.is_some());
-        let found_session = found.unwrap();
+        let found_session = found.unwrap_or_else(|| unreachable!());
         assert_eq!(found_session.session_id, session.session_id);
         assert_eq!(found_session.target_id, session.target_id);
         assert_eq!(found_session.frame_id, session.frame_id);
@@ -415,7 +415,7 @@ mod tests {
         // Lookup by target ID
         let found = registry.session_for_target(&session.target_id).await;
         assert!(found.is_some());
-        let found_session = found.unwrap();
+        let found_session = found.unwrap_or_else(|| unreachable!());
         assert_eq!(found_session.session_id, session.session_id);
         assert_eq!(found_session.target_id, session.target_id);
 
@@ -425,7 +425,7 @@ mod tests {
         // Get all sessions
         let all = registry.all_sessions().await;
         assert_eq!(all.len(), 1);
-        assert_eq!(all[0].session_id, session.session_id);
+        assert_eq!(all.get(0).unwrap_or_else(|| unreachable!()).session_id, session.session_id);
     }
 
     #[tokio::test]
@@ -468,7 +468,7 @@ mod tests {
         // Remove by target ID
         let removed = registry.remove_by_target(&session.target_id).await;
         assert!(removed.is_some());
-        assert_eq!(removed.unwrap(), session.session_id);
+        assert_eq!(removed.unwrap_or_else(|| unreachable!()), session.session_id);
         assert_eq!(registry.len().await, 0);
 
         // Verify it's gone
@@ -501,7 +501,7 @@ mod tests {
         // Verify first session is present
         let found = registry.session_for_frame("frame1").await;
         assert!(found.is_some());
-        assert_eq!(found.unwrap().session_id, session1.session_id);
+        assert_eq!(found.unwrap_or_else(|| unreachable!()).session_id, session1.session_id);
 
         // Rebind the frame to the second session
         registry.rebind("frame1", session2.clone()).await;
@@ -509,7 +509,7 @@ mod tests {
         // Verify the frame now points to the second session
         let found = registry.session_for_frame("frame1").await;
         assert!(found.is_some());
-        let found_session = found.unwrap();
+        let found_session = found.unwrap_or_else(|| unreachable!());
         assert_eq!(found_session.session_id, session2.session_id);
         assert_eq!(found_session.target_id, session2.target_id);
 

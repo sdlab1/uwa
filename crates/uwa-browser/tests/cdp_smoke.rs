@@ -557,7 +557,7 @@ fn default_keyring_locked() -> Option<bool> {
             .stderr(Stdio::null())
             .spawn()
             .ok()?;
-        let deadline = Instant::now() + Duration::from_secs(3);
+        let deadline = Instant::now().checked_add(Duration::from_secs(3)).unwrap_or_else(|| unreachable!());
         loop {
             match child.try_wait() {
                 Ok(Some(status)) => {
@@ -795,7 +795,7 @@ async fn chrome_renders_a_local_page_without_cdp() {
         html.contains("smoke-body"),
         "the page never rendered the fetched payload ({} bytes): {}",
         html.len(),
-        html.get(..html.len().min(600)).unwrap_or_else(|| "")
+        html.get(..html.len().min(600)).unwrap_or("")
     );
     eprintln!("[dump] {} bytes, payload rendered", html.len());
 }

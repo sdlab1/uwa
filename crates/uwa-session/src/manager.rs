@@ -286,6 +286,13 @@ impl SessionManager {
 
     async fn create(&self, key: &SessionKey, transport: &dyn Transport) -> Result<Lease> {
         self.evict_if_over_capacity();
+        // A named profile on a transport without profile support is an error.
+        if !key.profile.is_default() && !transport.supports_profiles() {
+            return Err(UwaError::Unavailable(format!(
+                "profile `{}` is not supported on this transport",
+                key.profile
+            )));
+        }
         // Pick a tab inside the profile; a named profile with no tabs of its
         // own opens one lazily (mirrors the no-session-manager fallback).
         let tab = match self.pick_tab_in(&key.profile, transport, None).await {
@@ -362,9 +369,12 @@ impl SessionManager {
         avoid: Option<&TabId>,
     ) -> Result<TabId> {
         let tabs = transport.list_tabs_in(profile.as_str()).await?;
-        let tabs = if tabs.is_empty() && !profile.is_default() {
+        let tabs = if tabs.is_empty() && !profile.is_default() && !transport.supports_profiles() {
             // Fall back to default profile's tabs for conversation
             // differentiation when browser profiles aren't configured.
+            // When profiles are supported, a non-default profile with no
+            // tabs of its own should open one lazily (handled by the
+            // caller's error path) rather than sharing the default tab.
             transport.list_tabs_in(ProfileName::DEFAULT).await?
         } else {
             tabs

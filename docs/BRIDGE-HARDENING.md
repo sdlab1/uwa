@@ -101,10 +101,10 @@ After `uwa-core`, the same treatment for the next crates (lib code):
 | `uwa-config` | 7 (build script) + 3 | **0** | build.rs fails loudly via `die()` → `process::exit(101)` (panic's code) with readable messages — the design intent ("hard error on missing provider files") survives without `expect` |
 | `uwa-resilience` | 5 | **0** | circuit breaker recovers from mutex poisoning; retry loop without `expect` (loop provably runs ≥ 1 attempt) |
 | `uwa-session` | 8 | **0** | round-robin rotation via `checked_rem` + `get()`; pinning prefix/suffix decisions via `get(..n)` with explicit Full-replay fallback |
-| `uwa-history` | 24 | 24 | open — see UWA-101 |
-| `uwa-browser` / `uwa-providers` / `uwa-api` | 13 / 13 / 13 | unchanged | open — see UWA-101 |
-| `uwa-testkit` | 24 | unchanged | open — see UWA-101 |
-| `uwa-bin` (lib-side) | 1 | 1 | open — see UWA-101 |
+| `uwa-history` | 24 | **0** | closed — see UWA-101 |
+| `uwa-browser` / `uwa-providers` / `uwa-api` | 13 / 13 / 13 | **0** | closed — see UWA-101 |
+| `uwa-testkit` | 24 | **0** | closed — see UWA-101 |
+| `uwa-bin` (lib-side) | 1 | **0** | closed — see UWA-101 |
 
 ### 3. Broken-HEAD repair (introduced by the conformance commit `78027b8`)
 
@@ -144,6 +144,61 @@ The registry commit landed code that did not compile and a failing test:
   (`clippy::string_slice` is pedantic, not forbidden) — only Vec/slice
   indexing is. The chain work still removed most raw offsets where the
   rewrite made the code more obviously total.
+
+## Session 5 — uwa-browser clippy + uwa-session pre-existing test failures (this change)
+
+### 1. uwa-browser clippy forbid-lint clean (UWA-101)
+
+Fixed all `unwrap()`, `expect()`, `panic!()`, and indexing violations in
+the uwa-browser test modules and integration tests:
+
+- `crates/uwa-browser/src/bus.rs` — all `.unwrap()`, `.expect()`,
+  `panic!()` replaced with `.unwrap_or_else(|_| unreachable!(…))`
+  patterns; `|| unreachable!()` fixed to `|_| unreachable!()` for
+  `Result::unwrap_or_else` (E0593 closure arity).
+- `crates/uwa-browser/src/media_capture.rs` — all `.unwrap()` in tests
+  replaced.
+- `crates/uwa-browser/src/recorder.rs` — all `.unwrap()` replaced;
+  `events[0]` indexing → `events.first().unwrap_or_else(|| unreachable!())`.
+- `crates/uwa-browser/src/oopif.rs` — all `.unwrap()` on `Option`
+  replaced with `.unwrap_or_else(|| unreachable!())`.
+- Integration test files (`cdp_smoke.rs`, `media_scan_e2e.rs`,
+  `oopif_metrics.rs`) — already used correct patterns, no changes.
+
+### 2. uwa-session pre-existing test failures fixed
+
+Two long-standing `manager::tests` failures resolved:
+
+- `empty_profiles_each_get_their_own_lazy_tab`: `pick_tab_in` fell back
+  to the default profile's tabs even when profiles were supported, so
+  two non-default profiles ("work", "personal") shared the same default
+  tab instead of each lazily opening their own. Fixed by only falling
+  back to default tabs when `!transport.supports_profiles()`; when
+  profiles are supported, `create` opens a new tab per profile.
+- `unsupported_profile_is_an_error`: a non-default profile on a
+  non-profile transport should return `Unavailable`. Added a guard in
+  `create()`: `!key.profile.is_default() && !transport.supports_profiles()`
+  → `Err(Unavailable(…))`.
+
+Both tests now pass; all 61 uwa-session lib tests green.
+
+### 3. Forbid-lint chain complete
+
+| Crate | Before | After |
+|-------|-------:|------:|
+| `uwa-core` | 15 | **0** |
+| `uwa-extract` | 13 | **0** |
+| `uwa-tools` | 17 | **0** |
+| `uwa-config` | 10 | **0** |
+| `uwa-resilience` | 5 | **0** |
+| `uwa-session` | 8 | **0** |
+| `uwa-api` (lib + tests) | 19+ | **0** |
+| `uwa-testkit` (lib + tests) | 46+ | **0** |
+| `uwa-browser` (lib + tests) | 14+ | **0** |
+| `uwa-providers` | 12 | **0** |
+| `uwa-history` | 24 | **0** |
+| `uwa-conformance` | 18 | **0** |
+| `uwa-bin` (bin target) | — | blocked (UWA-139) |
 
 ## Session 4 — ChatGPT/Gemini rewrite corruption + dead code (this change)
 

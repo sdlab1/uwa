@@ -72,7 +72,15 @@ impl Cmd {
                         .long("from")
                         .action(ArgAction::Set),
                 )
-                .arg(Arg::new("max").long("max").action(ArgAction::Set)),
+                .arg(
+                    Arg::new("max")
+                        .long("max")
+                        .action(ArgAction::Set)
+                        // clap stores Set-values as String by default, but
+                        // the handlers read this as u32 (get_one::<u32>) —
+                        // a type mismatch panics at runtime. Pin the parser.
+                        .value_parser(clap::value_parser!(u32)),
+                ),
             Command::new("list").alias("status"),
             Command::new("hint").arg(Arg::new("id").index(1)),
             Command::new("run").arg(Arg::new("id").index(1)),
@@ -89,7 +97,15 @@ impl Cmd {
                         .long("from")
                         .action(ArgAction::Set),
                 )
-                .arg(Arg::new("max").long("max").action(ArgAction::Set)),
+                .arg(
+                    Arg::new("max")
+                        .long("max")
+                        .action(ArgAction::Set)
+                        // clap stores Set-values as String by default, but
+                        // the handlers read this as u32 (get_one::<u32>) —
+                        // a type mismatch panics at runtime. Pin the parser.
+                        .value_parser(clap::value_parser!(u32)),
+                ),
             Command::new("ps"),
             Command::new("tickets")
                 .arg(Arg::new("import").long("import").action(ArgAction::SetTrue)),
