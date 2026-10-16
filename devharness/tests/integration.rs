@@ -232,6 +232,12 @@ fn contains(hay: &str, needle: &str) -> bool {
     hay.contains(needle)
 }
 
+fn assert_skippable(tool: &str) {
+    let in_ci = matches!(std::env::var("CI"), Ok(v) if !v.is_empty());
+    assert!(!in_ci, "CI=1: «{tool}» обязателен — SKIP запрещён");
+    eprintln!("SKIP: {tool} не установлен");
+}
+
 #[test]
 fn section01_happy_path() {
     let sb = Sandbox::new("r1");
@@ -241,6 +247,11 @@ fn section01_happy_path() {
     let (ok, out) = sb.run_capture(&["run"]);
     assert!(ok, "run should succeed: {out}");
     assert!(contains(&out, "RED пропущен (записанный обход)"), "{out}");
+    assert_eq!(
+        out.matches("тайминг стадий").count(),
+        1,
+        "тайминг печатается ровно один раз: {out}"
+    );
 
     let mut_log = fs::read_to_string(sb.log_file("W-001-mutate.log")).unwrap();
     assert!(contains(&mut_log, "killed 10 (100%)"), "{mut_log}");
@@ -452,6 +463,7 @@ fn section10_doctor() {
     let (ok, out) = sb.run_capture(&["doctor"]);
     assert!(ok, "doctor exit 0: {out}");
     assert!(contains(&out, "fail=0"), "{out}");
+    assert!(contains(&out, "smoke"), "doctor гоняет VERIFY-smoke: {out}");
 
     let mut c = sb.devh(&["doctor"]);
     c.env("HARNESS_COLOR", "always");
@@ -774,7 +786,7 @@ fn section21b_editor_mode_pty() {
         .map(|o| !o.status.success())
         .unwrap_or(true)
     {
-        eprintln!("SKIP: script(1) нет — pty-тест editor-режима пропущен");
+        assert_skippable("script(1)");
         return;
     }
     let cmdline = format!(
@@ -1005,7 +1017,7 @@ fn section00_shellcheck_oracle_files() {
     match Command::new("shellcheck").arg("--version").output() {
         Ok(out) if out.status.success() => {}
         _ => {
-            eprintln!("SKIP: shellcheck не установлен");
+            assert_skippable("shellcheck");
             return;
         }
     }

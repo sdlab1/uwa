@@ -1,10 +1,13 @@
 use std::path::Path;
+use std::time::Instant;
 
 use crate::core::types::RunConfig;
 use crate::shell::color::{colors, Colors};
 use crate::shell::git;
 use crate::shell::store::Store;
 use crate::shell::worktree;
+
+const SMOKE_TIMEOUT_SECS: u64 = 120;
 
 pub fn doctor(store: &Store, cfg: &RunConfig, root: &Path) -> anyhow::Result<()> {
     let c = colors();
@@ -39,6 +42,8 @@ pub fn doctor(store: &Store, cfg: &RunConfig, root: &Path) -> anyhow::Result<()>
         failed.push("VERIFY не задан".into());
     } else {
         say(&format!("ok   VERIFY: {}", cfg.verify));
+        say(&format!("..   smoke VERIFY (≤{SMOKE_TIMEOUT_SECS}s)"));
+        verify_smoke(root, &cfg.verify, &mut say, &mut warn);
     }
 
     let ag = cfg.agent.split_whitespace().next().unwrap_or("");
@@ -163,6 +168,66 @@ fn orphan_checks(
         ));
         *warn += 1;
     }
+}
+
+fn verify_smoke(root: &Path, verify: &str, say: &mut dyn FnMut(&str), warn: &mut u32) {
+    let have_timeout = crate::commands::run::which("timeout");
+    let mut args: Vec<String> = Vec::new();
+    if have_timeout {
+        args.push(SMOKE_TIMEOUT_SECS.to_string());
+    }
+    args.push("sh".into());
+    args.push("-c".into());
+    args.push(verify.to_string());
+    let prog = if have_timeout { "timeout" } else { "sh" };
+    let t0 = Instant::now();
+    match std::process::Command::new(prog)
+        .args(&args)
+        .current_dir(root)
+        .output()
+    {
+        Err(e) => {
+            say(&format!("WARN smoke не запустился: {e}"));
+            *warn += 1;
+        }
+        Ok(out) => {
+            let elapsed = t0.elapsed().as_secs();
+            let rc = out.status.code();
+            if out.status.success() {
+                say(&format!("ok   smoke VERIFY прошёл ({elapsed}s)"));
+            } else if have_timeout && rc == Some(124) {
+                say(&format!(
+                    "WARN smoke не уложился в {SMOKE_TIMEOUT_SECS}s — прогони руками: {verify}"
+                ));
+                *warn += 1;
+            } else {
+                say(&format!(
+                    "WARN smoke VERIFY упал rc={:?} ({elapsed}s): {}",
+                    rc,
+                    tail_line(&out)
+                ));
+                *warn += 1;
+            }
+        }
+    }
+}
+
+fn tail_line(out: &std::process::Output) -> String {
+    let mut all = String::from_utf8_lossy(&out.stdout).into_owned();
+    all.push_str(&String::from_utf8_lossy(&out.stderr));
+    let last = all
+        .lines()
+        .rev()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("(нет вывода)")
+        .trim()
+        .to_string();
+    let mut chars: Vec<char> = last.chars().collect();
+    if chars.len() > 120 {
+        let skip = chars.len() - 120;
+        chars = chars[skip..].to_vec();
+    }
+    chars.into_iter().collect()
 }
 
 fn say_line(c: Colors, msg: &str) {

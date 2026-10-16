@@ -68,7 +68,7 @@ RED-пруф первым, MSG_DENY-гигиена последней. Паде�
 | merge | `devh merge [id]` | guard (дерево чисто, есть коммиты) → rebase → ff-push в MAIN → `## Session N` в RULES_LOG → лог → cleanup → `next:` |
 | abort | `devh abort [id]` | worktree/ветку вон, item → open (работа выброшена) |
 | clean | `devh clean` | worktree/ветки done-items + retention логов (LOG_DAYS) |
-| doctor | `devh doctor` | окружение: git/VERIFY/агент/flock/timeout/remote/exclude/mutation/shellcheck/bench + crash-recovery сироты; exit≠0 при fail |
+| doctor | `devh doctor` | окружение: git/VERIFY (+ smoke-запуск ≤120s)/агент/flock/timeout/remote/exclude/mutation/shellcheck/bench + crash-recovery сироты; exit≠0 при fail |
 | logs | `devh logs [id]` | пути логов item + хвосты agent/verify; без id — свежие логи всех items |
 | bg | `devh bg [id]` / `devh bg auto --from <dir> [--max N]` | detached-прогон: setsid+nohup (свой session, immune to HUP), лог в bg.log / bg-auto.log; параллельная работа безопасна (run.lock + WIP) |
 | ps | `devh ps` | PID, elapsed, текущая стадия из timing.log; живые авто-прогоны (auto.pid); мёртвые pid-файлы помечаются |
@@ -144,8 +144,10 @@ selfcov уходит; мутационный oracle = cargo-mutants) — **ТО�
 
 - ≥14 календарных дней с даты свитча (edd64c6, 2026-10-16) — не раньше
   2026-10-30;
-- оба CI зелёные на всех прогонах `devharness/**` за период;
+- оба devharness-CI (`devharness`, `devharness-rs`) зелёные на всех
+  прогонах `devharness/**` за период;
 - ни одного патча/фикса в `devh-classic` за период;
-- ≥1 реальная рабочая сессия через обёртку (`.harness/log.md` содержит
-  Session после свитча);
+- все новые devh-сессии периода идут через обёртку (classic — только
+  oracle-прогоны CI; `.harness/log.md` пополняется Session'ами после
+  свитча);
 - cargo-mutants: 100% viable kill-rate удерживается.

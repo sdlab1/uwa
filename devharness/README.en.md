@@ -69,7 +69,7 @@ of the log (≤ MAX_FIX); a missing tool = an ENV blocker, not a fix-round.
 | merge | `devh merge [id]` | guard (clean tree, has commits) → rebase → ff-push to MAIN → `## Session N` into RULES_LOG → log → cleanup → `next:` |
 | abort | `devh abort [id]` | worktree/branch gone, item → open (work discarded) |
 | clean | `devh clean` | worktrees/branches of done items + log retention (LOG_DAYS) |
-| doctor | `devh doctor` | environment: git/VERIFY/agent/flock/timeout/remote/exclude/mutation/shellcheck/bench + crash-recovery for orphans; exit≠0 on fail |
+| doctor | `devh doctor` | environment: git/VERIFY (+ a smoke run ≤120s)/agent/flock/timeout/remote/exclude/mutation/shellcheck/bench + crash-recovery for orphans; exit≠0 on fail |
 | logs | `devh logs [id]` | item log paths + agent/verify tails; without id — fresh logs of all items |
 | bg | `devh bg [id]` / `devh bg auto --from <dir> [--max N]` | detached run: setsid+nohup (own session, immune to HUP), log in bg.log / bg-auto.log; parallel work is safe (run.lock + WIP) |
 | ps | `devh ps` | PID, elapsed, current stage from timing.log; live autopilot runs (auto.pid); dead pid files are flagged |
@@ -145,8 +145,10 @@ retirement (`git rm devh-classic selfmutate.sh`, delete
 
 - ≥14 calendar days since the switch date (edd64c6, 2026-10-16) — not
   before 2026-10-30;
-- both CIs green on every `devharness/**` run over the period;
+- both devharness-CIs (`devharness`, `devharness-rs`) green on every
+  `devharness/**` run over the period;
 - zero patches/fixes to `devh-classic` over the period;
-- ≥1 real working session through the wrapper (`.harness/log.md` contains
-  a Session after the switch);
+- all new devh sessions of the period go through the wrapper (classic
+  only for CI oracle runs; `.harness/log.md` gains Sessions after the
+  switch);
 - cargo-mutants: 100% viable kill-rate is holding.
