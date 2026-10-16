@@ -3,13 +3,13 @@
 //! These tests require the registry overlay to fill capabilities from built-in entries.
 //! Currently marked as #[ignore] — enable after UWA-109 is fixed.
 
-use std::sync::Arc;
 use serde_json::json;
+use std::sync::Arc;
+use uwa_core::Transport;
 use uwa_testkit::{
     config::{config_with_key, TEST_AUTH_HEADER},
     AppBuilder, MockProvider, MockTransport,
 };
-use uwa_core::Transport;
 
 #[tokio::test]
 #[ignore = "UWA-109: registry overlay doesn't fill capabilities yet"]
@@ -23,7 +23,8 @@ async fn profiles_isolate_tabs_between_contexts() {
         .build();
 
     // Request with work profile
-    let work = app.server
+    let work = app
+        .server
         .post("/v1/chat/completions")
         .add_header("Authorization", TEST_AUTH_HEADER)
         .add_header("X-UWA-Session", "work")
@@ -31,7 +32,8 @@ async fn profiles_isolate_tabs_between_contexts() {
         .await;
 
     // Request with personal profile
-    let personal = app.server
+    let personal = app
+        .server
         .post("/v1/chat/completions")
         .add_header("Authorization", TEST_AUTH_HEADER)
         .add_header("X-UWA-Session", "personal")
@@ -47,9 +49,12 @@ async fn profiles_isolate_tabs_between_contexts() {
     let personal_tabs = transport.list_tabs_in("personal").await.unwrap_or_default();
 
     // At least one tab should be in each profile
-    assert!(!work_tabs.is_empty() || !personal_tabs.is_empty(),
+    assert!(
+        !work_tabs.is_empty() || !personal_tabs.is_empty(),
         "no tabs allocated to profiles: work={}, personal={}",
-        work_tabs.len(), personal_tabs.len());
+        work_tabs.len(),
+        personal_tabs.len()
+    );
 }
 
 #[tokio::test]
@@ -59,8 +64,16 @@ async fn provider_switch_uses_correct_profile() {
     let transport = Arc::new(
         MockTransport::with_n_tabs(2)
             .with_profiles()
-            .with_page_in("work", uwa_core::TabId::from_raw("tab_work"), Arc::new(uwa_testkit::MockPage::new()))
-            .with_page_in("personal", uwa_core::TabId::from_raw("tab_personal"), Arc::new(uwa_testkit::MockPage::new()))
+            .with_page_in(
+                "work",
+                uwa_core::TabId::from_raw("tab_work"),
+                Arc::new(uwa_testkit::MockPage::new()),
+            )
+            .with_page_in(
+                "personal",
+                uwa_core::TabId::from_raw("tab_personal"),
+                Arc::new(uwa_testkit::MockPage::new()),
+            ),
     );
 
     let provider1 = Arc::new(MockProvider::new("chatgpt").with_answer("from chatgpt"));
@@ -74,7 +87,8 @@ async fn provider_switch_uses_correct_profile() {
         .build();
 
     // Request to chatgpt -> should use work profile
-    let r1 = app.server
+    let r1 = app
+        .server
         .post("/v1/chat/completions")
         .add_header("Authorization", TEST_AUTH_HEADER)
         .add_header("X-UWA-Provider", "chatgpt")
@@ -83,11 +97,14 @@ async fn provider_switch_uses_correct_profile() {
     r1.assert_status_ok();
 
     // Request to claude -> should use personal profile
-    let r2 = app.server
+    let r2 = app
+        .server
         .post("/v1/chat/completions")
         .add_header("Authorization", TEST_AUTH_HEADER)
         .add_header("X-UWA-Provider", "claude")
-        .json(&json!({"model": "claude-3-5-sonnet", "messages": [{"role": "user", "content": "hi"}]}))
+        .json(
+            &json!({"model": "claude-3-5-sonnet", "messages": [{"role": "user", "content": "hi"}]}),
+        )
         .await;
     r2.assert_status_ok();
 
@@ -106,7 +123,8 @@ async fn provider_switch_uses_correct_profile() {
 async fn x_uwa_session_header_routes_to_session() {
     // Even without full profile support, X-UWA-Session should affect conversation_id
     // The config must include the profile for it to be accepted
-    let config = uwa_config::Config::load_from_str(r##"
+    let config = uwa_config::Config::load_from_str(
+        r##"
         [server]
         bind = "127.0.0.1"
         port = 8080
@@ -130,13 +148,23 @@ async fn x_uwa_session_header_routes_to_session() {
 
         [profiles.session_b]
         label = "Session B"
-    "##).unwrap();
+    "##,
+    )
+    .unwrap();
 
     let transport = Arc::new(
         MockTransport::with_n_tabs(2)
             .with_profiles()
-            .with_page_in("session_a", uwa_core::TabId::from_raw("tab_session_a"), Arc::new(uwa_testkit::MockPage::new()))
-            .with_page_in("session_b", uwa_core::TabId::from_raw("tab_session_b"), Arc::new(uwa_testkit::MockPage::new()))
+            .with_page_in(
+                "session_a",
+                uwa_core::TabId::from_raw("tab_session_a"),
+                Arc::new(uwa_testkit::MockPage::new()),
+            )
+            .with_page_in(
+                "session_b",
+                uwa_core::TabId::from_raw("tab_session_b"),
+                Arc::new(uwa_testkit::MockPage::new()),
+            ),
     );
 
     let app = AppBuilder::new()
@@ -146,7 +174,8 @@ async fn x_uwa_session_header_routes_to_session() {
         .build();
 
     // Two requests with different session headers
-    let r1 = app.server
+    let r1 = app
+        .server
         .post("/v1/chat/completions")
         .add_header("Authorization", TEST_AUTH_HEADER)
         .add_header("X-UWA-Session", "session_a")
@@ -157,7 +186,8 @@ async fn x_uwa_session_header_routes_to_session() {
     eprintln!("r1 body: {}", r1.text());
     r1.assert_status_ok();
 
-    let r2 = app.server
+    let r2 = app
+        .server
         .post("/v1/chat/completions")
         .add_header("Authorization", TEST_AUTH_HEADER)
         .add_header("X-UWA-Session", "session_b")
@@ -181,7 +211,8 @@ async fn default_session_without_header_works() {
         .with_provider(Arc::new(MockProvider::new("chatgpt").with_answer("ok")))
         .build();
 
-    let r = app.server
+    let r = app
+        .server
         .post("/v1/chat/completions")
         .add_header("Authorization", TEST_AUTH_HEADER)
         .json(&json!({"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]}))
@@ -204,7 +235,8 @@ async fn closing_profile_doesnt_affect_others() {
         .build();
 
     // Use work profile
-    let r1 = app.server
+    let r1 = app
+        .server
         .post("/v1/chat/completions")
         .add_header("Authorization", TEST_AUTH_HEADER)
         .add_header("X-UWA-Session", "work")
@@ -217,7 +249,8 @@ async fn closing_profile_doesnt_affect_others() {
     // assert_eq!(dropped.len(), 1);
 
     // personal profile should still work
-    let r2 = app.server
+    let r2 = app
+        .server
         .post("/v1/chat/completions")
         .add_header("Authorization", TEST_AUTH_HEADER)
         .add_header("X-UWA-Session", "personal")

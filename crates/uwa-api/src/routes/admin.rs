@@ -1,6 +1,6 @@
 //! Admin endpoints: history, stats, selector test.
 
-use crate::error::ApiResult;
+use crate::error::{ApiError, ApiResult};
 use crate::state::AppState;
 use axum::extract::{Path, Query, State};
 use axum::Json;
@@ -981,6 +981,56 @@ pub async fn recorder_stop(State(state): State<AppState>) -> ApiResult<Json<Reco
         workflow: proposal.workflow,
         toml_snippet,
     }))
+}
+
+// ---------- config hot reload ----------
+
+/// `GET /admin/config` — summary of the currently loaded configuration.
+pub async fn config_get(State(state): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
+    let cfg = state.cfg();
+    let providers: Vec<serde_json::Value> = cfg
+        .providers
+        .values()
+        .map(|pc| {
+            serde_json::json!({
+                "name": pc.name,
+                "url_patterns": pc.url_patterns,
+                "capabilities": pc.capabilities,
+                "extraction": pc.extraction,
+                "media": pc.media,
+                "conversation_pinning": pc.conversation_pinning,
+                "max_tool_retries": pc.max_tool_retries,
+                "fallback_model": pc.fallback_model,
+            })
+        })
+        .collect();
+    let profiles: Vec<String> = cfg.profiles.keys().cloned().collect();
+    Ok(Json(serde_json::json!({
+        "server": {
+            "bind": cfg.server.bind,
+            "port": cfg.server.port,
+            "api_key_set": cfg.server.api_key.is_some(),
+            "request_timeout_ms": cfg.server.request_timeout_ms,
+        },
+        "providers": providers,
+        "model_aliases": cfg.model_aliases,
+        "profiles": profiles,
+        "reload_available": state.config_path.is_some(),
+    })))
+}
+
+/// `POST /admin/config/reload` — reload configuration from disk.
+pub async fn config_reload(State(state): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
+    state
+        .reload_from_file()
+        .map_err(|e| ApiError::from(UwaError::Internal(format!("config reload failed: {e}"))))?;
+    let cfg = state.cfg();
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "providers": cfg.providers.len(),
+        "models": cfg.model_aliases.len(),
+        "message": "configuration reloaded successfully",
+    })))
 }
 
 /// Same glob as `uwa-config::url_matches`, duplicated here to avoid a

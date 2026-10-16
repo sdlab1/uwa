@@ -212,7 +212,40 @@ pub fn router(state: AppState) -> Router {
         .route("/tab/:tab_id/v1/models", get(routes::models::list_models))
         .layer(axum::middleware::from_fn(routing::from_tab_path));
 
-    let api_scoped = api_url_scoped.merge(api_tab_scoped);
+    let api_group_scoped = Router::new()
+        .route(
+            "/group/:group_id/v1/chat/completions",
+            post(routes::chat::chat_completions),
+        )
+        .route(
+            "/group/:group_id/v1/messages",
+            post(routes::messages::messages),
+        )
+        .route(
+            "/group/:group_id/v1/models",
+            get(routes::models::list_models),
+        )
+        .layer(axum::middleware::from_fn(routing::from_group_path));
+
+    let api_url_preset_scoped = Router::new()
+        .route(
+            "/url/:domain/:preset/v1/chat/completions",
+            post(routes::chat::chat_completions),
+        )
+        .route(
+            "/url/:domain/:preset/v1/messages",
+            post(routes::messages::messages),
+        )
+        .route(
+            "/url/:domain/:preset/v1/models",
+            get(routes::models::list_models),
+        )
+        .layer(axum::middleware::from_fn(routing::from_url_preset_path));
+
+    let api_scoped = api_url_scoped
+        .merge(api_tab_scoped)
+        .merge(api_group_scoped)
+        .merge(api_url_preset_scoped);
 
     let admin = Router::new()
         .route("/admin/history", get(routes::admin::history))
@@ -262,7 +295,9 @@ pub fn router(state: AppState) -> Router {
             "/admin/sessions/:id",
             axum::routing::delete(routes::admin::drop_session),
         )
-        .route("/admin/logs/stream", get(routes::admin::log_stream));
+        .route("/admin/logs/stream", get(routes::admin::log_stream))
+        .route("/admin/config", get(routes::admin::config_get))
+        .route("/admin/config/reload", post(routes::admin::config_reload));
 
     // Layer order: the last `.layer` is outermost and runs first. The origin
     // guard must reject a hostile browser request before anything else

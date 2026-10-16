@@ -1,15 +1,15 @@
 //! P3: Concurrency and isolation — simultaneous requests, session pinning,
 //! tab isolation, parallel tool calls.
 
+use futures::future::join_all;
+use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
-use serde_json::json;
+use uwa_core::Transport;
 use uwa_testkit::{
     config::{config_with_key, TEST_AUTH_HEADER},
     AppBuilder, MockProvider, MockTransport,
 };
-use uwa_core::Transport;
-use futures::future::join_all;
 
 #[tokio::test]
 async fn concurrent_requests_get_distinct_tabs() {
@@ -40,8 +40,14 @@ async fn concurrent_requests_get_distinct_tabs() {
     // Provider received both messages
     let sent = provider.sent();
     assert!(sent.len() >= 2, "provider saw only {} messages", sent.len());
-    assert!(sent.contains(&"first".to_string()), "missing first: {sent:?}");
-    assert!(sent.contains(&"second".to_string()), "missing second: {sent:?}");
+    assert!(
+        sent.contains(&"first".to_string()),
+        "missing first: {sent:?}"
+    );
+    assert!(
+        sent.contains(&"second".to_string()),
+        "missing second: {sent:?}"
+    );
 
     // Verify two tabs were used (check transport health)
     let tabs = transport.list_tabs().await.expect("list tabs");
@@ -94,10 +100,7 @@ async fn concurrent_requests_different_conversations_dont_collide() {
 async fn many_concurrent_streams_complete_without_interference() {
     let provider = Arc::new(
         MockProvider::new("chatgpt")
-            .with_chunks(
-                ["Chunk ", "1 ", "2 ", "3"],
-                Duration::from_millis(5),
-            )
+            .with_chunks(["Chunk ", "1 ", "2 ", "3"], Duration::from_millis(5)),
     );
 
     let app = std::sync::Arc::new(
@@ -105,7 +108,7 @@ async fn many_concurrent_streams_complete_without_interference() {
             .with_config(config_with_key())
             .with_transport(Arc::new(MockTransport::with_n_tabs(4)))
             .with_provider(provider.clone())
-            .build()
+            .build(),
     );
 
     // Fire 10 concurrent streaming requests
@@ -113,7 +116,8 @@ async fn many_concurrent_streams_complete_without_interference() {
     for i in 0..10 {
         let app = app.clone();
         futures.push(async move {
-            let r = app.server
+            let r = app
+                .server
                 .post("/v1/chat/completions")
                 .add_header("Accept", "text/event-stream")
                 .add_header("Authorization", TEST_AUTH_HEADER)
@@ -154,7 +158,8 @@ async fn rapid_sequential_requests_reuse_session() {
 
     // 5 rapid requests - same conversation should pin to same tab
     for i in 0..5 {
-        let r = app.server
+        let r = app
+            .server
             .post("/v1/chat/completions")
             .add_header("Authorization", TEST_AUTH_HEADER)
             .json(&json!({
@@ -208,9 +213,15 @@ async fn parallel_tool_calls_in_single_response() {
 
     let tool_calls = &v["choices"][0]["message"]["tool_calls"];
     assert!(tool_calls.is_array(), "expected tool_calls array: {v}");
-    assert_eq!(tool_calls.as_array().unwrap().len(), 2, "expected 2 tool calls: {v}");
+    assert_eq!(
+        tool_calls.as_array().unwrap().len(),
+        2,
+        "expected 2 tool calls: {v}"
+    );
 
-    let names: Vec<&str> = tool_calls.as_array().unwrap()
+    let names: Vec<&str> = tool_calls
+        .as_array()
+        .unwrap()
         .iter()
         .map(|tc| tc["function"]["name"].as_str().unwrap_or(""))
         .collect();
@@ -221,13 +232,10 @@ async fn parallel_tool_calls_in_single_response() {
 #[tokio::test]
 async fn tool_call_then_text_response() {
     // Provider first emits tool call, then on second turn emits text
-    let provider = Arc::new(
-        MockProvider::new("chatgpt")
-            .with_answers([
-                r#"{"name": "get_weather", "arguments": {"city": "Kyiv"}}"#,
-                "It's 22°C and sunny in Kyiv!",
-            ])
-    );
+    let provider = Arc::new(MockProvider::new("chatgpt").with_answers([
+        r#"{"name": "get_weather", "arguments": {"city": "Kyiv"}}"#,
+        "It's 22°C and sunny in Kyiv!",
+    ]));
 
     let app = AppBuilder::new()
         .with_config(config_with_key())
@@ -235,7 +243,8 @@ async fn tool_call_then_text_response() {
         .build();
 
     // Turn 1: tool call
-    let r1 = app.server
+    let r1 = app
+        .server
         .post("/v1/chat/completions")
         .add_header("Authorization", TEST_AUTH_HEADER)
         .json(&json!({
@@ -267,7 +276,10 @@ async fn tool_call_then_text_response() {
     r2.assert_status_ok();
     let v2: serde_json::Value = r2.json();
     assert_eq!(v2["choices"][0]["finish_reason"], "stop");
-    assert!(v2["choices"][0]["message"]["content"].as_str().unwrap_or("").contains("22"));
+    assert!(v2["choices"][0]["message"]["content"]
+        .as_str()
+        .unwrap_or("")
+        .contains("22"));
 }
 
 #[tokio::test]
@@ -318,7 +330,8 @@ async fn provider_switch_uses_correct_session() {
     // Alternate requests
     for i in 0..4 {
         let provider_name = if i % 2 == 0 { "chatgpt" } else { "claude" };
-        let r = app.server
+        let r = app
+            .server
             .post("/v1/chat/completions")
             .add_header("Authorization", TEST_AUTH_HEADER)
             .add_header("X-UWA-Provider", provider_name)
@@ -332,8 +345,18 @@ async fn provider_switch_uses_correct_session() {
     }
 
     // Each provider saw 2 messages
-    assert_eq!(provider1.sent().len(), 2, "chatgpt saw {} messages", provider1.sent().len());
-    assert_eq!(provider2.sent().len(), 2, "claude saw {} messages", provider2.sent().len());
+    assert_eq!(
+        provider1.sent().len(),
+        2,
+        "chatgpt saw {} messages",
+        provider1.sent().len()
+    );
+    assert_eq!(
+        provider2.sent().len(),
+        2,
+        "claude saw {} messages",
+        provider2.sent().len()
+    );
 }
 
 #[tokio::test]
@@ -353,7 +376,8 @@ async fn tab_health_check_removes_unhealthy_tabs() {
         .with_provider(provider.clone())
         .build();
 
-    let r = app.server
+    let r = app
+        .server
         .post("/v1/chat/completions")
         .add_header("Authorization", TEST_AUTH_HEADER)
         .json(&json!({
@@ -386,7 +410,8 @@ async fn session_expiry_forces_new_tab() {
 
     // Multiple requests - if session expires, should get new tab
     for i in 0..3 {
-        let r = app.server
+        let r = app
+            .server
             .post("/v1/chat/completions")
             .add_header("Authorization", TEST_AUTH_HEADER)
             .json(&json!({

@@ -48,6 +48,9 @@ pub struct AppState {
     pub config: Arc<ArcSwap<Config>>,
     /// Hot-reloadable provider registry. Use `registry()` to read.
     pub providers: Arc<ArcSwap<ProviderRegistry>>,
+    /// Path to the config file used for `/admin/config/reload`. `None`
+    /// means reload is not available.
+    pub config_path: Option<PathBuf>,
     pub transport: Arc<dyn Transport>,
     pub runtime: Arc<RuntimeServices>,
 }
@@ -114,15 +117,30 @@ impl AppState {
         config: Arc<Config>,
         providers: Arc<ProviderRegistry>,
         transport: Arc<dyn Transport>,
+        config_path: Option<PathBuf>,
     ) -> Self {
         let config_swap: ArcSwap<Config> = ArcSwap::new(config);
         let providers_swap: ArcSwap<ProviderRegistry> = ArcSwap::new(providers);
         Self {
             config: Arc::new(config_swap),
             providers: Arc::new(providers_swap),
+            config_path,
             transport,
             runtime: Arc::new(RuntimeServices::default()),
         }
+    }
+
+    /// Reload config from the stored config path, if any.
+    pub fn reload_from_file(&self) -> Result<(), uwa_core::UwaError> {
+        let Some(path) = &self.config_path else {
+            return Err(UwaError::Config(
+                "no config path configured for reload".into(),
+            ));
+        };
+        let new_cfg = Config::load_from_path(path)
+            .map_err(|e| UwaError::Config(format!("config reload failed: {e}")))?;
+        self.reload(new_cfg);
+        Ok(())
     }
 
     pub fn with_sessions(mut self, sm: Arc<SessionManager>) -> Self {
@@ -165,7 +183,12 @@ impl AppState {
         self.runtime
             .breakers
             .entry(provider.to_string())
-            .or_insert_with(|| Arc::new(CircuitBreaker::new(provider.to_string(), CircuitCfg::default())))
+            .or_insert_with(|| {
+                Arc::new(CircuitBreaker::new(
+                    provider.to_string(),
+                    CircuitCfg::default(),
+                ))
+            })
             .clone()
     }
 }

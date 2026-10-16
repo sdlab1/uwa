@@ -27,6 +27,7 @@ async fn appstate_assembles_with_all_pieces() {
         cfg,
         Arc::new(registry),
         Arc::new(MockTransport::with_n_tabs(1)),
+        None,
     )
     .with_sessions(sessions.clone())
     .with_semaphores(Arc::new(sem))

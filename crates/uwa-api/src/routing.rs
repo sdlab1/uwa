@@ -6,6 +6,7 @@
 
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
+use uwa_config::GroupCfg;
 use uwa_core::{ConversationId, TabId, UwaError};
 
 /// Where to send the request.
@@ -19,6 +20,10 @@ pub struct RoutingHint {
     pub conversation: Option<ConversationId>,
     /// Browser profile name (`X-UWA-Session`). `None` = default context.
     pub profile: Option<String>,
+    /// Routing group ID (`/group/{id}/`). Overrides provider selection.
+    pub group: Option<String>,
+    /// Preset name (`/url/{domain}/{preset}/`). Applied to the resolved provider.
+    pub preset: Option<String>,
 }
 
 impl RoutingHint {
@@ -61,6 +66,8 @@ impl<S: Send + Sync> FromRequestParts<S> for HintExtractor {
             tab: None,
             conversation: None,
             profile,
+            group: None,
+            preset: None,
         }))
     }
 }
@@ -112,6 +119,40 @@ pub async fn from_tab_path(
     next.run(req).await
 }
 
+/// `/group/{id}/...` → `RoutingHint::group`.
+pub async fn from_group_path(
+    axum::extract::Path(group_id): axum::extract::Path<String>,
+    mut req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let mut hint = req
+        .extensions()
+        .get::<RoutingHint>()
+        .cloned()
+        .unwrap_or_default();
+    hint.group = Some(group_id);
+    req.extensions_mut().insert(hint);
+    next.run(req).await
+}
+
+/// `/url/{domain}/{preset}/...` → `RoutingHint::provider` (raw `url:{domain}`)
+/// and `RoutingHint::preset`.
+pub async fn from_url_preset_path(
+    axum::extract::Path((domain, preset)): axum::extract::Path<(String, String)>,
+    mut req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let mut hint = req
+        .extensions()
+        .get::<RoutingHint>()
+        .cloned()
+        .unwrap_or_default();
+    hint.provider = Some(format!("url:{domain}"));
+    hint.preset = Some(preset);
+    req.extensions_mut().insert(hint);
+    next.run(req).await
+}
+
 /// Resolve a raw `url:<domain>` or `tab:<id>` into a concrete provider /
 /// tab via config or transport. Called once at the start of `chat_completions`.
 pub async fn resolve_hint(
@@ -119,7 +160,18 @@ pub async fn resolve_hint(
     hint: &RoutingHint,
 ) -> Result<RoutingHint, UwaError> {
     let mut out = hint.clone();
-    if let Some(p) = &hint.provider {
+
+    // Routing group takes priority over provider hint.
+    if let Some(group_id) = &hint.group {
+        let cfg = state.cfg();
+        let group = cfg
+            .groups
+            .get(group_id)
+            .ok_or_else(|| UwaError::Config(format!("unknown routing group `{group_id}`")))?;
+        let member = select_group_member(group, &cfg.providers, &out.conversation)?;
+        out.provider = Some(member.provider.clone());
+        out.preset = member.preset.clone().or(out.preset.clone());
+    } else if let Some(p) = &hint.provider {
         if let Some(domain) = p.strip_prefix("url:") {
             // Find a provider whose URL patterns include the given domain.
             let provider_name = state
@@ -132,8 +184,53 @@ pub async fn resolve_hint(
             out.provider = Some(provider_name);
         }
     }
+
     // Profile from X-UWA-Session is passed through to the session manager
     // without validation. The session manager will handle creating the
     // browser context if the transport supports profiles.
     Ok(out)
+}
+
+/// Select a group member based on the group's strategy.
+///
+/// For `RoundRobin` and `Failover`, this is a simple deterministic pick
+/// (first member). For `HashConversation`, the conversation id is hashed
+/// to pick a member (sticky routing).
+fn select_group_member(
+    group: &GroupCfg,
+    providers: &std::collections::HashMap<String, uwa_config::ProviderCfg>,
+    conversation: &Option<ConversationId>,
+) -> Result<uwa_config::GroupMember, UwaError> {
+    if group.members.is_empty() {
+        return Err(UwaError::Config("group has no members".into()));
+    }
+
+    let idx = match group.strategy {
+        uwa_config::GroupStrategy::RoundRobin | uwa_config::GroupStrategy::Failover => 0,
+        uwa_config::GroupStrategy::HashConversation => {
+            let hash: usize = conversation
+                .as_ref()
+                .map(|c| c.as_str())
+                .unwrap_or("")
+                .bytes()
+                .fold(0usize, |acc, b| {
+                    acc.wrapping_add(b as usize).wrapping_mul(31)
+                });
+            hash.checked_rem(group.members.len()).unwrap_or(0)
+        }
+    };
+
+    let member = group
+        .members
+        .get(idx)
+        .cloned()
+        .ok_or_else(|| UwaError::Config("group member index out of bounds".into()))?;
+    // Validate the member provider exists.
+    if !providers.contains_key(&member.provider) {
+        return Err(UwaError::Config(format!(
+            "group member provider `{}` is not defined",
+            member.provider
+        )));
+    }
+    Ok(member.clone())
 }

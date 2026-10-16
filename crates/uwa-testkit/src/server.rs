@@ -93,7 +93,7 @@ impl AppBuilder {
         for p in self.providers {
             registry.register(p);
         }
-        let mut state = AppState::minimal(self.config, Arc::new(registry), self.transport);
+        let mut state = AppState::minimal(self.config, Arc::new(registry), self.transport, None);
         if let Some(sm) = self.sessions {
             state = state.with_sessions(sm);
         }

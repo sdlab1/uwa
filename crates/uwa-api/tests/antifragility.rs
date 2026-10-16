@@ -1,8 +1,8 @@
 //! P2: Anti-fragility — errors, timeouts, edge-cases that break in prod.
 
+use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
-use serde_json::json;
 use uwa_testkit::{
     config::{config_with_key, TEST_AUTH_HEADER},
     AppBuilder, MockProvider,
@@ -17,7 +17,8 @@ async fn failing_provider_produces_503_with_openai_error_shape() {
         .with_provider(provider)
         .build();
 
-    let r = app.server
+    let r = app
+        .server
         .post("/v1/chat/completions")
         .add_header("Authorization", TEST_AUTH_HEADER)
         .json(&json!({
@@ -28,10 +29,16 @@ async fn failing_provider_produces_503_with_openai_error_shape() {
 
     // OpenAI-shape error, not raw panic and not 500 with trace
     let status = r.status_code().as_u16();
-    assert!(status == 503 || status == 500, "unexpected status: {status}");
+    assert!(
+        status == 503 || status == 500,
+        "unexpected status: {status}"
+    );
     let v: serde_json::Value = r.json();
 
-    assert!(v["error"]["message"].is_string(), "missing error.message: {v}");
+    assert!(
+        v["error"]["message"].is_string(),
+        "missing error.message: {v}"
+    );
     assert!(v["error"]["type"].is_string(), "missing error.type: {v}");
 
     // No leaked traces or source paths
@@ -46,7 +53,7 @@ async fn provider_timeout_produces_graceful_error() {
     let provider = Arc::new(
         MockProvider::new("chatgpt")
             .with_delay(Duration::from_secs(2))
-            .with_answer("slow")
+            .with_answer("slow"),
     );
 
     let app = AppBuilder::new()
@@ -54,7 +61,8 @@ async fn provider_timeout_produces_graceful_error() {
         .with_provider(provider)
         .build();
 
-    let r = app.server
+    let r = app
+        .server
         .post("/v1/chat/completions")
         .add_header("Authorization", TEST_AUTH_HEADER)
         .json(&json!({
@@ -65,31 +73,35 @@ async fn provider_timeout_produces_graceful_error() {
 
     // Should either timeout (504/503) or succeed, but not panic
     let status = r.status_code().as_u16();
-    assert!(status == 200 || status == 503 || status == 504, "unexpected status: {status}");
+    assert!(
+        status == 200 || status == 503 || status == 504,
+        "unexpected status: {status}"
+    );
 
     if status != 200 {
         let v: serde_json::Value = r.json();
-        assert!(v["error"]["message"].is_string(), "missing error.message on timeout: {v}");
+        assert!(
+            v["error"]["message"].is_string(),
+            "missing error.message on timeout: {v}"
+        );
     }
 }
 
 #[tokio::test]
 async fn multibyte_chars_survive_chunk_boundaries() {
     // Emoji and CJK chars in the middle of chunks - use streaming mode
-    let provider = Arc::new(
-        MockProvider::new("chatgpt")
-            .with_chunks(
-                ["Прив", "іт 🇺🇦世", "界", " від Ky", "iv"],
-                Duration::from_millis(10),
-            )
-    );
+    let provider = Arc::new(MockProvider::new("chatgpt").with_chunks(
+        ["Прив", "іт 🇺🇦世", "界", " від Ky", "iv"],
+        Duration::from_millis(10),
+    ));
 
     let app = AppBuilder::new()
         .with_config(config_with_key())
         .with_provider(provider)
         .build();
 
-    let r = app.server
+    let r = app
+        .server
         .post("/v1/chat/completions")
         .add_header("Accept", "text/event-stream")
         .add_header("Authorization", TEST_AUTH_HEADER)
@@ -118,17 +130,17 @@ async fn multibyte_chars_survive_chunk_boundaries() {
     }
 
     // Full string without loss or mojibake
-    assert_eq!(accumulated, "Привіт 🇺🇦世界 від Kyiv", "content mangled: {accumulated:?}");
+    assert_eq!(
+        accumulated, "Привіт 🇺🇦世界 від Kyiv",
+        "content mangled: {accumulated:?}"
+    );
 }
 
 #[tokio::test]
 async fn streaming_multibyte_chars_survive_chunk_boundaries() {
     let provider = Arc::new(
         MockProvider::new("chatgpt")
-            .with_chunks(
-                ["Прив", "іт 🇺🇦", " 世界"],
-                Duration::from_millis(10),
-            )
+            .with_chunks(["Прив", "іт 🇺🇦", " 世界"], Duration::from_millis(10)),
     );
 
     let app = AppBuilder::new()
@@ -136,7 +148,8 @@ async fn streaming_multibyte_chars_survive_chunk_boundaries() {
         .with_provider(provider)
         .build();
 
-    let r = app.server
+    let r = app
+        .server
         .post("/v1/chat/completions")
         .add_header("Accept", "text/event-stream")
         .add_header("Authorization", TEST_AUTH_HEADER)
@@ -165,7 +178,10 @@ async fn streaming_multibyte_chars_survive_chunk_boundaries() {
         }
     }
 
-    assert_eq!(accumulated, "Привіт 🇺🇦 世界", "streaming content mangled: {accumulated:?}");
+    assert_eq!(
+        accumulated, "Привіт 🇺🇦 世界",
+        "streaming content mangled: {accumulated:?}"
+    );
 }
 
 #[tokio::test]
@@ -177,7 +193,8 @@ async fn empty_response_handled_gracefully() {
         .with_provider(provider)
         .build();
 
-    let r = app.server
+    let r = app
+        .server
         .post("/v1/chat/completions")
         .add_header("Authorization", TEST_AUTH_HEADER)
         .json(&json!({
@@ -205,17 +222,16 @@ async fn very_long_response_streaming_doesnt_overflow() {
         .map(|c| c.iter().collect())
         .collect();
 
-    let provider = Arc::new(
-        MockProvider::new("chatgpt")
-            .with_chunks(chunks, Duration::from_millis(1))
-    );
+    let provider =
+        Arc::new(MockProvider::new("chatgpt").with_chunks(chunks, Duration::from_millis(1)));
 
     let app = AppBuilder::new()
         .with_config(config_with_key())
         .with_provider(provider)
         .build();
 
-    let r = app.server
+    let r = app
+        .server
         .post("/v1/chat/completions")
         .add_header("Accept", "text/event-stream")
         .add_header("Authorization", TEST_AUTH_HEADER)
@@ -230,7 +246,10 @@ async fn very_long_response_streaming_doesnt_overflow() {
     let body = r.text();
 
     // Should complete without OOM or truncation
-    assert!(body.contains("data: [DONE]"), "missing [DONE] on long stream");
+    assert!(
+        body.contains("data: [DONE]"),
+        "missing [DONE] on long stream"
+    );
 
     // Count content length from deltas
     let mut total = 0usize;
@@ -247,7 +266,10 @@ async fn very_long_response_streaming_doesnt_overflow() {
     }
 
     // Allow small overhead from SSE framing
-    assert!(total >= 95_000, "lost too much content in long stream: {total}");
+    assert!(
+        total >= 95_000,
+        "lost too much content in long stream: {total}"
+    );
 }
 
 #[tokio::test]
@@ -261,7 +283,8 @@ async fn malformed_json_in_tool_call_is_rejected_gracefully() {
         .with_provider(Arc::new(MockProvider::new("chatgpt").with_answer(answer)))
         .build();
 
-    let r = app.server
+    let r = app
+        .server
         .post("/v1/chat/completions")
         .add_header("Authorization", TEST_AUTH_HEADER)
         .json(&json!({
@@ -279,14 +302,19 @@ async fn malformed_json_in_tool_call_is_rejected_gracefully() {
 
     // Should not panic - either returns 200 (no tool_calls) or 4xx
     let status = r.status_code().as_u16();
-    assert!(status == 200 || (status >= 400 && status < 600), "unexpected status: {status}");
+    assert!(
+        status == 200 || (status >= 400 && status < 600),
+        "unexpected status: {status}"
+    );
 
     let v: serde_json::Value = r.json();
     if status == 200 {
         // If 200, tool_calls should be null/empty since JSON was invalid
         let tc = v["choices"][0]["message"]["tool_calls"].as_array();
-        assert!(tc.is_none() || tc.map(|a| a.is_empty()).unwrap_or(true),
-            "expected no tool_calls for invalid JSON: {v}");
+        assert!(
+            tc.is_none() || tc.map(|a| a.is_empty()).unwrap_or(true),
+            "expected no tool_calls for invalid JSON: {v}"
+        );
     }
 }
 
@@ -302,7 +330,8 @@ async fn circuit_breaker_opens_after_repeated_failures() {
 
     // First few requests fail with 503/500
     for i in 0..5 {
-        let r = app.server
+        let r = app
+            .server
             .post("/v1/chat/completions")
             .add_header("Authorization", TEST_AUTH_HEADER)
             .json(&json!({
@@ -317,7 +346,8 @@ async fn circuit_breaker_opens_after_repeated_failures() {
 
     // After threshold, subsequent requests should fail fast (circuit open)
     // The exact status depends on circuit breaker config; just verify no panic
-    let r = app.server
+    let r = app
+        .server
         .post("/v1/chat/completions")
         .add_header("Authorization", TEST_AUTH_HEADER)
         .json(&json!({
@@ -327,7 +357,10 @@ async fn circuit_breaker_opens_after_repeated_failures() {
         .await;
 
     let status = r.status_code().as_u16();
-    assert!(status >= 500, "circuit breaker should keep failing: {status}");
+    assert!(
+        status >= 500,
+        "circuit breaker should keep failing: {status}"
+    );
     let v: serde_json::Value = r.json();
     assert!(v["error"]["message"].is_string());
 }
@@ -344,7 +377,8 @@ async fn provider_returns_empty_tool_call_block() {
         .with_provider(Arc::new(MockProvider::new("chatgpt").with_answer(answer)))
         .build();
 
-    let r = app.server
+    let r = app
+        .server
         .post("/v1/chat/completions")
         .add_header("Authorization", TEST_AUTH_HEADER)
         .json(&json!({
@@ -362,7 +396,10 @@ async fn provider_returns_empty_tool_call_block() {
 
     // Should not panic; should return error or empty tool_calls
     let status = r.status_code().as_u16();
-    assert!(status == 200 || status >= 400, "unexpected status: {status}");
+    assert!(
+        status == 200 || status >= 400,
+        "unexpected status: {status}"
+    );
 
     if status == 200 {
         let v: serde_json::Value = r.json();

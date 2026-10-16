@@ -3,9 +3,9 @@
 //!
 //! These catch integration gaps that unit tests miss.
 
+use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
-use serde_json::json;
 use uwa_testkit::{
     config::{config_with_key, TEST_AUTH_HEADER},
     AppBuilder, MockProvider, MockTransport,
@@ -16,7 +16,9 @@ mod helpers {
     pub fn test_app() -> uwa_testkit::TestApp {
         AppBuilder::new()
             .with_config(config_with_key())
-            .with_provider(Arc::new(MockProvider::new("chatgpt").with_answer("default answer")))
+            .with_provider(Arc::new(
+                MockProvider::new("chatgpt").with_answer("default answer"),
+            ))
             .build()
     }
 }
@@ -30,7 +32,8 @@ async fn debug_messages_endpoint() {
         .with_provider(Arc::new(MockProvider::new("chatgpt").with_answer("hello")))
         .build();
 
-    let r = app.server
+    let r = app
+        .server
         .post("/v1/messages")
         .add_header("Authorization", TEST_AUTH_HEADER)
         .json(&json!({
@@ -49,13 +52,10 @@ async fn debug_messages_endpoint() {
 #[tokio::test]
 async fn streaming_pipeline_produces_sse_chunks_with_ttft() {
     // Provider streams chunks with delay — pipeline must proxy them as SSE
-    let provider = Arc::new(
-        MockProvider::new("chatgpt")
-            .with_chunks(
-                ["Hello", " world", " from", " the", " pipeline"],
-                Duration::from_millis(50),
-            )
-    );
+    let provider = Arc::new(MockProvider::new("chatgpt").with_chunks(
+        ["Hello", " world", " from", " the", " pipeline"],
+        Duration::from_millis(50),
+    ));
 
     let app = AppBuilder::new()
         .with_config(config_with_key())
@@ -63,7 +63,8 @@ async fn streaming_pipeline_produces_sse_chunks_with_ttft() {
         .build();
 
     // Streaming request
-    let mut stream = app.server
+    let mut stream = app
+        .server
         .post("/v1/chat/completions")
         .add_header("Accept", "text/event-stream")
         .add_header("Authorization", TEST_AUTH_HEADER)
@@ -129,11 +130,14 @@ async fn anthropic_messages_nonstreaming_round_trip() {
     let app = AppBuilder::new()
         .with_config(std::sync::Arc::new(config))
         .with_transport(Arc::new(MockTransport::with_n_tabs(1)))
-        .with_provider(Arc::new(MockProvider::new("claude").with_answer("Claude says hi")))
+        .with_provider(Arc::new(
+            MockProvider::new("claude").with_answer("Claude says hi"),
+        ))
         .build();
 
     // Use X-UWA-Provider header to force the claude provider
-    let r = app.server
+    let r = app
+        .server
         .post("/v1/messages")
         .add_header("Authorization", TEST_AUTH_HEADER)
         .add_header("X-UWA-Provider", "claude")
@@ -151,31 +155,35 @@ async fn anthropic_messages_nonstreaming_round_trip() {
     assert!(v["content"].is_array(), "missing content array: {v}");
     assert_eq!(v["role"].as_str(), Some("assistant"), "wrong role: {v}");
     assert!(
-        v["id"].as_str().map(|s| s.starts_with("msg_")).unwrap_or(false),
+        v["id"]
+            .as_str()
+            .map(|s| s.starts_with("msg_"))
+            .unwrap_or(false),
         "Anthropic-style id missing: {v}"
     );
 
     // Content text is present
     let content_text = v["content"][0]["text"].as_str().unwrap_or("");
-    assert_eq!(content_text, "Claude says hi", "content text mismatch: {content_text}");
+    assert_eq!(
+        content_text, "Claude says hi",
+        "content text mismatch: {content_text}"
+    );
 }
 
 #[tokio::test]
 async fn responses_endpoint_streaming_round_trip() {
-    let provider = Arc::new(
-        MockProvider::new("chatgpt")
-            .with_chunks(
-                ["Response ", "streaming ", "works"],
-                Duration::from_millis(30),
-            )
-    );
+    let provider = Arc::new(MockProvider::new("chatgpt").with_chunks(
+        ["Response ", "streaming ", "works"],
+        Duration::from_millis(30),
+    ));
 
     let app = AppBuilder::new()
         .with_config(config_with_key())
         .with_provider(provider)
         .build();
 
-    let r = app.server
+    let r = app
+        .server
         .post("/v1/responses")
         .add_header("Authorization", TEST_AUTH_HEADER)
         .json(&json!({
@@ -189,9 +197,18 @@ async fn responses_endpoint_streaming_round_trip() {
     let body = r.text();
 
     // Responses SSE format: response.created → output_text.delta* → response.completed
-    assert!(body.contains("response.created"), "missing response.created");
-    assert!(body.contains("output_text.delta"), "missing output_text.delta");
-    assert!(body.contains("response.completed"), "missing response.completed");
+    assert!(
+        body.contains("response.created"),
+        "missing response.created"
+    );
+    assert!(
+        body.contains("output_text.delta"),
+        "missing output_text.delta"
+    );
+    assert!(
+        body.contains("response.completed"),
+        "missing response.completed"
+    );
 }
 
 #[tokio::test]
@@ -209,7 +226,8 @@ async fn tool_calls_round_trip_via_openai_endpoint() {
         .with_provider(Arc::new(MockProvider::new("chatgpt").with_answer(answer)))
         .build();
 
-    let r = app.server
+    let r = app
+        .server
         .post("/v1/chat/completions")
         .add_header("Authorization", TEST_AUTH_HEADER)
         .json(&json!({
@@ -234,7 +252,10 @@ async fn tool_calls_round_trip_via_openai_endpoint() {
     let v: serde_json::Value = r.json();
 
     let tool_calls = &v["choices"][0]["message"]["tool_calls"];
-    assert!(tool_calls.is_array(), "expected tool_calls in response: {v}");
+    assert!(
+        tool_calls.is_array(),
+        "expected tool_calls in response: {v}"
+    );
     assert_eq!(
         tool_calls[0]["function"]["name"].as_str(),
         Some("get_weather"),
@@ -242,24 +263,27 @@ async fn tool_calls_round_trip_via_openai_endpoint() {
     );
 
     let args: serde_json::Value = serde_json::from_str(
-        tool_calls[0]["function"]["arguments"].as_str().unwrap_or("{}")
-    ).unwrap_or_default();
+        tool_calls[0]["function"]["arguments"]
+            .as_str()
+            .unwrap_or("{}"),
+    )
+    .unwrap_or_default();
     assert_eq!(args["city"].as_str(), Some("Kyiv"), "wrong tool args: {v}");
 
     // Finish reason must be tool_calls
-    assert_eq!(v["choices"][0]["finish_reason"].as_str(), Some("tool_calls"));
+    assert_eq!(
+        v["choices"][0]["finish_reason"].as_str(),
+        Some("tool_calls")
+    );
 }
 
 #[tokio::test]
 async fn tool_result_roundtrip_via_openai_endpoint() {
     // First turn: tool call
-    let provider = Arc::new(
-        MockProvider::new("chatgpt")
-            .with_answers([
-                r#"{"name": "get_weather", "arguments": {"city": "Kyiv"}}"#,
-                "It is 22C in Kyiv.",
-            ])
-    );
+    let provider = Arc::new(MockProvider::new("chatgpt").with_answers([
+        r#"{"name": "get_weather", "arguments": {"city": "Kyiv"}}"#,
+        "It is 22C in Kyiv.",
+    ]));
 
     let app = AppBuilder::new()
         .with_config(config_with_key())
@@ -267,7 +291,8 @@ async fn tool_result_roundtrip_via_openai_endpoint() {
         .build();
 
     // Turn 1: user asks, model emits tool call
-    let r1 = app.server
+    let r1 = app
+        .server
         .post("/v1/chat/completions")
         .add_header("Authorization", TEST_AUTH_HEADER)
         .json(&json!({
@@ -291,7 +316,8 @@ async fn tool_result_roundtrip_via_openai_endpoint() {
     assert_eq!(v1["choices"][0]["finish_reason"], "tool_calls");
 
     // Turn 2: client sends tool result back
-    let r2 = app.server
+    let r2 = app
+        .server
         .post("/v1/chat/completions")
         .add_header("Authorization", TEST_AUTH_HEADER)
         .json(&json!({
@@ -323,11 +349,7 @@ async fn tool_result_roundtrip_via_openai_endpoint() {
 #[tokio::test]
 async fn multiple_concurrent_streams_dont_interfere() {
     let provider = Arc::new(
-        MockProvider::new("chatgpt")
-            .with_chunks(
-                ["A", "B", "C"],
-                Duration::from_millis(20),
-            )
+        MockProvider::new("chatgpt").with_chunks(["A", "B", "C"], Duration::from_millis(20)),
     );
 
     let app = AppBuilder::new()

@@ -50,7 +50,9 @@ fn wait_for_readyz(port: u16, timeout: Duration) -> bool {
 fn stop_uwa(child: &mut std::process::Child) {
     let pid = child.id();
     // SIGTERM should kill the process group (PDEATHSIG in uwa-browser)
-    unsafe { libc::kill(pid as i32, libc::SIGTERM); }
+    unsafe {
+        libc::kill(pid as i32, libc::SIGTERM);
+    }
     let _ = child.wait();
 }
 
@@ -72,15 +74,22 @@ fn binary_starts_answers_readyz_and_stops_cleanly() {
 
     // Wait for readyz (this is TTFB — time to first byte of readiness)
     let readyz_ok = wait_for_readyz(port, Duration::from_secs(30));
-    assert!(readyz_ok, "uwa did not become ready within 30s on port {port}");
+    assert!(
+        readyz_ok,
+        "uwa did not become ready within 30s on port {port}"
+    );
 
     // Verify provider status endpoint works (pipeline reached tab)
-    let status: serde_json::Value = ureq::get(&format!("http://127.0.0.1:{port}/v1/provider/status"))
-        .call()
-        .unwrap_or_else(|e| panic!("provider status failed: {e}"))
-        .json()
-        .unwrap_or(serde_json::Value::Null);
-    assert!(status.is_object(), "provider status returned non-object: {status}");
+    let status: serde_json::Value =
+        ureq::get(&format!("http://127.0.0.1:{port}/v1/provider/status"))
+            .call()
+            .unwrap_or_else(|e| panic!("provider status failed: {e}"))
+            .json()
+            .unwrap_or(serde_json::Value::Null);
+    assert!(
+        status.is_object(),
+        "provider status returned non-object: {status}"
+    );
 
     // Clean stop: SIGTERM should kill uwa AND the Chromium process group
     stop_uwa(&mut child);
@@ -113,10 +122,16 @@ fn binary_healthz_reports_ok_before_readyz() {
         }
         std::thread::sleep(Duration::from_millis(500));
     }
-    assert!(healthz_ok, "/healthz did not respond within 15s on port {port}");
+    assert!(
+        healthz_ok,
+        "/healthz did not respond within 15s on port {port}"
+    );
 
     stop_uwa(&mut child);
-    assert!(!chromium_leaked(&profile), "Chromium leaked on healthz test");
+    assert!(
+        !chromium_leaked(&profile),
+        "Chromium leaked on healthz test"
+    );
     let _ = std::fs::remove_dir_all(&profile);
 }
 
@@ -127,7 +142,10 @@ fn models_endpoint_lists_expected_providers() {
     let mut child = spawn_uwa(port);
 
     let readyz_ok = wait_for_readyz(port, Duration::from_secs(30));
-    assert!(readyz_ok, "uwa did not become ready within 30s on port {port}");
+    assert!(
+        readyz_ok,
+        "uwa did not become ready within 30s on port {port}"
+    );
 
     let resp: serde_json::Value = ureq::get(&format!("http://127.0.0.1:{port}/v1/models"))
         .call()
@@ -136,11 +154,17 @@ fn models_endpoint_lists_expected_providers() {
         .unwrap_or(serde_json::Value::Null);
 
     let data = resp["data"].as_array().cloned().unwrap_or_default();
-    assert!(!data.is_empty(), "/v1/models returned empty list — config load failed?");
+    assert!(
+        !data.is_empty(),
+        "/v1/models returned empty list — config load failed?"
+    );
 
     // At least one built-in provider should be visible
     let has_known = data.iter().any(|m| {
-        m["owned_by"].as_str().map(|s| !s.is_empty()).unwrap_or(false)
+        m["owned_by"]
+            .as_str()
+            .map(|s| !s.is_empty())
+            .unwrap_or(false)
     });
     assert!(has_known, "no provider with owned_by found in: {resp}");
 
@@ -167,6 +191,9 @@ fn binary_restart_is_idempotent() {
     assert!(readyz_ok2, "restart on same profile failed");
     stop_uwa(&mut child2);
 
-    assert!(!chromium_leaked(&profile), "Chromium leaked on restart test");
+    assert!(
+        !chromium_leaked(&profile),
+        "Chromium leaked on restart test"
+    );
     let _ = std::fs::remove_dir_all(&profile);
 }

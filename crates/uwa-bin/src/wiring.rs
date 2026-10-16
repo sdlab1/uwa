@@ -164,11 +164,16 @@ pub async fn run_with(config_path: PathBuf, cdp_url: &str) -> anyhow::Result<()>
         "semaphores configured from provider.max_concurrency"
     );
 
-    let state = AppState::minimal(config.clone(), Arc::new(registry), transport.clone())
-        .with_sessions(sessions.clone())
-        .with_semaphores(Arc::new(sem))
-        .with_history(history)
-        .with_pinning(pinning);
+    let state = AppState::minimal(
+        config.clone(),
+        Arc::new(registry),
+        transport.clone(),
+        Some(config_path.clone()),
+    )
+    .with_sessions(sessions.clone())
+    .with_semaphores(Arc::new(sem))
+    .with_history(history)
+    .with_pinning(pinning);
 
     tracing::info!(
         pinning_enabled = state.runtime.pinning.is_some(),
@@ -235,6 +240,7 @@ mod tests {
             config,
             Arc::new(ProviderRegistry::new()),
             Arc::new(MockTransport::new()),
+            None,
         )
     }
 

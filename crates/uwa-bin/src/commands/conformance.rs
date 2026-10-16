@@ -149,10 +149,15 @@ async fn run_live(args: &RunArgs) -> Result<()> {
         sem = sem.with_limit(name, p.max_concurrency as usize);
     }
 
-    let state = uwa_api::AppState::minimal(config.clone(), Arc::new(registry), transport)
-        .with_sessions(sessions)
-        .with_semaphores(Arc::new(sem))
-        .with_history(history);
+    let state = uwa_api::AppState::minimal(
+        config.clone(),
+        Arc::new(registry),
+        transport,
+        Some(args.config.clone()),
+    )
+    .with_sessions(sessions)
+    .with_semaphores(Arc::new(sem))
+    .with_history(history);
 
     let mut scores = Vec::new();
     for provider in &args.provider {
@@ -226,7 +231,10 @@ impl ConformanceBackend for LiveBackend {
         // Find a model alias that routes to this provider; if there are
         // several, the first one wins — it only affects the response's
         // `model` field, which conformance ignores.
-        let model = self.state.cfg().model_aliases
+        let model = self
+            .state
+            .cfg()
+            .model_aliases
             .iter()
             .find(|(_, p)| p.as_str() == self.provider)
             .map(|(m, _)| m.clone())
