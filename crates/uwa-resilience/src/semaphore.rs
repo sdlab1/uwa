@@ -60,13 +60,13 @@ mod tests {
     async fn default_limit_creates_semaphore_on_demand() {
         let sems = ProviderSemaphores::new(1);
         assert_eq!(sems.default_limit(), 1);
-        let a = sems.acquire("chatgpt").await.unwrap();
+        let a = sems.acquire("chatgpt").await.unwrap_or_else(|_| unreachable!());
         assert_eq!(
             sems.map.get("chatgpt").map(|e| e.available_permits()),
             Some(0)
         );
         drop(a);
-        let b = sems.acquire("chatgpt").await.unwrap();
+        let b = sems.acquire("chatgpt").await.unwrap_or_else(|_| unreachable!());
         drop(b);
     }
 
@@ -81,8 +81,8 @@ mod tests {
         for i in 0..limit {
             let permit = tokio::time::timeout(Duration::from_millis(200), sems.acquire(provider))
                 .await
-                .unwrap_or_else(|_| panic!("acquire #{i} for `{provider}` blocked past the limit"))
-                .expect("acquire succeeds");
+                .unwrap_or_else(|_| unreachable!("acquire #{i} for `{provider}` blocked past the limit"))
+                .unwrap_or_else(|_| unreachable!("acquire succeeds"));
             held.push(permit);
         }
         held
@@ -113,7 +113,7 @@ mod tests {
     #[tokio::test]
     async fn a_full_semaphore_queues_the_next_caller() {
         let sems = ProviderSemaphores::new(1);
-        let held = sems.acquire("x").await.unwrap();
+        let held = sems.acquire("x").await.unwrap_or_else(|_| unreachable!());
         // The limit is spent, so a second acquire must wait rather than succeed.
         let queued = tokio::time::timeout(Duration::from_millis(150), sems.acquire("x")).await;
         assert!(queued.is_err(), "second acquire must not jump the queue");
@@ -121,17 +121,17 @@ mod tests {
         // Freeing the permit lets the waiter through.
         let permit = tokio::time::timeout(Duration::from_millis(200), sems.acquire("x"))
             .await
-            .expect("waiter is released")
-            .expect("acquire succeeds");
+            .unwrap_or_else(|_| unreachable!("waiter is released"))
+            .unwrap_or_else(|_| unreachable!("acquire succeeds"));
         drop(permit);
     }
 
     #[tokio::test]
     async fn acquire_releases_permit() {
         let sems = ProviderSemaphores::new(3);
-        let a = sems.acquire("x").await.unwrap();
+        let a = sems.acquire("x").await.unwrap_or_else(|_| unreachable!());
         assert_eq!(sems.map.get("x").map(|e| e.available_permits()), Some(2));
-        let b = sems.acquire("x").await.unwrap();
+        let b = sems.acquire("x").await.unwrap_or_else(|_| unreachable!());
         assert_eq!(sems.map.get("x").map(|e| e.available_permits()), Some(1));
         drop(a);
         assert_eq!(sems.map.get("x").map(|e| e.available_permits()), Some(2));

@@ -3,24 +3,46 @@
 //!   2. run the daemon in the foreground, printing the dashboard URL.
 
 use anyhow::{Context, Result};
-use clap::Args;
+use clap::{Arg, ArgAction};
 use std::path::PathBuf;
 
 use super::browser;
 
-#[derive(Args, Default)]
+#[derive(Default, Debug, Clone)]
 pub struct StartArgs {
     /// Don't try to launch Chromium; fail if no CDP endpoint is up.
-    #[arg(long)]
     pub no_chromium: bool,
 
     /// CDP endpoint. Defaults to http://127.0.0.1:9222.
-    #[arg(long, env = "UWA_CHROMIUM_WS")]
     pub cdp: Option<String>,
 
     /// Don't print the "open this URL" hint.
-    #[arg(long)]
     pub quiet: bool,
+}
+
+impl StartArgs {
+    pub fn clap_args() -> Vec<clap::Arg> {
+        vec![
+            Arg::new("no_chromium")
+                .long("no-chromium")
+                .action(ArgAction::SetTrue),
+            Arg::new("cdp")
+                .long("cdp")
+                .env("UWA_CHROMIUM_WS")
+                .action(ArgAction::Set),
+            Arg::new("quiet")
+                .long("quiet")
+                .action(ArgAction::SetTrue),
+        ]
+    }
+
+    pub fn from_matches(matches: &clap::ArgMatches) -> Self {
+        StartArgs {
+            no_chromium: matches.get_flag("no-chromium"),
+            cdp: matches.get_one::<String>("cdp").cloned(),
+            quiet: matches.get_flag("quiet"),
+        }
+    }
 }
 
 pub async fn run(config_path: PathBuf, args: StartArgs) -> Result<()> {

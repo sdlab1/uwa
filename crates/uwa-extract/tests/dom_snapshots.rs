@@ -18,27 +18,27 @@ fn ex() -> DomExtractor {
 #[test]
 fn chatgpt_simple() {
     let html = include_str!("fixtures/chatgpt_simple.html");
-    let out = ex().extract_from_html(html).unwrap();
+    let out = ex().extract_from_html(html).unwrap_or_else(|_| unreachable!());
     insta::assert_snapshot!(out);
 }
 
 #[test]
 fn chatgpt_multiple_messages() {
     let html = include_str!("fixtures/chatgpt_multiple.html");
-    let out = ex().extract_from_html(html).unwrap();
+    let out = ex().extract_from_html(html).unwrap_or_else(|_| unreachable!());
     insta::assert_snapshot!(out);
 }
 
 #[test]
 fn whitespace_is_trimmed() {
     let html = include_str!("fixtures/whitespace_trim.html");
-    let out = ex().extract_from_html(html).unwrap();
+    let out = ex().extract_from_html(html).unwrap_or_else(|_| unreachable!());
     insta::assert_snapshot!(out);
 }
 
 #[test]
 fn markdown_blocks_concatenated() {
     let html = include_str!("fixtures/markdown_blocks.html");
-    let out = ex().extract_from_html(html).unwrap();
+    let out = ex().extract_from_html(html).unwrap_or_else(|_| unreachable!());
     insta::assert_snapshot!(out);
 }

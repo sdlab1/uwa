@@ -240,7 +240,7 @@ mod tests {
     /// `TimingCfg::default()`.
     #[test]
     fn serde_defaults_match_default_impl() {
-        let parsed: TimingCfg = toml::from_str("").unwrap();
+        let parsed: TimingCfg = toml::from_str("").unwrap_or_else(|_| unreachable!());
         let d = TimingCfg::default();
         assert_eq!(parsed.profile, d.profile);
         assert_eq!(parsed.key_ms, d.key_ms);
@@ -289,7 +289,10 @@ mod tests {
             burst_chars: 0,
             ..TimingCfg::default()
         };
-        let e = t.validate().unwrap_err();
+        let e = match t.validate() {
+            Err(e) => e,
+            Ok(_) => unreachable!(),
+        };
         assert!(e.contains("burst_chars"), "got: {e}");
     }
 }

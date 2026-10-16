@@ -125,7 +125,7 @@ impl EventLog {
                 let (body, truncated) = if body.len() > self.cfg.max_body_bytes {
                     let mut cut = self.cfg.max_body_bytes;
                     while cut > 0 && !body.is_char_boundary(cut) {
-                        cut -= 1;
+                        cut = cut.saturating_sub(1);
                     }
                     (body[..cut].to_string(), true)
                 } else {
@@ -154,8 +154,9 @@ impl EventLog {
             if g.entries.len() >= self.cfg.capacity {
                 g.entries.pop_front();
             }
-            *g.by_target.entry(tapped.target.clone()).or_insert(0) += 1;
-            g.total += 1;
+            let entry = g.by_target.entry(tapped.target.clone()).or_insert(0);
+            *entry = entry.saturating_add(1);
+            g.total = g.total.saturating_add(1);
             g.entries.push_back(ev.clone());
         }
 

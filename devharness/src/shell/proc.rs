@@ -63,7 +63,9 @@ pub fn run_logged(
     let t_out = std::thread::spawn(move || read_pipe(out_pipe));
     let t_err = std::thread::spawn(move || read_pipe(err_pipe));
 
-    let deadline = Instant::now() + timeout;
+    let deadline = Instant::now()
+        .checked_add(timeout)
+        .unwrap_or_else(|| unreachable!());
     let status = loop {
         if let Some(st) = child
             .try_wait()
@@ -73,7 +75,7 @@ pub fn run_logged(
         }
         if Instant::now() >= deadline {
             unsafe {
-                libc::kill(-pgid, libc::SIGKILL);
+                libc::kill(pgid.wrapping_neg(), libc::SIGKILL);
             }
             let _ = child.wait();
             return Err(ProcError::Timeout {

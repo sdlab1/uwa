@@ -64,17 +64,17 @@ async fn send_message_runs_the_full_sequence() {
     provider(provider_cfg())
         .send_message(&page, "hello world")
         .await
-        .expect("send succeeds");
+        .unwrap_or_else(|_| unreachable!("send succeeds"));
 
     let seen = evals(&page);
     let inject = seen
         .iter()
         .position(|e| e.contains("el.focus()"))
-        .expect("the composer was filled");
+        .unwrap_or_else(|| unreachable!("the composer was filled"));
     let click = seen
         .iter()
         .position(|e| e.contains("el.click()"))
-        .expect("the send button was clicked");
+        .unwrap_or_else(|| unreachable!("the send button was clicked"));
     assert!(inject < click, "fill must precede click: {seen:?}");
     assert!(
         seen.iter().any(|e| e.contains("hello world")),
@@ -95,10 +95,13 @@ async fn send_message_fails_when_the_composer_is_gone() {
             "el.focus()",
             vec![json!({ "ok": false, "reason": "no-element" })],
         );
-    let err = provider(provider_cfg())
+    let err = match provider(provider_cfg())
         .send_message(&page, "hi")
         .await
-        .expect_err("a rejected injection must surface");
+    {
+        Err(err) => err,
+        Ok(_) => unreachable!(),
+    };
     assert!(matches!(err, UwaError::Transport(_)), "{err:?}");
 }
 
@@ -114,7 +117,7 @@ async fn send_message_waits_for_the_send_button_to_enable() {
     provider(provider_cfg())
         .send_message(&page, "hi")
         .await
-        .expect("button enables on the second probe");
+        .unwrap_or_else(|_| unreachable!("button enables on the second probe"));
     assert!(
         evals_containing(&page, "el.disabled") >= 2,
         "the disabled button was polled more than once"
@@ -126,10 +129,13 @@ async fn send_message_requires_the_configured_selectors() {
     let mut cfg = provider_cfg();
     cfg.selectors.input = None;
     let page = MockPage::new();
-    let err = provider(cfg)
+    let err = match provider(cfg)
         .send_message(&page, "hi")
         .await
-        .expect_err("a missing selector is a config error");
+    {
+        Err(err) => err,
+        Ok(_) => unreachable!(),
+    };
     assert!(matches!(err, UwaError::Config(_)), "{err:?}");
     assert!(evals(&page).is_empty(), "no page traffic before validation");
 }
@@ -142,7 +148,7 @@ async fn cancel_clicks_the_stop_button() {
     provider(provider_cfg())
         .cancel(&page)
         .await
-        .expect("cancel is best-effort");
+        .unwrap_or_else(|_| unreachable!("cancel is best-effort"));
     assert_eq!(evals_containing(&page, "el.click()"), 1);
     assert!(
         evals(&page).iter().any(|e| e.contains("#stop")),

@@ -23,7 +23,8 @@ fn cases(default: u32) -> ProptestConfig {
 
 /// One line of data that can't contain `\n` (so it won't split the frame).
 fn data_line() -> impl Strategy<Value = String> {
-    proptest::string::string_regex("[a-zA-Z0-9 ,.!?-]{0,80}").unwrap()
+    proptest::string::string_regex("[a-zA-Z0-9 ,.!?-]{0,80}")
+        .unwrap_or_else(|_| unreachable!())
 }
 
 /// Encodes an SSE frame the way servers do.
@@ -163,12 +164,12 @@ proptest! {
         for &c in &cuts {
             let c = c.min(chars.len());
             if c > prev {
-                pieces.push(chars[prev..c].iter().collect());
+                pieces.push(chars.get(prev..c).unwrap_or(&[]).iter().collect());
                 prev = c;
             }
         }
         if prev < chars.len() {
-            pieces.push(chars[prev..].iter().collect());
+            pieces.push(chars.get(prev..).unwrap_or(&[]).iter().collect());
         }
 
         let mut chunked = SseParser::new();
@@ -209,7 +210,8 @@ fn feed_splits_at_earliest_lf_before_crlf() {
     // "data: first\n" then "data: second\r\n" then blank line.
     let frames = p.feed("data: first\ndata: second\r\n\r\n");
     assert_eq!(frames.len(), 1);
-    assert_eq!(frames[0].data, "first\nsecond");
+    let frame = frames.first().unwrap_or_else(|| unreachable!());
+    assert_eq!(&frame.data, "first\nsecond");
 }
 
 /// A lone `\r` before a `\n` (not adjacent) must split at the `\r`.
@@ -222,7 +224,8 @@ fn feed_splits_at_lone_cr_before_lf() {
     // \r terminates first line; "b" is a separate line without data: prefix.
     let frames = p.feed("data: a\rb\n\n");
     assert_eq!(frames.len(), 1);
-    assert_eq!(frames[0].data, "a");
+    let frame = frames.first().unwrap_or_else(|| unreachable!());
+    assert_eq!(&frame.data, "a");
 }
 
 /// Two data lines separated by \r produce joined data.
@@ -232,7 +235,8 @@ fn feed_joins_data_lines_separated_by_cr() {
     // Each line has data: prefix; \r separates them.
     let frames = p.feed("data: a\rdata: b\n\n");
     assert_eq!(frames.len(), 1);
-    assert_eq!(frames[0].data, "a\nb");
+    let frame = frames.first().unwrap_or_else(|| unreachable!());
+    assert_eq!(&frame.data, "a\nb");
 }
 
 /// A `\r` at the very end of a chunk must be held back until the next
@@ -249,7 +253,8 @@ fn feed_holds_trailing_cr_until_next_chunk() {
     // Second chunk completes the CRLF and the frame.
     let frames2 = p.feed("\n\n");
     assert_eq!(frames2.len(), 1);
-    assert_eq!(frames2[0].data, "hello");
+    let frame = frames2.first().unwrap_or_else(|| unreachable!());
+    assert_eq!(&frame.data, "hello");
 }
 
 /// A `\r` at end-of-stream (in `finish`) IS treated as a terminator,
@@ -307,7 +312,8 @@ fn crlf_split_across_chunks() {
     assert!(f2.is_empty());
     let f3 = p.feed("\n");
     assert_eq!(f3.len(), 1);
-    assert_eq!(f3[0].data, "split");
+    let frame = f3.first().unwrap_or_else(|| unreachable!());
+    assert_eq!(&frame.data, "split");
 }
 
 // ---------- guarantee 3: json_path finds what exists ----------
@@ -338,7 +344,7 @@ proptest! {
             .collect();
         let root = serde_json::Value::Object(obj);
 
-        let got = json_path_str(&root, "*").unwrap();
+        let got = json_path_str(&root, "*").unwrap_or_else(|| unreachable!());
 
         for v in &vals {
             prop_assert!(got.contains(v.as_str()), "{v:?} missing from {got:?}");
@@ -361,7 +367,7 @@ fn decoder_roundtrips_through_serde() {
     let d = NetDecoder::Sse {
         json_path: "__raw__".into(),
     };
-    let s = serde_json::to_string(&d).unwrap();
-    let back: NetDecoder = serde_json::from_str(&s).unwrap();
+    let s = serde_json::to_string(&d).unwrap_or_else(|_| unreachable!());
+    let back: NetDecoder = serde_json::from_str(&s).unwrap_or_else(|_| unreachable!());
     assert_eq!(d, back);
 }

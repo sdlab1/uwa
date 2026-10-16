@@ -15,36 +15,88 @@
 //! `uwa start` from a shell — same code path, same guarantees.
 
 use anyhow::{bail, Context, Result};
-use clap::Subcommand;
+use clap::{Arg, ArgAction, Command};
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::Command as ProcessCommand;
 
 use super::paths;
 
-#[derive(Subcommand)]
+#[derive(Debug, Clone)]
 pub enum ServiceAction {
     /// Register and start the service.
     Install {
         /// System-wide instead of user-scoped (Linux/macOS only, requires root).
-        #[arg(long)]
         system: bool,
         /// Config file the service should load. Defaults to $HOME/uwa.toml.
-        #[arg(long)]
         config: Option<PathBuf>,
         /// Do not start after installing.
-        #[arg(long)]
         no_start: bool,
     },
     /// Stop and unregister.
     Uninstall {
-        #[arg(long)]
+        /// System-wide instead of user-scoped (Linux/macOS only, requires root).
         system: bool,
     },
     /// Show whether the service is registered and running.
     Status {
-        #[arg(long)]
+        /// System-wide instead of user-scoped (Linux/macOS only, requires root).
         system: bool,
     },
+}
+
+impl ServiceAction {
+    pub fn clap_subcommands() -> Vec<clap::Command> {
+        vec![
+            Command::new("install")
+                .about("Register and start the service.")
+                .arg(
+                    Arg::new("system")
+                        .long("system")
+                        .action(ArgAction::SetTrue),
+                )
+                .arg(
+                    Arg::new("config")
+                        .long("config")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("no_start")
+                        .long("no-start")
+                        .action(ArgAction::SetTrue),
+                ),
+            Command::new("uninstall")
+                .about("Stop and unregister.")
+                .arg(
+                    Arg::new("system")
+                        .long("system")
+                        .action(ArgAction::SetTrue),
+                ),
+            Command::new("status")
+                .about("Show whether the service is registered and running.")
+                .arg(
+                    Arg::new("system")
+                        .long("system")
+                        .action(ArgAction::SetTrue),
+                ),
+        ]
+    }
+
+    pub fn from_matches(name: &str, matches: &clap::ArgMatches) -> Result<Self, String> {
+        match name {
+            "install" => Ok(ServiceAction::Install {
+                system: matches.get_flag("system"),
+                config: matches.get_one::<PathBuf>("config").cloned(),
+                no_start: matches.get_flag("no_start"),
+            }),
+            "uninstall" => Ok(ServiceAction::Uninstall {
+                system: matches.get_flag("system"),
+            }),
+            "status" => Ok(ServiceAction::Status {
+                system: matches.get_flag("system"),
+            }),
+            _ => Err(format!("unknown service subcommand: {name}")),
+        }
+    }
 }
 
 pub async fn run(action: ServiceAction) -> Result<()> {
@@ -116,7 +168,7 @@ mod linux {
     }
 
     fn systemctl(system: bool, args: &[&str]) -> Result<std::process::Output> {
-        let mut cmd = Command::new("systemctl");
+        let mut cmd = ProcessCommand::new("systemctl");
         if !system {
             cmd.arg("--user");
         }

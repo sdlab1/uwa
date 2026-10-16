@@ -94,7 +94,9 @@ pub fn cdp_ready(cdp_url: &str) -> bool {
     // single 128-byte read misses it.
     let mut buf = Vec::with_capacity(1024);
     let mut chunk = [0u8; 512];
-    let deadline = Instant::now() + Duration::from_millis(400);
+    let deadline = Instant::now()
+        .checked_add(Duration::from_millis(400))
+        .unwrap_or_else(|| unreachable!());
     loop {
         if Instant::now() > deadline {
             break;
@@ -102,7 +104,7 @@ pub fn cdp_ready(cdp_url: &str) -> bool {
         match sock.read(&mut chunk) {
             Ok(0) => break,
             Ok(n) => {
-                buf.extend_from_slice(&chunk[..n]);
+                buf.extend_from_slice(chunk.get(..n).unwrap_or(&[]));
                 if buf.len() > 4096 {
                     break;
                 }
@@ -153,7 +155,9 @@ pub fn ensure_cdp(cdp_url: &str, launch_if_needed: bool) -> Result<(String, Opti
         .with_context(|| format!("spawn {}", bin.display()))?;
 
     // Wait for CDP with a deadline — 15 s is generous even on a cold SSD.
-    let deadline = Instant::now() + Duration::from_secs(15);
+    let deadline = Instant::now()
+        .checked_add(Duration::from_secs(15))
+        .unwrap_or_else(|| unreachable!());
     while Instant::now() < deadline {
         if cdp_ready(cdp_url) {
             return Ok((cdp_url.to_string(), Some(child)));
@@ -181,8 +185,12 @@ mod tests {
     /// single-read implementation missed it.
     fn serve_cdp_once(body: &str) -> u16 {
         use std::io::Write as _;
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-        let port = listener.local_addr().expect("addr").port();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap_or_else(|_| unreachable!());
+        let port = listener
+            .local_addr()
+            .unwrap_or_else(|_| unreachable!())
+            .port();
         let body = body.to_string();
         std::thread::spawn(move || {
             if let Ok((mut sock, _)) = listener.accept() {

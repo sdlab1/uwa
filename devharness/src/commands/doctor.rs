@@ -30,7 +30,7 @@ pub fn doctor(store: &Store, cfg: &RunConfig, root: &Path) -> anyhow::Result<()>
         .unwrap_or_default();
     if git_ver.is_empty() {
         say("FAIL нет git");
-        fail += 1;
+        fail = fail.saturating_add(1);
         failed.push("нет git".into());
     } else {
         say(&format!("ok   git {git_ver}"));
@@ -38,7 +38,7 @@ pub fn doctor(store: &Store, cfg: &RunConfig, root: &Path) -> anyhow::Result<()>
 
     if cfg.verify.is_empty() {
         say("FAIL VERIFY не задан");
-        fail += 1;
+        fail = fail.saturating_add(1);
         failed.push("VERIFY не задан".into());
     } else {
         say(&format!("ok   VERIFY: {}", cfg.verify));
@@ -51,7 +51,7 @@ pub fn doctor(store: &Store, cfg: &RunConfig, root: &Path) -> anyhow::Result<()>
         say(&format!("ok   агент: {ag}"));
     } else {
         say(&format!("FAIL агент '{ag}' не найден в PATH"));
-        fail += 1;
+        fail = fail.saturating_add(1);
         failed.push(format!("агент '{ag}' не найден в PATH"));
     }
 
@@ -61,14 +61,14 @@ pub fn doctor(store: &Store, cfg: &RunConfig, root: &Path) -> anyhow::Result<()>
         say("ok   timeout (watchdog)");
     } else {
         say("WARN нет coreutils timeout");
-        warn += 1;
+        warn = warn.saturating_add(1);
     }
 
     if crate::commands::run::which("shellcheck") {
         say("ok   shellcheck (статический слой)");
     } else {
         say("WARN нет shellcheck — статика пропускается");
-        warn += 1;
+        warn = warn.saturating_add(1);
     }
 
     if git::has_remote(root) {
@@ -76,7 +76,7 @@ pub fn doctor(store: &Store, cfg: &RunConfig, root: &Path) -> anyhow::Result<()>
             say(&format!("ok   remote {}", cfg.remote));
         } else {
             say(&format!("WARN remote {} недоступен", cfg.remote));
-            warn += 1;
+            warn = warn.saturating_add(1);
         }
     } else {
         say("ok   репо без remote (локальный режим)");
@@ -90,7 +90,7 @@ pub fn doctor(store: &Store, cfg: &RunConfig, root: &Path) -> anyhow::Result<()>
         say("ok   .harness/ в exclude");
     } else {
         say("WARN .harness/ не в .git/info/exclude");
-        warn += 1;
+        warn = warn.saturating_add(1);
     }
 
     if let Some(m) = &cfg.mutate {
@@ -108,7 +108,7 @@ pub fn doctor(store: &Store, cfg: &RunConfig, root: &Path) -> anyhow::Result<()>
             say(&format!(
                 "WARN mutation: '{mbin}' не найден — run будет заблокирован (установи инструмент)"
             ));
-            warn += 1;
+            warn = warn.saturating_add(1);
         }
     } else {
         say("ok   mutation-гейт выключен");
@@ -166,14 +166,14 @@ fn orphan_checks(
             it.id,
             it.id
         ));
-        *warn += 1;
+        *warn = warn.saturating_add(1);
     }
     if it.status == crate::core::state::Status::Open && wt.is_dir() {
         say(&format!(
             "WARN {}: worktree есть, статус open — devh run {} продолжит с места обрыва",
             it.id, it.id
         ));
-        *warn += 1;
+        *warn = warn.saturating_add(1);
     }
 }
 
@@ -195,7 +195,7 @@ fn verify_smoke(root: &Path, verify: &str, say: &mut dyn FnMut(&str), warn: &mut
     {
         Err(e) => {
             say(&format!("WARN smoke не запустился: {e}"));
-            *warn += 1;
+            *warn = warn.saturating_add(1);
         }
         Ok(out) => {
             let elapsed = t0.elapsed().as_secs();
@@ -206,14 +206,14 @@ fn verify_smoke(root: &Path, verify: &str, say: &mut dyn FnMut(&str), warn: &mut
                 say(&format!(
                     "WARN smoke не уложился в {SMOKE_TIMEOUT_SECS}s — прогони руками: {verify}"
                 ));
-                *warn += 1;
+                *warn = warn.saturating_add(1);
             } else {
                 say(&format!(
                     "WARN smoke VERIFY упал rc={:?} ({elapsed}s): {}",
                     rc,
                     tail_line(&out)
                 ));
-                *warn += 1;
+                *warn = warn.saturating_add(1);
             }
         }
     }
@@ -253,7 +253,7 @@ fn crap_smoke(
         say("ok   CRAP: инструмент отвечает (контракт распознан)");
     } else {
         say("FAIL CRAP: инструмент не отвечает по контракту (нет 'CRAP: functions=N') — блокер СРЕДЫ");
-        *fail += 1;
+        *fail = fail.saturating_add(1);
         failed.push("CRAP-инструмент не распознан (нет 'CRAP: functions=N')".into());
     }
 }
@@ -270,8 +270,8 @@ fn tail_line(out: &std::process::Output) -> String {
         .to_string();
     let mut chars: Vec<char> = last.chars().collect();
     if chars.len() > 120 {
-        let skip = chars.len() - 120;
-        chars = chars[skip..].to_vec();
+        let skip = chars.len().saturating_sub(120);
+        chars = chars.get(skip..).unwrap_or_else(|| unreachable!()).to_vec();
     }
     chars.into_iter().collect()
 }

@@ -27,7 +27,14 @@ async fn text_only_request_ignores_multimodal() {
         .await;
     r.assert_status_ok();
     let v: serde_json::Value = r.json();
-    assert_eq!(v["choices"][0]["message"]["content"], "ok");
+    assert_eq!(
+        v.get("choices")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("message"))
+            .and_then(|m| m.get("content"))
+            .and_then(|c| c.as_str()),
+        Some("ok")
+    );
 }
 
 #[tokio::test]
@@ -60,7 +67,14 @@ async fn image_attachment_decoded_but_not_fails_pipeline() {
     // Should succeed end-to-end: the mock provider ignores attachments.
     r.assert_status_ok();
     let v: serde_json::Value = r.json();
-    assert_eq!(v["choices"][0]["message"]["content"], "a red pixel");
+    assert_eq!(
+        v.get("choices")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("message"))
+            .and_then(|m| m.get("content"))
+            .and_then(|c| c.as_str()),
+        Some("a red pixel")
+    );
 }
 
 #[tokio::test]
@@ -88,5 +102,12 @@ async fn broken_image_does_not_fail_chat() {
         .await;
     r.assert_status_ok();
     let v: serde_json::Value = r.json();
-    assert_eq!(v["choices"][0]["message"]["content"], "fine");
+    assert_eq!(
+        v.get("choices")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("message"))
+            .and_then(|m| m.get("content"))
+            .and_then(|c| c.as_str()),
+        Some("fine")
+    );
 }

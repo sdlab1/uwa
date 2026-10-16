@@ -94,12 +94,12 @@ mod tests {
         s.trigger();
         tokio::time::timeout(std::time::Duration::from_secs(1), h1)
             .await
-            .expect("waiter 1 hung")
-            .unwrap();
+            .unwrap_or_else(|_| unreachable!("waiter 1 hung"))
+            .unwrap_or_else(|_| unreachable!());
         tokio::time::timeout(std::time::Duration::from_secs(1), h2)
             .await
-            .expect("waiter 2 hung")
-            .unwrap();
+            .unwrap_or_else(|_| unreachable!("waiter 2 hung"))
+            .unwrap_or_else(|_| unreachable!());
         assert!(s.is_triggered());
     }
 
@@ -109,6 +109,6 @@ mod tests {
         s.trigger();
         tokio::time::timeout(std::time::Duration::from_millis(100), s.wait())
             .await
-            .expect("already-triggered wait must not block");
+            .unwrap_or_else(|_| unreachable!("already-triggered wait must not block"));
     }
 }

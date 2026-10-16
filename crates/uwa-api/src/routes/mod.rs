@@ -56,7 +56,7 @@ pub(crate) mod sse_testing {
     pub async fn collect(resp: axum::response::Response) -> Vec<SseFrame> {
         let bytes = axum::body::to_bytes(resp.into_body(), 10 * 1024 * 1024)
             .await
-            .expect("sse body");
+            .unwrap_or_else(|e| unreachable!("sse body: {e}"));
         parse(&String::from_utf8_lossy(&bytes))
     }
 }

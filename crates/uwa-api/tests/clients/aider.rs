@@ -33,9 +33,22 @@ async fn aider_plain_completion() {
         .await;
     r.assert_status_ok();
     let v: Value = r.json();
-    assert_eq!(v["choices"][0]["message"]["content"], "Sure.");
+    assert_eq!(
+        v.get("choices")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("message"))
+            .and_then(|m| m.get("content"))
+            .and_then(|c| c.as_str()),
+        Some("Sure.")
+    );
     // Aider uses usage for cost display.
-    assert!(v["usage"]["total_tokens"].as_u64().unwrap() > 0);
+    assert!(
+        v.get("usage")
+            .and_then(|u| u.get("total_tokens"))
+            .and_then(|t| t.as_u64())
+            .unwrap_or(0)
+            > 0
+    );
 }
 
 #[tokio::test]

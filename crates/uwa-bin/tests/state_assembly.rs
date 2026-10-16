@@ -20,7 +20,7 @@ async fn appstate_assembles_with_all_pieces() {
     let history = Arc::new(
         uwa_history::HistoryStore::new(uwa_history::HistoryCfg::default(), false)
             .await
-            .unwrap(),
+            .unwrap_or_else(|_| unreachable!()),
     );
 
     let state = AppState::minimal(

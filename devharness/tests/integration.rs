@@ -16,13 +16,13 @@ fn devh_bin() -> &'static str {
 
 impl Sandbox {
     fn new(name: &str) -> Self {
-        let guard = tempfile::TempDir::new().unwrap();
+        let guard = tempfile::TempDir::new().unwrap_or_else(|_| unreachable!());
         let t = guard.path().to_path_buf();
         let repo = t.join(name);
         let wt = t.join("wt");
         let stubs = t.clone();
-        fs::create_dir_all(&repo).unwrap();
-        fs::create_dir_all(&wt).unwrap();
+        fs::create_dir_all(&repo).unwrap_or_else(|_| unreachable!());
+        fs::create_dir_all(&wt).unwrap_or_else(|_| unreachable!());
 
         let bare = t.join(format!("{name}.git"));
         git(None, &["init", "-q", "--bare", &bare.to_string_lossy()]);
@@ -33,7 +33,7 @@ impl Sandbox {
         );
         git(Some(&repo), &["config", "user.email", "test@example.com"]);
         git(Some(&repo), &["config", "user.name", "Test"]);
-        fs::write(repo.join("b.txt"), "base\n").unwrap();
+        fs::write(repo.join("b.txt"), "base\n").unwrap_or_else(|_| unreachable!());
         git(Some(&repo), &["add", "."]);
         git(Some(&repo), &["commit", "-qm", "base"]);
         git(Some(&repo), &["branch", "-M", "main"]);
@@ -154,7 +154,7 @@ echo "CRAP: functions=2"
     }
 
     fn run_ok(&self, args: &[&str]) -> Output {
-        let out = self.devh(args).output().unwrap();
+        let out = self.devh(args).output().unwrap_or_else(|_| unreachable!());
         assert!(
             out.status.success(),
             "devh {args:?} failed:\nstdout: {}\nstderr: {}",
@@ -165,7 +165,7 @@ echo "CRAP: functions=2"
     }
 
     fn run_capture(&self, args: &[&str]) -> (bool, String) {
-        let out = self.devh(args).output().unwrap();
+        let out = self.devh(args).output().unwrap_or_else(|_| unreachable!());
         let mut all = String::from_utf8_lossy(&out.stdout).to_string();
         all.push_str(&String::from_utf8_lossy(&out.stderr));
         (out.status.success(), all)
@@ -183,14 +183,14 @@ echo "CRAP: functions=2"
         c.stdin(Stdio::piped());
         c.stdout(Stdio::piped());
         c.stderr(Stdio::piped());
-        let mut child = c.spawn().unwrap();
+        let mut child = c.spawn().unwrap_or_else(|_| unreachable!());
         child
             .stdin
             .take()
-            .unwrap()
+            .unwrap_or_else(|| unreachable!())
             .write_all(spec.as_bytes())
-            .unwrap();
-        let out = child.wait_with_output().unwrap();
+            .unwrap_or_else(|_| unreachable!());
+        let out = child.wait_with_output().unwrap_or_else(|_| unreachable!());
         assert!(
             out.status.success(),
             "new failed: {}",
@@ -205,14 +205,14 @@ echo "CRAP: functions=2"
         c.stdin(Stdio::piped());
         c.stdout(Stdio::piped());
         c.stderr(Stdio::piped());
-        let mut child = c.spawn().unwrap();
+        let mut child = c.spawn().unwrap_or_else(|_| unreachable!());
         child
             .stdin
             .take()
-            .unwrap()
+            .unwrap_or_else(|| unreachable!())
             .write_all(spec.as_bytes())
-            .unwrap();
-        let out = child.wait_with_output().unwrap();
+            .unwrap_or_else(|_| unreachable!());
+        let out = child.wait_with_output().unwrap_or_else(|_| unreachable!());
         assert!(
             out.status.success(),
             "new failed: {}",
@@ -245,11 +245,13 @@ echo "CRAP: functions=2"
 }
 
 fn write_exec(p: &Path, content: &str) {
-    fs::write(p, content).unwrap();
+    fs::write(p, content).unwrap_or_else(|_| unreachable!());
     use std::os::unix::fs::PermissionsExt;
-    let mut perm = fs::metadata(p).unwrap().permissions();
+    let mut perm = fs::metadata(p)
+        .unwrap_or_else(|_| unreachable!())
+        .permissions();
     perm.set_mode(0o755);
-    fs::set_permissions(p, perm).unwrap();
+    fs::set_permissions(p, perm).unwrap_or_else(|_| unreachable!());
 }
 
 fn git(cwd: Option<&Path>, args: &[&str]) -> String {
@@ -258,7 +260,7 @@ fn git(cwd: Option<&Path>, args: &[&str]) -> String {
     if let Some(d) = cwd {
         c.current_dir(d);
     }
-    let out = c.output().unwrap();
+    let out = c.output().unwrap_or_else(|_| unreachable!());
     String::from_utf8_lossy(&out.stdout).to_string()
 }
 
@@ -287,7 +289,8 @@ fn section01_happy_path() {
         "тайминг печатается ровно один раз: {out}"
     );
 
-    let mut_log = fs::read_to_string(sb.log_file("W-001-mutate.log")).unwrap();
+    let mut_log =
+        fs::read_to_string(sb.log_file("W-001-mutate.log")).unwrap_or_else(|_| unreachable!());
     assert!(contains(&mut_log, "killed 10 (100%)"), "{mut_log}");
 
     let (ok, _) = sb.run_capture(&["merge"]);
@@ -298,19 +301,20 @@ fn section01_happy_path() {
     let base = sb.git_out(&["log", "--oneline", "origin/main~1"]);
     assert_ne!(head.trim(), base.trim(), "main advanced");
 
-    let logmd = fs::read_to_string(sb.harness_file("log.md")).unwrap();
+    let logmd = fs::read_to_string(sb.harness_file("log.md")).unwrap_or_else(|_| unreachable!());
     assert!(contains(&logmd, "fix-rounds="), "{logmd}");
 
     let (ok, logs_out) = sb.run_capture(&["logs", "W-001"]);
     assert!(ok);
     assert!(contains(&logs_out, "agent.log"), "{logs_out}");
 
-    let timing = fs::read_to_string(sb.log_file("W-001-timing.log")).unwrap();
+    let timing =
+        fs::read_to_string(sb.log_file("W-001-timing.log")).unwrap_or_else(|_| unreachable!());
     assert!(contains(&timing, "agent-r1"), "{timing}");
     assert!(contains(&timing, "verify-r1"), "{timing}");
 
     let wt_left = fs::read_dir(&sb.wt)
-        .unwrap()
+        .unwrap_or_else(|_| unreachable!())
         .flatten()
         .any(|e| e.file_name().to_string_lossy().contains("W-001"));
     assert!(!wt_left, "worktree should be removed");
@@ -328,12 +332,13 @@ fn section02_mutation_fix_round() {
         "HARNESS_MUTATE",
         format!("{} {{module}}", sb.stubs.join("mut-bad.sh").display()),
     );
-    let out = c.output().unwrap();
+    let out = c.output().unwrap_or_else(|_| unreachable!());
     let mut all = String::from_utf8_lossy(&out.stdout).to_string();
     all.push_str(&String::from_utf8_lossy(&out.stderr));
     assert!(out.status.success(), "run should succeed: {all}");
     assert!(contains(&all, "раунд фикса"), "{all}");
-    let mut_log = fs::read_to_string(sb.log_file("W-001-mutate.log")).unwrap();
+    let mut_log =
+        fs::read_to_string(sb.log_file("W-001-mutate.log")).unwrap_or_else(|_| unreachable!());
     assert!(contains(&mut_log, "killed 10 (100%)"), "{mut_log}");
 }
 
@@ -342,7 +347,8 @@ fn section03_red_cycle() {
     let sb = Sandbox::new("r3");
     sb.run_ok(&["init"]);
     sb.new_item("red item", "спека\n", None);
-    fs::write(sb.item_dir("W-001").join("red.cmd"), "test -f done.txt\n").unwrap();
+    fs::write(sb.item_dir("W-001").join("red.cmd"), "test -f done.txt\n")
+        .unwrap_or_else(|_| unreachable!());
     let (ok, out) = sb.run_capture(&["run"]);
     assert!(ok, "run: {out}");
     assert!(contains(&out, "OK red: падает"), "{out}");
@@ -357,7 +363,7 @@ fn section04_blocked_abort() {
     let mut c = sb.devh(&["run"]);
     c.env("HARNESS_AGENT", sb.stubs.join("stub-blocked.sh"))
         .env("HARNESS_VERIFY", "true");
-    let out = c.output().unwrap();
+    let out = c.output().unwrap_or_else(|_| unreachable!());
     assert!(!out.status.success(), "run should fail");
     let all = format!(
         "{}{}",
@@ -378,7 +384,7 @@ fn section05_noop_no_changes() {
     let mut c = sb.devh(&["run"]);
     c.env("HARNESS_AGENT", sb.stubs.join("stub-noop.sh"))
         .env("HARNESS_VERIFY", "true");
-    let out = c.output().unwrap();
+    let out = c.output().unwrap_or_else(|_| unreachable!());
     assert!(!out.status.success(), "run should fail (no changes)");
     let (ok, _) = sb.run_capture(&["merge"]);
     assert!(!ok, "merge should fail (no commits)");
@@ -390,14 +396,18 @@ fn section06_wip_limit() {
     let sb = Sandbox::new("r6");
     let mut c = sb.devh(&["init"]);
     c.env("HARNESS_MAX_ACTIVE", "1");
-    assert!(c.output().unwrap().status.success());
+    assert!(c
+        .output()
+        .unwrap_or_else(|_| unreachable!())
+        .status
+        .success());
     sb.new_item("a", "a\n", Some("x"));
     sb.run_ok(&["run"]);
     assert_eq!(sb.status("W-001"), "active");
     sb.new_item("b", "b\n", Some("x"));
     let mut c = sb.devh(&["run", "W-002"]);
     c.env("HARNESS_MAX_ACTIVE", "1");
-    let out = c.output().unwrap();
+    let out = c.output().unwrap_or_else(|_| unreachable!());
     assert!(!out.status.success());
     let all = format!(
         "{}{}",
@@ -415,7 +425,7 @@ fn section07_watchdog_timeout() {
     let mut c = sb.devh(&["run"]);
     c.env("HARNESS_AGENT", sb.stubs.join("sleeper.sh"))
         .env("HARNESS_AGENT_TIMEOUT", "2");
-    let out = c.output().unwrap();
+    let out = c.output().unwrap_or_else(|_| unreachable!());
     assert!(!out.status.success(), "run should fail on timeout");
     let all = format!(
         "{}{}",
@@ -439,14 +449,14 @@ fn section08_parallel_new_ids() {
         handles.push((
             spec,
             std::thread::spawn(move || {
-                let mut child = c.spawn().unwrap();
+                let mut child = c.spawn().unwrap_or_else(|_| unreachable!());
                 child
                     .stdin
                     .take()
-                    .unwrap()
+                    .unwrap_or_else(|| unreachable!())
                     .write_all(spec.as_bytes())
-                    .unwrap();
-                child.wait().unwrap()
+                    .unwrap_or_else(|_| unreachable!());
+                child.wait().unwrap_or_else(|_| unreachable!())
             }),
         ));
     }
@@ -456,8 +466,8 @@ fn section08_parallel_new_ids() {
     assert!(sb.item_dir("W-001").is_dir(), "W-001 exists");
     assert!(sb.item_dir("W-002").is_dir(), "W-002 exists");
 
-    fs::create_dir_all(sb.item_dir("W-008")).unwrap();
-    fs::create_dir_all(sb.item_dir("W-009")).unwrap();
+    fs::create_dir_all(sb.item_dir("W-008")).unwrap_or_else(|_| unreachable!());
+    fs::create_dir_all(sb.item_dir("W-009")).unwrap_or_else(|_| unreachable!());
     sb.new_item("after octal ids", "next\n", None);
     assert!(sb.item_dir("W-010").is_dir(), "W-010 after octal trap");
 }
@@ -477,7 +487,7 @@ fn section09_run_lock_blocks_merge() {
                 .arg("-c")
                 .arg(format!("exec 8>\"{}\"; flock -x 8; sleep 3", lp.display()))
                 .status()
-                .unwrap();
+                .unwrap_or_else(|_| unreachable!());
             assert!(status.success());
         })
     };
@@ -501,7 +511,7 @@ fn section10_doctor() {
 
     let mut c = sb.devh(&["doctor"]);
     c.env("HARNESS_COLOR", "always");
-    let out = c.output().unwrap();
+    let out = c.output().unwrap_or_else(|_| unreachable!());
     let all = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
@@ -526,10 +536,10 @@ fn section11_per_item_agent() {
         sb.item_dir("W-001").join("agent"),
         sb.stubs.join("stub2.sh").to_string_lossy().as_bytes(),
     )
-    .unwrap();
+    .unwrap_or_else(|_| unreachable!());
     let mut c = sb.devh(&["run"]);
     c.env("HARNESS_VERIFY", "test -f done2.txt");
-    let out = c.output().unwrap();
+    let out = c.output().unwrap_or_else(|_| unreachable!());
     let all = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
@@ -542,25 +552,27 @@ fn section11_per_item_agent() {
 #[test]
 fn section12_uwa_session_workflow() {
     let sb = Sandbox::new("r12");
-    fs::create_dir_all(sb.repo.join("todo")).unwrap();
+    fs::create_dir_all(sb.repo.join("todo")).unwrap_or_else(|_| unreachable!());
     fs::write(
         sb.repo.join("todo/40.md"),
         "# Session 40 — Дистрибуция\n\nСоздай файл done.txt.\n",
     )
-    .unwrap();
+    .unwrap_or_else(|_| unreachable!());
     fs::write(
         sb.repo.join("todo/report.md"),
         "# Отчет\n\n## Железные правила\n1. CI зелёный до коммита.\n",
     )
-    .unwrap();
+    .unwrap_or_else(|_| unreachable!());
     sb.run_ok(&["init"]);
-    let conf = fs::read_to_string(sb.harness_file("config")).unwrap();
+    let conf = fs::read_to_string(sb.harness_file("config")).unwrap_or_else(|_| unreachable!());
     assert!(contains(&conf, "RULES='todo/report.md'"), "{conf}");
 
     sb.run_ok(&["new", "40"]);
     assert!(sb.item_dir("W-040").is_dir());
-    fs::write(sb.item_dir("W-040").join("red.cmd"), "test -f done.txt\n").unwrap();
-    let title = fs::read_to_string(sb.item_dir("W-040").join("title")).unwrap();
+    fs::write(sb.item_dir("W-040").join("red.cmd"), "test -f done.txt\n")
+        .unwrap_or_else(|_| unreachable!());
+    let title =
+        fs::read_to_string(sb.item_dir("W-040").join("title")).unwrap_or_else(|_| unreachable!());
     assert!(contains(&title, "Дистрибуция"), "{title}");
 
     let (ok, hint_out) = sb.run_capture(&["hint", "40"]);
@@ -572,7 +584,8 @@ fn section12_uwa_session_workflow() {
     let (ok, out) = sb.run_capture(&["run", "40"]);
     assert!(ok, "run 40: {out}");
     sb.run_ok(&["merge", "40"]);
-    let report = fs::read_to_string(sb.repo.join("todo/report.md")).unwrap();
+    let report =
+        fs::read_to_string(sb.repo.join("todo/report.md")).unwrap_or_else(|_| unreachable!());
     assert!(contains(&report, "## Session 40"), "{report}");
 }
 
@@ -583,7 +596,7 @@ fn section13_msg_deny_and_commit() {
     sb.new_item("deny item", "спека\n", Some("x"));
     let mut c = sb.devh(&["run"]);
     c.env("HARNESS_AGENT", sb.stubs.join("stub-deny.sh"));
-    let out = c.output().unwrap();
+    let out = c.output().unwrap_or_else(|_| unreachable!());
     assert!(!out.status.success(), "run should fail on hygiene");
     let all = format!(
         "{}{}",
@@ -600,7 +613,7 @@ fn section13_msg_deny_and_commit() {
         sb.harness_file("summaries/W-001.md"),
         "feat: маркер добавлен\n\nдетали: стаб\n",
     )
-    .unwrap();
+    .unwrap_or_else(|_| unreachable!());
     sb.run_ok(&["commit"]);
     sb.run_ok(&["merge"]);
 }
@@ -621,11 +634,15 @@ fn section15_mutate_required() {
     let sb = Sandbox::new("r15");
     let mut c = sb.devh(&["init"]);
     c.env("HARNESS_MUTATE", "");
-    assert!(c.output().unwrap().status.success());
+    assert!(c
+        .output()
+        .unwrap_or_else(|_| unreachable!())
+        .status
+        .success());
     sb.new_item("m item", "спека\n", Some("x"));
     let mut c = sb.devh(&["run"]);
     c.env_remove("HARNESS_MUTATE");
-    let out = c.output().unwrap();
+    let out = c.output().unwrap_or_else(|_| unreachable!());
     assert!(!out.status.success(), "run should fail without MUTATE");
     let all = format!(
         "{}{}",
@@ -649,7 +666,7 @@ fn section16_mutation_env_blocker() {
             .to_string_lossy()
             .to_string(),
     );
-    let out = c.output().unwrap();
+    let out = c.output().unwrap_or_else(|_| unreachable!());
     assert!(!out.status.success(), "run should fail on env blocker");
     let all = format!(
         "{}{}",
@@ -672,7 +689,7 @@ fn section17_no_ignored() {
         "if [ -f ign-fix ]; then echo \"3 passed; 0 failed; 0 ignored\"; else echo \"3 passed; 0 failed; 2 ignored\"; fi; test -f done.txt",
     )
     .env("HARNESS_AGENT", sb.stubs.join("stub-ign.sh"));
-    let out = c.output().unwrap();
+    let out = c.output().unwrap_or_else(|_| unreachable!());
     let all = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
@@ -697,13 +714,14 @@ printf 'feat: рефактор с удалением\n\nдетали\n' > "$HARN
     sb.new_item("del item", "спека\n", Some("x"));
     let mut c = sb.devh(&["run"]);
     c.env("HARNESS_AGENT", sb.stubs.join("stub-del.sh"));
-    let out = c.output().unwrap();
+    let out = c.output().unwrap_or_else(|_| unreachable!());
     assert!(
         out.status.success(),
         "run: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let mut_log = fs::read_to_string(sb.log_file("W-001-mutate.log")).unwrap();
+    let mut_log =
+        fs::read_to_string(sb.log_file("W-001-mutate.log")).unwrap_or_else(|_| unreachable!());
     assert!(
         contains(&mut_log, "удалён агентом — мутации не требуется"),
         "{mut_log}"
@@ -722,14 +740,15 @@ printf 'BLOCKED: первая попытка\n' > "$HARNESS_SUMMARY"
     );
     sb.run_ok(&["init"]);
     sb.new_item("resume item", "спека\n", None);
-    fs::write(sb.item_dir("W-001").join("red.cmd"), "test -f done.txt\n").unwrap();
+    fs::write(sb.item_dir("W-001").join("red.cmd"), "test -f done.txt\n")
+        .unwrap_or_else(|_| unreachable!());
     let mut c = sb.devh(&["run"]);
     c.env("HARNESS_AGENT", sb.stubs.join("stub-blk-red.sh"));
-    let out = c.output().unwrap();
+    let out = c.output().unwrap_or_else(|_| unreachable!());
     assert!(!out.status.success(), "first run should fail BLOCKED");
     let mut c = sb.devh(&["run"]);
     c.env("HARNESS_AGENT", sb.stubs.join("stub.sh"));
-    let out = c.output().unwrap();
+    let out = c.output().unwrap_or_else(|_| unreachable!());
     let all = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
@@ -757,7 +776,7 @@ if [ -f "$T_MUT_GOOD" ]; then echo "Mutants: 10, Killed: 10 (100%)"; else echo "
         "HARNESS_MUTATE",
         sb.stubs.join("mut-bad2.sh").to_string_lossy().to_string(),
     );
-    let out = c.output().unwrap();
+    let out = c.output().unwrap_or_else(|_| unreachable!());
     let all = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
@@ -765,7 +784,8 @@ if [ -f "$T_MUT_GOOD" ]; then echo "Mutants: 10, Killed: 10 (100%)"; else echo "
     );
     assert!(out.status.success(), "run: {all}");
     assert!(contains(&all, "раунд фикса"), "{all}");
-    let mut_log = fs::read_to_string(sb.log_file("W-001-mutate.log")).unwrap();
+    let mut_log =
+        fs::read_to_string(sb.log_file("W-001-mutate.log")).unwrap_or_else(|_| unreachable!());
     assert!(contains(&mut_log, "killed 10 (100%)"), "{mut_log}");
 }
 
@@ -776,7 +796,7 @@ fn section21_bg_ps() {
     sb.new_item("bg item", "спека\n", Some("x"));
     let mut c = sb.devh(&["bg", "W-001"]);
     c.env("HARNESS_VERIFY", "sleep 6; test -f done.txt");
-    let out = c.output().unwrap();
+    let out = c.output().unwrap_or_else(|_| unreachable!());
     assert!(
         out.status.success(),
         "bg: {}",
@@ -832,7 +852,7 @@ fn section21b_editor_mode_pty() {
     c.args(["-qec", &cmdline, "/dev/null"])
         .current_dir(&sb.repo);
     sb.base_env(&mut c);
-    let out = c.output().unwrap();
+    let out = c.output().unwrap_or_else(|_| unreachable!());
     assert!(
         out.status.success(),
         "editor pty: {}",
@@ -845,9 +865,9 @@ fn section21b_editor_mode_pty() {
     );
     assert!(contains(&all, "OK W-001"), "{all}");
     let item = sb.item_dir("W-001");
-    let spec = fs::read_to_string(item.join("spec.md")).unwrap();
+    let spec = fs::read_to_string(item.join("spec.md")).unwrap_or_else(|_| unreachable!());
     assert!(spec.contains("спека из редактора"), "spec.md: {spec}");
-    let red = fs::read_to_string(item.join("red.cmd")).unwrap();
+    let red = fs::read_to_string(item.join("red.cmd")).unwrap_or_else(|_| unreachable!());
     assert_eq!(red.trim(), "true", "RED извлечён из спеки редактора");
 }
 
@@ -855,15 +875,15 @@ fn section21b_editor_mode_pty() {
 fn section21c_auto_pid_ps() {
     let sb = Sandbox::new("r21c");
     sb.run_ok(&["init"]);
-    fs::create_dir_all(sb.repo.join("specs")).unwrap();
+    fs::create_dir_all(sb.repo.join("specs")).unwrap_or_else(|_| unreachable!());
     fs::write(
         sb.repo.join("specs/a.md"),
         "# Авто-А\nRED: test -f done.txt\nx\n",
     )
-    .unwrap();
+    .unwrap_or_else(|_| unreachable!());
     let mut c = sb.devh(&["auto", "--from", "specs", "--max", "1"]);
     c.env("HARNESS_VERIFY", "sleep 6; test -f done.txt");
-    let mut child = c.spawn().unwrap();
+    let mut child = c.spawn().unwrap_or_else(|_| unreachable!());
     let ap = sb.harness_file("auto.pid");
     let mut n = 0;
     while !ap.exists() && n < 50 {
@@ -895,15 +915,15 @@ fn section21c_auto_pid_ps() {
 fn section21d_bg_auto() {
     let sb = Sandbox::new("r21d");
     sb.run_ok(&["init"]);
-    fs::create_dir_all(sb.repo.join("specs")).unwrap();
+    fs::create_dir_all(sb.repo.join("specs")).unwrap_or_else(|_| unreachable!());
     fs::write(
         sb.repo.join("specs/a.md"),
         "# Бг-А\nRED: test -f done.txt\nx\n",
     )
-    .unwrap();
+    .unwrap_or_else(|_| unreachable!());
     let mut c = sb.devh(&["bg", "auto", "--from", "specs", "--max", "1"]);
     c.env("HARNESS_VERIFY", "sleep 6; test -f done.txt");
-    let out = c.output().unwrap();
+    let out = c.output().unwrap_or_else(|_| unreachable!());
     assert!(
         out.status.success(),
         "bg auto: {}",
@@ -942,16 +962,18 @@ fn section22_tickets() {
         sb.harness_file("observations.md"),
         "crates/foo.rs:42 | дублирование логики с bar.rs | red-тест: тест на общий хелпер\nстрока без red-идеи — должна быть отклонена\n",
     )
-    .unwrap();
+    .unwrap_or_else(|_| unreachable!());
     let (ok, out) = sb.run_capture(&["tickets"]);
     assert!(ok);
     assert!(contains(&out, "foo.rs:42"), "{out}");
 
     let (ok, out) = sb.run_capture(&["tickets", "--import"]);
     assert!(ok, "import: {out}");
-    let spec = fs::read_to_string(sb.item_dir("W-001").join("spec.md")).unwrap();
+    let spec =
+        fs::read_to_string(sb.item_dir("W-001").join("spec.md")).unwrap_or_else(|_| unreachable!());
     assert!(contains(&spec, "RED-тест ОБЯЗАТЕЛЕН"), "{spec}");
-    let obs = fs::read_to_string(sb.harness_file("observations.md")).unwrap();
+    let obs =
+        fs::read_to_string(sb.harness_file("observations.md")).unwrap_or_else(|_| unreachable!());
     assert!(obs.trim().is_empty(), "observations drained");
     assert!(contains(&out, "нет red-идеи"), "{out}");
 }
@@ -975,7 +997,7 @@ printf 'feat: lint-фикс\n\nдетали\n' > "$HARNESS_SUMMARY"
     sb.new_item("lint item", "спека\n", Some("x"));
     let mut c = sb.devh(&["run"]);
     c.env("HARNESS_AGENT", sb.stubs.join("stub-lint.sh"));
-    let out = c.output().unwrap();
+    let out = c.output().unwrap_or_else(|_| unreachable!());
     let all = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
@@ -1007,7 +1029,7 @@ fi
     c.env("HARNESS_REVIEW", "1")
         .env("T_REV_OK", &rev_ok)
         .env("HARNESS_AGENT", sb.stubs.join("stub-rev.sh"));
-    let out = c.output().unwrap();
+    let out = c.output().unwrap_or_else(|_| unreachable!());
     let all = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
@@ -1015,7 +1037,8 @@ fi
     );
     assert!(out.status.success(), "run after review fix: {all}");
     assert!(contains(&all, "гейт REVIEW упал"), "{all}");
-    let rev_log = fs::read_to_string(sb.log_file("W-001-review.log")).unwrap();
+    let rev_log =
+        fs::read_to_string(sb.log_file("W-001-review.log")).unwrap_or_else(|_| unreachable!());
     assert!(contains(&rev_log, "VERDICT: OK"), "{rev_log}");
 }
 
@@ -1023,17 +1046,17 @@ fi
 fn section25_auto() {
     let sb = Sandbox::new("r25");
     sb.run_ok(&["init"]);
-    fs::create_dir_all(sb.repo.join("specs")).unwrap();
+    fs::create_dir_all(sb.repo.join("specs")).unwrap_or_else(|_| unreachable!());
     fs::write(
         sb.repo.join("specs/spec-a.md"),
         "# Задача А\nRED: test -f done.txt\nСоздай done.txt.\n",
     )
-    .unwrap();
+    .unwrap_or_else(|_| unreachable!());
     fs::write(
         sb.repo.join("specs/spec-b.md"),
         "# Задача Б без RED\nСделай что-то.\n",
     )
-    .unwrap();
+    .unwrap_or_else(|_| unreachable!());
     let (ok, out) = sb.run_capture(&["auto", "--from", "specs"]);
     assert!(ok, "auto rc: {out}");
     assert!(contains(&out, "импортировано 2 спек"), "{out}");
@@ -1055,14 +1078,15 @@ fn section26_crap_gate() {
     let mut c = sb.devh(&["run", "W-001"]);
     c.env("HARNESS_CRAP", sb.stubs.join("crap-ok.sh"))
         .env("HARNESS_CRAP_SCOPE", ".");
-    let out = c.output().unwrap();
+    let out = c.output().unwrap_or_else(|_| unreachable!());
     let all = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(out.status.success(), "clean run: {all}");
-    let crap_log = fs::read_to_string(sb.log_file("W-001-crap.log")).unwrap();
+    let crap_log =
+        fs::read_to_string(sb.log_file("W-001-crap.log")).unwrap_or_else(|_| unreachable!());
     assert!(contains(&crap_log, "0 violations"), "{crap_log}");
 
     // env-блокер: мусорный инструмент → не fix-раунд, статус active
@@ -1070,7 +1094,7 @@ fn section26_crap_gate() {
     let mut c = sb.devh(&["run", "W-002"]);
     c.env("HARNESS_CRAP", sb.stubs.join("crap-garbage.sh"))
         .env("HARNESS_CRAP_SCOPE", ".");
-    let out = c.output().unwrap();
+    let out = c.output().unwrap_or_else(|_| unreachable!());
     let all = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
@@ -1091,7 +1115,7 @@ fn section26_crap_gate() {
     let mut c = sb.devh(&["run", "W-003"]);
     c.env("HARNESS_CRAP", sb.stubs.join("crap-garbage.sh"))
         .env("HARNESS_CRAP_SCOPE", ".");
-    let out = c.output().unwrap();
+    let out = c.output().unwrap_or_else(|_| unreachable!());
     let all = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
@@ -1112,7 +1136,7 @@ fn section26_crap_gate() {
     assert!(contains(&out, "CRAP-гейт не настроен"), "{out}");
     let mut c = sb.devh(&["doctor"]);
     c.env("HARNESS_CRAP", sb.stubs.join("crap-garbage.sh"));
-    let out = c.output().unwrap();
+    let out = c.output().unwrap_or_else(|_| unreachable!());
     let all = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
@@ -1142,7 +1166,7 @@ fn section00_shellcheck_oracle_files() {
         let out = Command::new("shellcheck")
             .arg(manifest.join(f))
             .output()
-            .unwrap();
+            .unwrap_or_else(|_| unreachable!());
         assert!(
             out.status.success(),
             "shellcheck findings в {f}:\n{}",
@@ -1186,7 +1210,7 @@ fn observability_list_logs_clean() {
         sb.item_dir("W-002").join("plan.md"),
         "намерение: сделать хорошо\n",
     )
-    .unwrap();
+    .unwrap_or_else(|_| unreachable!());
     let out = String::from_utf8_lossy(&sb.run_ok(&["hint", "W-002"]).stdout).to_string();
     assert!(contains(&out, "# W-002"), "{out}");
     assert!(contains(&out, "## План/заметки:"), "{out}");
@@ -1198,12 +1222,12 @@ fn observability_list_logs_clean() {
 
     sb.git_out(&["branch", "devh/W-001", "HEAD"]);
     let stale = sb.log_file("stale.log");
-    fs::write(&stale, "старый лог\n").unwrap();
+    fs::write(&stale, "старый лог\n").unwrap_or_else(|_| unreachable!());
     Command::new("touch")
         .args(["-d", "2020-01-01"])
         .arg(&stale)
         .status()
-        .unwrap();
+        .unwrap_or_else(|_| unreachable!());
     let out = String::from_utf8_lossy(&sb.run_ok(&["clean"]).stdout).to_string();
     assert!(contains(&out, "clean: W-001"), "{out}");
     assert!(contains(&out, "retention:"), "{out}");
@@ -1212,7 +1236,7 @@ fn observability_list_logs_clean() {
 
     let mut c = sb.devh(&["clean"]);
     c.env("HARNESS_LOG_DAYS", "0");
-    let out = c.output().unwrap();
+    let out = c.output().unwrap_or_else(|_| unreachable!());
     assert!(out.status.success());
     let out = String::from_utf8_lossy(&out.stdout).to_string();
     assert!(contains(&out, "OK clean (0)"), "{out}");

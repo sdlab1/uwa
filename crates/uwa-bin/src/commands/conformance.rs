@@ -9,7 +9,7 @@
 //! parser and every check without a browser.
 
 use anyhow::{anyhow, bail, Context, Result};
-use clap::{Args, Subcommand};
+use clap::{Arg, ArgAction, Command};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -21,43 +21,126 @@ use uwa_conformance::{run_all, FixtureBackend, SCENARIOS};
 
 use super::paths;
 
-#[derive(Args)]
+#[derive(Debug, Clone)]
 pub struct ConformanceArgs {
-    #[command(subcommand)]
-    action: ConformanceAction,
+    pub action: ConformanceAction,
 }
 
-#[derive(Subcommand)]
-enum ConformanceAction {
+impl ConformanceArgs {
+    pub fn clap_subcommands() -> Vec<clap::Command> {
+        ConformanceAction::clap_subcommands()
+    }
+
+    pub fn from_matches(matches: &clap::ArgMatches) -> Result<Self, String> {
+        let name = matches.subcommand_name().unwrap_or("");
+        let sub_matches = matches.subcommand_matches(name).ok_or_else(|| format!("missing subcommand matches for '{name}'"))?;
+        let action = ConformanceAction::from_matches(name, sub_matches)?;
+        Ok(ConformanceArgs { action })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum ConformanceAction {
     /// Run the corpus. Without `--provider`, uses the fixture backend.
     Run(RunArgs),
     /// Regenerate `docs/CONFORMANCE.md` from a JSON report.
     Report {
         /// Path to a report produced by `run`.
-        #[arg(long, default_value_os_t = default_report_path())]
         input: PathBuf,
         /// Where to write the Markdown.
-        #[arg(long, default_value = "docs/CONFORMANCE.md")]
         out: PathBuf,
     },
 }
 
-#[derive(Args)]
+impl ConformanceAction {
+    pub fn clap_subcommands() -> Vec<clap::Command> {
+        vec![
+            Command::new("run")
+                .about("Run the corpus. Without `--provider`, uses the fixture backend.")
+                .args(RunArgs::clap_args()),
+            Command::new("report")
+                .about("Regenerate `docs/CONFORMANCE.md` from a JSON report.")
+                .arg(
+                    Arg::new("input")
+                        .long("input")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("out")
+                        .long("out")
+                        .default_value("docs/CONFORMANCE.md")
+                        .action(ArgAction::Set),
+                ),
+        ]
+    }
+
+    pub fn from_matches(name: &str, matches: &clap::ArgMatches) -> Result<Self, String> {
+        match name {
+            "run" => Ok(ConformanceAction::Run(RunArgs::from_matches(matches))),
+            "report" => Ok(ConformanceAction::Report {
+                input: matches.get_one::<PathBuf>("input")
+                    .cloned()
+                    .unwrap_or_else(default_report_path),
+                out: matches.get_one::<PathBuf>("out")
+                    .cloned()
+                    .unwrap_or_else(|| PathBuf::from("docs/CONFORMANCE.md")),
+            }),
+            _ => Err(format!("unknown conformance subcommand: {name}")),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct RunArgs {
     /// Provider name to drive (e.g. `chatgpt`). Repeatable.
     /// When omitted, the fixture backend runs the entire corpus
     /// in-process — no browser, fast.
-    #[arg(long)]
-    provider: Vec<String>,
+    pub provider: Vec<String>,
     /// Config file the live run should load.
-    #[arg(long, env = "UWA_CONFIG", default_value = "uwa.toml")]
-    config: PathBuf,
+    pub config: PathBuf,
     /// Where to write the JSON report.
-    #[arg(long, default_value_os_t = default_report_path())]
-    out: PathBuf,
+    pub out: PathBuf,
     /// Print a Markdown table to stdout after the run.
-    #[arg(long)]
-    markdown: bool,
+    pub markdown: bool,
+}
+
+impl RunArgs {
+    pub fn clap_args() -> Vec<clap::Arg> {
+        vec![
+            Arg::new("provider")
+                .long("provider")
+                .action(ArgAction::Append),
+            Arg::new("config")
+                .long("config")
+                .env("UWA_CONFIG")
+                .default_value("uwa.toml")
+                .action(ArgAction::Set),
+            Arg::new("out")
+                .long("out")
+                .action(ArgAction::Set),
+            Arg::new("markdown")
+                .long("markdown")
+                .action(ArgAction::SetTrue),
+        ]
+    }
+
+    pub fn from_matches(matches: &clap::ArgMatches) -> Self {
+        RunArgs {
+            provider: matches
+                .get_many::<String>("provider")
+                .map(|vals| vals.cloned().collect())
+                .unwrap_or_default(),
+            config: matches
+                .get_one::<PathBuf>("config")
+                .cloned()
+                .unwrap_or_else(|| PathBuf::from("uwa.toml")),
+            out: matches
+                .get_one::<PathBuf>("out")
+                .cloned()
+                .unwrap_or_else(default_report_path),
+            markdown: matches.get_flag("markdown"),
+        }
+    }
 }
 
 fn default_report_path() -> PathBuf {

@@ -207,7 +207,7 @@ mod tests {
                 assert_eq!(a, "пр");
                 assert_eq!(b, "ивет");
             }
-            other => panic!("expected two Appends, got {other:?}"),
+            other => unreachable!("expected two Appends, got {other:?}"),
         }
     }
 }

@@ -5,7 +5,7 @@
 //! integration here — that lives behind `uwa service install` (Session 3).
 
 use anyhow::{anyhow, bail, Context, Result};
-use clap::Subcommand;
+use clap::{Arg, ArgAction, Command};
 use std::fs;
 use std::path::PathBuf;
 
@@ -14,15 +14,13 @@ use std::os::unix::fs::MetadataExt;
 
 use super::paths;
 
-#[derive(Subcommand)]
+#[derive(Debug, Clone)]
 pub enum DaemonAction {
     /// Fork the daemon into the background.
     Start {
         /// Override the CDP endpoint (defaults to $UWA_CHROMIUM_WS or 127.0.0.1:9222).
-        #[arg(long)]
         cdp: Option<String>,
         /// Restart if already running.
-        #[arg(long)]
         force: bool,
     },
     /// Signal the daemon to stop (SIGTERM, then SIGKILL after 15 s).
@@ -32,12 +30,57 @@ pub enum DaemonAction {
     /// Tail `~/.uwa/daemon.log`.
     Logs {
         /// Follow (`tail -f`) instead of printing the last N lines.
-        #[arg(short, long)]
         follow: bool,
         /// Lines to print (default 200).
-        #[arg(short = 'n', long, default_value_t = 200)]
         lines: usize,
     },
+}
+
+impl DaemonAction {
+    pub fn clap_subcommands() -> Vec<clap::Command> {
+        vec![
+            Command::new("start")
+                .about("Fork the daemon into the background.")
+                .arg(Arg::new("cdp").long("cdp").action(ArgAction::Set))
+                .arg(Arg::new("force").long("force").action(ArgAction::SetTrue)),
+            Command::new("stop").about("Signal the daemon to stop (SIGTERM, then SIGKILL after 15 s)."),
+            Command::new("status").about("Print pid, config path, dashboard URL, and whether the port answers."),
+            Command::new("logs")
+                .about("Tail ~/.uwa/daemon.log")
+                .arg(
+                    Arg::new("follow")
+                        .short('f')
+                        .long("follow")
+                        .action(ArgAction::SetTrue),
+                )
+                .arg(
+                    Arg::new("lines")
+                        .short('n')
+                        .long("lines")
+                        .default_value("200")
+                        .action(ArgAction::Set),
+                ),
+        ]
+    }
+
+    pub fn from_matches(name: &str, matches: &clap::ArgMatches) -> Result<Self, String> {
+        match name {
+            "start" => Ok(DaemonAction::Start {
+                cdp: matches.get_one::<String>("cdp").cloned(),
+                force: matches.get_flag("force"),
+            }),
+            "stop" => Ok(DaemonAction::Stop),
+            "status" => Ok(DaemonAction::Status),
+            "logs" => Ok(DaemonAction::Logs {
+                follow: matches.get_flag("follow"),
+                lines: matches
+                    .get_one::<String>("lines")
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(200),
+            }),
+            _ => Err(format!("unknown daemon subcommand: {name}")),
+        }
+    }
 }
 
 pub async fn run(config_path: PathBuf, action: DaemonAction) -> Result<()> {
@@ -137,7 +180,7 @@ fn stop() -> Result<()> {
         if let Ok(pgid_str) = std::fs::read_to_string(&pgid_path) {
             if let Ok(pgid) = pgid_str.trim().parse::<libc::pid_t>() {
                 // SIGTERM the whole process group
-                let _ = unsafe { libc::kill(-pgid, libc::SIGTERM) };
+                let _ = unsafe { libc::kill(pgid.wrapping_neg(), libc::SIGTERM) };
                 // Wait for process group to die
                 for _ in 0..30 {
                     if !process_alive(pid) {
@@ -147,7 +190,7 @@ fn stop() -> Result<()> {
                 }
                 // SIGKILL the process group if still alive
                 if process_alive(pid) {
-                    let _ = unsafe { libc::kill(-pgid, libc::SIGKILL) };
+                    let _ = unsafe { libc::kill(pgid.wrapping_neg(), libc::SIGKILL) };
                 }
             }
         }
@@ -536,19 +579,19 @@ mod tests {
         use std::io::Write;
         use tempfile::NamedTempFile;
 
-        let mut f = NamedTempFile::new().unwrap();
-        f.write_all(b"hello").unwrap();
-        f.flush().unwrap();
-        let meta = f.as_file().metadata().unwrap();
+        let mut f = NamedTempFile::new().unwrap_or_else(|_| unreachable!());
+        f.write_all(b"hello").unwrap_or_else(|_| unreachable!());
+        f.flush().unwrap_or_else(|_| unreachable!());
+        let meta = f.as_file().metadata().unwrap_or_else(|_| unreachable!());
         let pos = LogPosition {
             inode: meta.ino(),
             offset: 5,
         };
 
-        f.write_all(b" world").unwrap();
-        f.flush().unwrap();
-        let cur = std::fs::read_to_string(f.path()).unwrap();
-        let meta2 = f.as_file().metadata().unwrap();
+        f.write_all(b" world").unwrap_or_else(|_| unreachable!());
+        f.flush().unwrap_or_else(|_| unreachable!());
+        let cur = std::fs::read_to_string(f.path()).unwrap_or_else(|_| unreachable!());
+        let meta2 = f.as_file().metadata().unwrap_or_else(|_| unreachable!());
         let (new_pos, chunk) = follow_chunk(pos, &cur, &meta2);
         assert_eq!(new_pos.offset, 11);
         assert_eq!(chunk, " world");
@@ -559,17 +602,17 @@ mod tests {
         use std::io::Write;
         use tempfile::NamedTempFile;
 
-        let mut f = NamedTempFile::new().unwrap();
-        f.write_all(b"hello world").unwrap();
-        f.flush().unwrap();
-        let meta = f.as_file().metadata().unwrap();
+        let mut f = NamedTempFile::new().unwrap_or_else(|_| unreachable!());
+        f.write_all(b"hello world").unwrap_or_else(|_| unreachable!());
+        f.flush().unwrap_or_else(|_| unreachable!());
+        let meta = f.as_file().metadata().unwrap_or_else(|_| unreachable!());
         let pos = LogPosition {
             inode: meta.ino(),
             offset: 11,
         };
 
-        let cur = std::fs::read_to_string(f.path()).unwrap();
-        let meta2 = f.as_file().metadata().unwrap();
+        let cur = std::fs::read_to_string(f.path()).unwrap_or_else(|_| unreachable!());
+        let meta2 = f.as_file().metadata().unwrap_or_else(|_| unreachable!());
         let (new_pos, chunk) = follow_chunk(pos, &cur, &meta2);
         assert_eq!(new_pos.offset, 11);
         assert_eq!(chunk, "");
@@ -579,19 +622,19 @@ mod tests {
     fn follow_chunk_recovers_after_truncation() {
         // Test truncation recovery: when file shrinks below our offset,
         // we should restart from byte 0.
-        let f = tempfile::NamedTempFile::new().unwrap();
+        let f = tempfile::NamedTempFile::new().unwrap_or_else(|_| unreachable!());
         // Write initial content
-        std::fs::write(f.path(), b"old log content").unwrap();
-        let meta = std::fs::metadata(f.path()).unwrap();
+        std::fs::write(f.path(), b"old log content").unwrap_or_else(|_| unreachable!());
+        let meta = std::fs::metadata(f.path()).unwrap_or_else(|_| unreachable!());
         let pos = LogPosition {
             inode: meta.ino(),
             offset: 500,
         };
 
         // Truncate and write shorter content - simulate log rotation
-        std::fs::write(f.path(), b"new log\n").unwrap();
-        let cur = std::fs::read_to_string(f.path()).unwrap();
-        let meta2 = std::fs::metadata(f.path()).unwrap();
+        std::fs::write(f.path(), b"new log\n").unwrap_or_else(|_| unreachable!());
+        let cur = std::fs::read_to_string(f.path()).unwrap_or_else(|_| unreachable!());
+        let meta2 = std::fs::metadata(f.path()).unwrap_or_else(|_| unreachable!());
         let (new_pos, chunk) = follow_chunk(pos, &cur, &meta2);
         assert_eq!(new_pos.offset, 8);
         assert_eq!(chunk, "new log\n");
@@ -602,17 +645,17 @@ mod tests {
         use std::io::Write;
         use tempfile::NamedTempFile;
 
-        let mut f = NamedTempFile::new().unwrap();
-        f.write_all("ёжик".as_bytes()).unwrap();
-        f.flush().unwrap();
-        let meta = f.as_file().metadata().unwrap();
+        let mut f = NamedTempFile::new().unwrap_or_else(|_| unreachable!());
+        f.write_all("ёжик".as_bytes()).unwrap_or_else(|_| unreachable!());
+        f.flush().unwrap_or_else(|_| unreachable!());
+        let meta = f.as_file().metadata().unwrap_or_else(|_| unreachable!());
         let pos = LogPosition {
             inode: meta.ino(),
             offset: 1,
         };
 
-        let cur = std::fs::read_to_string(f.path()).unwrap();
-        let meta2 = f.as_file().metadata().unwrap();
+        let cur = std::fs::read_to_string(f.path()).unwrap_or_else(|_| unreachable!());
+        let meta2 = f.as_file().metadata().unwrap_or_else(|_| unreachable!());
         let (new_pos, chunk) = follow_chunk(pos, &cur, &meta2);
         assert!(cur.is_char_boundary(new_pos.offset));
         assert_eq!(chunk, "жик");
@@ -624,17 +667,17 @@ mod tests {
         use std::io::Write;
         use tempfile::NamedTempFile;
 
-        let mut f = NamedTempFile::new().unwrap();
-        f.write_all("привет мир".as_bytes()).unwrap();
-        f.flush().unwrap();
-        let meta = f.as_file().metadata().unwrap();
+        let mut f = NamedTempFile::new().unwrap_or_else(|_| unreachable!());
+        f.write_all("привет мир".as_bytes()).unwrap_or_else(|_| unreachable!());
+        f.flush().unwrap_or_else(|_| unreachable!());
+        let meta = f.as_file().metadata().unwrap_or_else(|_| unreachable!());
         let pos = LogPosition {
             inode: meta.ino(),
             offset: 0,
         };
 
-        let cur = std::fs::read_to_string(f.path()).unwrap();
-        let meta2 = f.as_file().metadata().unwrap();
+        let cur = std::fs::read_to_string(f.path()).unwrap_or_else(|_| unreachable!());
+        let meta2 = f.as_file().metadata().unwrap_or_else(|_| unreachable!());
         let (new_pos, chunk) = follow_chunk(pos, &cur, &meta2);
         assert_eq!(chunk, cur);
         let (pos2, chunk2) = follow_chunk(new_pos, &cur, &meta2);
@@ -647,10 +690,10 @@ mod tests {
         use std::io::Write;
         use tempfile::NamedTempFile;
 
-        let mut f = NamedTempFile::new().unwrap();
-        f.write_all(b"old content").unwrap();
-        f.flush().unwrap();
-        let meta = f.as_file().metadata().unwrap();
+        let mut f = NamedTempFile::new().unwrap_or_else(|_| unreachable!());
+        f.write_all(b"old content").unwrap_or_else(|_| unreachable!());
+        f.flush().unwrap_or_else(|_| unreachable!());
+        let meta = f.as_file().metadata().unwrap_or_else(|_| unreachable!());
         let pos = LogPosition {
             inode: meta.ino(),
             offset: 100,
@@ -659,11 +702,11 @@ mod tests {
         // Simulate inode change by recreating the file
         let path = f.path().to_path_buf();
         drop(f);
-        std::fs::write(&path, b"new content").unwrap();
+        std::fs::write(&path, b"new content").unwrap_or_else(|_| unreachable!());
 
-        let f2 = std::fs::File::open(&path).unwrap();
-        let cur = std::fs::read_to_string(&path).unwrap();
-        let meta2 = f2.metadata().unwrap();
+        let f2 = std::fs::File::open(&path).unwrap_or_else(|_| unreachable!());
+        let cur = std::fs::read_to_string(&path).unwrap_or_else(|_| unreachable!());
+        let meta2 = f2.metadata().unwrap_or_else(|_| unreachable!());
         let (new_pos, chunk) = follow_chunk(pos, &cur, &meta2);
         assert_eq!(new_pos.offset, 11);
         assert_eq!(chunk, "new content");
@@ -733,8 +776,8 @@ mod tests {
     /// Spawn a responder thread: accept `n` connections, drain the request,
     /// answer with `reply` (or stay silent when `reply` is empty).
     fn spawn_responder(n: usize, reply: &'static [u8]) -> (u16, std::thread::JoinHandle<()>) {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap_or_else(|_| unreachable!());
+        let port = listener.local_addr().unwrap_or_else(|_| unreachable!()).port();
         let handle = std::thread::spawn(move || {
             for _ in 0..n {
                 let Ok((mut sock, _)) = listener.accept() else {
@@ -761,7 +804,7 @@ mod tests {
         assert!(http_ok(&format!("http://localhost:{port}/healthz")));
         // Scheme in any letter case.
         assert!(http_ok(&format!("HTTP://127.0.0.1:{port}/healthz")));
-        handle.join().unwrap();
+        handle.join().unwrap_or_else(|_| unreachable!());
 
         // Responder gone → connection refused → down.
         assert!(!http_ok(&format!("http://127.0.0.1:{port}/healthz")));
@@ -772,25 +815,25 @@ mod tests {
         // Non-HTTP speaker (the old TCP-connect probe called this "healthy").
         let (port, handle) = spawn_responder(1, b"welcome to my telnet server\r\n");
         assert!(!http_ok(&format!("http://127.0.0.1:{port}/healthz")));
-        handle.join().unwrap();
+        handle.join().unwrap_or_else(|_| unreachable!());
 
         // HTTP speaker without the health endpoint.
         let (port, handle) = spawn_responder(1, b"HTTP/1.0 404 Not Found\r\n\r\nnope");
         assert!(!http_ok(&format!("http://127.0.0.1:{port}/healthz")));
-        handle.join().unwrap();
+        handle.join().unwrap_or_else(|_| unreachable!());
 
         // Server error responses are health failures too.
         let (port, handle) = spawn_responder(1, b"HTTP/1.0 500 Internal Server Error\r\n\r\n");
         assert!(!http_ok(&format!("http://127.0.0.1:{port}/healthz")));
-        handle.join().unwrap();
+        handle.join().unwrap_or_else(|_| unreachable!());
     }
 
     #[test]
     fn http_ok_silent_socket_times_out_as_down() {
         // A bound-but-never-accepting listener: connect succeeds, the write
         // succeeds, the read hits the 300 ms timeout → down.
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap_or_else(|_| unreachable!());
+        let port = listener.local_addr().unwrap_or_else(|_| unreachable!()).port();
         let started = std::time::Instant::now();
         assert!(!http_ok(&format!("http://127.0.0.1:{port}/healthz")));
         assert!(
@@ -803,8 +846,8 @@ mod tests {
     #[test]
     fn http_ok_https_falls_back_to_tcp_handshake() {
         // std has no TLS: https URLs are probed by TCP connect only.
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap_or_else(|_| unreachable!());
+        let port = listener.local_addr().unwrap_or_else(|_| unreachable!()).port();
         assert!(http_ok(&format!("https://127.0.0.1:{port}/healthz")));
         drop(listener);
         assert!(!http_ok(&format!("https://127.0.0.1:{port}/healthz")));

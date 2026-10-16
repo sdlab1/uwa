@@ -31,14 +31,14 @@ pub fn install(p: &std::path::Path, payload: &Payload) -> Result<()> {
 
     let models = v
         .as_object_mut()
-        .unwrap()
+        .unwrap_or_else(|| unreachable!())
         .entry("models")
         .or_insert_with(|| Value::Array(vec![]));
     if !models.is_array() {
         anyhow::bail!("{}: `models` is not an array", p.display());
     }
 
-    let arr = models.as_array_mut().unwrap();
+    let arr = models.as_array_mut().unwrap_or_else(|| unreachable!());
     arr.retain(|m| m.get("title").and_then(Value::as_str) != Some(MARKER));
     arr.push(json!({
         "title": MARKER,

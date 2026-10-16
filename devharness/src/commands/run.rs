@@ -205,7 +205,7 @@ pub fn run(store: &Store, cfg: &RunConfig, id: &ItemId) -> anyhow::Result<()> {
                 die(store, id, 1);
             }
             Err(GateFail::Red { gate, tail }) => {
-                round += 1;
+                round = round.saturating_add(1);
                 if round > cfg.max_fix {
                     eprintln!(
                         "{}FAIL: гейт {} красный после {} раундов фикса (логи: {}){}",
@@ -303,7 +303,7 @@ pub fn run(store: &Store, cfg: &RunConfig, id: &ItemId) -> anyhow::Result<()> {
     println!("— staged:");
     let stat = git::staged_stat(&wt);
     let lines: Vec<&str> = stat.lines().collect();
-    for l in &lines[lines.len().saturating_sub(5)..] {
+    for l in lines.iter().skip(lines.len().saturating_sub(5)) {
         println!("{l}");
     }
     let dels = git::staged_deletions(&wt);
@@ -414,7 +414,7 @@ fn run_agent(
                 "агент завершился с кодом {:?}",
                 out.exit
             );
-            timing.stage(format!("agent-r{}", round + 1), store, id);
+            timing.stage(format!("agent-r{}", round.saturating_add(1)), store, id);
             Ok(())
         }
         Err(e) => {
@@ -459,7 +459,7 @@ fn gate_ladder(
             tail: tail_of(&verify_raw.log, 40),
         });
     }
-    timing.stage(format!("verify-r{}", round + 1), store, id);
+    timing.stage(format!("verify-r{}", round.saturating_add(1)), store, id);
 
     if cfg.no_ignored && gates::parse_ignored_count(&verify_raw.log) > 0 {
         let hits: Vec<String> = ignored_lines(&verify_raw.log)
@@ -474,7 +474,7 @@ fn gate_ladder(
 
     let lint_log = lint_gate(cfg, wt);
     std::fs::write(store.log_file(id, "lint"), &lint_log).ok();
-    timing.stage(format!("lint-r{}", round + 1), store, id);
+    timing.stage(format!("lint-r{}", round.saturating_add(1)), store, id);
     match lint_log_kind(&lint_log) {
         LintKind::Env(msg) => {
             return Err(GateFail::Env {
@@ -505,7 +505,7 @@ fn gate_ladder(
         } else {
             let (clog, verdict) = crap_gate(wt, cr);
             std::fs::write(store.log_file(id, "crap"), &clog).ok();
-            timing.stage(format!("crap-r{}", round + 1), store, id);
+            timing.stage(format!("crap-r{}", round.saturating_add(1)), store, id);
             match verdict {
                 Verdict::Pass => {}
                 Verdict::EnvBlocked { missing } => {
@@ -529,7 +529,7 @@ fn gate_ladder(
     if cfg.review {
         let (review_log, verdict) = review_gate(store, cfg, wt, id);
         std::fs::write(store.log_file(id, "review"), &review_log).ok();
-        timing.stage(format!("review-r{}", round + 1), store, id);
+        timing.stage(format!("review-r{}", round.saturating_add(1)), store, id);
         match verdict {
             ReviewOutcome::Env(msg) => {
                 return Err(GateFail::Env {
@@ -553,7 +553,7 @@ fn gate_ladder(
         let (mlog, mres) = mutate_gate(m, wt);
         let mpath = store.log_file(id, "mutate");
         std::fs::write(&mpath, &mlog).ok();
-        timing.stage(format!("mutate-r{}", round + 1), store, id);
+        timing.stage(format!("mutate-r{}", round.saturating_add(1)), store, id);
         match mres {
             MutateOutcome::Env => {
                 return Err(GateFail::Env {
@@ -578,7 +578,7 @@ fn gate_ladder(
 
     if let Some(bench) = &cfg.bench {
         let raw = exec_logged(store, wt, id, bench, "bench", BENCH_TIMEOUT);
-        timing.stage(format!("bench-r{}", round + 1), store, id);
+        timing.stage(format!("bench-r{}", round.saturating_add(1)), store, id);
         if raw.exit != Some(0) {
             return Err(GateFail::Red {
                 gate: Gate::Bench,
@@ -647,8 +647,8 @@ fn lint_gate(cfg: &RunConfig, wt: &Path) -> String {
                 .output()
             {
                 Ok(out) => {
-                    log += &String::from_utf8_lossy(&out.stdout);
-                    log += &String::from_utf8_lossy(&out.stderr);
+                    log.push_str(&String::from_utf8_lossy(&out.stdout));
+                    log.push_str(&String::from_utf8_lossy(&out.stderr));
                     if !out.status.success() {
                         bad = true;
                     }
@@ -669,8 +669,8 @@ fn lint_gate(cfg: &RunConfig, wt: &Path) -> String {
             .output()
         {
             Ok(out) => {
-                log += &String::from_utf8_lossy(&out.stdout);
-                log += &String::from_utf8_lossy(&out.stderr);
+                log.push_str(&String::from_utf8_lossy(&out.stdout));
+                log.push_str(&String::from_utf8_lossy(&out.stderr));
                 if !out.status.success() {
                     bad = true;
                 }

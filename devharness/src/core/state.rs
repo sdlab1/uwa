@@ -53,7 +53,14 @@ pub fn can_claim(active: u32, max_active: u32) -> bool {
 }
 
 pub fn next_id(existing: &[ItemId]) -> ItemId {
-    ItemId(existing.iter().map(|i| i.0).max().unwrap_or(0) + 1)
+    ItemId(
+        existing
+            .iter()
+            .map(|i| i.0)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1),
+    )
 }
 
 #[cfg(test)]

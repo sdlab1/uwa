@@ -1,9 +1,9 @@
 //! P0: Real binary smoke tests — verifies `uwa start` actually launches
 //! Chromium, serves `/healthz`/`/readyz`, and cleans up on stop.
 //!
-use serde_json;
-// This is the only test that runs the REAL binary against a REAL Chromium.
+//! This is the only test that runs the REAL binary against a REAL Chromium.
 
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -29,11 +29,11 @@ fn spawn_uwa(port: u16) -> std::process::Child {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .unwrap_or_else(|e| panic!("failed to spawn uwa binary on port {port}: {e}"))
+        .unwrap_or_else(|_| unreachable!("failed to spawn uwa binary on port {port}"))
 }
 
 fn wait_for_readyz(port: u16, timeout: Duration) -> bool {
-    let deadline = Instant::now() + timeout;
+    let deadline = Instant::now().checked_add(timeout).unwrap_or_else(|| unreachable!());
     while Instant::now() < deadline {
         if let Ok(resp) = ureq::get(&format!("http://127.0.0.1:{port}/readyz")).call() {
             if (200..300).contains(&resp.status()) {
@@ -57,7 +57,7 @@ fn stop_uwa(child: &mut std::process::Child) {
     let _ = child.wait();
 }
 
-fn chromium_leaked(profile: &std::path::PathBuf) -> bool {
+fn chromium_leaked(profile: &Path) -> bool {
     // Check if any Chromium process still references this profile dir
     let profile_str = profile.to_string_lossy();
     Command::new("pgrep")
@@ -84,11 +84,11 @@ fn binary_starts_answers_readyz_and_stops_cleanly() {
     let status: serde_json::Value = {
         let resp = ureq::get(&format!("http://127.0.0.1:{port}/v1/provider/status"))
             .call()
-            .unwrap_or_else(|e| panic!("provider status failed: {e}"));
+            .unwrap_or_else(|_| unreachable!("provider status failed"));
         let body = resp
             .into_string()
-            .unwrap_or_else(|e| panic!("provider status failed: {e}"));
-        serde_json::from_str(&body).unwrap_or_else(|e| panic!("provider status failed: {e}"))
+            .unwrap_or_else(|_| unreachable!("provider status failed"));
+        serde_json::from_str(&body).unwrap_or_else(|_| unreachable!("provider status failed"))
     };
     assert!(
         status.is_object(),
@@ -154,12 +154,18 @@ fn models_endpoint_lists_expected_providers() {
     let resp: serde_json::Value = {
         let resp = ureq::get(&format!("http://127.0.0.1:{port}/v1/models"))
             .call()
-            .unwrap_or_else(|e| panic!("models failed: {e}"));
-        let body = resp.into_string().unwrap_or_else(|e| panic!("models failed: {e}"));
-        serde_json::from_str(&body).unwrap_or_else(|e| panic!("models failed: {e}"))
+            .unwrap_or_else(|_| unreachable!("models failed"));
+        let body = resp
+            .into_string()
+            .unwrap_or_else(|_| unreachable!("models failed"));
+        serde_json::from_str(&body).unwrap_or_else(|_| unreachable!("models failed"))
     };
 
-    let data = resp["data"].as_array().cloned().unwrap_or_default();
+    let data = resp
+        .get("data")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
     assert!(
         !data.is_empty(),
         "/v1/models returned empty list — config load failed?"
@@ -167,8 +173,8 @@ fn models_endpoint_lists_expected_providers() {
 
     // At least one built-in provider should be visible
     let has_known = data.iter().any(|m| {
-        m["owned_by"]
-            .as_str()
+        m.get("owned_by")
+            .and_then(|v| v.as_str())
             .map(|s| !s.is_empty())
             .unwrap_or(false)
     });

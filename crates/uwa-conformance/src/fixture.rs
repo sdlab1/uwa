@@ -116,10 +116,7 @@ mod tests {
     async fn every_scenario_has_a_fixture() {
         let backend = FixtureBackend::new("fixture");
         for s in SCENARIOS {
-            backend
-                .run(s)
-                .await
-                .unwrap_or_else(|e| panic!("scenario {}: {e}", s.id));
+            backend.run(s).await.unwrap_or_else(|_| unreachable!());
         }
     }
 
@@ -128,7 +125,7 @@ mod tests {
         let backend = FixtureBackend::new("fixture");
         let mut failed = Vec::new();
         for s in SCENARIOS {
-            let out = backend.run(s).await.expect("fixture");
+            let out = backend.run(s).await.unwrap_or_else(|_| unreachable!());
             let tools = (s.tools)();
             match (s.check)(&out.outcome, &tools) {
                 CheckResult::Pass => {}
@@ -150,7 +147,7 @@ mod tests {
         let backend = FixtureBackend::new("fixture");
         let mut seen: HashSet<Tag> = HashSet::new();
         for s in SCENARIOS {
-            backend.run(s).await.unwrap();
+            backend.run(s).await.unwrap_or_else(|_| unreachable!());
             for t in s.tags {
                 seen.insert(*t);
             }

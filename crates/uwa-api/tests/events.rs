@@ -63,13 +63,32 @@ async fn list_returns_recent_events_newest_first() {
         .await;
     r.assert_status_ok();
     let v: Value = r.json();
-    assert_eq!(v["available"], true);
-    let events = v["events"].as_array().unwrap();
+    assert_eq!(
+        v.get("available").and_then(|a| a.as_bool()),
+        Some(true),
+        "available should be true: {v}"
+    );
+    let events = v
+        .get("events")
+        .and_then(|e| e.as_array())
+        .unwrap_or_else(|| unreachable!("events array missing: {v}"));
     assert_eq!(events.len(), 3);
     // Newest first: claude.
-    assert_eq!(events[0]["target"], "tab_b");
-    assert_eq!(events[2]["target"], "tab_a");
-    assert_eq!(events[2]["kind"], "response_body");
+    assert_eq!(
+        events[0].get("target").and_then(|t| t.as_str()),
+        Some("tab_b"),
+        "first target wrong: {v}"
+    );
+    assert_eq!(
+        events[2].get("target").and_then(|t| t.as_str()),
+        Some("tab_a"),
+        "third target wrong: {v}"
+    );
+    assert_eq!(
+        events[2].get("kind").and_then(|k| k.as_str()),
+        Some("response_body"),
+        "third kind wrong: {v}"
+    );
 }
 
 #[tokio::test]
@@ -83,21 +102,42 @@ async fn list_filters_by_target_kind_url() {
         .await;
     target.assert_status_ok();
     let v: Value = target.json();
-    assert_eq!(v["events"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        v.get("events")
+            .and_then(|e| e.as_array())
+            .map(|a| a.len())
+            .unwrap_or(0),
+        2,
+        "tab_a events count wrong: {v}"
+    );
 
     let kind = s
         .get("/admin/events?kind=finished")
         .add_header("Authorization", TEST_AUTH_HEADER)
         .await;
     let v: Value = kind.json();
-    assert_eq!(v["events"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        v.get("events")
+            .and_then(|e| e.as_array())
+            .map(|a| a.len())
+            .unwrap_or(0),
+        1,
+        "finished events count wrong: {v}"
+    );
 
     let url = s
         .get("/admin/events?url=claude.ai")
         .add_header("Authorization", TEST_AUTH_HEADER)
         .await;
     let v: Value = url.json();
-    assert_eq!(v["events"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        v.get("events")
+            .and_then(|e| e.as_array())
+            .map(|a| a.len())
+            .unwrap_or(0),
+        1,
+        "claude.ai events count wrong: {v}"
+    );
 }
 
 #[tokio::test]
@@ -110,12 +150,28 @@ async fn summary_reports_targets() {
         .await;
     r.assert_status_ok();
     let v: Value = r.json();
-    assert_eq!(v["summary"]["total"], 3);
-    assert_eq!(v["summary"]["retained"], 3);
-    let targets = v["summary"]["targets"].as_array().unwrap();
+    assert_eq!(
+        v.get("summary")
+            .and_then(|s| s.get("total"))
+            .and_then(|t| t.as_u64()),
+        Some(3),
+        "total wrong: {v}"
+    );
+    assert_eq!(
+        v.get("summary")
+            .and_then(|s| s.get("retained"))
+            .and_then(|t| t.as_u64()),
+        Some(3),
+        "retained wrong: {v}"
+    );
+    let targets = v
+        .get("summary")
+        .and_then(|s| s.get("targets"))
+        .and_then(|t| t.as_array())
+        .unwrap_or_else(|| unreachable!("targets array missing: {v}"));
     let names: Vec<&str> = targets
         .iter()
-        .map(|t| t["target"].as_str().unwrap())
+        .map(|t| t.get("target").and_then(|t| t.as_str()).unwrap_or_else(|| unreachable!("target missing")))
         .collect();
     assert!(names.contains(&"tab_a"));
     assert!(names.contains(&"tab_b"));
@@ -136,15 +192,34 @@ async fn clear_empties_the_ring_but_keeps_total() {
         .add_header("Authorization", TEST_AUTH_HEADER)
         .await;
     let v: Value = r.json();
-    assert_eq!(v["summary"]["retained"], 0);
-    assert_eq!(v["summary"]["total"], 3);
+    assert_eq!(
+        v.get("summary")
+            .and_then(|s| s.get("retained"))
+            .and_then(|t| t.as_u64()),
+        Some(0),
+        "retained should be 0: {v}"
+    );
+    assert_eq!(
+        v.get("summary")
+            .and_then(|s| s.get("total"))
+            .and_then(|t| t.as_u64()),
+        Some(3),
+        "total should be 3: {v}"
+    );
 
     let r = s
         .get("/admin/events")
         .add_header("Authorization", TEST_AUTH_HEADER)
         .await;
     let v: Value = r.json();
-    assert_eq!(v["events"].as_array().unwrap().len(), 0);
+    assert_eq!(
+        v.get("events")
+            .and_then(|e| e.as_array())
+            .map(|a| a.len())
+            .unwrap_or(0),
+        0,
+        "events should be empty: {v}"
+    );
 }
 
 #[tokio::test]
@@ -161,7 +236,11 @@ async fn unavailable_when_no_log_wired() {
         .await;
     r.assert_status_ok();
     let v: Value = r.json();
-    assert_eq!(v["available"], false);
+    assert_eq!(
+        v.get("available").and_then(|a| a.as_bool()),
+        Some(false),
+        "available should be false: {v}"
+    );
 }
 
 #[tokio::test]
@@ -183,9 +262,26 @@ async fn body_truncation_is_visible_in_listing() {
         .add_header("Authorization", TEST_AUTH_HEADER)
         .await;
     let v: Value = r.json();
-    let ev = &v["events"][0];
-    assert_eq!(ev["truncated"], true);
-    assert_eq!(ev["size_bytes"], 70_000);
-    assert!(ev["body"].as_str().unwrap().len() <= 64 * 1024 + 8);
+    let ev = v
+        .get("events")
+        .and_then(|e| e.get(0))
+        .unwrap_or_else(|| unreachable!("events[0] missing: {v}"));
+    assert_eq!(
+        ev.get("truncated").and_then(|t| t.as_bool()),
+        Some(true),
+        "truncated should be true: {ev}"
+    );
+    assert_eq!(
+        ev.get("size_bytes").and_then(|s| s.as_u64()),
+        Some(70_000),
+        "size_bytes wrong: {ev}"
+    );
+    assert!(
+        ev.get("body")
+            .and_then(|b| b.as_str())
+            .map(|s| s.len() <= 64 * 1024 + 8)
+            .unwrap_or(false),
+        "body too long: {ev}"
+    );
     let _ = json!({}); // silence unused-import lint on non-debug builds
 }

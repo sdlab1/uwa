@@ -27,6 +27,7 @@ fn parts_variant_flattens_text() {
         name: None,
         tool_call_id: None,
         tool_calls: None,
+        uwa_media: Vec::new(),
     };
     assert_eq!(m.content_text(), "a\nb");
 }
@@ -49,6 +50,7 @@ fn parts_with_image_marker() {
         name: None,
         tool_call_id: None,
         tool_calls: None,
+        uwa_media: Vec::new(),
     };
     let text = m.content_text();
     assert!(text.contains("look:"));
@@ -63,6 +65,7 @@ fn none_content_yields_empty_string() {
         name: None,
         tool_call_id: None,
         tool_calls: None,
+        uwa_media: Vec::new(),
     };
     assert_eq!(m.content_text(), "");
 }
@@ -88,6 +91,7 @@ fn text_content_macro_builds_the_text_variant() {
         name: None,
         tool_call_id: None,
         tool_calls: None,
+        uwa_media: Vec::new(),
     };
     assert_eq!(m.content_text(), "macro");
 }

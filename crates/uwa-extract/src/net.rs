@@ -567,15 +567,17 @@ mod tests {
         let mut p = SseParser::new();
         let frames = p.feed("event: message\ndata: hello\n\n");
         assert_eq!(frames.len(), 1);
-        assert_eq!(frames[0].event.as_deref(), Some("message"));
-        assert_eq!(frames[0].data, "hello");
+        let f = frames.first().unwrap_or_else(|| unreachable!());
+        assert_eq!(f.event.as_deref(), Some("message"));
+        assert_eq!(&f.data, "hello");
     }
 
     #[test]
     fn sse_multiline_data() {
         let mut p = SseParser::new();
         let frames = p.feed("data: a\ndata: b\n\n");
-        assert_eq!(frames[0].data, "a\nb");
+        let f = frames.first().unwrap_or_else(|| unreachable!());
+        assert_eq!(&f.data, "a\nb");
     }
 
     #[test]
@@ -584,7 +586,8 @@ mod tests {
         assert!(p.feed("data: he").is_empty());
         assert!(p.feed("llo\n").is_empty());
         let frames = p.feed("\n");
-        assert_eq!(frames[0].data, "hello");
+        let f = frames.first().unwrap_or_else(|| unreachable!());
+        assert_eq!(&f.data, "hello");
     }
 
     #[test]
@@ -592,15 +595,18 @@ mod tests {
         let mut p = SseParser::new();
         let frames = p.feed("data: a\n\ndata: b\n\n");
         assert_eq!(frames.len(), 2);
-        assert_eq!(frames[0].data, "a");
-        assert_eq!(frames[1].data, "b");
+        let f0 = frames.first().unwrap_or_else(|| unreachable!());
+        let f1 = frames.get(1).unwrap_or_else(|| unreachable!());
+        assert_eq!(&f0.data, "a");
+        assert_eq!(&f1.data, "b");
     }
 
     #[test]
     fn sse_crlf_tolerated() {
         let mut p = SseParser::new();
         let frames = p.feed("data: x\r\n\r\n");
-        assert_eq!(frames[0].data, "x");
+        let f = frames.first().unwrap_or_else(|| unreachable!());
+        assert_eq!(&f.data, "x");
     }
 
     #[test]
@@ -610,16 +616,16 @@ mod tests {
         // Trailing \r in feed() is held back (Bug 3 fix: CRLF split across chunks).
         // The frame is emitted at finish().
         assert!(p.feed("data: x\r\r").is_empty());
-        let f = p.finish().unwrap();
-        assert_eq!(f.data, "x");
+        let f = p.finish().unwrap_or_else(|| unreachable!());
+        assert_eq!(&f.data, "x");
     }
 
     #[test]
     fn sse_finish_flushes_trailing() {
         let mut p = SseParser::new();
         assert!(p.feed("data: tail").is_empty());
-        let f = p.finish().unwrap();
-        assert_eq!(f.data, "tail");
+        let f = p.finish().unwrap_or_else(|| unreachable!());
+        assert_eq!(&f.data, "tail");
     }
 
     #[test]
@@ -669,19 +675,21 @@ mod tests {
         // streamed token deltas.
         let mut p = SseParser::new();
         let frames = p.feed("data:  world\n\n");
-        assert_eq!(frames[0].data, " world");
+        let f = frames.first().unwrap_or_else(|| unreachable!());
+        assert_eq!(&f.data, " world");
 
         // No space at all is also valid.
         let mut p = SseParser::new();
         let frames = p.feed("data:x\n\n");
-        assert_eq!(frames[0].data, "x");
+        let f = frames.first().unwrap_or_else(|| unreachable!());
+        assert_eq!(&f.data, "x");
     }
 
     #[test]
     fn sse_finish_keeps_leading_space() {
         let mut p = SseParser::new();
         assert!(p.feed("data:  tail").is_empty());
-        let f = p.finish().unwrap();
+        let f = p.finish().unwrap_or_else(|| unreachable!());
         assert_eq!(f.data, " tail");
     }
 
@@ -691,11 +699,13 @@ mod tests {
         // strip it would glue onto the first field name.
         let mut p = SseParser::new();
         let frames = p.feed("\u{feff}event: message\ndata: hi\n\n");
-        assert_eq!(frames[0].event.as_deref(), Some("message"));
-        assert_eq!(frames[0].data, "hi");
+        let f = frames.first().unwrap_or_else(|| unreachable!());
+        assert_eq!(f.event.as_deref(), Some("message"));
+        assert_eq!(&f.data, "hi");
         // Stripped once, at stream start only.
         let frames = p.feed("data: second\n\n");
-        assert_eq!(frames[0].data, "second");
+        let f = frames.first().unwrap_or_else(|| unreachable!());
+        assert_eq!(&f.data, "second");
     }
 
     #[test]
@@ -744,7 +754,8 @@ mod tests {
 
     #[test]
     fn json_body_extraction() {
-        let body = serde_json::to_string(&json!({"answer":{"text":"42"}})).unwrap();
+        let body =
+            serde_json::to_string(&json!({"answer":{"text":"42"}})).unwrap_or_else(|_| unreachable!());
         let d = NetDecoder::Json {
             json_path: "answer.text".into(),
         };
@@ -774,8 +785,8 @@ mod tests {
         // would be false for JSON responses.
         // Here we test the parser behavior directly: finish() returns the
         // buffered data, but the caller should not call it for non-SSE.
-        let tail = p.finish();
-        assert_eq!(tail.unwrap().data, "stale");
+        let tail = p.finish().unwrap_or_else(|| unreachable!());
+        assert_eq!(&tail.data, "stale");
 
         // Parser is now clean. A subsequent JSON response should not
         // have any stale data.
@@ -788,9 +799,9 @@ mod tests {
         let mut p = SseParser::new();
         // Feed without a trailing newline, so the buffer holds two logical lines.
         let _ = p.feed("event: foo\ndata: bar");
-        let f = p.finish().expect("frame");
+        let f = p.finish().unwrap_or_else(|| unreachable!("frame"));
         assert_eq!(f.event.as_deref(), Some("foo"));
-        assert_eq!(f.data, "bar");
+        assert_eq!(&f.data, "bar");
     }
 
     #[test]
@@ -803,7 +814,7 @@ mod tests {
     fn finish_single_line_without_newline() {
         let mut p = SseParser::new();
         let _ = p.feed("data: hello");
-        let f = p.finish().expect("frame");
-        assert_eq!(f.data, "hello");
+        let f = p.finish().unwrap_or_else(|| unreachable!("frame"));
+        assert_eq!(&f.data, "hello");
     }
 }

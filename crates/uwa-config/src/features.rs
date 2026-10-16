@@ -279,8 +279,8 @@ mod tests {
         };
         let args = c.chrome_args();
         assert_eq!(args.len(), 2);
-        assert_eq!(args[0], "--proxy-server=socks5://127.0.0.1:1080");
-        assert_eq!(args[1], "--proxy-bypass-list=localhost,127.0.0.1");
+        assert_eq!(args.first().unwrap_or_else(|| unreachable!()), "--proxy-server=socks5://127.0.0.1:1080");
+        assert_eq!(args.get(1).unwrap_or_else(|| unreachable!()), "--proxy-bypass-list=localhost,127.0.0.1");
     }
 
     #[test]
@@ -306,7 +306,7 @@ mod tests {
             download_remote = true
             max_assets = 3
         "#;
-        let c: MediaCfg = toml::from_str(toml).unwrap();
+        let c: MediaCfg = toml::from_str(toml).unwrap_or_else(|_| unreachable!());
         assert!(c.extract_from_response);
         assert!(c.download_remote);
         assert_eq!(c.max_assets, 3);

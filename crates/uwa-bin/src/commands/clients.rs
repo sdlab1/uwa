@@ -5,24 +5,35 @@
 //! `crate::clients` for the rules.
 
 use anyhow::{anyhow, Context, Result};
-use clap::{Args, Subcommand};
+use clap::{Arg, ArgAction, Command};
 use std::path::PathBuf;
 
 use super::paths;
 use crate::clients::{self, Payload};
 
-#[derive(Args)]
+#[derive(Debug, Clone)]
 pub struct ClientsArgs {
-    #[command(subcommand)]
-    action: ClientsAction,
+    pub action: ClientsAction,
 }
 
-#[derive(Subcommand)]
-enum ClientsAction {
+impl ClientsArgs {
+    pub fn clap_subcommands() -> Vec<clap::Command> {
+        ClientsAction::clap_subcommands()
+    }
+
+    pub fn from_matches(matches: &clap::ArgMatches) -> Result<Self, String> {
+        let name = matches.subcommand_name().unwrap_or("");
+        let sub_matches = matches.subcommand_matches(name).ok_or_else(|| format!("missing subcommand matches for '{name}'"))?;
+        let action = ClientsAction::from_matches(name, sub_matches)?;
+        Ok(ClientsArgs { action })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum ClientsAction {
     /// Print every supported client and its current state.
     List {
         /// Output as JSON for programmatic use.
-        #[arg(long)]
         json: bool,
     },
     /// Patch a client's config to point at this uwa instance.
@@ -30,30 +41,24 @@ enum ClientsAction {
         /// Client id (see `uwa clients list`).
         id: String,
         /// Override the detected config path.
-        #[arg(long)]
         path: Option<PathBuf>,
         /// Base URL to write. Defaults to http://127.0.0.1:<port>.
-        #[arg(long)]
         base_url: Option<String>,
         /// API key to write. Defaults to the config's key or `dummy-key`
         /// on loopback.
-        #[arg(long)]
         api_key: Option<String>,
         /// Model id. Defaults to the first alias in the config.
-        #[arg(long)]
         model: Option<String>,
     },
     /// Undo a previous `install`.
     Uninstall {
         id: String,
         /// Override the detected config path.
-        #[arg(long)]
         path: Option<PathBuf>,
         /// Restore from the newest backup instead of stripping our block.
         /// Use this if our install is the *only* thing that ever wrote
         /// the file (env-export clients), and a plain strip would leave
         /// an empty shell.
-        #[arg(long)]
         from_backup: bool,
     },
     /// Print just the state of one client.
@@ -63,9 +68,102 @@ enum ClientsAction {
     /// Watch patched files and re-apply the uwa block if an app
     /// overwrites it. Foreground task.
     Watch {
-        #[arg(long, default_value_t = 3)]
         interval_secs: u64,
     },
+}
+
+impl ClientsAction {
+    pub fn clap_subcommands() -> Vec<clap::Command> {
+        vec![
+            Command::new("list")
+                .about("Print every supported client and its current state.")
+                .arg(
+                    Arg::new("json")
+                        .long("json")
+                        .action(ArgAction::SetTrue),
+                ),
+            Command::new("install")
+                .about("Patch a client's config to point at this uwa instance.")
+                .arg(Arg::new("id").index(1).action(ArgAction::Set))
+                .arg(
+                    Arg::new("path")
+                        .long("path")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("base_url")
+                        .long("base-url")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("api_key")
+                        .long("api-key")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("model")
+                        .long("model")
+                        .action(ArgAction::Set),
+                ),
+            Command::new("uninstall")
+                .about("Undo a previous `install`.")
+                .arg(Arg::new("id").index(1).action(ArgAction::Set))
+                .arg(
+                    Arg::new("path")
+                        .long("path")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("from_backup")
+                        .long("from-backup")
+                        .action(ArgAction::SetTrue),
+                ),
+            Command::new("status")
+                .about("Print just the state of one client.")
+                .arg(Arg::new("id").index(1).action(ArgAction::Set)),
+            Command::new("env")
+                .about("Print a shell snippet the user can `source` for env-only clients."),
+            Command::new("watch")
+                .about("Watch patched files and re-apply the uwa block if an app overwrites it. Foreground task.")
+                .arg(
+                    Arg::new("interval_secs")
+                        .long("interval-sec")
+                        .default_value("3")
+                        .action(ArgAction::Set),
+                ),
+        ]
+    }
+
+    pub fn from_matches(name: &str, matches: &clap::ArgMatches) -> Result<Self, String> {
+        match name {
+            "list" => Ok(ClientsAction::List {
+                json: matches.get_flag("json"),
+            }),
+            "install" => Ok(ClientsAction::Install {
+                id: matches.get_one::<String>("id").ok_or_else(|| "missing required argument 'id'".to_string())?.clone(),
+                path: matches.get_one::<PathBuf>("path").cloned(),
+                base_url: matches.get_one::<String>("base_url").cloned(),
+                api_key: matches.get_one::<String>("api_key").cloned(),
+                model: matches.get_one::<String>("model").cloned(),
+            }),
+            "uninstall" => Ok(ClientsAction::Uninstall {
+                id: matches.get_one::<String>("id").ok_or_else(|| "missing required argument 'id'".to_string())?.clone(),
+                path: matches.get_one::<PathBuf>("path").cloned(),
+                from_backup: matches.get_flag("from_backup"),
+            }),
+            "status" => Ok(ClientsAction::Status {
+                id: matches.get_one::<String>("id").ok_or_else(|| "missing required argument 'id'".to_string())?.clone(),
+            }),
+            "env" => Ok(ClientsAction::Env),
+            "watch" => Ok(ClientsAction::Watch {
+                interval_secs: matches
+                    .get_one::<String>("interval_secs")
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(3),
+            }),
+            _ => Err(format!("unknown clients subcommand: {name}")),
+        }
+    }
 }
 
 pub async fn run(args: ClientsArgs) -> Result<()> {

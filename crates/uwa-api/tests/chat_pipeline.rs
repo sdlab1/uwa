@@ -30,6 +30,19 @@ async fn plain_chat_stop() {
         .await;
     r.assert_status_ok();
     let v: serde_json::Value = r.json();
-    assert_eq!(v["choices"][0]["finish_reason"], "stop");
-    assert_eq!(v["choices"][0]["message"]["content"], "hello");
+    assert_eq!(
+        v.get("choices")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("finish_reason"))
+            .and_then(|f| f.as_str()),
+        Some("stop")
+    );
+    assert_eq!(
+        v.get("choices")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("message"))
+            .and_then(|m| m.get("content"))
+            .and_then(|c| c.as_str()),
+        Some("hello")
+    );
 }

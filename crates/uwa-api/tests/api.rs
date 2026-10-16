@@ -1,4 +1,4 @@
-use axum::http::StatusCode;
+use axum::http::{Method, StatusCode};
 use axum_test::TestServer;
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -110,7 +110,13 @@ async fn models_lists_aliases() {
         .await;
     r.assert_status_ok();
     let v: serde_json::Value = r.json();
-    assert_eq!(v["data"][0]["id"], "gpt-4o");
+    assert_eq!(
+        v.get("data")
+            .and_then(|d| d.get(0))
+            .and_then(|d| d.get("id"))
+            .and_then(|i| i.as_str()),
+        Some("gpt-4o")
+    );
 }
 
 #[tokio::test]
@@ -123,7 +129,10 @@ async fn chat_unknown_model_400() {
         .await;
     r.assert_status_not_found();
     let v: serde_json::Value = r.json();
-    assert_eq!(v["error"]["code"], "model_not_found");
+    assert_eq!(
+        v.get("error").and_then(|e| e.get("code")).and_then(|c| c.as_str()),
+        Some("model_not_found")
+    );
 }
 
 #[tokio::test]
@@ -136,9 +145,28 @@ async fn chat_plain_text_stop() {
         .await;
     r.assert_status_ok();
     let v: serde_json::Value = r.json();
-    assert_eq!(v["choices"][0]["message"]["content"], "Hello there.");
-    assert_eq!(v["choices"][0]["finish_reason"], "stop");
-    assert!(v["choices"][0]["message"].get("tool_calls").is_none());
+    assert_eq!(
+        v.get("choices")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("message"))
+            .and_then(|m| m.get("content"))
+            .and_then(|c| c.as_str()),
+        Some("Hello there.")
+    );
+    assert_eq!(
+        v.get("choices")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("finish_reason"))
+            .and_then(|f| f.as_str()),
+        Some("stop")
+    );
+    assert!(
+        v.get("choices")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("message"))
+            .and_then(|m| m.get("tool_calls"))
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -160,14 +188,47 @@ async fn chat_emits_tool_calls() {
         .await;
     r.assert_status_ok();
     let v: serde_json::Value = r.json();
-    assert_eq!(v["choices"][0]["finish_reason"], "tool_calls");
-    let tc = &v["choices"][0]["message"]["tool_calls"][0];
-    assert_eq!(tc["type"], "function");
-    assert_eq!(tc["function"]["name"], "get_weather");
+    assert_eq!(
+        v.get("choices")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("finish_reason"))
+            .and_then(|f| f.as_str()),
+        Some("tool_calls")
+    );
+    let tc = v
+        .get("choices")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("message"))
+        .and_then(|m| m.get("tool_calls"))
+        .and_then(|t| t.get(0))
+        .unwrap_or_else(|| unreachable!("missing tool_calls[0]"));
+    assert_eq!(
+        tc.get("type").and_then(|t| t.as_str()).unwrap_or(""),
+        "function"
+    );
+    assert_eq!(
+        tc.get("function")
+            .and_then(|f| f.get("name"))
+            .and_then(|n| n.as_str())
+            .unwrap_or(""),
+        "get_weather"
+    );
+    let args_str = tc
+        .get("function")
+        .and_then(|f| f.get("arguments"))
+        .and_then(|a| a.as_str())
+        .unwrap_or_default();
     let args: serde_json::Value =
-        serde_json::from_str(tc["function"]["arguments"].as_str().unwrap()).unwrap();
+        serde_json::from_str(args_str).unwrap_or_else(|e| unreachable!("bad args: {e}"));
     assert_eq!(args, json!({"city":"NYC"}));
-    assert_eq!(v["choices"][0]["message"]["content"], "Let me check.");
+    assert_eq!(
+        v.get("choices")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("message"))
+            .and_then(|m| m.get("content"))
+            .and_then(|c| c.as_str()),
+        Some("Let me check.")
+    );
 }
 
 #[tokio::test]
@@ -190,33 +251,65 @@ async fn streaming_ends_with_done_and_finish_reason() {
     let ct = r
         .headers()
         .get("content-type")
-        .expect("content-type")
-        .to_str()
-        .unwrap()
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
         .to_string();
     assert!(ct.contains("text/event-stream"), "content-type: {ct}");
 
     let body = r.text();
     let frames: Vec<&str> = body.split("data: ").skip(1).collect();
+
     assert!(frames.len() > 2, "too few chunks: {body}");
-    assert_eq!(frames.last().unwrap().trim(), "[DONE]");
+    assert_eq!(
+        frames.last().copied().unwrap_or_default().trim(),
+        "[DONE]"
+    );
 
     // The frame before [DONE] carries the finish reason.
-    let last: serde_json::Value =
-        serde_json::from_str(frames[frames.len() - 2].trim()).expect("finish frame");
-    assert_eq!(last["choices"][0]["finish_reason"], "tool_calls");
+    let last: serde_json::Value = frames
+        .get(frames.len() - 2)
+        .map(|f| f.trim())
+        .and_then(|f| serde_json::from_str(f).ok())
+        .unwrap_or_else(|| unreachable!("missing finish frame"));
+    assert_eq!(
+        last.get("choices")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("finish_reason"))
+            .and_then(|f| f.as_str()),
+        Some("tool_calls")
+    );
 
     // Tool name arrives first, then the arguments are streamed in chunks.
     let mut args = String::new();
-    for frame in &frames[..frames.len() - 2] {
-        let ev: serde_json::Value = serde_json::from_str(frame.trim()).expect("chunk frame");
-        if let Some(calls) = ev["choices"][0]["delta"]["tool_calls"].as_array() {
-            args.push_str(calls[0]["function"]["name"].as_str().unwrap_or(""));
-            args.push_str(calls[0]["function"]["arguments"].as_str().unwrap_or(""));
+    let end = frames.len().saturating_sub(2);
+    for frame in frames.get(..end).unwrap_or(&[]) {
+        let ev: serde_json::Value =
+            serde_json::from_str(frame.trim()).unwrap_or_else(|e| unreachable!("bad chunk frame: {e}"));
+        if let Some(calls) = ev
+            .get("choices")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("delta"))
+            .and_then(|d| d.get("tool_calls"))
+            .and_then(|t| t.as_array())
+        {
+            let call = calls.get(0).unwrap_or_else(|| unreachable!("empty tool_calls array"));
+            args.push_str(
+                call.get("function")
+                    .and_then(|f| f.get("name"))
+                    .and_then(|n| n.as_str())
+                    .unwrap_or(""),
+            );
+            args.push_str(
+                call.get("function")
+                    .and_then(|f| f.get("arguments"))
+                    .and_then(|a| a.as_str())
+                    .unwrap_or(""),
+            );
         }
     }
     assert_eq!(&args[..11], "get_weather");
-    let parsed: serde_json::Value = serde_json::from_str(&args[11..]).expect("arguments json");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&args[11..]).unwrap_or_else(|e| unreachable!("bad arguments json: {e}"));
     assert_eq!(parsed, json!({"city": "X"}));
 }
 
@@ -237,15 +330,53 @@ async fn messages_returns_anthropic_shape() {
         .await;
     r.assert_status_ok();
     let v: Value = r.json();
-    assert_eq!(v["type"], "message");
-    assert_eq!(v["role"], "assistant");
-    assert_eq!(v["model"], "gpt-4o");
-    assert!(v["id"].as_str().unwrap().starts_with("msg_"));
-    assert_eq!(v["content"][0]["type"], "text");
-    assert_eq!(v["content"][0]["text"], "Hello there.");
-    assert_eq!(v["stop_reason"], "end_turn");
-    assert!(v["usage"]["input_tokens"].as_u64().unwrap() >= 1);
-    assert!(v["usage"]["output_tokens"].as_u64().unwrap() >= 1);
+    assert_eq!(
+        v.get("type").and_then(|v| v.as_str()).unwrap_or(""),
+        "message"
+    );
+    assert_eq!(
+        v.get("role").and_then(|v| v.as_str()).unwrap_or(""),
+        "assistant"
+    );
+    assert_eq!(
+        v.get("model").and_then(|v| v.as_str()).unwrap_or(""),
+        "gpt-4o"
+    );
+    assert!(
+        v.get("id").and_then(|v| v.as_str()).unwrap_or("").starts_with("msg_")
+    );
+    assert_eq!(
+        v.get("content")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("type"))
+            .and_then(|t| t.as_str()),
+        Some("text")
+    );
+    assert_eq!(
+        v.get("content")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("text"))
+            .and_then(|t| t.as_str()),
+        Some("Hello there.")
+    );
+    assert_eq!(
+        v.get("stop_reason").and_then(|v| v.as_str()).unwrap_or(""),
+        "end_turn"
+    );
+    assert!(
+        v.get("usage")
+            .and_then(|u| u.get("input_tokens"))
+            .and_then(|t| t.as_u64())
+            .unwrap_or(0)
+            >= 1
+    );
+    assert!(
+        v.get("usage")
+            .and_then(|u| u.get("output_tokens"))
+            .and_then(|t| t.as_u64())
+            .unwrap_or(0)
+            >= 1
+    );
 
     // The system block must actually reach the browser (it used to be lost).
     let body = provider.sent_last();
@@ -273,12 +404,36 @@ async fn messages_tool_use_block_and_stop_reason() {
         .await;
     r.assert_status_ok();
     let v: Value = r.json();
-    assert_eq!(v["stop_reason"], "tool_use");
-    assert_eq!(v["content"][0]["text"], "Let me check.");
-    let tool = &v["content"][1];
-    assert_eq!(tool["type"], "tool_use");
-    assert_eq!(tool["name"], "get_weather");
-    assert_eq!(tool["input"]["city"], "NYC");
+    assert_eq!(
+        v.get("stop_reason").and_then(|v| v.as_str()).unwrap_or(""),
+        "tool_use"
+    );
+    assert_eq!(
+        v.get("content")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("text"))
+            .and_then(|t| t.as_str()),
+        Some("Let me check.")
+    );
+    let tool = v
+        .get("content")
+        .and_then(|c| c.get(1))
+        .unwrap_or_else(|| unreachable!("missing content[1]"));
+    assert_eq!(
+        tool.get("type").and_then(|t| t.as_str()).unwrap_or(""),
+        "tool_use"
+    );
+    assert_eq!(
+        tool.get("name").and_then(|n| n.as_str()).unwrap_or(""),
+        "get_weather"
+    );
+    assert_eq!(
+        tool.get("input")
+            .and_then(|i| i.get("city"))
+            .and_then(|c| c.as_str())
+            .unwrap_or(""),
+        "NYC"
+    );
     // The Anthropic tool declaration became an OpenAI tool in the prompt.
     assert!(provider.sent_last().contains("get_weather"));
 }
@@ -307,8 +462,17 @@ async fn messages_tool_result_history_reaches_the_browser() {
         .await;
     r.assert_status_ok();
     let v: Value = r.json();
-    assert_eq!(v["stop_reason"], "end_turn");
-    assert_eq!(v["content"][0]["text"], "22C");
+    assert_eq!(
+        v.get("stop_reason").and_then(|v| v.as_str()).unwrap_or(""),
+        "end_turn"
+    );
+    assert_eq!(
+        v.get("content")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("text"))
+            .and_then(|t| t.as_str()),
+        Some("22C")
+    );
 
     let body = provider.sent_last();
     assert!(body.contains("toolu_1"), "tool result id missing: {body}");
@@ -335,9 +499,8 @@ async fn messages_stream_emits_real_deltas() {
     let ct = r
         .headers()
         .get("content-type")
-        .expect("content-type")
-        .to_str()
-        .unwrap()
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
         .to_string();
     assert!(ct.contains("text/event-stream"), "content-type: {ct}");
 
@@ -357,10 +520,19 @@ async fn messages_stream_emits_real_deltas() {
     let mut delta_count = 0;
     for line in body.lines() {
         if let Some(data) = line.strip_prefix("data: ") {
-            let ev: Value = serde_json::from_str(data).expect("valid event json");
-            if ev["type"] == "content_block_delta" && ev["delta"]["type"] == "text_delta" {
+            let ev: Value =
+                serde_json::from_str(data).unwrap_or_else(|e| unreachable!("bad event json: {e}"));
+            if ev.get("type").and_then(|t| t.as_str()) == Some("content_block_delta")
+                && ev.get("delta").and_then(|d| d.get("type")).and_then(|t| t.as_str())
+                    == Some("text_delta")
+            {
                 delta_count += 1;
-                text.push_str(ev["delta"]["text"].as_str().unwrap());
+                text.push_str(
+                    ev.get("delta")
+                        .and_then(|d| d.get("text"))
+                        .and_then(|t| t.as_str())
+                        .unwrap_or(""),
+                );
             }
         }
     }
@@ -437,8 +609,9 @@ async fn circuit_opens_after_repeated_provider_failures() {
         r.assert_status(StatusCode::SERVICE_UNAVAILABLE);
         let v: Value = r.json();
         assert!(
-            v["error"]["message"]
-                .as_str()
+            v.get("error")
+                .and_then(|e| e.get("message"))
+                .and_then(|m| m.as_str())
                 .is_some_and(|m| m.contains("provider exploded")),
             "round {round}: {v}"
         );
@@ -450,8 +623,9 @@ async fn circuit_opens_after_repeated_provider_failures() {
     r.assert_status(StatusCode::SERVICE_UNAVAILABLE);
     let v: Value = r.json();
     assert!(
-        v["error"]["message"]
-            .as_str()
+        v.get("error")
+            .and_then(|e| e.get("message"))
+            .and_then(|m| m.as_str())
             .is_some_and(|m| m.contains("circuit `chatgpt` open")),
         "{v}"
     );
@@ -585,7 +759,13 @@ async fn loopback_blocks_cross_origin_browser_requests() {
         .json(&payload)
         .await;
     r.assert_status_forbidden();
-    assert_eq!(r.json::<Value>()["error"]["code"], "forbidden_origin");
+    assert_eq!(
+        r.json::<Value>()
+            .get("error")
+            .and_then(|e| e.get("code"))
+            .and_then(|c| c.as_str()),
+        Some("forbidden_origin")
+    );
     assert!(
         h.provider.sent().is_empty(),
         "a blocked request must never reach the browser"
@@ -598,6 +778,7 @@ async fn loopback_blocks_cross_origin_browser_requests() {
             .await
             .assert_status_forbidden();
     }
+
     // The opaque origin (sandboxed iframe, file://) is just as foreign.
     h.server
         .get("/v1/models")
@@ -614,7 +795,13 @@ async fn loopback_blocks_dns_rebinding_hosts() {
         .add_header("Host", "rebind.evil.example:8080")
         .await;
     r.assert_status_forbidden();
-    assert_eq!(r.json::<Value>()["error"]["code"], "forbidden_host");
+    assert_eq!(
+        r.json::<Value>()
+            .get("error")
+            .and_then(|e| e.get("code"))
+            .and_then(|c| c.as_str()),
+        Some("forbidden_host")
+    );
 }
 
 #[tokio::test]
@@ -636,7 +823,7 @@ async fn loopback_allows_local_dashboard_and_plain_clients() {
 async fn cors_preflight_is_not_granted_to_foreign_origins_on_loopback() {
     let s = server("hi");
     let evil = s
-        .method(axum::http::Method::OPTIONS, "/v1/chat/completions")
+        .method(Method::OPTIONS, "/v1/chat/completions")
         .add_header("Origin", "https://evil.example")
         .add_header("Access-Control-Request-Method", "POST")
         .add_header("Access-Control-Request-Headers", "content-type")
@@ -647,7 +834,7 @@ async fn cors_preflight_is_not_granted_to_foreign_origins_on_loopback() {
     );
 
     let local = s
-        .method(axum::http::Method::OPTIONS, "/v1/chat/completions")
+        .method(Method::OPTIONS, "/v1/chat/completions")
         .add_header("Origin", "http://localhost:3000")
         .add_header("Access-Control-Request-Method", "POST")
         .add_header("Access-Control-Request-Headers", "content-type")

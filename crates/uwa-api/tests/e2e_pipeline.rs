@@ -46,7 +46,7 @@ async fn debug_messages_endpoint() {
     println!("Status: {}", r.status_code());
     r.assert_status_ok();
     let v: serde_json::Value = r.json();
-    assert_eq!(v["type"], "message");
+    assert_eq!(v.get("type").and_then(|v| v.as_str()), Some("message"));
 }
 
 #[tokio::test]
@@ -93,7 +93,7 @@ async fn streaming_pipeline_produces_sse_chunks_with_ttft() {
         let data = chunk.strip_prefix("data: ").unwrap_or(chunk);
         if data != "[DONE]" {
             serde_json::from_str::<serde_json::Value>(data)
-                .unwrap_or_else(|e| panic!("invalid SSE chunk JSON: {data}: {e}"));
+                .unwrap_or_else(|e| unreachable!("invalid SSE chunk JSON: {data}: {e}"));
         }
     }
 
@@ -125,7 +125,8 @@ async fn anthropic_messages_nonstreaming_round_trip() {
         stop_button = "button.stop"
         assistant_message = "[data-role=assistant]"
     "##;
-    let config = uwa_config::Config::load_from_str(config_toml).unwrap();
+    let config = uwa_config::Config::load_from_str(config_toml)
+        .unwrap_or_else(|e| unreachable!("config load failed: {e}"));
 
     let app = AppBuilder::new()
         .with_config(std::sync::Arc::new(config))
@@ -152,18 +153,30 @@ async fn anthropic_messages_nonstreaming_round_trip() {
     let v: serde_json::Value = r.json();
 
     // Anthropic Messages shape: content[] with text blocks
-    assert!(v["content"].is_array(), "missing content array: {v}");
-    assert_eq!(v["role"].as_str(), Some("assistant"), "wrong role: {v}");
     assert!(
-        v["id"]
-            .as_str()
+        v.get("content").and_then(|c| c.is_array()).unwrap_or(false),
+        "missing content array: {v}"
+    );
+    assert_eq!(
+        v.get("role").and_then(|v| v.as_str()),
+        Some("assistant"),
+        "wrong role: {v}"
+    );
+    assert!(
+        v.get("id")
+            .and_then(|v| v.as_str())
             .map(|s| s.starts_with("msg_"))
             .unwrap_or(false),
         "Anthropic-style id missing: {v}"
     );
 
     // Content text is present
-    let content_text = v["content"][0]["text"].as_str().unwrap_or("");
+    let content_text = v
+        .get("content")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("text"))
+        .and_then(|c| c.as_str())
+        .unwrap_or("");
     assert_eq!(
         content_text, "Claude says hi",
         "content text mismatch: {content_text}"
@@ -251,28 +264,46 @@ async fn tool_calls_round_trip_via_openai_endpoint() {
     r.assert_status_ok();
     let v: serde_json::Value = r.json();
 
-    let tool_calls = &v["choices"][0]["message"]["tool_calls"];
+    let tool_calls = v
+        .get("choices")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("message"))
+        .and_then(|c| c.get("tool_calls"));
     assert!(
-        tool_calls.is_array(),
+        tool_calls.map(|c| c.is_array()).unwrap_or(false),
         "expected tool_calls in response: {v}"
     );
     assert_eq!(
-        tool_calls[0]["function"]["name"].as_str(),
+        tool_calls
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("function"))
+            .and_then(|c| c.get("name"))
+            .and_then(|c| c.as_str()),
         Some("get_weather"),
         "wrong tool name: {v}"
     );
 
     let args: serde_json::Value = serde_json::from_str(
-        tool_calls[0]["function"]["arguments"]
-            .as_str()
+        tool_calls
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("function"))
+            .and_then(|c| c.get("arguments"))
+            .and_then(|c| c.as_str())
             .unwrap_or("{}"),
     )
     .unwrap_or_default();
-    assert_eq!(args["city"].as_str(), Some("Kyiv"), "wrong tool args: {v}");
+    assert_eq!(
+        args.get("city").and_then(|c| c.as_str()),
+        Some("Kyiv"),
+        "wrong tool args: {v}"
+    );
 
     // Finish reason must be tool_calls
     assert_eq!(
-        v["choices"][0]["finish_reason"].as_str(),
+        v.get("choices")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("finish_reason"))
+            .and_then(|c| c.as_str()),
         Some("tool_calls")
     );
 }
@@ -313,7 +344,12 @@ async fn tool_result_roundtrip_via_openai_endpoint() {
 
     r1.assert_status_ok();
     let v1: serde_json::Value = r1.json();
-    assert_eq!(v1["choices"][0]["finish_reason"], "tool_calls");
+    assert_eq!(
+        v1.get("choices")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("finish_reason")),
+        Some(&serde_json::json!("tool_calls"))
+    );
 
     // Turn 2: client sends tool result back
     let r2 = app
@@ -342,8 +378,20 @@ async fn tool_result_roundtrip_via_openai_endpoint() {
 
     r2.assert_status_ok();
     let v2: serde_json::Value = r2.json();
-    assert_eq!(v2["choices"][0]["finish_reason"], "stop");
-    assert_eq!(v2["choices"][0]["message"]["content"], "It is 22C in Kyiv.");
+    assert_eq!(
+        v2.get("choices")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("finish_reason")),
+        Some(&serde_json::json!("stop"))
+    );
+    assert_eq!(
+        v2.get("choices")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("message"))
+            .and_then(|c| c.get("content"))
+            .and_then(|c| c.as_str()),
+        Some("It is 22C in Kyiv.")
+    );
 }
 
 #[tokio::test]

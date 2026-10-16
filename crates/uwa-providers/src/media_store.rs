@@ -77,7 +77,7 @@ pub async fn persist(page: &dyn Page, assets: &mut [MediaAsset], cfg: &StoreCfg)
             continue;
         }
         if asset.local_path.is_some() {
-            saved += 1;
+            saved = saved.saturating_add(1);
         }
     }
     saved
@@ -259,16 +259,16 @@ fn today() -> String {
 /// Howard Hinnant's algorithm. Small enough to inline; a chrono
 /// dependency for one date format isn't worth it.
 fn civil_from_days(z: i64) -> (i64, u32, u32) {
-    let z = z + 719_468;
+    let z = z.wrapping_add(719_468);
     let era = z.div_euclid(146_097);
     let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    let y = if m <= 2 { y + 1 } else { y };
+    let yoe = (doe.wrapping_sub(doe / 1460).wrapping_add(doe / 36_524).wrapping_sub(doe / 146_096)) / 365;
+    let y = yoe.wrapping_add(era.wrapping_mul(400));
+    let doy = doe.wrapping_sub(365_i64.wrapping_mul(yoe).wrapping_add(yoe / 4).wrapping_sub(yoe / 100));
+    let mp = (5_i64.wrapping_mul(doy).wrapping_add(2)) / 153;
+    let d = (doy.wrapping_sub(153_i64.wrapping_mul(mp).wrapping_add(2) / 5).wrapping_add(1)) as u32;
+    let m = if mp < 10 { mp.wrapping_add(3) } else { mp.wrapping_sub(9) } as u32;
+    let y = if m <= 2 { y.wrapping_add(1) } else { y };
     (y, m, d)
 }
 
@@ -323,7 +323,7 @@ pub async fn fetch_blob_from_page(page: &dyn uwa_core::Page, url: &str) -> Resul
                 return {{ ok: false, error: String(e) }};
             }}
         }})()"#,
-        u = serde_json::to_string(url).unwrap(),
+        u = serde_json::to_string(url).unwrap_or_else(|_| unreachable!()),
     );
     let v = page.eval(&js).await?;
     if v.get("ok").and_then(|x| x.as_bool()) != Some(true) {

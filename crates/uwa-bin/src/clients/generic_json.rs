@@ -43,7 +43,7 @@ pub fn install(p: &std::path::Path, payload: &Payload) -> Result<()> {
     if !providers.is_array() {
         anyhow::bail!("{}: `providers` exists but is not an array", p.display());
     }
-    let arr = providers.as_array_mut().unwrap();
+    let arr = providers.as_array_mut().unwrap_or_else(|| unreachable!());
     arr.retain(|p| p.get("name").and_then(Value::as_str) != Some(MARKER));
     arr.push(json!({
         "name": MARKER,

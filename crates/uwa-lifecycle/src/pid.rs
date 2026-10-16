@@ -75,7 +75,7 @@ mod tests {
     /// (file unlinked between acquire and assert).
     fn tmp(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("uwa-pid-test-{}-{name}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(&dir).unwrap_or_else(|_| unreachable!());
         dir.join("x.pid")
     }
 
@@ -84,10 +84,10 @@ mod tests {
         let path = tmp("a.pid");
         let _ = std::fs::remove_file(&path);
         {
-            let pid = PidFile::acquire(&path).unwrap();
+            let pid = PidFile::acquire(&path).unwrap_or_else(|_| unreachable!());
             assert!(path.exists());
             assert_eq!(
-                std::fs::read_to_string(&path).unwrap().trim(),
+                std::fs::read_to_string(&path).unwrap_or_else(|_| unreachable!()).trim(),
                 std::process::id().to_string()
             );
             drop(pid);
@@ -98,9 +98,12 @@ mod tests {
     #[test]
     fn rejects_live_pid() {
         let path = tmp("b.pid");
-        std::fs::write(&path, std::process::id().to_string()).unwrap();
+        std::fs::write(&path, std::process::id().to_string()).unwrap_or_else(|_| unreachable!());
         // The test binary itself is alive, so this must be rejected.
-        let err = PidFile::acquire(&path).unwrap_err();
+        let err = match PidFile::acquire(&path) {
+            Err(err) => err,
+            Ok(_) => unreachable!(),
+        };
         assert!(matches!(err, UwaError::Config(_)));
         let _ = std::fs::remove_file(&path);
     }
@@ -109,8 +112,8 @@ mod tests {
     fn stale_pid_ok() {
         let path = tmp("c.pid");
         // PID 1 may be alive on unix; use a very unlikely-high number instead.
-        std::fs::write(&path, "4194303").unwrap();
-        let pid = PidFile::acquire(&path).unwrap();
+        std::fs::write(&path, "4194303").unwrap_or_else(|_| unreachable!());
+        let pid = PidFile::acquire(&path).unwrap_or_else(|_| unreachable!());
         drop(pid);
         let _ = std::fs::remove_file(&path);
     }

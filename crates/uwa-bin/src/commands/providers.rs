@@ -4,7 +4,7 @@
 //! survive. `update` writes to the cache dir only.
 
 use anyhow::{anyhow, bail, Context, Result};
-use clap::{Args, Subcommand};
+use clap::{Arg, ArgAction, Command};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -14,18 +14,29 @@ use uwa_config::{Config, ProviderCfg};
 use super::paths;
 use super::update::{hex, http_get_string};
 
-#[derive(Args)]
+#[derive(Debug, Clone)]
 pub struct ProvidersArgs {
-    #[command(subcommand)]
-    action: ProvidersAction,
+    pub action: ProvidersAction,
 }
 
-#[derive(Subcommand)]
-enum ProvidersAction {
+impl ProvidersArgs {
+    pub fn clap_subcommands() -> Vec<clap::Command> {
+        ProvidersAction::clap_subcommands()
+    }
+
+    pub fn from_matches(matches: &clap::ArgMatches) -> Result<Self, String> {
+        let name = matches.subcommand_name().unwrap_or("");
+        let sub_matches = matches.subcommand_matches(name).ok_or_else(|| format!("missing subcommand matches for '{name}'"))?;
+        let action = ProvidersAction::from_matches(name, sub_matches)?;
+        Ok(ProvidersArgs { action })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum ProvidersAction {
     /// List registry entries and, for each, whether the user config
     /// overrides them.
     List {
-        #[arg(long, env = "UWA_CONFIG", default_value = "uwa.toml")]
         config: PathBuf,
     },
 
@@ -33,7 +44,6 @@ enum ProvidersAction {
     /// user override, with the source of each field labelled.
     Show {
         name: String,
-        #[arg(long, env = "UWA_CONFIG", default_value = "uwa.toml")]
         config: PathBuf,
     },
 
@@ -41,20 +51,16 @@ enum ProvidersAction {
     /// nothing else. Answers "why did the registry update not affect me?".
     Diff {
         name: String,
-        #[arg(long, env = "UWA_CONFIG", default_value = "uwa.toml")]
         config: PathBuf,
     },
 
     /// Fetch the latest registry from GitHub, verify each entry against
     /// the manifest's SHA256, and write to `~/.uwa/providers/`.
     Update {
-        #[arg(long, env = "UWA_CONFIG", default_value = "uwa.toml")]
         config: PathBuf,
         /// Skip verification (do not).
-        #[arg(long)]
         no_verify: bool,
         /// Print the plan but write nothing.
-        #[arg(long)]
         dry_run: bool,
     },
 
@@ -62,15 +68,126 @@ enum ProvidersAction {
     /// site is currently open in the browser.
     Canary {
         /// Config file whose providers should be checked.
-        #[arg(long, env = "UWA_CONFIG", default_value = "uwa.toml")]
         config: PathBuf,
         /// Where to write the JSON report.
-        #[arg(long, default_value_os_t = default_canary_path())]
         out: PathBuf,
         /// Print a Markdown table to stdout.
-        #[arg(long)]
         markdown: bool,
     },
+}
+
+impl ProvidersAction {
+    pub fn clap_subcommands() -> Vec<clap::Command> {
+        let default_config: &str = "uwa.toml";
+        vec![
+            Command::new("list")
+                .about("List registry entries and, for each, whether the user config overrides them.")
+                .arg(
+                    Arg::new("config")
+                        .long("config")
+                        .env("UWA_CONFIG")
+                        .default_value(default_config)
+                        .action(ArgAction::Set),
+                ),
+            Command::new("show")
+                .about("Show the merged view of one provider: registry entry + every user override, with the source of each field labelled.")
+                .arg(Arg::new("name").index(1).action(ArgAction::Set))
+                .arg(
+                    Arg::new("config")
+                        .long("config")
+                        .env("UWA_CONFIG")
+                        .default_value(default_config)
+                        .action(ArgAction::Set),
+                ),
+            Command::new("diff")
+                .about("Print the fields the user config overrides for a provider, and nothing else.")
+                .arg(Arg::new("name").index(1).action(ArgAction::Set))
+                .arg(
+                    Arg::new("config")
+                        .long("config")
+                        .env("UWA_CONFIG")
+                        .default_value(default_config)
+                        .action(ArgAction::Set),
+                ),
+            Command::new("update")
+                .about("Fetch the latest registry from GitHub, verify each entry against the manifest's SHA256, and write to ~/.uwa/providers/.")
+                .arg(
+                    Arg::new("config")
+                        .long("config")
+                        .env("UWA_CONFIG")
+                        .default_value(default_config)
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("no_verify")
+                        .long("no-verify")
+                        .action(ArgAction::SetTrue),
+                )
+                .arg(
+                    Arg::new("dry_run")
+                        .long("dry-run")
+                        .action(ArgAction::SetTrue),
+                ),
+            Command::new("canary")
+                .about("Run a live selector check against every registered provider whose site is currently open in the browser.")
+                .arg(
+                    Arg::new("config")
+                        .long("config")
+                        .env("UWA_CONFIG")
+                        .default_value(default_config)
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("out")
+                        .long("out")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("markdown")
+                        .long("markdown")
+                        .action(ArgAction::SetTrue),
+                ),
+        ]
+    }
+
+    pub fn from_matches(name: &str, matches: &clap::ArgMatches) -> Result<Self, String> {
+        match name {
+            "list" => Ok(ProvidersAction::List {
+                config: matches.get_one::<PathBuf>("config")
+                    .cloned()
+                    .unwrap_or_else(|| PathBuf::from("uwa.toml")),
+            }),
+            "show" => Ok(ProvidersAction::Show {
+                name: matches.get_one::<String>("name").ok_or_else(|| "missing required argument 'name'".to_string())?.clone(),
+                config: matches.get_one::<PathBuf>("config")
+                    .cloned()
+                    .unwrap_or_else(|| PathBuf::from("uwa.toml")),
+            }),
+            "diff" => Ok(ProvidersAction::Diff {
+                name: matches.get_one::<String>("name").ok_or_else(|| "missing required argument 'name'".to_string())?.clone(),
+                config: matches.get_one::<PathBuf>("config")
+                    .cloned()
+                    .unwrap_or_else(|| PathBuf::from("uwa.toml")),
+            }),
+            "update" => Ok(ProvidersAction::Update {
+                config: matches.get_one::<PathBuf>("config")
+                    .cloned()
+                    .unwrap_or_else(|| PathBuf::from("uwa.toml")),
+                no_verify: matches.get_flag("no_verify"),
+                dry_run: matches.get_flag("dry_run"),
+            }),
+            "canary" => Ok(ProvidersAction::Canary {
+                config: matches.get_one::<PathBuf>("config")
+                    .cloned()
+                    .unwrap_or_else(|| PathBuf::from("uwa.toml")),
+                out: matches.get_one::<PathBuf>("out")
+                    .cloned()
+                    .unwrap_or_else(default_canary_path),
+                markdown: matches.get_flag("markdown"),
+            }),
+            _ => Err(format!("unknown providers subcommand: {name}")),
+        }
+    }
 }
 
 fn default_canary_path() -> PathBuf {

@@ -246,7 +246,9 @@ pub async fn run_with(config_path: PathBuf, cdp_url: &str) -> anyhow::Result<()>
     }
 
     // Give in-flight conversations a moment before the tabs go away.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let deadline = tokio::time::Instant::now()
+        .checked_add(Duration::from_secs(10))
+        .unwrap_or_else(|| unreachable!());
     while !sessions.is_empty() && tokio::time::Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
@@ -268,7 +270,7 @@ mod tests {
             port = 59999
             "#,
             )
-            .unwrap(),
+            .unwrap_or_else(|_| unreachable!()),
         );
         AppState::minimal(
             config,
@@ -289,7 +291,7 @@ mod tests {
     #[tokio::test]
     async fn run_fails_fast_without_a_browser_and_cleans_up() {
         let dir = std::env::temp_dir().join(format!("uwa-wiring-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(&dir).unwrap_or_else(|_| unreachable!());
         let pid_path = dir.join("uwa.pid");
         let config_path = dir.join("uwa.toml");
         std::fs::write(
@@ -299,7 +301,7 @@ mod tests {
                 pid_path.display()
             ),
         )
-        .unwrap();
+        .unwrap_or_else(|_| unreachable!());
 
         // Port 9 is closed on any sane machine, so the connect fails instead
         // of hanging: the daemon must refuse to start, not stall.
@@ -308,9 +310,12 @@ mod tests {
             run_with(config_path, "http://127.0.0.1:9"),
         )
         .await
-        .expect("run_with must not hang");
+        .unwrap_or_else(|_| unreachable!("run_with must not hang"));
 
-        let err = outcome.expect_err("no browser => no daemon");
+        let err = match outcome {
+            Err(err) => err,
+            Ok(_) => unreachable!("no browser => no daemon"),
+        };
         let msg = format!("{err:#}");
         assert!(msg.contains("connect Chromium"), "{msg}");
 

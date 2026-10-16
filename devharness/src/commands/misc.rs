@@ -140,7 +140,7 @@ fn tail_file(p: &Path, n: usize) -> String {
 
 fn fmt_mtime(t: SystemTime) -> String {
     let secs = t.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
-    let days = secs.div_euclid(86_400) + 719_468;
+    let days = secs.div_euclid(86_400).wrapping_add(719_468);
     let (y, m, d) = civil_ymd(days);
     let tod = secs.rem_euclid(86_400);
     format!(
@@ -151,15 +151,30 @@ fn fmt_mtime(t: SystemTime) -> String {
 }
 
 fn civil_ymd(z: i64) -> (i64, i64, i64) {
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
+    let era = if z >= 0 { z } else { z.wrapping_sub(146_096) } / 146_097;
+    let doe = z.wrapping_sub(era.wrapping_mul(146_097));
+    let yoe = (doe
+        .wrapping_sub(doe / 1460)
+        .wrapping_add(doe / 36_524)
+        .wrapping_sub(doe / 146_096))
+        / 365;
+    let y = yoe.wrapping_add(era.wrapping_mul(400));
+    let doy = doe.wrapping_sub(
+        365_i64
+            .wrapping_mul(yoe)
+            .wrapping_add(yoe / 4)
+            .wrapping_sub(yoe / 100),
+    );
+    let mp = (5_i64.wrapping_mul(doy).wrapping_add(2)) / 153;
+    let d = doy
+        .wrapping_sub(153_i64.wrapping_mul(mp).wrapping_add(2) / 5)
+        .wrapping_add(1);
+    let m = if mp < 10 {
+        mp.wrapping_add(3)
+    } else {
+        mp.wrapping_sub(9)
+    };
+    let y = if m <= 2 { y.wrapping_add(1) } else { y };
     (y, m, d)
 }
 
@@ -191,7 +206,7 @@ pub fn abort(store: &Store, cfg: &RunConfig, id: &ItemId) -> anyhow::Result<()> 
 pub fn clean(store: &Store, cfg: &RunConfig) -> anyhow::Result<()> {
     let c = colors();
     let root = store.root().to_path_buf();
-    let mut n = 0;
+    let mut n: usize = 0;
     for it in store.items() {
         if it.status != Status::Done {
             continue;
@@ -202,7 +217,7 @@ pub fn clean(store: &Store, cfg: &RunConfig) -> anyhow::Result<()> {
             store.remove_pid(&it.id);
             let _ = git::worktree_remove(&root, &wt);
             let _ = git::branch_delete(&root, &br);
-            n += 1;
+            n = n.saturating_add(1);
             println!("clean: {}", it.id);
         }
     }

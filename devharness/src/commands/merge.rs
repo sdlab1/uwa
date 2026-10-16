@@ -150,18 +150,33 @@ fn today() -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64;
-    civil_from_days(now.div_euclid(86_400) + 719_468)
+    civil_from_days(now.div_euclid(86_400).wrapping_add(719_468))
 }
 
 fn civil_from_days(z: i64) -> String {
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
+    let era = if z >= 0 { z } else { z.wrapping_sub(146_096) } / 146_097;
+    let doe = z.wrapping_sub(era.wrapping_mul(146_097));
+    let yoe = (doe
+        .wrapping_sub(doe / 1460)
+        .wrapping_add(doe / 36_524)
+        .wrapping_sub(doe / 146_096))
+        / 365;
+    let y = yoe.wrapping_add(era.wrapping_mul(400));
+    let doy = doe.wrapping_sub(
+        365_i64
+            .wrapping_mul(yoe)
+            .wrapping_add(yoe / 4)
+            .wrapping_sub(yoe / 100),
+    );
+    let mp = (5_i64.wrapping_mul(doy).wrapping_add(2)) / 153;
+    let d = doy
+        .wrapping_sub(153_i64.wrapping_mul(mp).wrapping_add(2) / 5)
+        .wrapping_add(1);
+    let m = if mp < 10 {
+        mp.wrapping_add(3)
+    } else {
+        mp.wrapping_sub(9)
+    };
+    let y = if m <= 2 { y.wrapping_add(1) } else { y };
     format!("{y:04}-{m:02}-{d:02}")
 }

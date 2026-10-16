@@ -70,17 +70,19 @@ async fn streaming_uses_the_profile_header() {
         .await;
     list.assert_status_ok();
     let v: Value = list.json();
-    let names: Vec<String> = v["sessions"]
-        .as_array()
-        .map(Vec::as_slice)
-        .unwrap_or(&[])
-        .iter()
-        .filter_map(|s| {
-            s["profile"]
-                .as_str()
-                .map(|p| p.to_string())
-                .or_else(|| Some("default".into()))
+    let names: Vec<String> = v
+        .get("sessions")
+        .and_then(|s| s.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|s| {
+                    s.get("profile")
+                        .and_then(|p| p.as_str())
+                        .map(|p| p.to_string())
+                        .or_else(|| Some("default".into()))
+                })
+                .collect()
         })
-        .collect();
+        .unwrap_or_default();
     assert!(names.contains(&"work".to_string()), "{names:?}");
 }

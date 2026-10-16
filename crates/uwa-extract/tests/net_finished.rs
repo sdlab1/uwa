@@ -54,12 +54,12 @@ async fn unrelated_finished_does_not_end_the_stream() {
     ]);
 
     let net = DefaultNetExtractor;
-    let mut stream = net.deltas(&page, &rules()).await.expect("deltas");
+    let mut stream = net.deltas(&page, &rules()).await.unwrap_or_else(|_| unreachable!("deltas"));
 
     let mut got: Vec<String> = Vec::new();
     while let Some(d) = tokio::time::timeout(Duration::from_secs(5), stream.next())
         .await
-        .expect("stream must not stall")
+        .unwrap_or_else(|_| unreachable!("stream must not stall"))
     {
         // The empty delta is the end-of-stream marker emitted on `Finished`.
         if d.is_empty() {

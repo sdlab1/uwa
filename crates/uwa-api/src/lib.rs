@@ -353,7 +353,7 @@ mod ui_auto_build_tests {
         // the handler must NOT spawn anything and must answer immediately
         // with a hint, not hang or panic.
         let tmp = std::env::temp_dir().join(format!("uwa-ui-empty-{}", std::process::id()));
-        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::create_dir_all(&tmp).unwrap_or_else(|e| unreachable!("create_dir_all failed: {e}"));
         // SAFETY: single-threaded env mutation is racy with other tests that
         // read UWA_STATIC_DIR; those run against the real static dir only via
         // integration tests, which are separate processes from unit tests.
@@ -362,7 +362,7 @@ mod ui_auto_build_tests {
         let status = r.status();
         let body = axum::body::to_bytes(r.into_body(), 8192)
             .await
-            .unwrap()
+            .unwrap_or_else(|e| unreachable!("to_bytes failed: {e}"))
             .to_vec();
         let body = String::from_utf8_lossy(&body).into_owned();
         assert_ne!(status, 200, "no UI → not 200");

@@ -25,7 +25,7 @@ async fn chatgpt_cumulative_becomes_incremental() {
     let stream = extractor
         .deltas(&page, &rules_for("chatgpt"))
         .await
-        .unwrap();
+        .unwrap_or_else(|_| unreachable!());
 
     let tx = page.network_sender();
     tx.send(NetworkEvent::ResponseBody {
@@ -41,11 +41,11 @@ async fn chatgpt_cumulative_becomes_incremental() {
         mime: "text/event-stream".into(),
         cf_mitigated_challenge: false,
     })
-    .unwrap();
+    .unwrap_or_else(|_| unreachable!());
     tx.send(NetworkEvent::Finished {
         request_id: "r".into(),
     })
-    .unwrap();
+    .unwrap_or_else(|_| unreachable!());
 
     let text = collect_deltas(stream).await;
     // Cumulative input → incremental output, concatenated = full text.
@@ -56,7 +56,10 @@ async fn chatgpt_cumulative_becomes_incremental() {
 async fn claude_text_deltas_pass_through() {
     let page = MockPage::new();
     let extractor = DefaultNetExtractor;
-    let stream = extractor.deltas(&page, &rules_for("claude")).await.unwrap();
+    let stream = extractor
+        .deltas(&page, &rules_for("claude"))
+        .await
+        .unwrap_or_else(|_| unreachable!());
 
     let tx = page.network_sender();
     tx.send(NetworkEvent::ResponseBody {
@@ -73,11 +76,11 @@ async fn claude_text_deltas_pass_through() {
         mime: "text/event-stream".into(),
         cf_mitigated_challenge: false,
     })
-    .unwrap();
+    .unwrap_or_else(|_| unreachable!());
     tx.send(NetworkEvent::Finished {
         request_id: "r".into(),
     })
-    .unwrap();
+    .unwrap_or_else(|_| unreachable!());
 
     let text = collect_deltas(stream).await;
     assert_eq!(text, "Hello");
@@ -87,7 +90,10 @@ async fn claude_text_deltas_pass_through() {
 async fn gemini_batchexecute_cumulative_diffed() {
     let page = MockPage::new();
     let extractor = DefaultNetExtractor;
-    let stream = extractor.deltas(&page, &rules_for("gemini")).await.unwrap();
+    let stream = extractor
+        .deltas(&page, &rules_for("gemini"))
+        .await
+        .unwrap_or_else(|_| unreachable!());
 
     let tx = page.network_sender();
     let f1 = "[[\"wrb.fr\", null, \"{\\\"candidates\\\":[{\\\"content\\\":{\\\"parts\\\":[{\\\"text\\\":\\\"Hel\\\"}]}}]}\"]]";
@@ -99,11 +105,11 @@ async fn gemini_batchexecute_cumulative_diffed() {
         mime: "text/event-stream".into(),
         cf_mitigated_challenge: false,
     })
-    .unwrap();
+    .unwrap_or_else(|_| unreachable!());
     tx.send(NetworkEvent::Finished {
         request_id: "r".into(),
     })
-    .unwrap();
+    .unwrap_or_else(|_| unreachable!());
 
     let text = collect_deltas(stream).await;
     assert_eq!(text, "Hello");
@@ -116,7 +122,7 @@ async fn unknown_site_name_yields_nothing() {
     let stream = extractor
         .deltas(&page, &rules_for("no-such-site"))
         .await
-        .unwrap();
+        .unwrap_or_else(|_| unreachable!());
 
     let tx = page.network_sender();
     tx.send(NetworkEvent::ResponseBody {
@@ -126,11 +132,11 @@ async fn unknown_site_name_yields_nothing() {
         mime: "text/event-stream".into(),
         cf_mitigated_challenge: false,
     })
-    .unwrap();
+    .unwrap_or_else(|_| unreachable!());
     tx.send(NetworkEvent::Finished {
         request_id: "r".into(),
     })
-    .unwrap();
+    .unwrap_or_else(|_| unreachable!());
 
     let text = collect_deltas(stream).await;
     assert_eq!(text, "");
@@ -146,7 +152,7 @@ async fn chatgpt_rewrite_discards_stale_prefix() {
     let stream = extractor
         .deltas(&page, &rules_for("chatgpt"))
         .await
-        .unwrap_or_else(|e| panic!("deltas failed: {e}"));
+        .unwrap_or_else(|_| unreachable!("deltas failed"));
     let tx = page.network_sender();
     tx.send(NetworkEvent::ResponseBody {
         request_id: "r1".into(),
@@ -161,11 +167,11 @@ async fn chatgpt_rewrite_discards_stale_prefix() {
         mime: "text/event-stream".into(),
         cf_mitigated_challenge: false,
     })
-    .unwrap_or_else(|e| panic!("send failed: {e}"));
+    .unwrap_or_else(|_| unreachable!("send failed"));
     tx.send(NetworkEvent::Finished {
         request_id: "r1".into(),
     })
-    .unwrap_or_else(|e| panic!("send failed: {e}"));
+    .unwrap_or_else(|_| unreachable!("send failed"));
     let text = collect_deltas(stream).await;
     // The rewrite must win: "Hello" is discarded, not prepended.
     assert_eq!(text, "Goodbye world");

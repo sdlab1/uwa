@@ -4,9 +4,11 @@
 //! `/api/pool/status`, and selectors in `/v1/provider/status`.
 
 use axum_test::TestServer;
-use uwa_testkit::{config::config_with_key, AppBuilder, MockProvider, MockTransport};
-
-use uwa_testkit::config::TEST_AUTH_HEADER;
+use std::sync::Arc;
+use uwa_testkit::{
+    config::{config_with_key, TEST_AUTH_HEADER},
+    AppBuilder, MockProvider, MockTransport,
+};
 
 fn server() -> TestServer {
     let provider = Arc::new(MockProvider::new("chatgpt").with_answer("hi"));
@@ -17,8 +19,6 @@ fn server() -> TestServer {
         .build()
         .server
 }
-
-use std::sync::Arc;
 
 #[tokio::test]
 async fn index_served_when_built() {
@@ -44,12 +44,24 @@ async fn pool_status_has_urls() {
         .await;
     assert_eq!(r.status_code(), 200);
     let v: serde_json::Value = r.json();
-    assert!(v["total_tabs"].is_number(), "total_tabs must stay");
-    let tabs = v["tabs"].as_array().expect("tabs array");
+    assert!(
+        v.get("total_tabs").map(|v| v.is_number()).unwrap_or(false),
+        "total_tabs must stay"
+    );
+    let tabs = v
+        .get("tabs")
+        .and_then(|v| v.as_array())
+        .unwrap_or_else(|| unreachable!("tabs array missing"));
     assert_eq!(tabs.len(), 1);
     // MockTab reports a URL (about:blank default); the shape is what matters.
-    assert!(tabs[0]["id"].is_string(), "tab entry has id");
-    assert!(tabs[0]["url"].is_string(), "tab entry has url");
+    assert!(
+        tabs.get(0).and_then(|t| t.get("id")).and_then(|v| v.is_string()).unwrap_or(false),
+        "tab entry has id"
+    );
+    assert!(
+        tabs.get(0).and_then(|t| t.get("url")).and_then(|v| v.is_string()).unwrap_or(false),
+        "tab entry has url"
+    );
 }
 
 #[tokio::test]
@@ -61,12 +73,25 @@ async fn provider_status_has_selectors_and_caps() {
         .await;
     assert_eq!(r.status_code(), 200);
     let v: serde_json::Value = r.json();
-    let p = &v["chatgpt"];
+    let p = v.get("chatgpt").unwrap_or_else(|| unreachable!("chatgpt provider present"));
     assert!(p.is_object(), "chatgpt provider present");
-    assert!(p["url_patterns"].is_array());
-    assert!(p["selectors"].is_object(), "selectors block for the wizard");
-    assert!(p["selectors"]["input"].is_null() || p["selectors"]["input"].is_string());
-    assert!(p["capabilities"].is_object(), "capabilities block");
+    assert!(
+        p.get("url_patterns").map(|v| v.is_array()).unwrap_or(false)
+    );
+    assert!(
+        p.get("selectors").map(|v| v.is_object()).unwrap_or(false),
+        "selectors block for the wizard"
+    );
+    assert!(
+        p.get("selectors")
+            .and_then(|s| s.get("input"))
+            .map(|v| v.is_null() || v.is_string())
+            .unwrap_or(false)
+    );
+    assert!(
+        p.get("capabilities").map(|v| v.is_object()).unwrap_or(false),
+        "capabilities block"
+    );
 }
 
 #[tokio::test]

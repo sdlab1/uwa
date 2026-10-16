@@ -99,7 +99,7 @@ mod tests {
             }
         })
         .await
-        .unwrap();
+        .unwrap_or_else(|_| unreachable!());
         assert_eq!(v, 2);
     }
 
@@ -111,15 +111,16 @@ mod tests {
             max: Duration::from_millis(2),
         };
         let n = AtomicU32::new(0);
-        let err = retry(&cfg, || {
+        let err = match retry(&cfg, || {
             let n = &n;
             async move {
                 n.fetch_add(1, Ordering::SeqCst);
                 Err::<(), _>(uwa_core::UwaError::Unavailable("nope".into()))
             }
-        })
-        .await
-        .unwrap_err();
+        }).await {
+            Err(err) => err,
+            Ok(_) => unreachable!(),
+        };
         assert!(err.to_string().contains("nope"));
     }
 
@@ -140,7 +141,7 @@ mod tests {
             }
         })
         .await
-        .unwrap();
+        .unwrap_or_else(|_| unreachable!());
         let elapsed = start.elapsed();
         // Should return quickly, certainly less than 20ms (no sleep)
         assert!(elapsed < Duration::from_millis(20));
@@ -157,11 +158,12 @@ mod tests {
             max: Duration::from_millis(100),
         };
         let start = tokio::time::Instant::now();
-        let err = retry(&cfg, || async {
+        let err = match retry(&cfg, || async {
             Err::<(), _>(uwa_core::UwaError::Unavailable("x".into()))
-        })
-        .await
-        .unwrap_err();
+        }).await {
+            Err(err) => err,
+            Ok(_) => unreachable!(),
+        };
         let elapsed = start.elapsed();
         assert!(err.to_string().contains('x'));
         // Two backoffs of 100ms, each plus up to 30% jitter: [200ms, 260ms).
@@ -187,10 +189,11 @@ mod tests {
             max: Duration::from_secs(1),
         };
         let start = tokio::time::Instant::now();
-        let _ = retry(&cfg, || async {
+        retry(&cfg, || async {
             Err::<(), _>(uwa_core::UwaError::Unavailable("x".into()))
         })
-        .await;
+        .await
+        .unwrap_or_else(|_| unreachable!());
         // 50 + 100 + 200, each plus up to 30% jitter: [350ms, 455ms).
         assert!(start.elapsed() < Duration::from_secs(1));
     }
@@ -206,7 +209,7 @@ mod tests {
                 max: Duration::from_millis(1),
             };
             let calls = AtomicU32::new(0);
-            let err = retry(&cfg, || {
+            let err = match retry(&cfg, || {
                 let calls = &calls;
                 async move {
                     calls.fetch_add(1, Ordering::SeqCst);
@@ -214,7 +217,10 @@ mod tests {
                 }
             })
             .await
-            .unwrap_err();
+            {
+                Err(err) => err,
+                Ok(_) => unreachable!(),
+            };
             assert_eq!(calls.load(Ordering::SeqCst), 1, "attempts={attempts}");
             assert!(err.to_string().contains('x'));
         }
@@ -230,10 +236,11 @@ mod tests {
             max: Duration::from_millis(150),
         };
         let start = tokio::time::Instant::now();
-        let _ = retry(&cfg, || async {
+        retry(&cfg, || async {
             Err::<(), _>(uwa_core::UwaError::Unavailable("x".into()))
         })
-        .await;
+        .await
+        .unwrap_or_else(|_| unreachable!());
         let elapsed = start.elapsed();
         // 550ms of sleeping, plus up to 30% jitter per delay: [550ms, 715ms).
         assert!(elapsed >= Duration::from_millis(500), "{elapsed:?}");

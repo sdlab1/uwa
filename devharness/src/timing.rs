@@ -36,7 +36,7 @@ impl Timing {
     pub fn render(&self) -> String {
         let mut s = String::new();
         for (n, sec) in &self.stages {
-            s += &format!("{n} {sec}\n");
+            s.push_str(&format!("{n} {sec}\n"));
         }
         s
     }
@@ -44,7 +44,7 @@ impl Timing {
     pub fn summary_line(&self) -> String {
         let mut s = String::from("timing: ");
         for (n, sec) in &self.stages {
-            s += &format!("{n}={sec}s ");
+            s.push_str(&format!("{n}={sec}s "));
         }
         s
     }
@@ -64,15 +64,21 @@ mod tests {
 
     #[test]
     fn stages_render_summary_and_flush() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
         let store = Store::new(dir.path());
         let id = ItemId(1);
         let mut t = Timing::start();
         t.stage("worktree", &store, &id);
         t.stage("agent-r1", &store, &id);
         assert_eq!(t.stages().len(), 2);
-        assert_eq!(t.stages().first().unwrap().0, "worktree");
-        assert_eq!(t.stages().last().unwrap().0, "agent-r1");
+        assert_eq!(
+            t.stages().first().unwrap_or_else(|| unreachable!()).0,
+            "worktree"
+        );
+        assert_eq!(
+            t.stages().last().unwrap_or_else(|| unreachable!()).0,
+            "agent-r1"
+        );
         let r = t.render();
         assert!(r.contains("worktree 0\n"), "{r}");
         assert!(r.contains("agent-r1 0\n"), "{r}");
@@ -81,8 +87,8 @@ mod tests {
         assert!(s.contains("worktree=0s "), "{s}");
         assert!(s.contains("agent-r1=0s"), "{s}");
         assert!(t.elapsed() < 5);
-        let text =
-            std::fs::read_to_string(dir.path().join(".harness/logs/W-001-timing.log")).unwrap();
+        let text = std::fs::read_to_string(dir.path().join(".harness/logs/W-001-timing.log"))
+            .unwrap_or_else(|_| unreachable!());
         assert!(text.contains("agent-r1"), "{text}");
     }
 

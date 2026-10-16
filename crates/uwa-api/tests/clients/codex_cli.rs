@@ -37,12 +37,43 @@ async fn codex_cli_plain_response() {
     r.assert_status_ok();
     let v: Value = r.json();
 
-    assert_eq!(v["object"], "response");
-    assert_eq!(v["status"], "completed");
-    assert_eq!(v["output_text"], "Hello from codex.");
-    assert_eq!(v["output"][0]["type"], "message");
-    assert_eq!(v["output"][0]["content"][0]["type"], "output_text");
-    assert_eq!(v["output"][0]["content"][0]["text"], "Hello from codex.");
+    assert_eq!(
+        v.get("object").and_then(|v| v.as_str()).unwrap_or(""),
+        "response"
+    );
+    assert_eq!(
+        v.get("status").and_then(|v| v.as_str()).unwrap_or(""),
+        "completed"
+    );
+    assert_eq!(
+        v.get("output_text").and_then(|v| v.as_str()).unwrap_or(""),
+        "Hello from codex."
+    );
+    assert_eq!(
+        v.get("output")
+            .and_then(|o| o.get(0))
+            .and_then(|o| o.get("type"))
+            .and_then(|t| t.as_str()),
+        Some("message")
+    );
+    assert_eq!(
+        v.get("output")
+            .and_then(|o| o.get(0))
+            .and_then(|o| o.get("content"))
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("type"))
+            .and_then(|t| t.as_str()),
+        Some("output_text")
+    );
+    assert_eq!(
+        v.get("output")
+            .and_then(|o| o.get(0))
+            .and_then(|o| o.get("content"))
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("text"))
+            .and_then(|t| t.as_str()),
+        Some("Hello from codex.")
+    );
 }
 
 #[tokio::test]
@@ -54,5 +85,8 @@ async fn codex_cli_string_input() {
         .await;
     r.assert_status_ok();
     let v: Value = r.json();
-    assert_eq!(v["output_text"], "ok");
+    assert_eq!(
+        v.get("output_text").and_then(|v| v.as_str()).unwrap_or(""),
+        "ok"
+    );
 }

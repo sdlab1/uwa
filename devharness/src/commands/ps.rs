@@ -3,13 +3,13 @@ use crate::shell::store::Store;
 
 pub fn ps(store: &Store) {
     let c = colors();
-    let mut found = 0;
+    let mut found: i32 = 0;
     for it in store.items() {
         let pid_path = store.item_dir(&it.id).join("run.pid");
         let Ok(pid_text) = std::fs::read_to_string(&pid_path) else {
             continue;
         };
-        found += 1;
+        found = found.saturating_add(1);
         let pid: i32 = pid_text.trim().parse().unwrap_or(0);
         if pid > 0 && kill_ok(pid) {
             let el = pid_path
@@ -50,7 +50,7 @@ pub fn ps(store: &Store) {
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
             println!("auto    PID {pid:<8} {el:>5}s   стадия: авто-прогон");
-            found += 1;
+            found = found.saturating_add(1);
         } else {
             let _ = std::fs::remove_file(&ap);
         }

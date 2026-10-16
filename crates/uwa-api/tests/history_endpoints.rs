@@ -10,7 +10,7 @@ async fn server_with_history() -> axum_test::TestServer {
     let store = Arc::new(
         HistoryStore::new(HistoryCfg::default(), false)
             .await
-            .unwrap(),
+            .unwrap_or_else(|e| unreachable!("history store: {e}")),
     );
     AppBuilder::new()
         .with_config(config_with_key())
@@ -30,7 +30,11 @@ async fn history_starts_empty() {
         .await;
     r.assert_status_ok();
     let v: serde_json::Value = r.json();
-    assert_eq!(v["count"], 0);
+    assert_eq!(
+        v.get("count").and_then(|c| c.as_u64()),
+        Some(0),
+        "count should be 0: {v}"
+    );
 }
 
 #[tokio::test]
@@ -52,11 +56,32 @@ async fn history_records_after_chat() {
         .await;
     r.assert_status_ok();
     let v: serde_json::Value = r.json();
-    assert_eq!(v["count"], 1);
-    let rec = &v["records"][0];
-    assert_eq!(rec["provider"], "chatgpt");
-    assert_eq!(rec["status"], "success");
-    assert_eq!(rec["response"]["text_preview"], "hello");
+    assert_eq!(
+        v.get("count").and_then(|c| c.as_u64()),
+        Some(1),
+        "count should be 1: {v}"
+    );
+    let rec = v
+        .get("records")
+        .and_then(|r| r.get(0))
+        .unwrap_or_else(|| unreachable!("records[0] missing: {v}"));
+    assert_eq!(
+        rec.get("provider").and_then(|p| p.as_str()),
+        Some("chatgpt"),
+        "wrong provider: {rec}"
+    );
+    assert_eq!(
+        rec.get("status").and_then(|s| s.as_str()),
+        Some("success"),
+        "wrong status: {rec}"
+    );
+    assert_eq!(
+        rec.get("response")
+            .and_then(|r| r.get("text_preview"))
+            .and_then(|t| t.as_str()),
+        Some("hello"),
+        "wrong text_preview: {rec}"
+    );
 }
 
 #[tokio::test]
@@ -79,8 +104,16 @@ async fn stats_reflect_requests() {
         .await;
     r.assert_status_ok();
     let v: serde_json::Value = r.json();
-    assert_eq!(v["total"], 3);
-    assert_eq!(v["success"], 3);
+    assert_eq!(
+        v.get("total").and_then(|t| t.as_u64()),
+        Some(3),
+        "total should be 3: {v}"
+    );
+    assert_eq!(
+        v.get("success").and_then(|s| s.as_u64()),
+        Some(3),
+        "success should be 3: {v}"
+    );
 }
 
 #[tokio::test]
@@ -101,7 +134,13 @@ async fn history_detail_by_id() {
         .add_header("Authorization", TEST_AUTH_HEADER)
         .await;
     let v: serde_json::Value = r.json();
-    let id = v["records"][0]["id"].as_str().unwrap();
+    let id = v
+        .get("records")
+        .and_then(|r| r.get(0))
+        .and_then(|r| r.get("id"))
+        .and_then(|i| i.as_str())
+        .unwrap_or_else(|| unreachable!("records[0].id missing: {v}"))
+        .to_string();
 
     let r2 = s
         .get(&format!("/admin/history/{id}"))
@@ -109,7 +148,11 @@ async fn history_detail_by_id() {
         .await;
     r2.assert_status_ok();
     let v2: serde_json::Value = r2.json();
-    assert_eq!(v2["id"], *id);
+    assert_eq!(
+        v2.get("id").and_then(|i| i.as_str()),
+        Some(id.as_str()),
+        "id mismatch: {v2}"
+    );
 }
 
 #[tokio::test]
@@ -125,7 +168,10 @@ async fn selector_test_on_live_tab() {
         .await;
     r.assert_status_ok();
     let v: serde_json::Value = r.json();
-    assert!(v["duration_ms"].as_u64().is_some());
+    assert!(
+        v.get("duration_ms").and_then(|d| d.as_u64()).is_some(),
+        "duration_ms missing: {v}"
+    );
 }
 
 async fn history_count(s: &axum_test::TestServer, query: &str) -> u64 {
@@ -134,7 +180,10 @@ async fn history_count(s: &axum_test::TestServer, query: &str) -> u64 {
         .add_header("Authorization", TEST_AUTH_HEADER)
         .await;
     r.assert_status_ok();
-    r.json::<serde_json::Value>()["count"].as_u64().unwrap()
+    r.json::<serde_json::Value>()
+        .get("count")
+        .and_then(|c| c.as_u64())
+        .unwrap_or_else(|| unreachable!("count missing"))
 }
 
 #[tokio::test]
@@ -203,7 +252,14 @@ async fn selector_test_refuses_tabs_the_transport_never_listed() {
         }))
         .await;
     r.assert_status(axum::http::StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(r.json::<serde_json::Value>()["error"]["code"], "no_tab");
+    assert_eq!(
+        r.json::<serde_json::Value>()
+            .get("error")
+            .and_then(|e| e.get("code"))
+            .and_then(|c| c.as_str()),
+        Some("no_tab"),
+        "error code should be no_tab"
+    );
 }
 
 #[tokio::test]

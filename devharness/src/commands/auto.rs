@@ -57,7 +57,7 @@ pub fn auto(store: &Store, cfg: &RunConfig, from: Option<&str>, max: u32) -> any
                 "  импорт: {id} — {title}{}",
                 if has_red { " (RED ✓)" } else { "" }
             );
-            imp += 1;
+            imp = imp.saturating_add(1);
         }
         println!("auto: импортировано {imp} спек из {from}");
     }
@@ -78,7 +78,7 @@ pub fn auto(store: &Store, cfg: &RunConfig, from: Option<&str>, max: u32) -> any
             println!(
                 "   ⚠  нет RED-пруфа — добавь в спеку строку 'RED: <команда, падающая сейчас>'"
             );
-            fail_n += 1;
+            fail_n = fail_n.saturating_add(1);
             continue;
         }
         let rc = run_child(&exe, store, "run", &next);
@@ -86,17 +86,17 @@ pub fn auto(store: &Store, cfg: &RunConfig, from: Option<&str>, max: u32) -> any
             let mrc = run_child(&exe, store, "merge", &next);
             if mrc == Some(0) {
                 println!("   {}✓ done{}", c.g, c.z);
-                done_n += 1;
+                done_n = done_n.saturating_add(1);
             } else {
                 println!("   ⚠  run ок, merge отклонил — ревью руками");
-                fail_n += 1;
+                fail_n = fail_n.saturating_add(1);
             }
         } else {
             println!(
                 "   {}✗ rc={:?}{} — остаётся active; детали: devh logs {next}",
                 c.r, rc, c.z
             );
-            fail_n += 1;
+            fail_n = fail_n.saturating_add(1);
         }
         let _ = Command::new(&exe)
             .arg("tickets")
@@ -105,7 +105,7 @@ pub fn auto(store: &Store, cfg: &RunConfig, from: Option<&str>, max: u32) -> any
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
-        if max > 0 && done_n + fail_n >= max {
+        if max > 0 && done_n.saturating_add(fail_n) >= max {
             break;
         }
     }

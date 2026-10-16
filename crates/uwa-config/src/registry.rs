@@ -551,7 +551,7 @@ mod tests {
         // they must still parse (they're only checked by `providers
         // update`), and the manifest must be exposed.
         let reg = Registry::from_builtin();
-        let m = reg.manifest().expect("built-in manifest present");
+        let m = reg.manifest().unwrap_or_else(|| unreachable!());
         assert_eq!(m.schema, 1);
         assert!(!m.registry_version.is_empty());
         assert!(!m.providers.is_empty());

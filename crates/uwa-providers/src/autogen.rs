@@ -137,9 +137,12 @@ mod tests {
             ]
         });
         let p = ScriptedPage::new(vec![("candidates", scan_result)]);
-        let a = analyze(&p).await.unwrap();
+        let a = analyze(&p).await.unwrap_or_else(|_| unreachable!());
         assert_eq!(a.inputs.len(), 2);
-        assert_eq!(a.inputs[0].selector, "textarea#prompt"); // sorted by score
+        assert_eq!(
+            a.inputs.get(0).unwrap_or_else(|| unreachable!()).selector,
+            "textarea#prompt"
+        ); // sorted by score
         assert_eq!(a.send_buttons.len(), 1);
         assert_eq!(a.assistant_containers.len(), 1);
         assert!(a.duration_ms < 5_000);
@@ -149,7 +152,7 @@ mod tests {
     async fn empty_page_returns_empty_lists() {
         // Default scripted answer is `false` — no arrays at all.
         let p = ScriptedPage::new(vec![]);
-        let a = analyze(&p).await.unwrap();
+        let a = analyze(&p).await.unwrap_or_else(|_| unreachable!());
         assert!(a.inputs.is_empty());
         assert!(a.send_buttons.is_empty());
         assert!(a.assistant_containers.is_empty());
@@ -161,7 +164,7 @@ mod tests {
             "querySelectorAll",
             json!({"ok": true, "n": 3, "text": "hello"}),
         )]);
-        let (n, t) = probe_selector(&p, "#x").await.unwrap();
+        let (n, t) = probe_selector(&p, "#x").await.unwrap_or_else(|_| unreachable!());
         assert_eq!(n, 3);
         assert_eq!(t.as_deref(), Some("hello"));
     }

@@ -52,10 +52,34 @@ async fn tool_call_returned_to_client() {
     let v: serde_json::Value = r.json();
 
     // The client receives the tool_call — UWA does not execute it.
-    assert_eq!(v["choices"][0]["finish_reason"], "tool_calls");
-    let tc = &v["choices"][0]["message"]["tool_calls"][0];
-    assert_eq!(tc["function"]["name"], "get_weather");
-    assert_eq!(v["choices"][0]["message"]["content"], "Let me check.");
+    assert_eq!(
+        v.get("choices")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("finish_reason"))
+            .and_then(|f| f.as_str()),
+        Some("tool_calls")
+    );
+    let tc = v
+        .get("choices")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("message"))
+        .and_then(|m| m.get("tool_calls"))
+        .and_then(|t| t.get(0))
+        .unwrap_or_else(|| unreachable!("missing tool_calls[0]"));
+    assert_eq!(
+        tc.get("function")
+            .and_then(|f| f.get("name"))
+            .and_then(|n| n.as_str()),
+        Some("get_weather")
+    );
+    assert_eq!(
+        v.get("choices")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("message"))
+            .and_then(|m| m.get("content"))
+            .and_then(|c| c.as_str()),
+        Some("Let me check.")
+    );
 }
 
 #[tokio::test]
@@ -95,8 +119,21 @@ async fn tool_result_roundtrip() {
         .await;
     r.assert_status_ok();
     let v: serde_json::Value = r.json();
-    assert_eq!(v["choices"][0]["finish_reason"], "stop");
-    assert_eq!(v["choices"][0]["message"]["content"], "It is 22C in NYC.");
+    assert_eq!(
+        v.get("choices")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("finish_reason"))
+            .and_then(|f| f.as_str()),
+        Some("stop")
+    );
+    assert_eq!(
+        v.get("choices")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("message"))
+            .and_then(|m| m.get("content"))
+            .and_then(|c| c.as_str()),
+        Some("It is 22C in NYC.")
+    );
 }
 
 #[tokio::test]
@@ -112,6 +149,19 @@ async fn no_tools_no_tool_calls() {
         .await;
     r.assert_status_ok();
     let v: serde_json::Value = r.json();
-    assert_eq!(v["choices"][0]["message"]["content"], "plain answer");
-    assert!(v["choices"][0]["message"].get("tool_calls").is_none());
+    assert_eq!(
+        v.get("choices")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("message"))
+            .and_then(|m| m.get("content"))
+            .and_then(|c| c.as_str()),
+        Some("plain answer")
+    );
+    assert!(
+        v.get("choices")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("message"))
+            .and_then(|m| m.get("tool_calls"))
+            .is_none()
+    );
 }

@@ -45,8 +45,16 @@ async fn start_status_stop_round_trip() {
         .await;
     start.assert_status_ok();
     let v: serde_json::Value = start.json();
-    assert_eq!(v["provider"], "chatgpt");
-    assert!(v["id"].as_str().unwrap_or_default().starts_with("rec_"));
+    assert_eq!(
+        v.get("provider").and_then(|v| v.as_str()),
+        Some("chatgpt")
+    );
+    assert!(
+        v.get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .starts_with("rec_")
+    );
 
     // Give the poller a beat to see at least one batch.
     tokio::time::sleep(std::time::Duration::from_millis(900)).await;
@@ -58,8 +66,10 @@ async fn start_status_stop_round_trip() {
         .await;
     status.assert_status_ok();
     let sv: serde_json::Value = status.json();
-    assert_eq!(sv["active"], true);
-    assert!(sv["events"].as_u64().unwrap_or(0) >= 1);
+    assert_eq!(sv.get("active").and_then(|v| v.as_bool()), Some(true));
+    assert!(
+        sv.get("events").and_then(|v| v.as_u64()).unwrap_or(0) >= 1
+    );
 
     // Stop, get the proposal.
     let stop = s
@@ -68,12 +78,21 @@ async fn start_status_stop_round_trip() {
         .await;
     stop.assert_status_ok();
     let stv: serde_json::Value = stop.json();
-    assert_eq!(stv["provider"], "chatgpt");
-    assert!(stv["event_count"].as_u64().unwrap_or(0) >= 1);
-    assert!(stv["toml_snippet"]
-        .as_str()
-        .unwrap_or_default()
-        .contains("[[providers.chatgpt.workflow]]"));
+    assert_eq!(
+        stv.get("provider").and_then(|v| v.as_str()),
+        Some("chatgpt")
+    );
+    assert!(
+        stv.get("event_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) >= 1
+    );
+    assert!(
+        stv.get("toml_snippet")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .contains("[[providers.chatgpt.workflow]]")
+    );
 
     // Status is now inactive.
     let status = s
@@ -81,7 +100,7 @@ async fn start_status_stop_round_trip() {
         .add_header("Authorization", TEST_AUTH_HEADER)
         .await;
     let sv: serde_json::Value = status.json();
-    assert_eq!(sv["active"], false);
+    assert_eq!(sv.get("active").and_then(|v| v.as_bool()), Some(false));
 }
 
 #[tokio::test]
@@ -100,10 +119,13 @@ async fn second_start_is_rejected_while_active() {
         .await;
     second.assert_status_bad_request();
     let v: serde_json::Value = second.json();
-    assert!(v["error"]["message"]
-        .as_str()
-        .unwrap_or_default()
-        .contains("already in progress"));
+    assert!(
+        v.get("error")
+            .and_then(|e| e.get("message"))
+            .and_then(|m| m.as_str())
+            .unwrap_or_default()
+            .contains("already in progress")
+    );
 
     // Clean up so other tests don't see a leaked recorder.
     s.post("/admin/recorder/stop")

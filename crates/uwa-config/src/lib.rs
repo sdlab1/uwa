@@ -726,7 +726,10 @@ mod validate_helper_tests {
 
     #[test]
     fn cdp_ws_url_rejects_bare_browser_path() {
-        let e = validate_cdp_ws_url("ws://127.0.0.1:9222/devtools/browser").unwrap_err();
+        let e = match validate_cdp_ws_url("ws://127.0.0.1:9222/devtools/browser") {
+            Err(e) => e,
+            Ok(_) => unreachable!(),
+        };
         assert!(e.to_string().contains("GUID"), "{e}");
     }
 
@@ -775,7 +778,7 @@ mod tests {
 
     #[test]
     fn loads_sample_config() {
-        let cfg = Config::load_from_str(SAMPLE).unwrap();
+        let cfg = Config::load_from_str(SAMPLE).unwrap_or_else(|_| unreachable!());
         assert_eq!(cfg.server.port, 8080);
         assert!(cfg.provider_for_model("gpt-4o").is_some());
         assert!(cfg.provider_for_model("unknown").is_none());
@@ -783,8 +786,8 @@ mod tests {
 
     #[test]
     fn resolve_model_hits_alias_exactly() {
-        let cfg = Config::load_from_str(SAMPLE).unwrap();
-        let (p, name) = cfg.resolve_model("gpt-4o").unwrap();
+        let cfg = Config::load_from_str(SAMPLE).unwrap_or_else(|_| unreachable!());
+        let (p, name) = cfg.resolve_model("gpt-4o").unwrap_or_else(|_| unreachable!());
         assert_eq!(p.name, "chatgpt");
         assert_eq!(name, "gpt-4o");
     }
@@ -807,16 +810,19 @@ mod tests {
             send_button = "#s"
             assistant_message = "#a"
         "####;
-        let cfg = Config::load_from_str(toml).unwrap();
-        let (p, name) = cfg.resolve_model("deepseek-flash").unwrap();
+        let cfg = Config::load_from_str(toml).unwrap_or_else(|_| unreachable!());
+        let (p, name) = cfg.resolve_model("deepseek-flash").unwrap_or_else(|_| unreachable!());
         assert_eq!(p.name, "deepseek");
         assert_eq!(name, "deepseek-chat");
     }
 
     #[test]
     fn resolve_model_unknown_without_fallback_reports_candidates() {
-        let cfg = Config::load_from_str(SAMPLE).unwrap();
-        let err = cfg.resolve_model("claude-3-opus").unwrap_err();
+        let cfg = Config::load_from_str(SAMPLE).unwrap_or_else(|_| unreachable!());
+        let err = match cfg.resolve_model("claude-3-opus") {
+            Err(err) => err,
+            Ok(_) => unreachable!(),
+        };
         let msg = err.to_string();
         assert!(msg.contains("claude-3-opus"));
         assert!(msg.contains("gpt-4o") || msg.contains("claude-3-5-sonnet"));
@@ -824,17 +830,17 @@ mod tests {
 
     #[test]
     fn provider_concurrency_defaults_and_overrides() {
-        let cfg = Config::load_from_str(SAMPLE).unwrap();
-        assert_eq!(cfg.providers["chatgpt"].max_concurrency, 2);
-        assert_eq!(cfg.providers["chatgpt"].max_tool_retries, 2);
+        let cfg = Config::load_from_str(SAMPLE).unwrap_or_else(|_| unreachable!());
+        assert_eq!(cfg.providers.get("chatgpt").unwrap_or_else(|| unreachable!()).max_concurrency, 2);
+        assert_eq!(cfg.providers.get("chatgpt").unwrap_or_else(|| unreachable!()).max_tool_retries, 2);
 
         let toml = SAMPLE.replace(
             "[providers.chatgpt.selectors]",
             "max_concurrency = 4\nmax_tool_retries = 0\n\n[providers.chatgpt.selectors]",
         );
-        let cfg = Config::load_from_str(&toml).unwrap();
-        assert_eq!(cfg.providers["chatgpt"].max_concurrency, 4);
-        assert_eq!(cfg.providers["chatgpt"].max_tool_retries, 0);
+        let cfg = Config::load_from_str(&toml).unwrap_or_else(|_| unreachable!());
+        assert_eq!(cfg.providers.get("chatgpt").unwrap_or_else(|| unreachable!()).max_concurrency, 4);
+        assert_eq!(cfg.providers.get("chatgpt").unwrap_or_else(|| unreachable!()).max_tool_retries, 0);
     }
 
     #[test]
@@ -843,27 +849,30 @@ mod tests {
             "[providers.chatgpt.selectors]",
             "max_concurrency = 0\n\n[providers.chatgpt.selectors]",
         );
-        let err = Config::load_from_str(&toml).unwrap_err();
+        let err = match Config::load_from_str(&toml) {
+            Err(err) => err,
+            Ok(_) => unreachable!(),
+        };
         assert!(err.to_string().contains("max_concurrency"), "{err}");
     }
 
     #[test]
     fn conversation_pinning_defaults_true_and_can_be_disabled() {
-        let cfg = Config::load_from_str(SAMPLE).unwrap();
-        assert!(cfg.providers["chatgpt"].conversation_pinning);
+        let cfg = Config::load_from_str(SAMPLE).unwrap_or_else(|_| unreachable!());
+        assert!(cfg.providers.get("chatgpt").unwrap_or_else(|| unreachable!()).conversation_pinning);
 
         let toml = SAMPLE.replace(
             "[providers.chatgpt.selectors]",
             "conversation_pinning = false\n\n[providers.chatgpt.selectors]",
         );
-        let cfg = Config::load_from_str(&toml).unwrap();
-        assert!(!cfg.providers["chatgpt"].conversation_pinning);
+        let cfg = Config::load_from_str(&toml).unwrap_or_else(|_| unreachable!());
+        assert!(!cfg.providers.get("chatgpt").unwrap_or_else(|| unreachable!()).conversation_pinning);
     }
 
     #[test]
     fn vendor_prefix_is_stripped_before_alias_lookup() {
-        let cfg = Config::load_from_str(SAMPLE).unwrap();
-        let (p, name) = cfg.resolve_model("openai/gpt-4o").unwrap();
+        let cfg = Config::load_from_str(SAMPLE).unwrap_or_else(|_| unreachable!());
+        let (p, name) = cfg.resolve_model("openai/gpt-4o").unwrap_or_else(|_| unreachable!());
         assert_eq!(p.name, "chatgpt");
         assert_eq!(name, "gpt-4o");
     }
@@ -883,8 +892,10 @@ mod tests {
         input = "#prompt"
         assistant_message = ".assistant"
         "####;
-        let err = Config::load_from_str_with_registry(toml, &Registry::from_builtin())
-            .expect_err("missing send_button must be rejected");
+        let err = match Config::load_from_str_with_registry(toml, &Registry::from_builtin()) {
+            Err(err) => err,
+            Ok(_) => unreachable!(),
+        };
         assert!(err.to_string().contains("send_button"), "{err}");
     }
 
@@ -902,8 +913,8 @@ mod tests {
         input = "#custom-input"
         "####;
         let cfg = Config::load_from_str_with_registry(toml, &Registry::from_builtin())
-            .expect("registry fills the rest");
-        let p = &cfg.providers["chatgpt"];
+            .unwrap_or_else(|_| unreachable!());
+        let p = cfg.providers.get("chatgpt").unwrap_or_else(|| unreachable!());
         assert_eq!(p.selectors.input.as_deref(), Some("#custom-input"));
         // Filled in from the registry.
         assert!(p.selectors.send_button.is_some());
@@ -914,7 +925,7 @@ mod tests {
     #[test]
     fn existing_config_without_pid_file_parses() {
         // No `pid_file` key at all: the field defaults to `None`.
-        let cfg = Config::load_from_str(SAMPLE).unwrap();
+        let cfg = Config::load_from_str(SAMPLE).unwrap_or_else(|_| unreachable!());
         assert_eq!(cfg.server.pid_file, None);
 
         // Keys before the next table header still belong to `[server]`.
@@ -922,7 +933,7 @@ mod tests {
             "[model_aliases]",
             "pid_file = \"run/uwa.pid\"\n\n[model_aliases]",
         );
-        let cfg = Config::load_from_str(&text).unwrap();
+        let cfg = Config::load_from_str(&text).unwrap_or_else(|_| unreachable!());
         assert_eq!(
             cfg.server.pid_file.as_deref(),
             Some(std::path::Path::new("run/uwa.pid"))
@@ -947,7 +958,10 @@ mod tests {
             bind = "0.0.0.0"
             port = 8080
         "#;
-        let err = Config::load_from_str(bad).unwrap_err();
+        let err = match Config::load_from_str(bad) {
+            Err(err) => err,
+            Ok(_) => unreachable!(),
+        };
         assert!(matches!(err, UwaError::Config(_)));
     }
 
@@ -960,7 +974,10 @@ mod tests {
             [model_aliases]
             "gpt-4o" = "nonexistent"
         "#;
-        let err = Config::load_from_str(bad).unwrap_err();
+        let err = match Config::load_from_str(bad) {
+            Err(err) => err,
+            Ok(_) => unreachable!(),
+        };
         assert!(err.to_string().contains("nonexistent"));
     }
 
@@ -973,7 +990,7 @@ mod tests {
             port = 8080
         "#,
         )
-        .unwrap();
+        .unwrap_or_else(|_| unreachable!());
         assert_eq!(cfg.backend.kind, BackendKind::Nodriver);
         assert_eq!(cfg.backend.cdp.ws_url, "http://127.0.0.1:9222");
         assert_eq!(cfg.backend.nodriver.python, "python3");
@@ -1000,9 +1017,9 @@ mod tests {
             assistant_message = "#a"
         "##,
         )
-        .unwrap();
+        .unwrap_or_else(|_| unreachable!());
         assert_eq!(cfg.backend.kind, BackendKind::Nodriver);
-        assert_eq!(cfg.providers["x"].backend, Some(BackendKind::Cdp));
+        assert_eq!(cfg.providers.get("x").unwrap_or_else(|| unreachable!()).backend, Some(BackendKind::Cdp));
     }
 
     #[test]
@@ -1019,7 +1036,7 @@ mod tests {
             idle_ttl_secs = 600
         "#,
         )
-        .unwrap();
+        .unwrap_or_else(|_| unreachable!());
         assert_eq!(cfg.backend.kind, BackendKind::Cdp);
         assert_eq!(
             cfg.backend.cdp.ws_url,
@@ -1044,7 +1061,7 @@ mod tests {
             init_timeout_ms = 5000
         "#,
         )
-        .unwrap();
+        .unwrap_or_else(|_| unreachable!());
         assert_eq!(cfg.backend.kind, BackendKind::Nodriver);
         assert!(cfg.backend.nodriver.headless);
         assert_eq!(cfg.backend.nodriver.python, "python3.11");
@@ -1072,9 +1089,9 @@ mod tests {
             label = "Personal"
             "#
         );
-        let cfg = Config::load_from_str(&toml).unwrap();
+        let cfg = Config::load_from_str(&toml).unwrap_or_else(|_| unreachable!());
         assert_eq!(cfg.profiles.len(), 2);
-        let work = cfg.profiles.get("work").unwrap();
+        let work = cfg.profiles.get("work").unwrap_or_else(|| unreachable!());
         assert_eq!(work.label, "Work accounts");
         assert_eq!(work.provider_limits.get("chatgpt"), Some(&1));
         assert_eq!(
@@ -1085,14 +1102,17 @@ mod tests {
 
     #[test]
     fn profiles_default_to_empty() {
-        let cfg = Config::load_from_str(SAMPLE).unwrap();
+        let cfg = Config::load_from_str(SAMPLE).unwrap_or_else(|_| unreachable!());
         assert!(cfg.profiles.is_empty());
     }
 
     #[test]
     fn profile_default_name_is_rejected() {
         let toml = format!("{SAMPLE}\n[profiles.default]\nlabel = \"x\"\n");
-        let err = Config::load_from_str(&toml).unwrap_err();
+        let err = match Config::load_from_str(&toml) {
+            Err(err) => err,
+            Ok(_) => unreachable!(),
+        };
         assert!(err.to_string().contains("reserved"), "{err}");
     }
 
@@ -1105,20 +1125,26 @@ mod tests {
     #[test]
     fn profile_zero_limit_is_rejected() {
         let toml = format!("{SAMPLE}\n[profiles.work]\nprovider_limits = {{ chatgpt = 0 }}\n");
-        let err = Config::load_from_str(&toml).unwrap_err();
+        let err = match Config::load_from_str(&toml) {
+            Err(err) => err,
+            Ok(_) => unreachable!(),
+        };
         assert!(err.to_string().contains("≥ 1"), "{err}");
     }
 
     #[test]
     fn profile_limit_for_unknown_provider_is_rejected() {
         let toml = format!("{SAMPLE}\n[profiles.work]\nprovider_limits = {{ nosuch = 1 }}\n");
-        let err = Config::load_from_str(&toml).unwrap_err();
+        let err = match Config::load_from_str(&toml) {
+            Err(err) => err,
+            Ok(_) => unreachable!(),
+        };
         assert!(err.to_string().contains("nosuch"), "{err}");
     }
 
     #[test]
     fn url_glob_matches() {
-        let url: Url = "https://chatgpt.com/c/abc".parse().unwrap();
+        let url: Url = "https://chatgpt.com/c/abc".parse().unwrap_or_else(|_| unreachable!());
         assert!(url_matches("https://chatgpt.com/*", &url));
         assert!(!url_matches("https://gemini.google.com/*", &url));
     }
@@ -1132,29 +1158,29 @@ mod tests {
             port = 8080
         "#,
         )
-        .unwrap();
+        .unwrap_or_else(|_| unreachable!());
         assert_eq!(cfg.stealth.pack, "default");
         assert!(cfg.stealth.user_scripts_dir.is_none());
     }
 
     #[test]
     fn timing_defaults_to_natural() {
-        let cfg = Config::load_from_str(SAMPLE).unwrap();
+        let cfg = Config::load_from_str(SAMPLE).unwrap_or_else(|_| unreachable!());
         assert_eq!(cfg.timing.profile, TimingProfile::Natural);
     }
 
     #[test]
     fn timing_profile_override_applies() {
         let toml = format!("{}\n[timing]\nprofile = \"slow\"\n", SAMPLE);
-        let cfg = Config::load_from_str(&toml).unwrap();
+        let cfg = Config::load_from_str(&toml).unwrap_or_else(|_| unreachable!());
         assert_eq!(cfg.timing.profile, TimingProfile::Slow);
-        assert!(cfg.timing.key_ms[0] >= 100);
+        assert!(cfg.timing.key_ms.first().unwrap_or_else(|| unreachable!()) >= &100);
     }
 
     #[test]
     fn timing_fast_profile_zeroes_ranges() {
         let toml = format!("{}\n[timing]\nprofile = \"fast\"\n", SAMPLE);
-        let cfg = Config::load_from_str(&toml).unwrap();
+        let cfg = Config::load_from_str(&toml).unwrap_or_else(|_| unreachable!());
         assert_eq!(cfg.timing.profile, TimingProfile::Fast);
         assert_eq!(cfg.timing.key_ms, [0, 0]);
         assert_eq!(cfg.timing.pre_send_ms, [0, 0]);
@@ -1167,14 +1193,17 @@ mod tests {
             "{}\n[timing]\nprofile = \"custom\"\nkey_ms = [5, 10]\n",
             SAMPLE
         );
-        let cfg = Config::load_from_str(&toml).unwrap();
+        let cfg = Config::load_from_str(&toml).unwrap_or_else(|_| unreachable!());
         assert_eq!(cfg.timing.key_ms, [5, 10]);
     }
 
     #[test]
     fn timing_bad_poll_is_rejected() {
         let toml = format!("{}\n[timing]\npoll_ms = 10\n", SAMPLE);
-        let e = Config::load_from_str(&toml).unwrap_err();
+        let e = match Config::load_from_str(&toml) {
+            Err(e) => e,
+            Ok(_) => unreachable!(),
+        };
         assert!(e.to_string().contains("poll_ms"), "{e}");
     }
 }

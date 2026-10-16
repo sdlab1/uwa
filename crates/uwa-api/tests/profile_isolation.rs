@@ -150,7 +150,7 @@ async fn x_uwa_session_header_routes_to_session() {
         label = "Session B"
     "##,
     )
-    .unwrap();
+    .unwrap_or_else(|e| unreachable!("config load failed: {e}"));
 
     let transport = Arc::new(
         MockTransport::with_n_tabs(2)

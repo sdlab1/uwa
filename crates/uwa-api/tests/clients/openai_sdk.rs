@@ -34,16 +34,63 @@ async fn sdk_non_stream() {
     let v: Value = r.json();
 
     // SDK deserializes ChatCompletion strictly.
-    assert_eq!(v["object"], "chat.completion");
-    assert!(!v["id"].as_str().unwrap().is_empty());
-    assert!(v["created"].as_u64().unwrap() > 0);
-    assert_eq!(v["choices"][0]["index"], 0);
-    assert_eq!(v["choices"][0]["message"]["role"], "assistant");
-    assert_eq!(v["choices"][0]["message"]["content"], "The answer is 42.");
-    assert!(v["choices"][0]["finish_reason"].is_string());
-    assert!(v["usage"]["prompt_tokens"].as_u64().unwrap() > 0);
-    assert!(v["usage"]["completion_tokens"].as_u64().unwrap() > 0);
-    assert!(v["usage"]["total_tokens"].as_u64().unwrap() > 0);
+    assert_eq!(
+        v.get("object").and_then(|v| v.as_str()).unwrap_or(""),
+        "chat.completion"
+    );
+    assert!(!v.get("id").and_then(|v| v.as_str()).unwrap_or("").is_empty());
+    assert!(v.get("created").and_then(|v| v.as_u64()).unwrap_or(0) > 0);
+    assert_eq!(
+        v.get("choices")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("index"))
+            .and_then(|i| i.as_u64()),
+        Some(0)
+    );
+    assert_eq!(
+        v.get("choices")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("message"))
+            .and_then(|m| m.get("role"))
+            .and_then(|r| r.as_str()),
+        Some("assistant")
+    );
+    assert_eq!(
+        v.get("choices")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("message"))
+            .and_then(|m| m.get("content"))
+            .and_then(|c| c.as_str()),
+        Some("The answer is 42.")
+    );
+    assert!(
+        v.get("choices")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("finish_reason"))
+            .map(|f| f.is_string())
+            .unwrap_or(false)
+    );
+    assert!(
+        v.get("usage")
+            .and_then(|u| u.get("prompt_tokens"))
+            .and_then(|t| t.as_u64())
+            .unwrap_or(0)
+            > 0
+    );
+    assert!(
+        v.get("usage")
+            .and_then(|u| u.get("completion_tokens"))
+            .and_then(|t| t.as_u64())
+            .unwrap_or(0)
+            > 0
+    );
+    assert!(
+        v.get("usage")
+            .and_then(|u| u.get("total_tokens"))
+            .and_then(|t| t.as_u64())
+            .unwrap_or(0)
+            > 0
+    );
 }
 
 #[tokio::test]
@@ -63,9 +110,18 @@ async fn sdk_stream_with_usage() {
     let body = r.text();
     let frames: Vec<&str> = body.split("data: ").skip(1).collect();
     // First frame always carries role: assistant.
-    let first: Value = serde_json::from_str(frames[0].trim()).unwrap();
-    assert_eq!(first["choices"][0]["delta"]["role"], "assistant");
+    let first: Value = serde_json::from_str(
+        frames.get(0).map(|f| f.trim()).unwrap_or("")
+    ).unwrap_or_else(|e| unreachable!("bad frame: {e}"));
+    assert_eq!(
+        first.get("choices")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("delta"))
+            .and_then(|d| d.get("role"))
+            .and_then(|r| r.as_str()),
+        Some("assistant")
+    );
     // Last data frame before [DONE] is [DONE]; the one before is finish.
-    let last_data = frames.last().unwrap().trim();
+    let last_data = frames.last().map(|f| f.trim()).unwrap_or("");
     assert_eq!(last_data, "[DONE]");
 }

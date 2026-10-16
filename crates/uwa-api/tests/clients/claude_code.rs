@@ -43,21 +43,50 @@ async fn claude_code_tool_use_flow() {
         .await;
     r.assert_status_ok();
     let v: Value = r.json();
-    assert_eq!(v["type"], "message");
-    assert_eq!(v["stop_reason"], "tool_use");
+    assert_eq!(
+        v.get("type").and_then(|v| v.as_str()).unwrap_or(""),
+        "message"
+    );
+    assert_eq!(
+        v.get("stop_reason").and_then(|v| v.as_str()).unwrap_or(""),
+        "tool_use"
+    );
 
-    let tool = v["content"]
-        .as_array()
-        .unwrap()
+    let tool = v
+        .get("content")
+        .and_then(|c| c.as_array())
+        .cloned()
+        .unwrap_or_default()
         .iter()
-        .find(|c| c["type"] == "tool_use")
-        .expect("tool_use block");
-    assert_eq!(tool["name"], "read_file");
-    assert_eq!(tool["input"]["path"], "README.md");
+        .find(|c| c.get("type").and_then(|t| t.as_str()).unwrap_or("") == "tool_use")
+        .unwrap_or_else(|| unreachable!("tool_use block"));
+    assert_eq!(
+        tool.get("name").and_then(|n| n.as_str()).unwrap_or(""),
+        "read_file"
+    );
+    assert_eq!(
+        tool.get("input")
+            .and_then(|i| i.get("path"))
+            .and_then(|p| p.as_str())
+            .unwrap_or(""),
+        "README.md"
+    );
 
     // Claude Code uses usage to update its status line.
-    assert!(v["usage"]["input_tokens"].as_u64().unwrap() > 0);
-    assert!(v["usage"]["output_tokens"].as_u64().unwrap() > 0);
+    assert!(
+        v.get("usage")
+            .and_then(|u| u.get("input_tokens"))
+            .and_then(|t| t.as_u64())
+            .unwrap_or(0)
+            > 0
+    );
+    assert!(
+        v.get("usage")
+            .and_then(|u| u.get("output_tokens"))
+            .and_then(|t| t.as_u64())
+            .unwrap_or(0)
+            > 0
+    );
 }
 
 #[tokio::test]
@@ -82,6 +111,15 @@ async fn claude_code_tool_result_continuation() {
         .await;
     r.assert_status_ok();
     let v: Value = r.json();
-    assert_eq!(v["stop_reason"], "end_turn");
-    assert_eq!(v["content"][0]["text"], "The file says hello.");
+    assert_eq!(
+        v.get("stop_reason").and_then(|v| v.as_str()).unwrap_or(""),
+        "end_turn"
+    );
+    assert_eq!(
+        v.get("content")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("text"))
+            .and_then(|t| t.as_str()),
+        Some("The file says hello.")
+    );
 }

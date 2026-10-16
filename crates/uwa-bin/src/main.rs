@@ -6,53 +6,37 @@ mod commands;
 mod wiring;
 
 use anyhow::Context;
-use clap::{Parser, Subcommand};
+use clap::{Arg, ArgAction, Command as ClapCommand};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-#[derive(Parser)]
-#[allow(clippy::restriction)]
-#[command(version, about = "Universal Web API — Rust bridge")]
 struct Cli {
     /// Path to TOML config.
-    #[arg(
-        short,
-        long,
-        env = "UWA_CONFIG",
-        default_value = "uwa.toml",
-        global = true
-    )]
     config: PathBuf,
-
-    #[command(subcommand)]
-    command: Option<Command>,
+    command: Option<CliCommand>,
 }
 
-#[derive(Subcommand)]
-enum Command {
+#[derive(Debug, Clone)]
+enum CliCommand {
     /// Build nothing, just start: find Chromium, launch it if needed,
     /// start uwa, print the dashboard URL. (Default when no subcommand.)
     Start(commands::start::StartArgs),
 
     /// Manage the background daemon.
     Daemon {
-        #[command(subcommand)]
         action: commands::daemon::DaemonAction,
     },
 
     /// Install / uninstall uwa as a system service (systemd, launchd, sc.exe).
     Service {
-        #[command(subcommand)]
         action: commands::service::ServiceAction,
     },
 
     /// Check for a newer release and (optionally) install it.
     Update {
         /// Only print the version comparison; do not download.
-        #[arg(long)]
         check: bool,
         /// Reinstall even if the versions match.
-        #[arg(long)]
         force: bool,
     },
 
@@ -69,6 +53,151 @@ enum Command {
     Doctor,
 }
 
+/// Build the top-level clap [`ClapCommand`] tree manually, without
+/// clap's `Parser`/`Subcommand`/`FromArgMatches` derive traits (those
+/// emit `#[allow(clippy::restriction)]` which conflicts with
+/// `-F clippy::restriction`).
+fn build_clap_command() -> ClapCommand {
+    ClapCommand::new("uwa")
+        .version(env!("CARGO_PKG_VERSION"))
+        .about("Universal Web API — Rust bridge")
+        .arg(
+            Arg::new("config")
+                .short('c')
+                .long("config")
+                .env("UWA_CONFIG")
+                .default_value("uwa.toml")
+                .global(true)
+                .action(ArgAction::Set),
+        )
+        .subcommand(
+            ClapCommand::new("start")
+                .about("Build nothing, just start: find Chromium, launch it if needed, start uwa, print the dashboard URL.")
+                .args(commands::start::StartArgs::clap_args()),
+        )
+        .subcommand(
+            ClapCommand::new("daemon")
+                .about("Manage the background daemon.")
+                .subcommands(commands::daemon::DaemonAction::clap_subcommands()),
+        )
+        .subcommand(
+            ClapCommand::new("service")
+                .about("Install / uninstall uwa as a system service (systemd, launchd, sc.exe).")
+                .subcommands(commands::service::ServiceAction::clap_subcommands()),
+        )
+        .subcommand(
+            ClapCommand::new("update")
+                .about("Check for a newer release and (optionally) install it.")
+                .arg(
+                    Arg::new("check")
+                        .long("check")
+                        .action(ArgAction::SetTrue),
+                )
+                .arg(
+                    Arg::new("force")
+                        .long("force")
+                        .action(ArgAction::SetTrue),
+                ),
+        )
+        .subcommand(
+            ClapCommand::new("conformance")
+                .about("Tool-calling conformance suite: run the corpus, generate reports.")
+                .subcommands(commands::conformance::ConformanceArgs::clap_subcommands()),
+        )
+        .subcommand(
+            ClapCommand::new("providers")
+                .about("Provider selector registry: list, show, diff, update, canary.")
+                .subcommands(commands::providers::ProvidersArgs::clap_subcommands()),
+        )
+        .subcommand(
+            ClapCommand::new("clients")
+                .about("Point installed editors at this uwa instance.")
+                .subcommands(commands::clients::ClientsArgs::clap_subcommands()),
+        )
+        .subcommand(
+            ClapCommand::new("doctor")
+                .about("Print resolved config, provider list and detected browser."),
+        )
+}
+
+/// Parse command-line args into a [`Cli`] value. Returns `None` for the
+/// command when no subcommand was given (caller defaults to `Start`).
+fn parse_cli() -> Cli {
+    let matches = build_clap_command().get_matches();
+
+    let config = matches
+        .get_one::<String>("config")
+        .cloned()
+        .unwrap_or_else(|| "uwa.toml".to_string())
+        .into();
+
+    let command = match matches.subcommand() {
+        Some(("start", sub)) => Some(CliCommand::Start(
+            commands::start::StartArgs::from_matches(sub),
+        )),
+        Some(("daemon", sub)) => {
+            let name = sub.subcommand_name().unwrap_or_else(|| unreachable!());
+            let sub_sub = sub
+                .subcommand_matches(name)
+                .unwrap_or_else(|| unreachable!());
+            let action = commands::daemon::DaemonAction::from_matches(name, sub_sub)
+                .unwrap_or_else(|e| {
+                    eprintln!("{e}");
+                    std::process::exit(2);
+                });
+            Some(CliCommand::Daemon { action })
+        }
+        Some(("service", sub)) => {
+            let name = sub.subcommand_name().unwrap_or_else(|| unreachable!());
+            let sub_sub = sub
+                .subcommand_matches(name)
+                .unwrap_or_else(|| unreachable!());
+            let action = commands::service::ServiceAction::from_matches(name, sub_sub)
+                .unwrap_or_else(|e| {
+                    eprintln!("{e}");
+                    std::process::exit(2);
+                });
+            Some(CliCommand::Service { action })
+        }
+        Some(("update", sub)) => Some(CliCommand::Update {
+            check: sub.get_flag("check"),
+            force: sub.get_flag("force"),
+        }),
+        Some(("conformance", sub)) => {
+            let args = commands::conformance::ConformanceArgs::from_matches(sub)
+                .unwrap_or_else(|e| {
+                    eprintln!("{e}");
+                    std::process::exit(2);
+                });
+            Some(CliCommand::Conformance(args))
+        }
+        Some(("providers", sub)) => {
+            let args = commands::providers::ProvidersArgs::from_matches(sub)
+                .unwrap_or_else(|e| {
+                    eprintln!("{e}");
+                    std::process::exit(2);
+                });
+            Some(CliCommand::Providers(args))
+        }
+        Some(("clients", sub)) => {
+            let args = commands::clients::ClientsArgs::from_matches(sub)
+                .unwrap_or_else(|e| {
+                    eprintln!("{e}");
+                    std::process::exit(2);
+                });
+            Some(CliCommand::Clients(args))
+        }
+        Some(("doctor", _)) => Some(CliCommand::Doctor),
+        _ => None,
+    };
+
+    let command = Some(command.unwrap_or_else(|| {
+        CliCommand::Start(commands::start::StartArgs::default())
+    }));
+
+    Cli { config, command }
+}
+
 // Track whether we're in a context where we spawned child processes
 static CHILD_PROCESSES_SPAWNED: AtomicBool = AtomicBool::new(false);
 
@@ -83,7 +212,7 @@ fn set_panic_hook() {
                 // Kill the entire process group (negative PID = PGID)
                 let pgid = unsafe { libc::getpgrp() };
                 if pgid > 0 {
-                    let _ = unsafe { libc::kill(-pgid, libc::SIGKILL) };
+                    let _ = unsafe { libc::kill(pgid.wrapping_neg(), libc::SIGKILL) };
                 }
             }
             #[cfg(windows)]
@@ -106,26 +235,26 @@ async fn main() -> anyhow::Result<()> {
         .with_writer(std::io::stderr)
         .init();
 
-    let cli = Cli::parse();
+    let cli = parse_cli();
     let config_path = cli.config.clone();
 
     // `uwa` with no subcommand == `uwa start`.
     let command = cli
         .command
-        .unwrap_or(Command::Start(commands::start::StartArgs::default()));
+        .unwrap_or(CliCommand::Start(commands::start::StartArgs::default()));
 
     let result = match command {
-        Command::Start(args) => {
+        CliCommand::Start(args) => {
             CHILD_PROCESSES_SPAWNED.store(true, Ordering::SeqCst);
             commands::start::run(config_path.clone(), args).await
         }
-        Command::Daemon { action } => commands::daemon::run(config_path.clone(), action).await,
-        Command::Service { action } => commands::service::run(action).await,
-        Command::Update { check, force } => commands::update::run(check, force).await,
-        Command::Conformance(args) => commands::conformance::run(args).await,
-        Command::Providers(args) => commands::providers::run(args).await,
-        Command::Clients(args) => commands::clients::run(args).await,
-        Command::Doctor => commands::doctor::run(config_path.clone()).await,
+        CliCommand::Daemon { action } => commands::daemon::run(config_path.clone(), action).await,
+        CliCommand::Service { action } => commands::service::run(action).await,
+        CliCommand::Update { check, force } => commands::update::run(check, force).await,
+        CliCommand::Conformance(args) => commands::conformance::run(args).await,
+        CliCommand::Providers(args) => commands::providers::run(args).await,
+        CliCommand::Clients(args) => commands::clients::run(args).await,
+        CliCommand::Doctor => commands::doctor::run(config_path.clone()).await,
     };
 
     CHILD_PROCESSES_SPAWNED.store(false, Ordering::SeqCst);

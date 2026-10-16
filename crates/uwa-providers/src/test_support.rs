@@ -47,7 +47,7 @@ impl ScriptedPage {
     }
 
     pub fn log(&self) -> Vec<String> {
-        self.log.lock().unwrap().clone()
+        self.log.lock().unwrap_or_else(|_| unreachable!()).clone()
     }
 }
 
@@ -57,11 +57,11 @@ impl Page for ScriptedPage {
         Ok(())
     }
     async fn url(&self) -> Result<Url> {
-        Ok("https://chatgpt.com/".parse().unwrap())
+        Ok("https://chatgpt.com/".parse().unwrap_or_else(|_| unreachable!()))
     }
     async fn eval(&self, js: &str) -> Result<Value> {
-        self.log.lock().unwrap().push(js.to_string());
-        let mut s = self.script.lock().unwrap();
+        self.log.lock().unwrap_or_else(|_| unreachable!()).push(js.to_string());
+        let mut s = self.script.lock().unwrap_or_else(|_| unreachable!());
         if let Some(idx) = s.iter().position(|(pat, _)| js.contains(pat.as_str())) {
             let (_, v) = s.remove(idx);
             Ok(v)
@@ -73,7 +73,7 @@ impl Page for ScriptedPage {
         Ok(())
     }
     async fn html(&self) -> Result<String> {
-        Ok(self.html.lock().unwrap().clone())
+        Ok(self.html.lock().unwrap_or_else(|_| unreachable!()).clone())
     }
     async fn click(&self, _: &str) -> Result<()> {
         Ok(())

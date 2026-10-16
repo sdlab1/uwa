@@ -97,11 +97,11 @@ mod tests {
     #[test]
     fn media_kind_serializes_lowercase() {
         assert_eq!(
-            serde_json::to_string(&MediaKind::Image).unwrap(),
+            serde_json::to_string(&MediaKind::Image).unwrap_or_else(|_| unreachable!()),
             "\"image\""
         );
         assert_eq!(
-            serde_json::to_string(&MediaKind::Canvas).unwrap(),
+            serde_json::to_string(&MediaKind::Canvas).unwrap_or_else(|_| unreachable!()),
             "\"canvas\""
         );
     }
@@ -117,8 +117,8 @@ mod tests {
             alt: Some("a red square".into()),
             source: Some("img".into()),
         };
-        let j = serde_json::to_string(&a).unwrap();
-        let back: MediaAsset = serde_json::from_str(&j).unwrap();
+        let j = serde_json::to_string(&a).unwrap_or_else(|_| unreachable!());
+        let back: MediaAsset = serde_json::from_str(&j).unwrap_or_else(|_| unreachable!());
         assert_eq!(back.kind, MediaKind::Image);
         assert_eq!(back.size_bytes, Some(2048));
     }

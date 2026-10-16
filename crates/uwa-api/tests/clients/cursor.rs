@@ -50,18 +50,60 @@ async fn cursor_tool_call_round_trips() {
     r.assert_status_ok();
 
     let v: Value = r.json();
-    assert_eq!(v["choices"][0]["finish_reason"], "tool_calls");
-    let tc = &v["choices"][0]["message"]["tool_calls"][0];
-    assert_eq!(tc["type"], "function");
-    assert_eq!(tc["function"]["name"], "read_file");
+    assert_eq!(
+        v.get("choices")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("finish_reason"))
+            .and_then(|f| f.as_str()),
+        Some("tool_calls")
+    );
+    let tc = v
+        .get("choices")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("message"))
+        .and_then(|m| m.get("tool_calls"))
+        .and_then(|t| t.get(0))
+        .unwrap_or_else(|| unreachable!("missing tool_call[0]"));
+    assert_eq!(
+        tc.get("type").and_then(|t| t.as_str()).unwrap_or(""),
+        "function"
+    );
+    assert_eq!(
+        tc.get("function")
+            .and_then(|f| f.get("name"))
+            .and_then(|n| n.as_str())
+            .unwrap_or(""),
+        "read_file"
+    );
 
     // Cursor parses `arguments` as JSON.
-    let args: Value = serde_json::from_str(tc["function"]["arguments"].as_str().unwrap()).unwrap();
-    assert_eq!(args["path"], "src/main.rs");
+    let args_str = tc
+        .get("function")
+        .and_then(|f| f.get("arguments"))
+        .and_then(|a| a.as_str())
+        .unwrap_or("");
+    let args: Value =
+        serde_json::from_str(args_str).unwrap_or_else(|e| unreachable!("bad args: {e}"));
+    assert_eq!(
+        args.get("path").and_then(|p| p.as_str()).unwrap_or(""),
+        "src/main.rs"
+    );
 
     // Usage must be present so Cursor's context budget works.
-    assert!(v["usage"]["total_tokens"].as_u64().unwrap() > 0);
-    assert!(v["usage"]["prompt_tokens"].as_u64().unwrap() > 0);
+    assert!(
+        v.get("usage")
+            .and_then(|u| u.get("total_tokens"))
+            .and_then(|t| t.as_u64())
+            .unwrap_or(0)
+            > 0
+    );
+    assert!(
+        v.get("usage")
+            .and_then(|u| u.get("prompt_tokens"))
+            .and_then(|t| t.as_u64())
+            .unwrap_or(0)
+            > 0
+    );
 }
 
 #[tokio::test]
@@ -88,6 +130,19 @@ async fn cursor_accepts_tool_result_follow_up() {
         .await;
     r.assert_status_ok();
     let v: Value = r.json();
-    assert_eq!(v["choices"][0]["finish_reason"], "stop");
-    assert_eq!(v["choices"][0]["message"]["content"], "Done.");
+    assert_eq!(
+        v.get("choices")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("finish_reason"))
+            .and_then(|f| f.as_str()),
+        Some("stop")
+    );
+    assert_eq!(
+        v.get("choices")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("message"))
+            .and_then(|m| m.get("content"))
+            .and_then(|c| c.as_str()),
+        Some("Done.")
+    );
 }

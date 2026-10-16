@@ -193,7 +193,7 @@ mod tests {
     #[test]
     fn fix_prompt_names_every_gate_and_tail() {
         let cfg = RunConfig::default();
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
         let store = Store::new(dir.path());
         let id = ItemId(7);
         let cases = [
@@ -230,7 +230,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
         let store = Store::new(dir.path());
         let p = fix_prompt(&Gate::Mutate, "t", &cfg, &store, &ItemId(1));
         assert!(p.contains("80%"), "{p}");

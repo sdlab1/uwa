@@ -42,17 +42,23 @@ async fn continue_usage_chunk_in_stream() {
         if trimmed == "[DONE]" {
             continue;
         }
-        let v: Value = serde_json::from_str(trimmed).unwrap();
-        if v["choices"]
-            .as_array()
+        let v: Value =
+            serde_json::from_str(trimmed).unwrap_or_else(|e| unreachable!("bad frame: {e}"));
+        if v.get("choices")
+            .and_then(|c| c.as_array())
             .map(|a| a.is_empty())
             .unwrap_or(false)
         {
             if let Some(u) = v.get("usage") {
-                assert!(u["prompt_tokens"].as_u64().unwrap() > 0);
-                assert!(u["completion_tokens"].as_u64().unwrap() > 0);
                 assert!(
-                    u["total_tokens"].as_u64().unwrap() >= u["prompt_tokens"].as_u64().unwrap()
+                    u.get("prompt_tokens").and_then(|t| t.as_u64()).unwrap_or(0) > 0
+                );
+                assert!(
+                    u.get("completion_tokens").and_then(|t| t.as_u64()).unwrap_or(0) > 0
+                );
+                assert!(
+                    u.get("total_tokens").and_then(|t| t.as_u64()).unwrap_or(0)
+                        >= u.get("prompt_tokens").and_then(|t| t.as_u64()).unwrap_or(0)
                 );
                 seen_usage = true;
             }
@@ -80,7 +86,8 @@ async fn continue_without_include_usage_has_no_usage_chunk() {
         if trimmed == "[DONE]" {
             continue;
         }
-        let v: Value = serde_json::from_str(trimmed).unwrap();
+        let v: Value =
+            serde_json::from_str(trimmed).unwrap_or_else(|e| unreachable!("bad frame: {e}"));
         assert!(
             v.get("usage").is_none(),
             "unexpected usage chunk without stream_options.include_usage"

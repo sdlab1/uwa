@@ -1,7 +1,6 @@
 //! P3: Concurrency and isolation — simultaneous requests, session pinning,
 //! tab isolation, parallel tool calls.
 
-use futures::future::join_all;
 use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
@@ -50,7 +49,10 @@ async fn concurrent_requests_get_distinct_tabs() {
     );
 
     // Verify two tabs were used (check transport health)
-    let tabs = transport.list_tabs().await.expect("list tabs");
+    let tabs = transport
+        .list_tabs()
+        .await
+        .unwrap_or_else(|e| unreachable!("list tabs: {e}"));
     assert_eq!(tabs.len(), 2, "should still have 2 tabs");
 }
 
@@ -211,20 +213,32 @@ async fn parallel_tool_calls_in_single_response() {
     r.assert_status_ok();
     let v: serde_json::Value = r.json();
 
-    let tool_calls = &v["choices"][0]["message"]["tool_calls"];
+    let tool_calls = v
+        .get("choices")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("message"))
+        .and_then(|m| m.get("tool_calls"))
+        .unwrap_or_else(|| unreachable!("missing tool_calls: {v}"));
     assert!(tool_calls.is_array(), "expected tool_calls array: {v}");
     assert_eq!(
-        tool_calls.as_array().unwrap().len(),
+        tool_calls.as_array().map(|a| a.len()).unwrap_or(0),
         2,
         "expected 2 tool calls: {v}"
     );
 
     let names: Vec<&str> = tool_calls
         .as_array()
-        .unwrap()
-        .iter()
-        .map(|tc| tc["function"]["name"].as_str().unwrap_or(""))
-        .collect();
+        .map(|a| {
+            a.iter()
+                .map(|tc| {
+                    tc.get("function")
+                        .and_then(|f| f.get("name"))
+                        .and_then(|n| n.as_str())
+                        .unwrap_or("")
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     assert!(names.contains(&"get_weather"), "missing get_weather");
     assert!(names.contains(&"get_time"), "missing get_time");
 }
@@ -256,7 +270,13 @@ async fn tool_call_then_text_response() {
 
     r1.assert_status_ok();
     let v1: serde_json::Value = r1.json();
-    assert_eq!(v1["choices"][0]["finish_reason"], "tool_calls");
+    assert_eq!(
+        v1.get("choices")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("finish_reason"))
+            .and_then(|f| f.as_str()),
+        Some("tool_calls")
+    );
 
     // Turn 2: tool result
     let r2 = app.server
@@ -275,11 +295,22 @@ async fn tool_call_then_text_response() {
 
     r2.assert_status_ok();
     let v2: serde_json::Value = r2.json();
-    assert_eq!(v2["choices"][0]["finish_reason"], "stop");
-    assert!(v2["choices"][0]["message"]["content"]
-        .as_str()
-        .unwrap_or("")
-        .contains("22"));
+    assert_eq!(
+        v2.get("choices")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("finish_reason"))
+            .and_then(|f| f.as_str()),
+        Some("stop")
+    );
+    assert!(
+        v2.get("choices")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("message"))
+            .and_then(|m| m.get("content"))
+            .and_then(|c| c.as_str())
+            .unwrap_or("")
+            .contains("22")
+    );
 }
 
 #[tokio::test]
@@ -315,7 +346,8 @@ async fn provider_switch_uses_correct_session() {
         stop_button = "button.stop"
         assistant_message = "[data-role=assistant]"
     "##;
-    let config = uwa_config::Config::load_from_str(config_toml).unwrap();
+    let config = uwa_config::Config::load_from_str(config_toml)
+        .unwrap_or_else(|e| unreachable!("config load failed: {e}"));
 
     let provider1 = Arc::new(MockProvider::new("chatgpt").with_answer("from chatgpt"));
     let provider2 = Arc::new(MockProvider::new("claude").with_answer("from claude"));
@@ -365,7 +397,10 @@ async fn tab_health_check_removes_unhealthy_tabs() {
     let transport = Arc::new(MockTransport::with_n_tabs(3));
 
     // Mark one tab as unhealthy
-    let tabs = transport.list_tabs().await.expect("tabs");
+    let tabs = transport
+        .list_tabs()
+        .await
+        .unwrap_or_else(|e| unreachable!("tabs: {e}"));
     if let Some(bad_tab) = tabs.first() {
         transport.mark_unhealthy(bad_tab);
     }
@@ -390,7 +425,10 @@ async fn tab_health_check_removes_unhealthy_tabs() {
 
     // Unhealthy tab should not be used (pipeline should skip it)
     // The exact behavior depends on tab selection logic
-    let healthy_tabs = transport.list_tabs().await.expect("tabs");
+    let healthy_tabs = transport
+        .list_tabs()
+        .await
+        .unwrap_or_else(|e| unreachable!("tabs: {e}"));
     assert!(!healthy_tabs.is_empty(), "no healthy tabs left");
 }
 

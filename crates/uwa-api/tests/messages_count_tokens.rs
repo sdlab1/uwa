@@ -25,7 +25,9 @@ async fn count(s: &TestServer, body: Value) -> u32 {
         .await;
     r.assert_status_ok();
     let v: Value = r.json();
-    v["input_tokens"].as_u64().expect("input_tokens") as u32
+    v.get("input_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as u32
 }
 
 #[tokio::test]

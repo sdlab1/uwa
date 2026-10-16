@@ -131,13 +131,19 @@ mod tests {
               <div data-message-author-role="assistant">second</div>
             </body></html>
         "#;
-        assert_eq!(mk().extract_from_html(html).unwrap(), "second");
+        assert_eq!(
+            mk().extract_from_html(html).unwrap_or_else(|_| unreachable!()),
+            "second"
+        );
     }
 
     #[test]
     fn missing_selector_errors() {
         let html = "<html><body></body></html>";
-        let err = mk().extract_from_html(html).unwrap_err();
+        let err = match mk().extract_from_html(html) {
+            Err(err) => err,
+            Ok(_) => unreachable!(),
+        };
         assert!(matches!(err, UwaError::Extraction(_)));
     }
 
@@ -145,7 +151,10 @@ mod tests {
     fn bad_selector_errors() {
         let mut m = mk();
         m.assistant_message = ">>>bad".into();
-        let err = m.extract_from_html("<html/>").unwrap_err();
+        let err = match m.extract_from_html("<html/>") {
+            Err(err) => err,
+            Ok(_) => unreachable!(),
+        };
         assert!(matches!(err, UwaError::Extraction(_)));
     }
 }

@@ -37,7 +37,7 @@ async fn replace_delta_clears_accumulated_text() {
     let out = pipe
         .run(&page, &base_cfg(ExtractionStrategy::NetworkFirst))
         .await
-        .unwrap_or_else(|e| panic!("pipeline failed: {e}"));
+        .unwrap_or_else(|_| unreachable!("pipeline failed"));
     assert_eq!(out.source, ExtractionSource::Network);
     assert_eq!(out.text, "new text and more");
 }
@@ -100,7 +100,7 @@ async fn network_first_uses_net_stream() {
     let out = pipe
         .run(&page, &base_cfg(ExtractionStrategy::NetworkFirst))
         .await
-        .unwrap();
+        .unwrap_or_else(|_| unreachable!());
     assert_eq!(out.source, ExtractionSource::Network);
     assert_eq!(out.text, "Hello, world");
 }
@@ -115,7 +115,7 @@ async fn empty_network_falls_back_to_dom() {
     let out = pipe
         .run(&page, &base_cfg(ExtractionStrategy::NetworkFirst))
         .await
-        .unwrap();
+        .unwrap_or_else(|_| unreachable!());
     assert_eq!(out.source, ExtractionSource::Dom);
     assert_eq!(out.text, "from dom");
 }
@@ -131,7 +131,7 @@ async fn dom_only_skips_network() {
     let out = pipe
         .run(&page, &base_cfg(ExtractionStrategy::DomOnly))
         .await
-        .unwrap();
+        .unwrap_or_else(|_| unreachable!());
     assert_eq!(out.source, ExtractionSource::Dom);
     assert_eq!(out.text, "dom says hi");
 }

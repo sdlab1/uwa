@@ -62,14 +62,18 @@ fn keyed_config_with_media(audio: bool) -> Arc<uwa_config::Config> {
             {media}
             "##
         ))
-        .unwrap(),
+        .unwrap_or_else(|e| unreachable!("config load failed: {e}")),
     )
 }
 
 /// Server wired with a **real** GenericProvider over the given page.
 /// Returns the server plus the page handle for log assertions.
 fn server(cfg: Arc<uwa_config::Config>, page: MockPage) -> axum_test::TestServer {
-    let provider_cfg = cfg.providers.get("chatgpt").unwrap().clone();
+    let provider_cfg = cfg
+        .providers
+        .get("chatgpt")
+        .cloned()
+        .unwrap_or_else(|| unreachable!("chatgpt provider not found"));
     let provider = GenericProvider::new(provider_cfg, Arc::new(ExtractionPipeline::new()));
     let t = MockTransport::new().with_page(TabId::from_raw("t1"), Arc::new(page));
     AppBuilder::new()
@@ -98,7 +102,14 @@ async fn audio_capture_flag_off_no_injection() {
     let page = happy_page(false);
     let s = server(keyed_config_with_media(false), page.clone());
     let v = chat(&s).await;
-    assert_eq!(v["choices"][0]["message"]["content"], "the answer");
+    let content = v
+        .get("choices")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("message"))
+        .and_then(|c| c.get("content"))
+        .and_then(|c| c.as_str())
+        .unwrap_or_default();
+    assert_eq!(content, "the answer");
 
     // No audio hook of any kind reached the page.
     assert!(
@@ -113,16 +124,23 @@ async fn audio_capture_flag_on_injects_start_and_stop() {
     let page = happy_page(true);
     let s = server(keyed_config_with_media(true), page.clone());
     let v = chat(&s).await;
-    assert_eq!(v["choices"][0]["message"]["content"], "the answer");
+    let content = v
+        .get("choices")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("message"))
+        .and_then(|c| c.get("content"))
+        .and_then(|c| c.as_str())
+        .unwrap_or_default();
+    assert_eq!(content, "the answer");
 
     let log = page.log();
     let pos_start = log
         .iter()
         .position(|e| e == "audio_capture:start")
-        .expect("audio capture started");
+        .unwrap_or_else(|| unreachable!("audio capture started"));
     let pos_stop = log
         .iter()
         .position(|e| e == "audio_capture:stop")
-        .expect("audio capture stopped after extraction");
+        .unwrap_or_else(|| unreachable!("audio capture stopped after extraction"));
     assert!(pos_start < pos_stop, "start precedes stop: {log:?}");
 }

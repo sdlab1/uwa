@@ -4,25 +4,20 @@ pub mod prompt;
 pub mod shell;
 pub mod timing;
 
-use clap::Subcommand;
+use clap::{Arg, ArgAction, Command};
 
-#[derive(Subcommand, Debug)]
+#[derive(Debug)]
 pub enum Cmd {
     Init,
     New {
         arg: String,
-        #[arg(long)]
         no_red: Option<String>,
-        #[arg(long)]
         no_crap: Option<String>,
     },
     Auto {
-        #[arg(long)]
         from: Option<String>,
-        #[arg(long)]
         max: Option<u32>,
     },
-    #[command(alias = "status")]
     List,
     Hint {
         id: Option<String>,
@@ -46,14 +41,133 @@ pub enum Cmd {
     },
     Bg {
         id: Option<String>,
-        #[arg(long)]
         from: Option<String>,
-        #[arg(long)]
         max: Option<u32>,
     },
     Ps,
     Tickets {
-        #[arg(long)]
         import: bool,
     },
+}
+
+impl Cmd {
+    pub fn clap_subcommands() -> Vec<clap::Command> {
+        vec![
+            Command::new("init"),
+            Command::new("new")
+                .arg(Arg::new("arg").index(1).required(true))
+                .arg(
+                    Arg::new("no_red")
+                        .long("no-red")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("no_crap")
+                        .long("no-crap")
+                        .action(ArgAction::Set),
+                ),
+            Command::new("auto")
+                .arg(
+                    Arg::new("from")
+                        .long("from")
+                        .action(ArgAction::Set),
+                )
+                .arg(Arg::new("max").long("max").action(ArgAction::Set)),
+            Command::new("list").alias("status"),
+            Command::new("hint").arg(Arg::new("id").index(1)),
+            Command::new("run").arg(Arg::new("id").index(1)),
+            Command::new("commit").arg(Arg::new("id").index(1)),
+            Command::new("merge").arg(Arg::new("id").index(1)),
+            Command::new("abort").arg(Arg::new("id").index(1)),
+            Command::new("clean"),
+            Command::new("doctor"),
+            Command::new("logs").arg(Arg::new("id").index(1)),
+            Command::new("bg")
+                .arg(Arg::new("id").index(1))
+                .arg(
+                    Arg::new("from")
+                        .long("from")
+                        .action(ArgAction::Set),
+                )
+                .arg(Arg::new("max").long("max").action(ArgAction::Set)),
+            Command::new("ps"),
+            Command::new("tickets")
+                .arg(Arg::new("import").long("import").action(ArgAction::SetTrue)),
+        ]
+    }
+
+    pub fn from_matches(matches: &clap::ArgMatches) -> Result<Self, String> {
+        match matches.subcommand_name() {
+            Some("init") => Ok(Cmd::Init),
+            Some("new") => {
+                let m = matches.subcommand_matches("new").unwrap_or_else(|| unreachable!());
+                let arg = m
+                    .get_one::<String>("arg")
+                    .unwrap_or_else(|| unreachable!())
+                    .clone();
+                let no_red = m.get_one::<String>("no_red").cloned();
+                let no_crap = m.get_one::<String>("no_crap").cloned();
+                Ok(Cmd::New {
+                    arg,
+                    no_red,
+                    no_crap,
+                })
+            }
+            Some("auto") => {
+                let m = matches.subcommand_matches("auto").unwrap_or_else(|| unreachable!());
+                let from = m.get_one::<String>("from").cloned();
+                let max = m.get_one::<u32>("max").copied();
+                Ok(Cmd::Auto { from, max })
+            }
+            Some("list") => Ok(Cmd::List),
+            Some("hint") => {
+                let m = matches.subcommand_matches("hint").unwrap_or_else(|| unreachable!());
+                let id = m.get_one::<String>("id").cloned();
+                Ok(Cmd::Hint { id })
+            }
+            Some("run") => {
+                let m = matches.subcommand_matches("run").unwrap_or_else(|| unreachable!());
+                let id = m.get_one::<String>("id").cloned();
+                Ok(Cmd::Run { id })
+            }
+            Some("commit") => {
+                let m = matches.subcommand_matches("commit").unwrap_or_else(|| unreachable!());
+                let id = m.get_one::<String>("id").cloned();
+                Ok(Cmd::Commit { id })
+            }
+            Some("merge") => {
+                let m = matches.subcommand_matches("merge").unwrap_or_else(|| unreachable!());
+                let id = m.get_one::<String>("id").cloned();
+                Ok(Cmd::Merge { id })
+            }
+            Some("abort") => {
+                let m = matches.subcommand_matches("abort").unwrap_or_else(|| unreachable!());
+                let id = m.get_one::<String>("id").cloned();
+                Ok(Cmd::Abort { id })
+            }
+            Some("clean") => Ok(Cmd::Clean),
+            Some("doctor") => Ok(Cmd::Doctor),
+            Some("logs") => {
+                let m = matches.subcommand_matches("logs").unwrap_or_else(|| unreachable!());
+                let id = m.get_one::<String>("id").cloned();
+                Ok(Cmd::Logs { id })
+            }
+            Some("bg") => {
+                let m = matches.subcommand_matches("bg").unwrap_or_else(|| unreachable!());
+                let id = m.get_one::<String>("id").cloned();
+                let from = m.get_one::<String>("from").cloned();
+                let max = m.get_one::<u32>("max").copied();
+                Ok(Cmd::Bg { id, from, max })
+            }
+            Some("ps") => Ok(Cmd::Ps),
+            Some("tickets") => {
+                let m = matches
+                    .subcommand_matches("tickets")
+                    .unwrap_or_else(|| unreachable!());
+                let import = m.get_one::<bool>("import").copied().unwrap_or(false);
+                Ok(Cmd::Tickets { import })
+            }
+            _ => Err("unknown subcommand".to_string()),
+        }
+    }
 }

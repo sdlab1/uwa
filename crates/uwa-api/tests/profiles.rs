@@ -92,12 +92,18 @@ async fn header_selects_the_profile() {
     // Three sessions were created for the same message body: one
     // default, one `work`, one `personal`.
     let v = sessions_list(&s).await;
-    let sessions = v["sessions"]
-        .as_array()
+    let sessions = v
+        .get("sessions")
+        .and_then(|s| s.as_array())
         .unwrap_or_else(|| unreachable!("sessions must be an array: {v}"));
     let mut profiles: Vec<String> = sessions
         .iter()
-        .map(|s| s["profile"].as_str().unwrap_or("default").to_string())
+        .map(|s| {
+            s.get("profile")
+                .and_then(|p| p.as_str())
+                .unwrap_or("default")
+                .to_string()
+        })
         .collect();
     profiles.sort();
     assert_eq!(
@@ -115,12 +121,17 @@ async fn same_profile_reuses_the_tab() {
     r.assert_status_ok();
 
     let v = sessions_list(&s).await;
-    let work: Vec<&Value> = v["sessions"]
-        .as_array()
+    let work: Vec<&Value> = v
+        .get("sessions")
+        .and_then(|s| s.as_array())
         .map(Vec::as_slice)
         .unwrap_or(&[])
         .iter()
-        .filter(|s| s["profile"] == "work")
+        .filter(|s| {
+            s.get("profile")
+                .and_then(|p| p.as_str())
+                == Some("work")
+        })
         .collect();
     assert_eq!(work.len(), 1, "same (conversation, profile) must reuse");
 }
@@ -131,8 +142,10 @@ async fn unknown_profile_is_a_bad_request() {
     let r = chat_as(&s, Some("nope")).await;
     r.assert_status_bad_request();
     let v: Value = r.json();
-    let msg = v["error"]["message"]
-        .as_str()
+    let msg = v
+        .get("error")
+        .and_then(|e| e.get("message"))
+        .and_then(|m| m.as_str())
         .unwrap_or_default()
         .to_string();
     assert!(msg.contains("unknown profile"), "{msg}");
@@ -152,34 +165,47 @@ async fn profiles_endpoint_lists_everything() {
         .await;
     r.assert_status_ok();
     let v: Value = r.json();
-    assert_eq!(v["supports_profiles"], true);
+    assert_eq!(
+        v.get("supports_profiles").and_then(|v| v.as_bool()),
+        Some(true)
+    );
 
-    let names: Vec<String> = v["profiles"]
-        .as_array()
-        .map(Vec::as_slice)
-        .unwrap_or(&[])
-        .iter()
-        .filter_map(|p| p["name"].as_str().map(String::from))
-        .collect();
+    let names: Vec<String> = v
+        .get("profiles")
+        .and_then(|p| p.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|p| {
+                    p.get("name").and_then(|n| n.as_str()).map(String::from)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     assert!(names.contains(&"default".to_string()));
     assert!(names.contains(&"work".to_string()));
     assert!(names.contains(&"personal".to_string()));
 
-    let work = v["profiles"]
-        .as_array()
-        .map(Vec::as_slice)
-        .unwrap_or(&[])
-        .iter()
-        .find(|p| p["name"] == "work")
-        .cloned()
+    let work = v
+        .get("profiles")
+        .and_then(|p| p.as_array())
+        .and_then(|a| {
+            a.iter()
+                .find(|p| p.get("name").and_then(|n| n.as_str()) == Some("work"))
+                .cloned()
+        })
         .unwrap_or_else(|| unreachable!("work must be listed"));
-    assert_eq!(work["active"], true);
-    assert!(!work["tabs"]
-        .as_array()
-        .map(Vec::as_slice)
-        .unwrap_or(&[])
-        .is_empty());
-    assert_eq!(work["label"], "Work");
+    assert_eq!(work.get("active").and_then(|v| v.as_bool()), Some(true));
+    assert!(
+        !work.get("tabs")
+            .and_then(|t| t.as_array())
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+            .is_empty()
+    );
+    assert_eq!(
+        work.get("label").and_then(|v| v.as_str()).unwrap_or(""),
+        "Work"
+    );
 }
 
 #[tokio::test]
@@ -192,8 +218,16 @@ async fn open_profile_tab_creates_a_new_tab() {
         .await;
     r.assert_status_ok();
     let v: Value = r.json();
-    assert_eq!(v["reused"], false);
-    assert!(v["tab"].as_str().unwrap_or_default().starts_with("dyn_"));
+    assert_eq!(
+        v.get("reused").and_then(|v| v.as_bool()),
+        Some(false)
+    );
+    assert!(
+        v.get("tab")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .starts_with("dyn_")
+    );
 }
 
 #[tokio::test]
@@ -219,20 +253,27 @@ async fn reset_profile_drops_its_tabs_and_sessions() {
         .await;
     r.assert_status_ok();
     let v: Value = r.json();
-    assert!(!v["dropped_tabs"]
-        .as_array()
-        .map(Vec::as_slice)
-        .unwrap_or(&[])
-        .is_empty());
+    assert!(
+        !v.get("dropped_tabs")
+            .and_then(|t| t.as_array())
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+            .is_empty()
+    );
 
     // The work session is gone.
     let v = sessions_list(&s).await;
-    let work: Vec<&Value> = v["sessions"]
-        .as_array()
+    let work: Vec<&Value> = v
+        .get("sessions")
+        .and_then(|s| s.as_array())
         .map(Vec::as_slice)
         .unwrap_or(&[])
         .iter()
-        .filter(|s| s["profile"] == "work")
+        .filter(|s| {
+            s.get("profile")
+                .and_then(|p| p.as_str())
+                == Some("work")
+        })
         .collect();
     assert!(work.is_empty(), "work sessions must be dropped: {v}");
 }
@@ -263,6 +304,14 @@ async fn default_profile_reuses_an_existing_tab_and_navigates() {
     // The mock tab's URL is blank, so the reuse prefix never matches;
     // the handler navigates the existing static tab instead of creating
     // a dynamic one.
-    assert_eq!(v["reused"], false);
-    assert!(!v["tab"].as_str().unwrap_or_default().starts_with("dyn_"));
+    assert_eq!(
+        v.get("reused").and_then(|v| v.as_bool()),
+        Some(false)
+    );
+    assert!(
+        !v.get("tab")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .starts_with("dyn_")
+    );
 }

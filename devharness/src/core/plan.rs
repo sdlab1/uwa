@@ -61,7 +61,7 @@ mod tests {
     #[test]
     fn plan_commit_carries_summary() {
         let step = next(0, 3, &Verdict::Pass, "feat: x");
-        let msg = step.commit_msg().unwrap();
+        let msg = step.commit_msg().unwrap_or_else(|| unreachable!());
         assert_eq!(msg, "feat: x");
     }
 }

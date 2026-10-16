@@ -22,7 +22,7 @@ pub fn import(store: &Store) -> anyhow::Result<usize> {
         }
         if !line.contains("red-тест:") {
             println!("  отклонено (нет red-идеи): {line}");
-            skipped += 1;
+            skipped = skipped.saturating_add(1);
             continue;
         }
         let title = ticket_title(line);
@@ -43,7 +43,7 @@ pub fn import(store: &Store) -> anyhow::Result<usize> {
         );
         std::fs::write(d.join("spec.md"), &spec)?;
         println!("  + {id}: {title}");
-        n += 1;
+        n = n.saturating_add(1);
     }
     std::fs::write(&obs_path, "")?;
     println!(
@@ -56,7 +56,11 @@ pub fn import(store: &Store) -> anyhow::Result<usize> {
 fn ticket_title(line: &str) -> String {
     let parts: Vec<&str> = line.split('|').collect();
     if parts.len() >= 2 {
-        let t = format!("obs: {} — {}", parts[0].trim(), parts[1].trim());
+        let t = format!(
+            "obs: {} — {}",
+            parts.first().unwrap_or_else(|| unreachable!()).trim(),
+            parts.get(1).unwrap_or_else(|| unreachable!()).trim()
+        );
         t.chars().take(72).collect()
     } else {
         line.trim().chars().take(72).collect()

@@ -86,9 +86,10 @@ fn fetch_latest_tag() -> Result<String> {
         .nth(1)
         .ok_or_else(|| anyhow!("malformed tag_name"))?;
     let first_quote = after.find('"').ok_or_else(|| anyhow!("no opening quote"))?;
-    let rest = &after[first_quote + 1..];
+    let start = first_quote.checked_add(1).unwrap_or_else(|| unreachable!());
+    let rest = after.get(start..).unwrap_or("");
     let end = rest.find('"').ok_or_else(|| anyhow!("no closing quote"))?;
-    Ok(rest[..end].to_string())
+    Ok(rest.get(..end).unwrap_or("").to_string())
 }
 
 pub(crate) fn http_get_string(url: &str) -> Result<String> {
@@ -135,7 +136,7 @@ fn verify_sha256(archive: &std::path::Path, sum_file: &std::path::Path) -> Resul
         if n == 0 {
             break;
         }
-        hasher.update(&buf[..n]);
+        hasher.update(buf.get(..n).unwrap_or(&[]));
     }
     let actual = hex(&hasher.finalize());
     if actual != expected {
@@ -146,10 +147,10 @@ fn verify_sha256(archive: &std::path::Path, sum_file: &std::path::Path) -> Resul
 
 pub(crate) fn hex(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut s = String::with_capacity(bytes.len() * 2);
+    let mut s = String::with_capacity(bytes.len().checked_mul(2).unwrap_or_else(|| unreachable!()));
     for b in bytes {
-        s.push(HEX[(b >> 4) as usize] as char);
-        s.push(HEX[(b & 0xf) as usize] as char);
+        s.push(HEX.get((b >> 4) as usize).copied().unwrap_or(b'0') as char);
+        s.push(HEX.get((b & 0xf) as usize).copied().unwrap_or(b'0') as char);
     }
     s
 }

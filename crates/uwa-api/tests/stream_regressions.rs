@@ -63,21 +63,36 @@ async fn stream_frames(s: &TestServer) -> Vec<Value> {
         .skip(1)
         .map(str::trim)
         .filter(|f| *f != "[DONE]" && !f.is_empty())
-        .map(|f| serde_json::from_str(f).unwrap_or_else(|e| panic!("bad frame {f:?}: {e}")))
+        .map(|f| {
+            serde_json::from_str(f).unwrap_or_else(|e| unreachable!("bad frame {f:?}: {e}"))
+        })
         .collect()
 }
 
 fn visible_text(frames: &[Value]) -> String {
     frames
         .iter()
-        .filter_map(|f| f["choices"][0]["delta"]["content"].as_str())
+        .filter_map(|f| {
+            f.get("choices")
+                .and_then(|c| c.get(0))
+                .and_then(|c| c.get("delta"))
+                .and_then(|d| d.get("content"))
+                .and_then(|c| c.as_str())
+        })
         .collect()
 }
 
 fn tool_call_frames(frames: &[Value]) -> Vec<&Value> {
     frames
         .iter()
-        .filter(|f| f["choices"][0]["delta"]["tool_calls"].is_array())
+        .filter(|f| {
+            f.get("choices")
+                .and_then(|c| c.get(0))
+                .and_then(|c| c.get("delta"))
+                .and_then(|d| d.get("tool_calls"))
+                .map(|t| t.is_array())
+                .unwrap_or(false)
+        })
         .collect()
 }
 
@@ -149,11 +164,21 @@ async fn streaming_self_heals_schema_invalid_call() {
 
     let calls = tool_call_frames(&frames);
     assert_eq!(calls.len(), 1, "frames: {frames:?}");
-    let args = calls[0]["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"]
-        .as_str()
-        .unwrap();
+    let args = calls
+        .get(0)
+        .unwrap_or_else(|| unreachable!("expected at least one tool_call frame"))
+        .get("choices")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("delta"))
+        .and_then(|d| d.get("tool_calls"))
+        .and_then(|t| t.get(0))
+        .and_then(|t| t.get("function"))
+        .and_then(|f| f.get("arguments"))
+        .and_then(|a| a.as_str())
+        .unwrap_or_default();
     assert_eq!(
-        serde_json::from_str::<Value>(args).unwrap(),
+        serde_json::from_str::<Value>(args)
+            .unwrap_or_else(|e| unreachable!("bad JSON: {e}")),
         json!({"city": "NYC"})
     );
     assert_eq!(p.sent().len(), 2, "a correction turn must be sent");
@@ -173,16 +198,23 @@ async fn streaming_reports_error_when_validation_never_passes() {
         tool_call_frames(&frames).is_empty(),
         "invalid call must not reach the client: {frames:?}"
     );
-    let last = frames.last().expect("frames");
+    let last = frames.last().unwrap_or_else(|| unreachable!("no frames"));
     // OpenAI streaming spec: error event + [DONE], no finish_reason on error.
     assert!(
-        last["choices"][0]["finish_reason"].is_null(),
+        last.get("choices")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("finish_reason"))
+            .map(|f| f.is_null())
+            .unwrap_or(false),
         "finish_reason must be null on error: {last:?}"
     );
-    assert!(last["error"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("schema validation"));
+    assert!(
+        last.get("error")
+            .and_then(|e| e.get("message"))
+            .and_then(|m| m.as_str())
+            .unwrap_or("")
+            .contains("schema validation")
+    );
 }
 
 // ---------- client disconnect ----------
@@ -192,7 +224,7 @@ fn plain_req() -> ChatCompletionRequest {
         "model": "gpt-4o",
         "messages": [{"role": "user", "content": "talk"}]
     }))
-    .unwrap()
+    .unwrap_or_else(|e| unreachable!("bad JSON: {e}"))
 }
 
 #[tokio::test]
@@ -226,8 +258,8 @@ async fn client_disconnect_stops_the_browser_turn() {
 
     let res = tokio::time::timeout(Duration::from_secs(1), task)
         .await
-        .expect("pipeline must stop soon after the client disconnects")
-        .expect("task");
+        .unwrap_or_else(|e| unreachable!("timeout: {e}"))
+        .unwrap_or_else(|e| unreachable!("task: {e}"));
     assert!(res.is_err(), "an abandoned stream is not a success");
     assert!(
         p.polled_chunks() < 50,

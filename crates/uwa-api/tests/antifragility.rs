@@ -36,10 +36,13 @@ async fn failing_provider_produces_503_with_openai_error_shape() {
     let v: serde_json::Value = r.json();
 
     assert!(
-        v["error"]["message"].is_string(),
+        v.get("error").and_then(|e| e.get("message")).map(|m| m.is_string()).unwrap_or(false),
         "missing error.message: {v}"
     );
-    assert!(v["error"]["type"].is_string(), "missing error.type: {v}");
+    assert!(
+        v.get("error").and_then(|e| e.get("type")).map(|t| t.is_string()).unwrap_or(false),
+        "missing error.type: {v}"
+    );
 
     // No leaked traces or source paths
     let body_str = v.to_string();
@@ -81,7 +84,7 @@ async fn provider_timeout_produces_graceful_error() {
     if status != 200 {
         let v: serde_json::Value = r.json();
         assert!(
-            v["error"]["message"].is_string(),
+            v.get("error").and_then(|e| e.get("message")).map(|m| m.is_string()).unwrap_or(false),
             "missing error.message on timeout: {v}"
         );
     }
@@ -121,7 +124,13 @@ async fn multibyte_chars_survive_chunk_boundaries() {
         if let Some(data) = chunk.strip_prefix("data: ") {
             if data != "[DONE]" {
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(data) {
-                    if let Some(delta) = v["choices"][0]["delta"]["content"].as_str() {
+                    if let Some(delta) = v
+                        .get("choices")
+                        .and_then(|c| c.get(0))
+                        .and_then(|c| c.get("delta"))
+                        .and_then(|d| d.get("content"))
+                        .and_then(|c| c.as_str())
+                    {
                         accumulated.push_str(delta);
                     }
                 }
@@ -170,7 +179,13 @@ async fn streaming_multibyte_chars_survive_chunk_boundaries() {
         if let Some(data) = chunk.strip_prefix("data: ") {
             if data != "[DONE]" {
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(data) {
-                    if let Some(delta) = v["choices"][0]["delta"]["content"].as_str() {
+                    if let Some(delta) = v
+                        .get("choices")
+                        .and_then(|c| c.get(0))
+                        .and_then(|c| c.get("delta"))
+                        .and_then(|d| d.get("content"))
+                        .and_then(|c| c.as_str())
+                    {
                         accumulated.push_str(delta);
                     }
                 }
@@ -206,9 +221,21 @@ async fn empty_response_handled_gracefully() {
     r.assert_status_ok();
     let v: serde_json::Value = r.json();
     // Empty content is valid (null or empty string)
-    let content = v["choices"][0]["message"]["content"].as_str().unwrap_or("");
+    let content = v
+        .get("choices")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("message"))
+        .and_then(|m| m.get("content"))
+        .and_then(|c| c.as_str())
+        .unwrap_or("");
     assert_eq!(content, "");
-    assert_eq!(v["choices"][0]["finish_reason"], "stop");
+    assert_eq!(
+        v.get("choices")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("finish_reason"))
+            .and_then(|f| f.as_str()),
+        Some("stop")
+    );
 }
 
 #[tokio::test]
@@ -257,7 +284,13 @@ async fn very_long_response_streaming_doesnt_overflow() {
         if let Some(data) = chunk.strip_prefix("data: ") {
             if data != "[DONE]" {
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(data) {
-                    if let Some(delta) = v["choices"][0]["delta"]["content"].as_str() {
+                    if let Some(delta) = v
+                        .get("choices")
+                        .and_then(|c| c.get(0))
+                        .and_then(|c| c.get("delta"))
+                        .and_then(|d| d.get("content"))
+                        .and_then(|c| c.as_str())
+                    {
                         total += delta.len();
                     }
                 }
@@ -310,7 +343,12 @@ async fn malformed_json_in_tool_call_is_rejected_gracefully() {
     let v: serde_json::Value = r.json();
     if status == 200 {
         // If 200, tool_calls should be null/empty since JSON was invalid
-        let tc = v["choices"][0]["message"]["tool_calls"].as_array();
+        let tc = v
+            .get("choices")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("message"))
+            .and_then(|m| m.get("tool_calls"))
+            .and_then(|t| t.as_array());
         assert!(
             tc.is_none() || tc.map(|a| a.is_empty()).unwrap_or(true),
             "expected no tool_calls for invalid JSON: {v}"
@@ -362,7 +400,9 @@ async fn circuit_breaker_opens_after_repeated_failures() {
         "circuit breaker should keep failing: {status}"
     );
     let v: serde_json::Value = r.json();
-    assert!(v["error"]["message"].is_string());
+    assert!(
+        v.get("error").and_then(|e| e.get("message")).map(|m| m.is_string()).unwrap_or(false)
+    );
 }
 
 #[tokio::test]
@@ -404,7 +444,12 @@ async fn provider_returns_empty_tool_call_block() {
     if status == 200 {
         let v: serde_json::Value = r.json();
         // If it succeeds, tool_calls should be empty or null
-        let tc = v["choices"][0]["message"]["tool_calls"].as_array();
+        let tc = v
+            .get("choices")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("message"))
+            .and_then(|m| m.get("tool_calls"))
+            .and_then(|t| t.as_array());
         assert!(tc.is_none() || tc.map(|a| a.is_empty()).unwrap_or(true));
     }
 }

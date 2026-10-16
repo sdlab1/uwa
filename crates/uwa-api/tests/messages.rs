@@ -28,11 +28,26 @@ async fn plain_text_end_turn() {
         .await;
     r.assert_status_ok();
     let v: serde_json::Value = r.json();
-    assert_eq!(v["type"], "message");
-    assert_eq!(v["role"], "assistant");
-    assert_eq!(v["content"][0]["type"], "text");
-    assert_eq!(v["content"][0]["text"], "hello");
-    assert_eq!(v["stop_reason"], "end_turn");
+    assert_eq!(v.get("type").and_then(|v| v.as_str()), Some("message"));
+    assert_eq!(v.get("role").and_then(|v| v.as_str()), Some("assistant"));
+    assert_eq!(
+        v.get("content")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("type"))
+            .and_then(|c| c.as_str()),
+        Some("text")
+    );
+    assert_eq!(
+        v.get("content")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("text"))
+            .and_then(|c| c.as_str()),
+        Some("hello")
+    );
+    assert_eq!(
+        v.get("stop_reason").and_then(|v| v.as_str()),
+        Some("end_turn")
+    );
 }
 
 #[tokio::test]
@@ -54,15 +69,28 @@ async fn tool_use_block_emitted() {
         .await;
     r.assert_status_ok();
     let v: serde_json::Value = r.json();
-    assert_eq!(v["stop_reason"], "tool_use");
-    let tool_use = v["content"]
-        .as_array()
-        .unwrap()
+    assert_eq!(
+        v.get("stop_reason").and_then(|v| v.as_str()),
+        Some("tool_use")
+    );
+    let tool_use = v
+        .get("content")
+        .and_then(|c| c.as_array())
+        .unwrap_or_else(|| unreachable!("content array missing"))
         .iter()
-        .find(|c| c["type"] == "tool_use")
-        .unwrap();
-    assert_eq!(tool_use["name"], "get_weather");
-    assert_eq!(tool_use["input"]["city"], "NYC");
+        .find(|c| c.get("type").and_then(|t| t.as_str()) == Some("tool_use"))
+        .unwrap_or_else(|| unreachable!("tool_use block not found"));
+    assert_eq!(
+        tool_use.get("name").and_then(|n| n.as_str()),
+        Some("get_weather")
+    );
+    assert_eq!(
+        tool_use
+            .get("input")
+            .and_then(|i| i.get("city"))
+            .and_then(|c| c.as_str()),
+        Some("NYC")
+    );
 }
 
 #[tokio::test]
@@ -109,5 +137,11 @@ async fn tool_result_roundtrip() {
         .await;
     r.assert_status_ok();
     let v: serde_json::Value = r.json();
-    assert_eq!(v["content"][0]["text"], "thanks");
+    assert_eq!(
+        v.get("content")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("text"))
+            .and_then(|c| c.as_str()),
+        Some("thanks")
+    );
 }

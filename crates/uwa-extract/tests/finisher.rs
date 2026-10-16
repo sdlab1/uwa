@@ -18,7 +18,7 @@ async fn stable_dom_fires_stable_signal() {
         min_wait: Duration::from_millis(0),
         max_wait: Duration::from_secs(2),
     });
-    let s = f.wait(&p).await.unwrap();
+    let s = f.wait(&p).await.unwrap_or_else(|_| unreachable!());
     assert_eq!(s, FinishSignal::Stable);
 }
 
@@ -32,7 +32,7 @@ async fn stop_button_gone_fires_stop() {
         min_wait: Duration::from_millis(0),
         max_wait: Duration::from_secs(2),
     });
-    let s = f.wait(&p).await.unwrap();
+    let s = f.wait(&p).await.unwrap_or_else(|_| unreachable!());
     assert_eq!(s, FinishSignal::Stop);
 }
 
@@ -50,7 +50,7 @@ async fn network_finished_fires_network_done() {
         min_wait: Duration::from_millis(0),
         max_wait: Duration::from_secs(2),
     });
-    let s = f.wait(&p).await.unwrap();
+    let s = f.wait(&p).await.unwrap_or_else(|_| unreachable!());
     assert_eq!(s, FinishSignal::NetworkDone);
 }
 
@@ -66,7 +66,7 @@ async fn hard_timeout_wins() {
         min_wait: Duration::from_millis(0),
         max_wait: Duration::from_millis(50),
     });
-    let s = f.wait(&p).await.unwrap();
+    let s = f.wait(&p).await.unwrap_or_else(|_| unreachable!());
     assert_eq!(s, FinishSignal::Timeout);
 }
 
@@ -81,6 +81,6 @@ async fn min_wait_blocks_early_stable() {
         max_wait: Duration::from_secs(2),
     });
     let start = std::time::Instant::now();
-    let _ = f.wait(&p).await.unwrap();
+    let _ = f.wait(&p).await.unwrap_or_else(|_| unreachable!());
     assert!(start.elapsed() >= Duration::from_millis(80));
 }

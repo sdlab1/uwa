@@ -190,9 +190,9 @@ mod tests {
             assistant_message = "#a"
             "####,
         )
-        .unwrap();
-        let p = &cfg.providers["x"];
-        let eff = p.effective(None).unwrap();
+        .unwrap_or_else(|_| unreachable!());
+        let p = cfg.providers.get("x").unwrap_or_else(|| unreachable!());
+        let eff = p.effective(None).unwrap_or_else(|_| unreachable!());
         assert_eq!(eff.selectors.input.as_deref(), Some(h("i").as_str()));
         assert!(eff.preset_name.is_none());
     }
@@ -217,9 +217,9 @@ mod tests {
             input = "#pro"
             "####,
         )
-        .unwrap();
-        let p = &cfg.providers["x"];
-        let eff = p.effective(None).unwrap();
+        .unwrap_or_else(|_| unreachable!());
+        let p = cfg.providers.get("x").unwrap_or_else(|| unreachable!());
+        let eff = p.effective(None).unwrap_or_else(|_| unreachable!());
         assert_eq!(eff.selectors.input.as_deref(), Some("#pro"));
         // Non-overridden fields come from top-level.
         assert_eq!(eff.selectors.send_button.as_deref(), Some("#s"));
@@ -245,8 +245,8 @@ mod tests {
             input = "#i"
             "####,
         )
-        .unwrap();
-        let p = &cfg.providers["x"];
+        .unwrap_or_else(|_| unreachable!());
+        let p = cfg.providers.get("x").unwrap_or_else(|| unreachable!());
         assert!(p.effective(Some("bogus")).is_err());
         assert!(p.effective(Some("pro")).is_ok());
     }
@@ -271,8 +271,8 @@ mod tests {
             input = "#pro"
             "####,
         )
-        .unwrap();
-        let eff = cfg.providers["x"].effective(Some("pro")).unwrap();
+        .unwrap_or_else(|_| unreachable!());
+        let eff = cfg.providers.get("x").unwrap_or_else(|| unreachable!()).effective(Some("pro")).unwrap_or_else(|_| unreachable!());
         assert_eq!(eff.selectors.stop_button.as_deref(), Some("#stop"));
     }
 }

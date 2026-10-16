@@ -874,7 +874,12 @@ mod tests {
         frames
             .iter()
             .filter(|f| f.event == "response.output_item.added")
-            .map(|f| f.json()["output_index"].as_u64().unwrap())
+            .map(|f| {
+                f.json()
+                    .get("output_index")
+                    .and_then(|o| o.as_u64())
+                    .unwrap_or_else(|| unreachable!("output_index missing"))
+            })
             .collect()
     }
 
@@ -900,14 +905,25 @@ mod tests {
         let completed = frames
             .iter()
             .find(|f| f.event == "response.completed")
-            .expect("completed event");
-        assert_eq!(completed.json()["response"]["status"], "completed");
+            .unwrap_or_else(|| unreachable!("completed event missing"));
+        let completed_json = completed.json();
         assert_eq!(
-            completed.json()["response"]["output"]
-                .as_array()
-                .unwrap()
-                .len(),
-            3
+            completed_json
+                .get("response")
+                .and_then(|r| r.get("status"))
+                .and_then(|s| s.as_str()),
+            Some("completed"),
+            "response status wrong: {completed_json}"
+        );
+        assert_eq!(
+            completed_json
+                .get("response")
+                .and_then(|r| r.get("output"))
+                .and_then(|o| o.as_array())
+                .map(|a| a.len())
+                .unwrap_or(0),
+            3,
+            "output len wrong: {completed_json}"
         );
     }
 
@@ -934,11 +950,23 @@ mod tests {
         let completed = frames
             .iter()
             .find(|f| f.event == "response.completed")
-            .expect("completed event");
+            .unwrap_or_else(|| unreachable!("completed event missing"));
         let completed = completed.json();
-        let output = completed["response"]["output"].as_array().unwrap();
-        assert_eq!(output[0]["type"], "message");
-        assert_eq!(output[1]["type"], "function_call");
+        let output = completed
+            .get("response")
+            .and_then(|r| r.get("output"))
+            .and_then(|o| o.as_array())
+            .unwrap_or_else(|| unreachable!("response.output array missing"));
+        assert_eq!(
+            output.get(0).and_then(|o| o.get("type")).and_then(|t| t.as_str()),
+            Some("message"),
+            "output[0].type wrong"
+        );
+        assert_eq!(
+            output.get(1).and_then(|o| o.get("type")).and_then(|t| t.as_str()),
+            Some("function_call"),
+            "output[1].type wrong"
+        );
     }
 
     #[tokio::test]
@@ -947,7 +975,7 @@ mod tests {
         // used to be reported as a clean `response.completed`.
         let frames = collect(|tx| {
             tx.try_send(chat::pipeline::StreamEvent::Delta("partial".into()))
-                .unwrap();
+                .unwrap_or_else(|e| unreachable!("try_send failed: {e}"));
             drop(tx);
         })
         .await;
@@ -955,12 +983,26 @@ mod tests {
         let failed = frames
             .iter()
             .find(|f| f.event == "response.failed")
-            .expect("response.failed event");
-        assert_eq!(failed.json()["response"]["status"], "failed");
-        assert!(failed.json()["response"]["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("dropped"));
+            .unwrap_or_else(|| unreachable!("response.failed event missing"));
+        let failed_json = failed.json();
+        assert_eq!(
+            failed_json
+                .get("response")
+                .and_then(|r| r.get("status"))
+                .and_then(|s| s.as_str()),
+            Some("failed"),
+            "response status wrong: {failed_json}"
+        );
+        assert!(
+            failed_json
+                .get("response")
+                .and_then(|r| r.get("error"))
+                .and_then(|e| e.get("message"))
+                .and_then(|m| m.as_str())
+                .map(|m| m.contains("dropped"))
+                .unwrap_or(false),
+            "error message should contain 'dropped': {failed_json}"
+        );
         assert!(frames.iter().all(|f| f.event != "response.completed"));
     }
 }
