@@ -185,9 +185,24 @@ pub async fn resolve_hint(
         }
     }
 
-    // Profile from X-UWA-Session is passed through to the session manager
-    // without validation. The session manager will handle creating the
-    // browser context if the transport supports profiles.
+    // Validate that a named profile exists in the config.
+    // `"default"` is always valid (the default browser context); any other
+    // name must be declared under `[profiles.<name>]` in the config.
+    if let Some(profile_name) = &out.profile {
+        if profile_name != "default" {
+            let cfg = state.cfg();
+            if !cfg.profiles.contains_key(profile_name) {
+                let available: Vec<&str> = std::iter::once("default")
+                    .chain(cfg.profiles.keys().map(String::as_str))
+                    .collect();
+                return Err(UwaError::BadRequest(format!(
+                    "unknown profile `{profile_name}`. Available profiles: {}",
+                    available.join(", ")
+                )));
+            }
+        }
+    }
+
     Ok(out)
 }
 

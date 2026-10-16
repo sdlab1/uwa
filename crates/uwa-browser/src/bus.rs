@@ -280,7 +280,8 @@ mod tests {
     async fn bus_without_tap_has_no_tap_channel() {
         let bus = NetBus::new();
         assert!(bus.tap_subscribe().is_none());
-        // Sending still works.
+        // Sending still works (a subscriber holds the receiver open).
+        let _rx = bus.subscribe("t").await;
         let a = bus.sender_for("t".into()).await;
         a.send(NetworkEvent::Finished {
             request_id: "r".into(),

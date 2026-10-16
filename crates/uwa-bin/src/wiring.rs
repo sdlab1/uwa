@@ -38,12 +38,15 @@ pub async fn run_with(config_path: PathBuf, cdp_url: &str) -> anyhow::Result<()>
             .with_context(|| format!("loading {}", config_path.display()))?,
     );
 
+    // Default lives under `UWA_HOME` (not the CWD): two daemons with
+    // different `UWA_HOME`s must not collide on one relative `uwa.pid`,
+    // and a foreground `uwa start` should not litter the caller's cwd.
     let _pid = uwa_lifecycle::PidFile::acquire(
         config
             .server
             .pid_file
             .clone()
-            .unwrap_or_else(|| "uwa.pid".into()),
+            .unwrap_or_else(crate::commands::paths::pid_file),
     )?;
 
     let shutdown = uwa_lifecycle::Shutdown::new();

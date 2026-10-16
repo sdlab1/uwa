@@ -24,6 +24,13 @@ const BASE_PORT: u16 = 18080; // avoid conflict with test server on 8080
 /// One Chromium config on a fixed port — enough for a provider route,
 /// `/v1/models`, and a `readyz` that requires a live CDP tab.
 const SMOKE_CONFIG_TEMPLATE: &str = r##"
+[backend]
+# The daemon's default backend is `nodriver` (Python sidecar + nodriver),
+# which needs `--no-sandbox` in containers. These tests are about the
+# daemon lifecycle against the Chromium `uwa start` itself launches, so
+# pin the plain-CDP backend the CLI bootstraps on port 9222.
+kind = "cdp"
+
 [server]
 bind = "127.0.0.1"
 port = __PORT__
