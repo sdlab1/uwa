@@ -14,6 +14,7 @@
   import Sessions   from './routes/Sessions.svelte';
   import Config     from './routes/Config.svelte';
   import Logs       from './routes/Logs.svelte';
+  import Events     from './routes/Events.svelte';
   import Debug      from './routes/Debug.svelte';
   import Conformance from './routes/Conformance.svelte';
 
@@ -28,6 +29,7 @@
     '/sessions': Sessions,
     '/config': Config,
     '/logs': Logs,
+    '/events': Events,
     '/debug': Debug,
     '/conformance': Conformance,
   };

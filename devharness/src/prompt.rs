@@ -100,6 +100,13 @@ pub fn fix_prompt(gate: &Gate, tail: &str, cfg: &RunConfig, store: &Store, id: &
             "Линтер нашёл проблемы в изменённых файлах. Хвост лога:\n\n{tail}\n\n\
 Почини так, чтобы линтер был чист (стиль — по замечаниям линтера, не глуши его). git не трогай. Обнови summary: {sum}"
         ),
+        Gate::Crap => {
+            let max = cfg.crap.as_ref().map(|c| c.max).unwrap_or(12);
+            format!(
+                "CRAP-гейт не прошёл: сложность функций хуже порога (score = C²·(1−cov)³ + C, нарушение = score > {max}). Лог:\n\n{tail}\n\n\
+Снизь сложность изменённых функций (разбей длинные цепочки условий, убери дублирование) или покрой их тестами (coverage ↑). Ослаблять/удалять проверки и «чинить» порог запрещено. git не трогай. Обнови summary: {sum}"
+            )
+        }
         Gate::Review => format!(
             "Независимый ревьюер нашёл замечания (второй запрос той же модели):\n\n{tail}\n\n\
 Почини эти проблемы в рамках спеки, не расширяя скоуп. git не трогай. Обнови summary: {sum}"
@@ -193,6 +200,7 @@ mod tests {
             (Gate::Verify, "Verify не прошёл"),
             (Gate::NoIgnored, "ignored"),
             (Gate::Lint, "Линтер нашёл"),
+            (Gate::Crap, "CRAP-гейт"),
             (Gate::Review, "Независимый ревьюер нашёл"),
             (Gate::Mutate, "Mutation-гейт"),
             (Gate::Bench, "Bench-гейт"),

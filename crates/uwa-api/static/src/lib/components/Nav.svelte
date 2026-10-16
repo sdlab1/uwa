@@ -12,6 +12,7 @@
     { path: '/sessions',   label: 'Sessions' },
     { path: '/config',     label: 'Config' },
     { path: '/logs',       label: 'Logs' },
+    { path: '/events',     label: 'Events' },
     { path: '/conformance', label: 'Conformance' },
     { path: '/debug',      label: 'Debug' },
   ];

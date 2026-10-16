@@ -5,7 +5,7 @@ use crate::core::gates::{
     self, ignored_lines, parse_review_verdict, tail_of, Gate, Raw, RedPhase, ReviewVerdict, Verdict,
 };
 use crate::core::state::{self, Status};
-use crate::core::types::{ItemId, MutateCfg, RunConfig};
+use crate::core::types::{CrapCfg, ItemId, MutateCfg, RunConfig};
 use crate::prompt;
 use crate::shell::color::colors;
 use crate::shell::git;
@@ -157,6 +157,20 @@ pub fn run(store: &Store, cfg: &RunConfig, id: &ItemId) -> anyhow::Result<()> {
             );
             die(store, id, 1);
         }
+    }
+
+    let no_crap = store
+        .read(item_rel(id, "no-crap"))
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false);
+    if no_crap && cfg.crap.is_some() {
+        let reason = store.read(item_rel(id, "no-crap")).unwrap_or_default();
+        println!(
+            "{}⚠  CRAP пропущен (записанный обход): {}{}",
+            c.y,
+            reason.trim(),
+            c.z
+        );
     }
     timing.stage("red-pre", store, id);
 
@@ -479,6 +493,39 @@ fn gate_ladder(
         LintKind::Ok => {}
     }
 
+    if let Some(cr) = &cfg.crap {
+        let no_crap = store
+            .read(item_rel(id, "no-crap"))
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false);
+        if no_crap {
+            let reason = store.read(item_rel(id, "no-crap")).unwrap_or_default();
+            let bypass = format!("crap: записанный обход (no-crap): {}\n", reason.trim());
+            std::fs::write(store.log_file(id, "crap"), &bypass).ok();
+        } else {
+            let (clog, verdict) = crap_gate(wt, cr);
+            std::fs::write(store.log_file(id, "crap"), &clog).ok();
+            timing.stage(format!("crap-r{}", round + 1), store, id);
+            match verdict {
+                Verdict::Pass => {}
+                Verdict::EnvBlocked { missing } => {
+                    return Err(GateFail::Env {
+                        log: clog,
+                        message: format!(
+                            "FAIL: CRAP env-блокер ({missing}). Блокер СРЕДЫ, не работа агента (детали выше)."
+                        ),
+                    })
+                }
+                Verdict::Fail { tail, .. } => {
+                    return Err(GateFail::Red {
+                        gate: Gate::Crap,
+                        tail,
+                    })
+                }
+            }
+        }
+    }
+
     if cfg.review {
         let (review_log, verdict) = review_gate(store, cfg, wt, id);
         std::fs::write(store.log_file(id, "review"), &review_log).ok();
@@ -706,6 +753,51 @@ enum MutateOutcome {
     Ok,
     Fail,
     Env,
+}
+
+fn crap_gate(wt: &Path, cr: &CrapCfg) -> (String, Verdict) {
+    let files = git::changed_files_scoped(wt, &cr.scope);
+    if files.is_empty() {
+        return (
+            format!(
+                "crap: нет изменённых файлов в {} — гейт пропущен\n",
+                cr.scope
+            ),
+            Verdict::Pass,
+        );
+    }
+    let envs = vec![("DEVH_CRAP_FILES".to_string(), files.join("\n"))];
+    let raw = match proc::run_logged(&cr.tool, wt, VERIFY_TIMEOUT, &envs) {
+        Ok(out) => proc::combined(&out),
+        Err(e) => e.describe(&cr.tool),
+    };
+    match gates::parse_crap_report(&raw, cr.max) {
+        None => (
+            format!(
+                "crap env: инструмент не распознан (нет 'CRAP: functions=N'); CRAP='{}'\n",
+                cr.tool
+            ),
+            Verdict::EnvBlocked {
+                missing: "CRAP: вывод инструмента не распознан (нет 'CRAP: functions=N')".into(),
+            },
+        ),
+        Some(report) => {
+            let mut log = raw;
+            if !log.ends_with('\n') {
+                log.push('\n');
+            }
+            log += &report.derived;
+            let verdict = if report.violations.is_empty() {
+                Verdict::Pass
+            } else {
+                Verdict::Fail {
+                    gate: Gate::Crap,
+                    tail: report.derived,
+                }
+            };
+            (log, verdict)
+        }
+    }
 }
 
 fn mutate_gate(m: &MutateCfg, wt: &Path) -> (String, MutateOutcome) {

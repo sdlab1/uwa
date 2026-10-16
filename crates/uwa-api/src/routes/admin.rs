@@ -1,6 +1,7 @@
 //! Admin endpoints: history, stats, selector test.
 
 use crate::error::{ApiError, ApiResult};
+use crate::events::LoggedPayload;
 use crate::state::AppState;
 use axum::extract::{Path, Query, State};
 use axum::Json;
@@ -1031,6 +1032,141 @@ pub async fn config_reload(State(state): State<AppState>) -> ApiResult<Json<serd
         "models": cfg.model_aliases.len(),
         "message": "configuration reloaded successfully",
     })))
+}
+
+// ---------- events ----------
+
+#[derive(Debug, Deserialize)]
+pub struct EventsQuery {
+    #[serde(default = "default_events_limit")]
+    pub limit: usize,
+    #[serde(default)]
+    pub target: Option<String>,
+    /// `response_body` | `finished`
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub url: Option<String>,
+}
+
+fn default_events_limit() -> usize {
+    200
+}
+
+pub async fn events_list(
+    State(state): State<AppState>,
+    Query(q): Query<EventsQuery>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let Some(log) = &state.runtime.events else {
+        return Ok(Json(serde_json::json!({
+            "available": false,
+            "hint": "the active transport does not expose an event tap",
+            "events": [],
+        })));
+    };
+    let summary = log.summary().await;
+    let events = log
+        .recent(
+            q.limit,
+            q.target.as_deref(),
+            q.kind.as_deref(),
+            q.url.as_deref(),
+        )
+        .await;
+    Ok(Json(serde_json::json!({
+        "available": true,
+        "summary": summary,
+        "events": events,
+    })))
+}
+
+pub async fn events_summary(State(state): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
+    let Some(log) = &state.runtime.events else {
+        return Ok(Json(serde_json::json!({ "available": false })));
+    };
+    Ok(Json(serde_json::json!({
+        "available": true,
+        "summary": log.summary().await,
+    })))
+}
+
+/// `POST /admin/events/clear` — drop the ring. Lifetime counters survive.
+pub async fn events_clear(State(state): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
+    if let Some(log) = &state.runtime.events {
+        log.clear().await;
+    }
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct EventsStreamQuery {
+    #[serde(default)]
+    pub target: Option<String>,
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub url: Option<String>,
+}
+
+/// `GET /admin/events/stream` — SSE tail of the tap.
+///
+/// Replays nothing; the caller fetches history once with
+/// `GET /admin/events` and merges. Filters are applied server-side so a
+/// UI filtering by one target doesn't pay for the rest.
+pub async fn events_stream(
+    State(state): State<AppState>,
+    Query(q): Query<EventsStreamQuery>,
+) -> axum::response::Response {
+    use axum::response::sse::{Event, KeepAlive, Sse};
+    use axum::response::IntoResponse;
+    use tokio_stream::wrappers::BroadcastStream;
+    use tokio_stream::StreamExt;
+
+    let Some(log) = state.runtime.events.clone() else {
+        // 200 with an immediate close, so the UI doesn't loop retrying.
+        let s = futures::stream::once(async {
+            Ok::<_, std::convert::Infallible>(Event::default().event("unavailable").data("{}"))
+        });
+        return Sse::new(s).into_response();
+    };
+
+    let rx = log.subscribe();
+    let target = q.target.clone();
+    let kind = q.kind.clone();
+    let url_filter = q.url.clone();
+
+    let stream = BroadcastStream::new(rx).filter_map(move |item| {
+        let ev = item.ok()?;
+        if let Some(t) = &target {
+            if &ev.target != t {
+                return None;
+            }
+        }
+        if let Some(k) = &kind {
+            if ev.kind() != k {
+                return None;
+            }
+        }
+        if let Some(sub) = &url_filter {
+            if !sub.is_empty() {
+                let url = match &ev.payload {
+                    LoggedPayload::ResponseBody { url, .. } => url.as_str(),
+                    LoggedPayload::Finished { request_id } => request_id.as_str(),
+                };
+                if !url.contains(sub) {
+                    return None;
+                }
+            }
+        }
+        let json = serde_json::to_string(&ev).unwrap_or_default();
+        Some(Ok::<_, std::convert::Infallible>(
+            Event::default().event("event").data(json),
+        ))
+    });
+
+    Sse::new(stream)
+        .keep_alive(KeepAlive::default())
+        .into_response()
 }
 
 /// Same glob as `uwa-config::url_matches`, duplicated here to avoid a

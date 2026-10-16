@@ -13,6 +13,8 @@ pub enum Cmd {
         arg: String,
         #[arg(long)]
         no_red: Option<String>,
+        #[arg(long)]
+        no_crap: Option<String>,
     },
     Auto {
         #[arg(long)]

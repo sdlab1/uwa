@@ -36,6 +36,13 @@ pub struct MutateCfg {
 }
 
 #[derive(Debug, Clone)]
+pub struct CrapCfg {
+    pub tool: String,
+    pub scope: String,
+    pub max: u32,
+}
+
+#[derive(Debug, Clone)]
 pub struct RunConfig {
     pub verify: String,
     pub bootstrap: String,
@@ -48,6 +55,7 @@ pub struct RunConfig {
     pub wt_root: PathBuf,
     pub log_days: u32,
     pub mutate: Option<MutateCfg>,
+    pub crap: Option<CrapCfg>,
     pub bench: Option<String>,
     pub no_ignored: bool,
     pub lint: bool,
@@ -72,6 +80,7 @@ impl Default for RunConfig {
             wt_root: PathBuf::from("/tmp"),
             log_days: 30,
             mutate: None,
+            crap: None,
             bench: None,
             no_ignored: true,
             lint: true,

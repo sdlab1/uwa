@@ -94,6 +94,9 @@ pub struct RuntimeServices {
     /// dashboard. Shared across requests so the status endpoint and the
     /// stop endpoint see the same recorder.
     pub recorder: Arc<tokio::sync::Mutex<Option<Arc<crate::recorder::Recorder>>>>,
+    /// Ring of recent network events. `None` when the transport has no
+    /// tap; the UI shows a hint in that case.
+    pub events: Option<Arc<crate::events::EventLog>>,
 }
 
 impl Default for RuntimeServices {
@@ -107,6 +110,7 @@ impl Default for RuntimeServices {
             pinning: Some(Arc::new(uwa_session::PinningStore::new(
                 std::time::Duration::from_secs(30 * 60),
             ))),
+            events: None,
         }
     }
 }
@@ -174,6 +178,13 @@ impl AppState {
     pub fn without_pinning(mut self) -> Self {
         let mut rt = (*self.runtime).clone();
         rt.pinning = None;
+        self.runtime = Arc::new(rt);
+        self
+    }
+
+    pub fn with_events(mut self, log: Arc<crate::events::EventLog>) -> Self {
+        let mut rt = (*self.runtime).clone();
+        rt.events = Some(log);
         self.runtime = Arc::new(rt);
         self
     }

@@ -11,7 +11,12 @@ pub fn red_from_spec(spec: &str) -> Option<String> {
         .filter(|c| !c.is_empty())
 }
 
-pub fn new_cmd(store: &Store, arg: Option<&str>, no_red: Option<&str>) -> anyhow::Result<()> {
+pub fn new_cmd(
+    store: &Store,
+    arg: Option<&str>,
+    no_red: Option<&str>,
+    no_crap: Option<&str>,
+) -> anyhow::Result<()> {
     let c = colors();
     let arg = arg.ok_or_else(|| anyhow::anyhow!("devh new \"title\""))?;
 
@@ -46,14 +51,20 @@ pub fn new_cmd(store: &Store, arg: Option<&str>, no_red: Option<&str>) -> anyhow
             if let Some(reason) = no_red {
                 std::fs::write(d.join("no-red"), reason)?;
             }
+            if let Some(reason) = no_crap {
+                std::fs::write(d.join("no-crap"), reason)?;
+            }
             drop(_g);
             println!(
-                "{}OK {}: {} (спека из todo/{n}.md){}{}",
+                "{}OK {}: {} (спека из todo/{n}.md){}{}{}",
                 c.g,
                 id.dir_name(),
                 title,
                 no_red
                     .map(|r| format!(" [RED пропущен: {r}]"))
+                    .unwrap_or_default(),
+                no_crap
+                    .map(|r| format!(" [CRAP пропущен: {r}]"))
                     .unwrap_or_default(),
                 c.z
             );
@@ -67,7 +78,7 @@ pub fn new_cmd(store: &Store, arg: Option<&str>, no_red: Option<&str>) -> anyhow
 
     let title = arg;
     let (id, d) = if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
-        let (id, d) = create_item(store, title, "", no_red)?;
+        let (id, d) = create_item(store, title, "", no_red, no_crap)?;
         let spec_path = d.join("spec.md");
         let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
         match std::process::Command::new(&editor).arg(&spec_path).status() {
@@ -84,16 +95,19 @@ pub fn new_cmd(store: &Store, arg: Option<&str>, no_red: Option<&str>) -> anyhow
         (id, d)
     } else {
         let spec = read_spec_stdin()?;
-        create_item(store, title, &spec, no_red)?
+        create_item(store, title, &spec, no_red, no_crap)?
     };
     println!(
-        "{}OK {}: {} (спека: {}){}{}",
+        "{}OK {}: {} (спека: {}){}{}{}",
         c.g,
         id.dir_name(),
         title,
         d.join("spec.md").display(),
         no_red
             .map(|r| format!(" [RED пропущен: {r}]"))
+            .unwrap_or_default(),
+        no_crap
+            .map(|r| format!(" [CRAP пропущен: {r}]"))
             .unwrap_or_default(),
         c.z
     );
@@ -116,6 +130,7 @@ pub fn create_item(
     title: &str,
     spec: &str,
     no_red: Option<&str>,
+    no_crap: Option<&str>,
 ) -> anyhow::Result<(ItemId, std::path::PathBuf)> {
     let _g = GlobalLock::acquire(&store.dir).map_err(|e| anyhow::anyhow!("flock: {e}"))?;
     let ids: Vec<ItemId> = store.items().iter().map(|i| i.id).collect();
@@ -130,6 +145,9 @@ pub fn create_item(
         std::fs::write(d.join("no-red"), reason)?;
     } else if let Some(red) = red_from_spec(spec) {
         std::fs::write(d.join("red.cmd"), &red)?;
+    }
+    if let Some(reason) = no_crap {
+        std::fs::write(d.join("no-crap"), reason)?;
     }
     Ok((id, d))
 }

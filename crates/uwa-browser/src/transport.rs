@@ -84,7 +84,7 @@ impl CdpTransport {
         let (browser, mut handler) = Browser::connect(ws_url.to_string())
             .await
             .map_err(|e| UwaError::Transport(format!("connect {ws_url}: {e}")))?;
-        let bus = NetBus::new();
+        let bus = NetBus::with_tap();
         let pool = Arc::new(TabPool::new(idle_ttl));
         let target_ids = Arc::new(Mutex::new(HashMap::new()));
         let pumped = Arc::new(Mutex::new(HashSet::new()));
@@ -299,6 +299,10 @@ impl uwa_core::Transport for CdpTransport {
 
     async fn shutdown(&self) -> Result<()> {
         CdpTransport::shutdown(self).await
+    }
+
+    fn event_tap(&self) -> Option<tokio::sync::broadcast::Receiver<uwa_core::TappedEvent>> {
+        self.bus.tap_subscribe()
     }
 }
 

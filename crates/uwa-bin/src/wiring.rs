@@ -11,6 +11,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
+use uwa_api::events::EventLog;
 use uwa_api::{router, AppState, ProviderRegistry};
 use uwa_config::Config;
 use uwa_core::Transport;
@@ -118,6 +119,36 @@ pub async fn run_with(config_path: PathBuf, cdp_url: &str) -> anyhow::Result<()>
         Arc::new(transport)
     };
 
+    // Event tap → in-memory ring for the dashboard's Events page.
+    let events = match transport.event_tap() {
+        Some(mut tap) => {
+            let log = Arc::new(EventLog::new(uwa_api::events::EventLogCfg::default()));
+            let stop = shutdown.clone();
+            let log_task = log.clone();
+            tokio::spawn(async move {
+                use tokio::sync::broadcast::error::RecvError;
+                loop {
+                    tokio::select! {
+                        _ = stop.wait() => break,
+                        r = tap.recv() => match r {
+                            Ok(ev) => log_task.ingest(ev).await,
+                            Err(RecvError::Lagged(n)) => {
+                                tracing::warn!(skipped = n, "events tap lagged");
+                            }
+                            Err(RecvError::Closed) => break,
+                        }
+                    }
+                }
+            });
+            tracing::info!("network event tap active");
+            Some(log)
+        }
+        None => {
+            tracing::info!("transport does not expose an event tap; Events page will be empty");
+            None
+        }
+    };
+
     // Sessions + sweeper (idle sessions + pinning TTL).
     let sessions = Arc::new(uwa_session::SessionManager::new(
         uwa_session::SessionCfg::default(),
@@ -164,7 +195,7 @@ pub async fn run_with(config_path: PathBuf, cdp_url: &str) -> anyhow::Result<()>
         "semaphores configured from provider.max_concurrency"
     );
 
-    let state = AppState::minimal(
+    let mut state = AppState::minimal(
         config.clone(),
         Arc::new(registry),
         transport.clone(),
@@ -174,6 +205,9 @@ pub async fn run_with(config_path: PathBuf, cdp_url: &str) -> anyhow::Result<()>
     .with_semaphores(Arc::new(sem))
     .with_history(history)
     .with_pinning(pinning);
+    if let Some(log) = events {
+        state = state.with_events(log);
+    }
 
     tracing::info!(
         pinning_enabled = state.runtime.pinning.is_some(),

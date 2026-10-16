@@ -58,6 +58,18 @@ pub fn init(root: &Path) -> anyhow::Result<()> {
         mutate_scope = "lib".into();
     }
 
+    let mut crap = env_or("CRAP", "");
+    let mut crap_scope = env_or("CRAP_SCOPE", "");
+    if crap.is_empty() && root.join("gobot/mix.exs").exists() {
+        crap = "cd gobot && mix crap.report".into();
+        crap_scope = "gobot/lib dev".into();
+    }
+    if crap.is_empty() && root.join("scripts/crap-rs.sh").exists() {
+        crap = "bash scripts/crap-rs.sh".into();
+        crap_scope = "uwa-core/src crates".into();
+    }
+    let crap_max = env_num_or("CRAP_MAX", 12);
+
     let mut rules = env_or("RULES", "");
     let mut rules_log = env_or("RULES_LOG", "");
     if root.join("todo/report.md").exists() && rules.is_empty() {
@@ -107,6 +119,13 @@ pub fn init(root: &Path) -> anyhow::Result<()> {
     c += &format!("MUTATE='{mutate}'  # мутационный гейт; {{module}}/{{file}} подставляются на каждый изменённый файл\n");
     c += &format!("MUTATE_SCOPE='{mutate_scope}'  # какие пути считать «прод-кодом» для мутаций\n");
     c += &format!("MIN_KILL={min_kill}           # минимальный kill-rate, %\n");
+    c += &format!(
+        "CRAP='{crap}'  # гейт CRAP (guardrail №2): score = C²·(1−cov)³ + C; пусто = выкл\n"
+    );
+    c += &format!(
+        "CRAP_SCOPE='{crap_scope}'  # какие пути анализировать (пусто = все изменённые)\n"
+    );
+    c += &format!("CRAP_MAX={crap_max}            # порог нарушения: score > MAX = красный\n");
     c += &format!("BENCH='{bench}'                     # перф-гейт, пример: bash devharness/examples/check_bench.sh\n");
     c += "# ── session-workflow (uwa: todo/report.md) ──\n";
     c += &format!("RULES='{rules}'               # файл правил проекта; промпт: «прочитай полностью, исполняй беспрекословно»\n");

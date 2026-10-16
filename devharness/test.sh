@@ -85,7 +85,47 @@ cat > "$T/mut-garbage.sh" <<'S'
 echo "какой-то чужой вывод без маркеров"
 exit 0
 S
-chmod +x "$T"/stub*.sh "$T/sleeper.sh" "$T"/mut-*.sh
+cat > "$T/crap-ok.sh" <<'S'
+#!/usr/bin/env bash
+echo "src/lib.rs:10 parse_ok C=6 cov=45"
+echo "src/bin.rs:20 run_cli C=3 cov=0"
+echo "CRAP: functions=2"
+S
+cat > "$T/crap-fix.sh" <<'S'
+#!/usr/bin/env bash
+if [ -f "$T_MUT_GOOD" ]; then
+  echo "src/lib.rs:10 parse_ok C=6 cov=45"
+  echo "CRAP: functions=1"
+else
+  echo "src/big.rs:5 complex C=14 cov=100"
+  echo "CRAP: functions=1"
+fi
+S
+cat > "$T/crap-bad.sh" <<'S'
+#!/usr/bin/env bash
+echo "src/big.rs:5 complex C=14 cov=100"
+echo "CRAP: functions=1"
+S
+cat > "$T/crap-garbage.sh" <<'S'
+#!/usr/bin/env bash
+echo "какой-то чужой вывод без маркеров"
+S
+cat > "$T/crap-bounds.sh" <<'S'
+#!/usr/bin/env bash
+echo "src/a.rs:1 edge C=12 cov=100"
+echo "src/b.rs:2 zero C=3 cov=0"
+echo "CRAP: functions=2"
+S
+cat > "$T/crap-99.sh" <<'S'
+#!/usr/bin/env bash
+echo "src/c.rs:3 tight C=12 cov=99"
+echo "CRAP: functions=1"
+S
+cat > "$T/crap-zero.sh" <<'S'
+#!/usr/bin/env bash
+echo "CRAP: functions=0"
+S
+chmod +x "$T"/stub*.sh "$T/sleeper.sh" "$T"/mut-*.sh "$T"/crap-*.sh
 
 echo "== 0. статика: shellcheck (полный прогон, 4 файла) =="
 if command -v shellcheck >/dev/null 2>&1; then
@@ -386,6 +426,76 @@ grep -q "нет RED-пруфа" "$T/out" && pass "спека Б честно о�
 [ -f .harness/items/W-001/red.cmd ] && pass "RED извлечён из строки спеки" || fail "RED извлечён"
 [ "$(cat .harness/items/W-002/status)" = open ] && pass "W-002 осталась в очереди" || fail "W-002 потеряна"
 grep -q "остался: W-002" "$T/out" && pass "итог auto перечисляет остаток" || fail "итог auto"
+
+echo "== 26. CRAP-гейт (guardrail №2): score = C²·(1−cov)³ + C, порог 12 =="
+R="$(fresh r26)"; base_env; export HARNESS_CRAP="$T/crap-ok.sh" HARNESS_CRAP_SCOPE='.' HARNESS_MAX_FIX=3
+cd "$R" || exit 1; "$DEVH" init >/dev/null
+printf 'спека\n' | "$DEVH" new "crap ok" --no-red x >/dev/null
+"$DEVH" run >"$T/out" 2>&1 && grep -q "0 violations" .harness/logs/W-001-crap.log \
+  && pass "CRAP зелёный: 0 violations в логе" || { fail "CRAP зелёный: 0 violations в логе"; cat "$T/out"; }
+
+R="$(fresh r27)"; base_env; rm -f "$T/mut-good"; export HARNESS_CRAP="$T/crap-fix.sh" HARNESS_CRAP_SCOPE='.' HARNESS_MAX_FIX=3
+cd "$R" || exit 1; "$DEVH" init >/dev/null
+printf 'спека\n' | "$DEVH" new "crap fix" --no-red x >/dev/null
+"$DEVH" run >"$T/out" 2>&1 && grep -q "гейт CRAP упал" "$T/out" && grep -q "0 violations" .harness/logs/W-001-crap.log \
+  && pass "CRAP fix-раунд довёл до 0 violations" || { fail "CRAP fix-раунд довёл до 0 violations"; cat "$T/out"; }
+
+R="$(fresh r28)"; base_env; export HARNESS_CRAP="$T/crap-garbage.sh" HARNESS_CRAP_SCOPE='.' HARNESS_MAX_FIX=3
+cd "$R" || exit 1; "$DEVH" init >/dev/null
+printf 'спека\n' | "$DEVH" new "crap env" --no-red x >/dev/null
+if "$DEVH" run >"$T/out" 2>&1; then
+  fail "CRAP env-блокер ≠ fix-раунд, статус active"
+else
+  grep -q "Блокер СРЕДЫ" "$T/out" && ! grep -q "раунд фикса" "$T/out" && [ "$(cat .harness/items/W-001/status)" = active ] \
+    && pass "CRAP env-блокер ≠ fix-раунд, статус active" || { fail "CRAP env-блокер ≠ fix-раунд, статус active"; cat "$T/out"; }
+fi
+
+R="$(fresh r29)"; base_env; rm -f "$T/mut-good"; export HARNESS_CRAP="$T/crap-bad.sh" HARNESS_CRAP_SCOPE='.'
+cd "$R" || exit 1; "$DEVH" init >/dev/null
+printf 'спека\n' | "$DEVH" new "crap max" --no-red x >/dev/null
+if HARNESS_MAX_FIX=0 HARNESS_CRAP_MAX=12 "$DEVH" run >"$T/out" 2>&1; then
+  fail "CRAP_MAX: score=14 красный при 12, зелёный при 20"
+elif grep -q "score=14" .harness/logs/W-001-crap.log && HARNESS_MAX_FIX=3 HARNESS_CRAP_MAX=20 "$DEVH" run >"$T/out2" 2>&1; then
+  pass "CRAP_MAX: score=14 красный при 12, зелёный при 20"
+else
+  fail "CRAP_MAX: score=14 красный при 12, зелёный при 20"; cat "$T/out" "$T/out2"
+fi
+
+R="$(fresh r30)"; base_env; export HARNESS_MAX_FIX=3 HARNESS_CRAP_SCOPE='.'
+cd "$R" || exit 1; "$DEVH" init >/dev/null
+printf 'спека\n' | "$DEVH" new "crap skip" --no-red x >/dev/null
+ok1=0; HARNESS_CRAP="$T/crap-zero.sh" "$DEVH" run >"$T/out" 2>&1 && ok1=1
+printf 'спека\n' | "$DEVH" new "crap skip2" --no-red x >/dev/null
+if [ "$ok1" = 1 ] && HARNESS_CRAP="$T/crap-garbage.sh" HARNESS_CRAP_SCOPE=zzz "$DEVH" run W-002 >"$T/out2" 2>&1; then
+  pass "CRAP: functions=0 и пустой scope — гейт пропущен, не env-блокер"
+else
+  fail "CRAP: functions=0 и пустой scope — гейт пропущен, не env-блокер"; cat "$T/out" "$T/out2"
+fi
+
+R="$(fresh r31)"; base_env; export HARNESS_CRAP="$T/crap-garbage.sh" HARNESS_CRAP_SCOPE='.' HARNESS_MAX_FIX=3
+cd "$R" || exit 1; "$DEVH" init >/dev/null
+printf 'спека\n' | "$DEVH" new "crap bypass" --no-red x --no-crap "инструмент недоступен" >/dev/null
+"$DEVH" run >"$T/out" 2>&1 && grep -q "CRAP пропущен (записанный обход): инструмент недоступен" "$T/out" \
+  && pass "записанный обход CRAP (--no-crap) пропущен гейт" || { fail "записанный обход CRAP (--no-crap) пропущен гейт"; cat "$T/out"; }
+
+R="$(fresh r32)"; base_env; export HARNESS_MAX_FIX=3
+cd "$R" || exit 1; "$DEVH" init >/dev/null
+printf 'спека\n' | "$DEVH" new "crap bounds" --no-red x >/dev/null
+ok1=0; HARNESS_CRAP="$T/crap-bounds.sh" HARNESS_CRAP_SCOPE='.' "$DEVH" run >"$T/out" 2>&1 && ok1=1
+if [ "$ok1" = 1 ] && HARNESS_CRAP="$T/crap-99.sh" HARNESS_CRAP_SCOPE='.' HARNESS_MAX_FIX=0 "$DEVH" run >"$T/out2" 2>&1; then
+  fail "граница CRAP: 12@100 и 3@0 зелёные, 12@99 красный"
+elif [ "$ok1" = 1 ]; then
+  pass "граница CRAP: 12@100 и 3@0 зелёные, 12@99 красный"
+else
+  fail "граница CRAP: bounds-прогон должен пройти"; cat "$T/out"
+fi
+
+if HARNESS_CRAP="$T/crap-garbage.sh" "$DEVH" doctor >"$T/out" 2>&1; then
+  fail "doctor ловит сломанный CRAP-инструмент"
+else
+  grep -q "FAIL" "$T/out" && grep -q "CRAP" "$T/out" \
+    && pass "doctor ловит сломанный CRAP-инструмент" || { fail "doctor ловит сломанный CRAP-инструмент"; cat "$T/out"; }
+fi
 
 echo
 echo "ИТОГО: PASS=$PASS FAIL=$FAIL"

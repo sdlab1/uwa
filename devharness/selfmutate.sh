@@ -3,7 +3,7 @@
 # Вносим известные баги в ИЗОЛИРОВАННУЮ копию devh-classic и проверяем, что test.sh их убивает.
 # «Тесты на вес золота» — применимо и к тестам самого харнесса.
 # Патчер — чистый awk (ENVIRON, без escape-ловушек -v); python-зависимости нет.
-# Гейт: 16/16. Новые гейты devh должны сопровождаться новым мутантом здесь.
+# Гейт: 18/18. Новые гейты devh должны сопровождаться новым мутантом здесь.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 W="$(mktemp -d /tmp/devh-selfmut-XXXXXX)"
@@ -204,6 +204,26 @@ cat > "$W/m.new" <<'S'
     if false; then
 S
 mutant "M16: auto не требует RED-пруф (спека без RED уезжает в прогон)" "$W/m.old" "$W/m.new"
+
+# ─── M17: CRAP-гейт отключён ───
+cat > "$W/m.old" <<'S'
+    if [ -n "$CRAP" ] && [ ! -s "$d/no-crap" ]; then
+      crap_gate > "$craplog" 2>&1
+S
+cat > "$W/m.new" <<'S'
+    if false; then
+      crap_gate > "$craplog" 2>&1
+S
+mutant "M17: CRAP-гейт отключён (нарушения пропускаются)" "$W/m.old" "$W/m.new"
+
+# ─── M18: сравнение score с CRAP_MAX инвертировано ───
+cat > "$W/m.old" <<'S'
+    if [ "$s_x1000" -gt $(( CRAP_MAX * 1000 )) ]; then
+S
+cat > "$W/m.new" <<'S'
+    if [ "$s_x1000" -le $(( CRAP_MAX * 1000 )) ]; then
+S
+mutant "M18: score > MAX инвертировано (зелёное краснеет, красное зеленеет)" "$W/m.old" "$W/m.new"
 
 echo
 echo "KILL-RATE: $KILLED/$TOTAL (skip=$SKIP)"

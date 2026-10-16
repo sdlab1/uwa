@@ -51,7 +51,7 @@ pub fn auto(store: &Store, cfg: &RunConfig, from: Option<&str>, max: u32) -> any
             } else {
                 title
             };
-            let (id, _d) = new::create_item(store, &title, &text, None)?;
+            let (id, _d) = new::create_item(store, &title, &text, None, None)?;
             let has_red = store.item_dir(&id).join("red.cmd").is_file();
             println!(
                 "  импорт: {id} — {title}{}",

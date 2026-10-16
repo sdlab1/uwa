@@ -123,6 +123,13 @@ pub fn doctor(store: &Store, cfg: &RunConfig, root: &Path) -> anyhow::Result<()>
         say("ok   bench-гейт выключен");
     }
 
+    if let Some(cr) = &cfg.crap {
+        say(&format!("..   smoke CRAP (≤{SMOKE_TIMEOUT_SECS}s)"));
+        crap_smoke(root, cr, &mut say, &mut fail, &mut failed);
+    } else {
+        say("ok   CRAP-гейт не настроен");
+    }
+
     for it in store.items() {
         orphan_checks(store, cfg, &it, &mut say, &mut warn);
     }
@@ -209,6 +216,45 @@ fn verify_smoke(root: &Path, verify: &str, say: &mut dyn FnMut(&str), warn: &mut
                 *warn += 1;
             }
         }
+    }
+}
+
+fn crap_smoke(
+    root: &Path,
+    cr: &crate::core::types::CrapCfg,
+    say: &mut dyn FnMut(&str),
+    fail: &mut u32,
+    failed: &mut Vec<String>,
+) {
+    let have_timeout = crate::commands::run::which("timeout");
+    let mut args: Vec<String> = Vec::new();
+    if have_timeout {
+        args.push(SMOKE_TIMEOUT_SECS.to_string());
+    }
+    args.push("sh".into());
+    args.push("-c".into());
+    args.push(cr.tool.clone());
+    let prog = if have_timeout { "timeout" } else { "sh" };
+    let contract = match std::process::Command::new(prog)
+        .args(&args)
+        .current_dir(root)
+        .env("DEVH_CRAP_FILES", "")
+        .output()
+    {
+        Ok(out) => {
+            let mut all = String::from_utf8_lossy(&out.stdout).into_owned();
+            all.push_str(&String::from_utf8_lossy(&out.stderr));
+            all.lines()
+                .any(|l| l.trim_start().starts_with("CRAP: functions="))
+        }
+        Err(_) => false,
+    };
+    if contract {
+        say("ok   CRAP: инструмент отвечает (контракт распознан)");
+    } else {
+        say("FAIL CRAP: инструмент не отвечает по контракту (нет 'CRAP: functions=N') — блокер СРЕДЫ");
+        *fail += 1;
+        failed.push("CRAP-инструмент не распознан (нет 'CRAP: functions=N')".into());
     }
 }
 

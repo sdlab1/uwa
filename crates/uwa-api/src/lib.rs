@@ -8,6 +8,7 @@
 //! - [`ApiError`] — the OpenAI-shaped error at the HTTP edge
 
 pub mod error;
+pub mod events;
 pub mod history;
 pub mod metrics;
 pub mod middleware;
@@ -297,7 +298,11 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/admin/logs/stream", get(routes::admin::log_stream))
         .route("/admin/config", get(routes::admin::config_get))
-        .route("/admin/config/reload", post(routes::admin::config_reload));
+        .route("/admin/config/reload", post(routes::admin::config_reload))
+        .route("/admin/events", get(routes::admin::events_list))
+        .route("/admin/events/summary", get(routes::admin::events_summary))
+        .route("/admin/events/clear", post(routes::admin::events_clear))
+        .route("/admin/events/stream", get(routes::admin::events_stream));
 
     // Layer order: the last `.layer` is outermost and runs first. The origin
     // guard must reject a hostile browser request before anything else

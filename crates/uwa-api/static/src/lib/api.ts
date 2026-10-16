@@ -247,6 +247,84 @@ export interface ConformanceReport {
   runs: ConformanceRun[];
   hint?: string;
 }
+// ---------- events ----------
+
+export interface LoggedEvent {
+  id: number;
+  at_ms: number;
+  target: string;
+  kind: 'response_body' | 'finished';
+  url?: string;
+  mime?: string;
+  body?: string;
+  size_bytes?: number;
+  truncated?: boolean;
+  request_id?: string;
+}
+
+export interface TargetCount {
+  target: string;
+  count: number;
+}
+
+export interface EventSummary {
+  capacity: number;
+  retained: number;
+  total: number;
+  targets: TargetCount[];
+}
+
+export interface EventListResp {
+  available: boolean;
+  hint?: string;
+  summary?: EventSummary;
+  events: LoggedEvent[];
+}
+
+export const getEvents = (opts: {
+  limit?: number;
+  target?: string;
+  kind?: string;
+  url?: string;
+} = {}) => {
+  const p = new URLSearchParams();
+  if (opts.limit) p.set('limit', String(opts.limit));
+  if (opts.target) p.set('target', opts.target);
+  if (opts.kind) p.set('kind', opts.kind);
+  if (opts.url) p.set('url', opts.url);
+  const q = p.toString();
+  return request<EventListResp>(`/admin/events${q ? `?${q}` : ''}`);
+};
+
+export const clearEvents = () =>
+  request<{ ok: boolean }>('/admin/events/clear', { method: 'POST' });
+
+export function streamEvents(
+  opts: { target?: string; kind?: string; url?: string } = {},
+  onEvent: (ev: LoggedEvent) => void,
+  onError?: (e: Event) => void,
+): () => void {
+  const p = new URLSearchParams();
+  if (opts.target) p.set('target', opts.target);
+  if (opts.kind) p.set('kind', opts.kind);
+  if (opts.url) p.set('url', opts.url);
+  const key = getApiKey();
+  if (key) p.set('api_key', key);
+  const q = p.toString();
+  const src = new EventSource(`/admin/events/stream${q ? `?${q}` : ''}`);
+  src.addEventListener('event', (e) => {
+    try {
+      const ev = JSON.parse((e as MessageEvent).data) as LoggedEvent;
+      onEvent(ev);
+    } catch { /* ignore */ }
+  });
+  src.addEventListener('unavailable', () => {
+    src.close();
+  });
+  src.onerror = (e) => onError?.(e);
+  return () => src.close();
+}
+
 export const getConformance = () => request<ConformanceReport>('/admin/conformance');
 
 

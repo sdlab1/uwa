@@ -16,12 +16,15 @@
 #   NO-IGNORED — ни одного ignored-теста в выводе verify (N ignored > 0 = красный)
 #   MUTATE     — мутационный гейт на изменённых файлах: kill-rate >= MIN_KILL%;
 #                инструмент не установлен = блокер СРЕДЫ, а не «пропуск»
+#   CRAP       — guardrail №2 (Uncle Bob): score = C²·(1−cov)³ + C, нарушение = score > CRAP_MAX;
+#                инструмент без контракта 'CRAP: functions=N' = блокер СРЕДЫ;
+#                обход только записанный: devh new --no-crap "<причина>"
 #   red.cmd    — RED-пруф, В ПЕРВУЮ ОЧЕРЕДЬ: до работы обязан падать, после — проходить;
 #                обход только записанный: devh new --no-red "<причина>"
 # Опционален ТОЛЬКО BENCH — перф-гейт (напр. criterion против baseline)
 #
 # Команды:
-#   devh init / new "title" [--no-red "причина"] | new <N> (из todo/N.md) / list / hint [id]
+#   devh init / new "title" [--no-red "причина"] [--no-crap "причина"] | new <N> (из todo/N.md) / list / hint [id]
 #   devh run [id] / commit [id] (правка summary) / merge [id]
 #   devh abort [id] / clean / doctor
 #   devh logs [id]             логи item: пути ко всем логам + хвосты agent/verify
@@ -55,6 +58,9 @@ MAX_ACTIVE="${HARNESS_MAX_ACTIVE:-3}"
 MIN_KILL="${HARNESS_MIN_KILL:-90}"
 MUTATE="${HARNESS_MUTATE:-}"
 MUTATE_SCOPE="${HARNESS_MUTATE_SCOPE:-}"
+CRAP="${HARNESS_CRAP:-}"
+CRAP_SCOPE="${HARNESS_CRAP_SCOPE:-}"
+CRAP_MAX="${HARNESS_CRAP_MAX:-12}"
 BENCH="${HARNESS_BENCH:-}"
 AGENT_TIMEOUT="${HARNESS_AGENT_TIMEOUT:-1800}"
 LOG_DAYS="${HARNESS_LOG_DAYS:-30}"
@@ -71,7 +77,7 @@ need_conf() {
   # shellcheck disable=SC1090
   . "$CONF"
   local v env
-  for v in VERIFY BOOTSTRAP AGENT MAX_FIX REMOTE MAIN WT_ROOT MAX_ACTIVE MIN_KILL MUTATE MUTATE_SCOPE BENCH AGENT_TIMEOUT LOG_DAYS RULES RULES_LOG MSG_DENY NO_IGNORED LINT LINT_CMD REVIEW; do
+  for v in VERIFY BOOTSTRAP AGENT MAX_FIX REMOTE MAIN WT_ROOT MAX_ACTIVE MIN_KILL MUTATE MUTATE_SCOPE CRAP CRAP_SCOPE CRAP_MAX BENCH AGENT_TIMEOUT LOG_DAYS RULES RULES_LOG MSG_DENY NO_IGNORED LINT LINT_CMD REVIEW; do
     env="HARNESS_$v"
     # shellcheck disable=SC2086
     if [ -n "${!env:-}" ]; then printf -v "$v" '%s' "${!env}"; fi
@@ -235,6 +241,14 @@ cmd_init() {
     MUTATE_SCOPE='src'
   fi
   [ -n "$MUTATE_SCOPE" ] || MUTATE_SCOPE='lib'
+  if [ -f "$ROOT/gobot/mix.exs" ] && [ -z "$CRAP" ]; then
+    CRAP='cd gobot && mix crap.report'
+    CRAP_SCOPE='gobot/lib dev'
+  fi
+  if [ -f "$ROOT/scripts/crap-rs.sh" ] && [ -z "$CRAP" ]; then
+    CRAP='bash scripts/crap-rs.sh'
+    CRAP_SCOPE='uwa-core/src crates'
+  fi
   if [ -f "$ROOT/todo/report.md" ]; then
     RULES='todo/report.md'; RULES_LOG='todo/report.md'
   fi
@@ -257,6 +271,9 @@ LOG_DAYS=$LOG_DAYS            # retention логов в .harness/logs (0 = не 
 MUTATE='$MUTATE'  # мутационный гейт; {module}/{file} подставляются на каждый изменённый файл
 MUTATE_SCOPE='$MUTATE_SCOPE'  # какие пути считать «прод-кодом» для мутаций
 MIN_KILL=$MIN_KILL           # минимальный kill-rate, %
+CRAP='$CRAP'  # гейт CRAP (guardrail №2): score = C²·(1−cov)³ + C; пусто = выкл
+CRAP_SCOPE='$CRAP_SCOPE'  # какие пути анализировать (пусто = все изменённые)
+CRAP_MAX=$CRAP_MAX            # порог нарушения: score > MAX = красный
 BENCH=''                     # перф-гейт, пример: bash devharness/examples/check_bench.sh
 # ── session-workflow (uwa: todo/report.md) ──
 RULES='$RULES'               # файл правил проекта; промпт: «прочитай полностью, исполняй беспрекословно»
@@ -277,10 +294,11 @@ EOF
 # ─── new ───────────────────────────────────────────────────────────
 cmd_new() {
   need_conf
-  local arg="" no_red=""
+  local arg="" no_red="" no_crap=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --no-red) no_red="${2:?--no-red требует записанную причину}"; shift 2 ;;
+      --no-crap) no_crap="${2:?--no-crap требует записанную причину}"; shift 2 ;;
       *) arg="$1"; shift ;;
     esac
   done
@@ -295,7 +313,8 @@ cmd_new() {
     title="$(head -1 "$d/spec.md")"; title="${title#\# }"; [ -n "$title" ] || title="Session $arg"
     echo "$title" > "$d/title"; echo open > "$d/status"; : > "$d/plan.md"
     [ -n "$no_red" ] && echo "$no_red" > "$d/no-red"
-    echo "${C_G}OK $id: $title (спека из todo/$arg.md)${no_red:+ [RED пропущен: $no_red]}${C_0}"
+    [ -n "$no_crap" ] && echo "$no_crap" > "$d/no-crap"
+    echo "${C_G}OK $id: $title (спека из todo/$arg.md)${no_red:+ [RED пропущен: $no_red]}${no_crap:+ [CRAP пропущен: $no_crap]}${C_0}"
     echo "   RED-пруф ОБЯЗАТЕЛЕН (в первую очередь): $d/red.cmd — команда, падающая на чистом HEAD"
     return 0
   fi
@@ -307,7 +326,8 @@ cmd_new() {
   if [ ! -t 0 ]; then cat > "$d/spec.md"
   else : > "$d/spec.md"; "${EDITOR:-vi}" "$d/spec.md"; fi
   [ -n "$no_red" ] && echo "$no_red" > "$d/no-red"
-  echo "${C_G}OK $id: $title (спека: $d/spec.md)${no_red:+ [RED пропущен: $no_red]}${C_0}"
+  [ -n "$no_crap" ] && echo "$no_crap" > "$d/no-crap"
+  echo "${C_G}OK $id: $title (спека: $d/spec.md)${no_red:+ [RED пропущен: $no_red]}${no_crap:+ [CRAP пропущен: $no_crap]}${C_0}"
   echo "   RED-пруф ОБЯЗАТЕЛЕН (в первую очередь): $d/red.cmd — команда, падающая на чистом HEAD"
 }
 
@@ -419,6 +439,57 @@ lint_gate() { # rc: 0 ok, 1 findings, 2 env-блокер
   [ "$bad" = 0 ]
 }
 
+# гейт CRAP (guardrail №2): score = C²·(1−cov)³ + C, нарушение = score > CRAP_MAX.
+# Контракт инструмента: строки '<file>:<line> <fun> C=<n> cov=<n>' + итог 'CRAP: functions=N'.
+# Нет контракта → env-блокер (rc=2): среда ≠ работа агента.
+crap_gate() { # rc: 0 ok, 1 violations, 2 env-блокер
+  local envmsg files f locfun loc fun rest c cov l d s_x1000 fns bad=0 out existing
+  envmsg="crap env: инструмент не распознан (нет 'CRAP: functions=N'); CRAP='$CRAP'"
+  # shellcheck disable=SC2086  # CRAP_SCOPE — список pathspec, слово-разбиение намеренно
+  files="$(git -C "$wt" diff --name-only HEAD -- $CRAP_SCOPE 2>/dev/null | sort -u)"
+  # shellcheck disable=SC2086  # CRAP_SCOPE — список pathspec, слово-разбиение намеренно
+  if [ -z "$files" ] && [ -n "$(git -C "$wt" status --porcelain -- $CRAP_SCOPE 2>/dev/null)" ]; then
+    files="$(git -C "$wt" status --porcelain -- $CRAP_SCOPE 2>/dev/null | cut -c4- | sort -u)"
+  fi
+  existing=""
+  while IFS= read -r f; do
+    [ -n "$f" ] && [ -f "$wt/$f" ] && existing+="$f"$'\n'
+  done <<<"$files"
+  files="${existing%$'\n'}"
+  if [ -z "$files" ]; then
+    echo "crap: нет изменённых файлов в $CRAP_SCOPE — гейт пропущен"
+    return 0
+  fi
+  out="$(cd "$wt" && DEVH_CRAP_FILES="$files" bash -c "$CRAP" 2>&1)" || true
+  fns="$(printf '%s\n' "$out" | grep -m1 '^CRAP: functions=' | sed 's/^CRAP: functions=//' | tr -dc '0-9')"
+  if [ -z "$fns" ]; then echo "$envmsg"; return 2; fi
+  printf '%s\n' "$out"
+  while IFS= read -r line; do
+    case "$line" in *" C="*) ;; *) continue ;; esac
+    locfun="${line%% C=*}"
+    rest="${line#* C=}"
+    c="${rest%% *}"
+    case "$rest" in *" cov="*) ;; *) echo "$envmsg"; return 2 ;; esac
+    cov="${rest#* cov=}"; cov="${cov%% *}"
+    case "$locfun" in *" "*) ;; *) echo "$envmsg"; return 2 ;; esac
+    loc="${locfun% *}"; fun="${locfun##* }"
+    f="${loc%:*}"; l="${loc##*:}"
+    case "$c$cov" in ''|*[!0-9]*) echo "$envmsg"; return 2 ;; esac
+    case "$l" in ''|*[!0-9]*) echo "$envmsg"; return 2 ;; esac
+    [ -n "$f" ] && [ -n "$fun" ] || { echo "$envmsg"; return 2; }
+    c=$((10#$c)); cov=$((10#$cov))
+    [ "$cov" -gt 100 ] && cov=100
+    d=$((100 - cov))
+    s_x1000=$(( (c*c*d*d*d + 999) / 1000 + c*1000 ))
+    if [ "$s_x1000" -gt $(( CRAP_MAX * 1000 )) ]; then
+      echo "crap VIOLATION: CRAP $f:$l $fun C=$c cov=$cov score=$((s_x1000 / 1000))"
+      bad=$((bad+1))
+    fi
+  done <<<"$out"
+  echo "crap: $fns functions, $bad violations (CRAP_MAX=$CRAP_MAX)"
+  [ "$bad" = 0 ]
+}
+
 # гейт REVIEW: дифф → отдельный запрос той же модели; вердикт
 review_gate() { # rc: 0 ok, 1 issues, 2 env-блокер
   local out verdict
@@ -456,7 +527,7 @@ cmd_run() {
   log="$HDIR/logs/$id-verify.log"; sum="$HDIR/summaries/$id.md"
   # per-item маршрутизация агента (лёгкое — дешёвой модели, сложное — сильной)
   if [ -s "$d/agent" ]; then AGENT="$(cat "$d/agent")"; echo ".. агент (per-item): $AGENT"; fi
-  local mlog="$HDIR/logs/$id-mutate.log" blog="$HDIR/logs/$id-bench.log" llog="$HDIR/logs/$id-lint.log" rlog="$HDIR/logs/$id-review.log" which=VERIFY
+  local mlog="$HDIR/logs/$id-mutate.log" blog="$HDIR/logs/$id-bench.log" llog="$HDIR/logs/$id-lint.log" rlog="$HDIR/logs/$id-review.log" craplog="$HDIR/logs/$id-crap.log" which=VERIFY
 
   # claim: WIP-лимит + статус под глобальным локом
   local t0; t0="$(date +%s)"
@@ -521,9 +592,13 @@ cmd_run() {
   fi
   tstage "red-pre"
 
-  # 3. агент → гейт-цикл (verify → mutation → bench; падение → fix-раунд агенту)
+  if [ -s "$d/no-crap" ] && [ -n "$CRAP" ]; then
+    echo "${C_Y}⚠  CRAP пропущен (записанный обход): $(cat "$d/no-crap")${C_0}"
+  fi
+
+  # 3. агент → гейт-цикл (verify → lint → crap → review → mutation → bench; падение → fix-раунд агенту)
   gate() {
-    local mrc lrc rrc
+    local mrc lrc rrc crc
     if ! (cd "$wt" && bash -c "$VERIFY") > "$log" 2>&1; then which=VERIFY; return 1; fi
     tstage "verify-r$((round+1))"
     if [ "$NO_IGNORED" = 1 ] && ! no_ignored_ok "$log"; then which=NO-IGNORED; return 1; fi
@@ -535,6 +610,16 @@ cmd_run() {
       set_status "$id" active; exit 1
     fi
     if [ "$lrc" -ne 0 ]; then which=LINT; return 1; fi
+    if [ -n "$CRAP" ] && [ ! -s "$d/no-crap" ]; then
+      crap_gate > "$craplog" 2>&1
+      crc=$?
+      tstage "crap-r$((round+1))"
+      if [ "$crc" -eq 2 ]; then
+        cat "$craplog" >&2; echo "FAIL: CRAP env-блокер. Блокер СРЕДЫ, не работа агента (детали выше)." >&2
+        set_status "$id" active; exit 1
+      fi
+      if [ "$crc" -ne 0 ]; then which=CRAP; return 1; fi
+    fi
     if [ "$REVIEW" = 1 ]; then
       review_gate > "$rlog" 2>&1
       rrc=$?
@@ -581,6 +666,11 @@ $(tail -40 "$log")
 $(tail -30 "$llog")
 
 Почини так, чтобы линтер был чист (стиль — по замечаниям линтера, не глуши его). git не трогай. Обнови summary: $sum" ;;
+      CRAP) run_agent "CRAP-гейт не прошёл: сложность функций хуже порога (score = C²·(1−cov)³ + C, нарушение = score > $CRAP_MAX). Лог:
+
+$(tail -40 "$craplog")
+
+Снизь сложность изменённых функций (разбей длинные цепочки условий, убери дублирование) или покрой их тестами (coverage ↑). Ослаблять/удалять проверки и «чинить» порог запрещено. git не трогай. Обнови summary: $sum" ;;
       REVIEW) run_agent "Независимый ревьюер нашёл замечания (второй запрос той же модели):
 
 $(tail -5 "$rlog")
@@ -989,6 +1079,22 @@ cmd_doctor() {
     say "ok   mutation-гейт выключен"
   fi
   [ -n "$BENCH" ] && say "ok   bench-гейт: $BENCH" || say "ok   bench-гейт выключен"
+  if [ -n "$CRAP" ]; then
+    local cout
+    if command -v timeout >/dev/null 2>&1; then
+      cout="$(cd "$ROOT" && DEVH_CRAP_FILES='' timeout 120 bash -c "$CRAP" 2>&1)" || true
+    else
+      cout="$(cd "$ROOT" && DEVH_CRAP_FILES='' bash -c "$CRAP" 2>&1)" || true
+    fi
+    if printf '%s\n' "$cout" | grep -q '^CRAP: functions='; then
+      say "ok   CRAP: инструмент отвечает (контракт распознан)"
+    else
+      say "FAIL CRAP: инструмент не отвечает по контракту (нет 'CRAP: functions=N') — блокер СРЕДЫ"
+      fail=1
+    fi
+  else
+    say "ok   CRAP-гейт не настроен"
+  fi
   # crash-recovery: сироты после прерванных run
   for d in "$(items_dir)"/W-*; do
     [ -d "$d" ] || continue

@@ -178,6 +178,41 @@ pub fn changed_files(wt: &Path) -> Vec<String> {
     all
 }
 
+fn names_scoped(wt: &Path, kind: &str, scope: &str) -> Vec<String> {
+    let mut args: Vec<String> = if kind == "diff" {
+        vec!["diff".into(), "--name-only".into(), "HEAD".into()]
+    } else {
+        vec!["status".into(), "--porcelain".into()]
+    };
+    args.push("--".into());
+    for s in scope.split_whitespace() {
+        args.push(s.to_string());
+    }
+    let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+    let out = git_out(wt, &refs);
+    out.lines()
+        .filter_map(|l| {
+            let name = if kind == "diff" {
+                l.trim().to_string()
+            } else {
+                l.get(3..)?.trim().to_string()
+            };
+            (!name.is_empty()).then_some(name)
+        })
+        .collect()
+}
+
+pub fn changed_files_scoped(wt: &Path, scope: &str) -> Vec<String> {
+    let mut files = names_scoped(wt, "diff", scope);
+    if files.is_empty() {
+        files = names_scoped(wt, "status", scope);
+    }
+    files.retain(|f| wt.join(f).is_file());
+    files.sort();
+    files.dedup();
+    files
+}
+
 pub fn review_diff(wt: &Path) -> String {
     let _ = git_ok(wt, &["add", "-N", "."]);
     let out = Command::new("git")

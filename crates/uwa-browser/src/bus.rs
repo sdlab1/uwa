@@ -7,23 +7,49 @@
 //! corresponding subscribe methods) share the same channel map so that
 //! a subscription by target ID receives events routed by root frame ID
 //! when they match (which is the case for same-process pages).
+//!
+//! ## Tap
+//!
+//! When the bus is created with [`NetBus::with_tap`], every per-target
+//! channel is mirrored to a single fan-out channel carrying
+//! [`TappedEvent`]. The dashboard's Events page subscribes to that tap;
+//! a transport without a tap is exactly as before.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tokio::sync::{broadcast, Mutex};
-use uwa_core::NetworkEvent;
+use uwa_core::{NetworkEvent, TappedEvent};
 
 const CAPACITY: usize = 512;
+const TAP_CAPACITY: usize = 2048;
 
 #[derive(Default, Clone)]
 pub struct NetBus {
     /// Keyed by group key (target ID == root frame ID for same-process pages).
     inner: Arc<Mutex<HashMap<String, broadcast::Sender<NetworkEvent>>>>,
+    /// Fan-out mirror. `None` when the bus was built without a tap.
+    tap: Arc<OnceLock<broadcast::Sender<TappedEvent>>>,
 }
 
 impl NetBus {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Bus that also mirrors every per-target event to a single tap
+    /// channel. The per-target forwarder task is short-lived: it exits
+    /// when the channel closes (i.e. when the tab is gone and no
+    /// subscriber holds a sender).
+    pub fn with_tap() -> Self {
+        let s = Self::default();
+        let (tx, _) = broadcast::channel(TAP_CAPACITY);
+        let _ = s.tap.set(tx);
+        s
+    }
+
+    /// Subscribe to the tap channel. `None` when the bus has no tap.
+    pub fn tap_subscribe(&self) -> Option<broadcast::Receiver<TappedEvent>> {
+        self.tap.get().map(|t| t.subscribe())
     }
 
     /// Get (creating if needed) the sender for `target_id`.
@@ -33,9 +59,24 @@ impl NetBus {
     /// subscribers.
     pub async fn sender_for(&self, target_id: String) -> broadcast::Sender<NetworkEvent> {
         let mut g = self.inner.lock().await;
-        g.entry(target_id)
-            .or_insert_with(|| broadcast::channel(CAPACITY).0)
-            .clone()
+        if let Some(existing) = g.get(&target_id) {
+            return existing.clone();
+        }
+        let (tx, mut rx) = broadcast::channel(CAPACITY);
+        if let Some(tap) = self.tap.get() {
+            let tap = tap.clone();
+            let target = target_id.clone();
+            tokio::spawn(async move {
+                while let Ok(ev) = rx.recv().await {
+                    let _ = tap.send(TappedEvent {
+                        target: target.clone(),
+                        event: ev,
+                    });
+                }
+            });
+        }
+        g.insert(target_id, tx.clone());
+        tx
     }
 
     /// Get (creating if needed) the sender for `root_frame_id`.
@@ -85,6 +126,7 @@ impl NetBus {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[tokio::test]
     async fn same_key_shares_one_channel() {
@@ -95,7 +137,7 @@ mod tests {
             request_id: "r1".into(),
         })
         .unwrap();
-        let ev = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+        let ev = tokio::time::timeout(Duration::from_secs(1), rx.recv())
             .await
             .expect("event should arrive")
             .unwrap();
@@ -113,7 +155,7 @@ mod tests {
         })
         .unwrap();
         assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(50), rx2.recv())
+            tokio::time::timeout(Duration::from_millis(50), rx2.recv())
                 .await
                 .is_err(),
             "t2 must not see t1 traffic"
@@ -141,7 +183,7 @@ mod tests {
             request_id: "shared".into(),
         })
         .unwrap();
-        let ev = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+        let ev = tokio::time::timeout(Duration::from_secs(1), rx.recv())
             .await
             .expect("event should arrive via shared channel")
             .unwrap();
@@ -159,7 +201,7 @@ mod tests {
             request_id: "cross".into(),
         })
         .unwrap();
-        let ev = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+        let ev = tokio::time::timeout(Duration::from_secs(1), rx.recv())
             .await
             .expect("event should arrive via shared channel")
             .unwrap();
@@ -189,7 +231,7 @@ mod tests {
         })
         .unwrap();
         for rx in [&mut r1, &mut r2, &mut r3] {
-            let ev = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            let ev = tokio::time::timeout(Duration::from_secs(1), rx.recv())
                 .await
                 .expect("every subscriber must receive")
                 .unwrap();
@@ -197,5 +239,52 @@ mod tests {
                 matches!(ev, NetworkEvent::Finished { ref request_id } if request_id == "broadcast")
             );
         }
+    }
+
+    #[tokio::test]
+    async fn tap_mirrors_events_from_every_target() {
+        let bus = NetBus::with_tap();
+        let mut tap = bus.tap_subscribe().expect("tap present");
+
+        let a = bus.sender_for("t1".into()).await;
+        let b = bus.sender_for("t2".into()).await;
+        a.send(NetworkEvent::Finished {
+            request_id: "r1".into(),
+        })
+        .unwrap();
+        b.send(NetworkEvent::Finished {
+            request_id: "r2".into(),
+        })
+        .unwrap();
+
+        let mut seen: Vec<(String, String)> = Vec::new();
+        for _ in 0..2 {
+            let ev = tokio::time::timeout(Duration::from_secs(1), tap.recv())
+                .await
+                .expect("event within 1s")
+                .unwrap();
+            let rid = match ev.event {
+                NetworkEvent::Finished { request_id } => request_id,
+                _ => panic!("unexpected"),
+            };
+            seen.push((ev.target, rid));
+        }
+        seen.sort();
+        assert_eq!(
+            seen,
+            vec![("t1".into(), "r1".into()), ("t2".into(), "r2".into())]
+        );
+    }
+
+    #[tokio::test]
+    async fn bus_without_tap_has_no_tap_channel() {
+        let bus = NetBus::new();
+        assert!(bus.tap_subscribe().is_none());
+        // Sending still works.
+        let a = bus.sender_for("t".into()).await;
+        a.send(NetworkEvent::Finished {
+            request_id: "r".into(),
+        })
+        .unwrap();
     }
 }

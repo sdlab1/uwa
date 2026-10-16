@@ -110,7 +110,8 @@ pub enum MediaSourceKind {
 }
 
 /// A network event relevant to response extraction.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum NetworkEvent {
     ResponseBody {
         /// CDP request id, so a `Finished` for the same request can be told
@@ -126,6 +127,19 @@ pub enum NetworkEvent {
     Finished {
         request_id: String,
     },
+}
+
+/// A [`NetworkEvent`] stamped with the tab it came from. This is what
+/// the tap channel carries: a single stream of everything happening on
+/// every tab, tagged so the consumer can route on it.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TappedEvent {
+    /// `TabId` as a string. Kept as `String` so the event is portable
+    /// across the transport boundary without a `TabId` import in the
+    /// HTTP layer.
+    pub target: String,
+    #[serde(flatten)]
+    pub event: NetworkEvent,
 }
 
 /// Site adapter: everything provider-specific lives behind this trait.
@@ -251,6 +265,16 @@ pub trait Transport: Send + Sync {
     /// that belonged to it. Default: no-op (nothing to drop).
     async fn close_profile(&self, _profile: &str) -> Result<Vec<TabId>> {
         Ok(Vec::new())
+    }
+
+    /// Live tap over every network event on every tab, tagged with the
+    /// target. Default `None`: a transport without a tap simply doesn't
+    /// feed the dashboard's Events page.
+    ///
+    /// The channel is fan-out, not replay — a slow consumer misses
+    /// events. The dashboard's ring buffer handles the replay side.
+    fn event_tap(&self) -> Option<tokio::sync::broadcast::Receiver<TappedEvent>> {
+        None
     }
 }
 

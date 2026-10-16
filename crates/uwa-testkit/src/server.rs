@@ -1,6 +1,7 @@
 //! Fluent builder for `AppState` + an `axum_test::TestServer`.
 
 use std::sync::Arc;
+use uwa_api::events::EventLog;
 use uwa_api::{router, AppState, ProviderRegistry};
 use uwa_config::Config;
 use uwa_core::{SiteProvider, Transport};
@@ -35,6 +36,7 @@ pub struct AppBuilder {
     sessions: Option<Arc<SessionManager>>,
     semaphores: Option<Arc<ProviderSemaphores>>,
     history: Option<Arc<uwa_history::HistoryStore>>,
+    events: Option<Arc<EventLog>>,
 }
 
 impl AppBuilder {
@@ -46,6 +48,7 @@ impl AppBuilder {
             sessions: None,
             semaphores: None,
             history: None,
+            events: None,
         }
     }
 
@@ -88,6 +91,11 @@ impl AppBuilder {
         self
     }
 
+    pub fn with_events(mut self, log: Arc<EventLog>) -> Self {
+        self.events = Some(log);
+        self
+    }
+
     pub fn build_state(self) -> AppState {
         let mut registry = ProviderRegistry::new();
         for p in self.providers {
@@ -102,6 +110,9 @@ impl AppBuilder {
         }
         if let Some(h) = self.history {
             state = state.with_history(h);
+        }
+        if let Some(l) = self.events {
+            state = state.with_events(l);
         }
         state
     }

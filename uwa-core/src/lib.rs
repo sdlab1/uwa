@@ -25,6 +25,6 @@ pub use ids::{ConversationId, RequestId, SessionId, TabId};
 pub use net::{ExtractionStrategy, FinisherTuning, NetDecoder, NetRules};
 pub use traits::{
     Capabilities, MediaResource, MediaSourceKind, NetworkEvent, Page, ResponseStream, SiteProvider,
-    ToolSpec, Transport,
+    TappedEvent, ToolSpec, Transport,
 };
 pub use types::media::{MediaAsset, MediaKind, MediaSummary};

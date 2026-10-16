@@ -12,11 +12,11 @@ pub mod tickets;
 
 use std::path::Path;
 
-use crate::core::types::{ItemId, MutateCfg, RunConfig};
+use crate::core::types::{CrapCfg, ItemId, MutateCfg, RunConfig};
 use crate::shell::store::{Item, Store};
 use crate::Cmd;
 
-pub const CONFIG_KEYS: [&str; 21] = [
+pub const CONFIG_KEYS: [&str; 24] = [
     "VERIFY",
     "BOOTSTRAP",
     "AGENT",
@@ -30,6 +30,9 @@ pub const CONFIG_KEYS: [&str; 21] = [
     "MUTATE",
     "MUTATE_SCOPE",
     "MIN_KILL",
+    "CRAP",
+    "CRAP_SCOPE",
+    "CRAP_MAX",
     "BENCH",
     "RULES",
     "RULES_LOG",
@@ -77,6 +80,13 @@ pub fn load_config(root: &Path) -> anyhow::Result<RunConfig> {
                 tool,
                 scope: g("MUTATE_SCOPE").unwrap_or_else(|| "lib".into()),
                 min_kill: u32v("MIN_KILL", 90),
+            }),
+        crap: g("CRAP")
+            .filter(|s| !s.trim().is_empty())
+            .map(|tool| CrapCfg {
+                tool,
+                scope: g("CRAP_SCOPE").unwrap_or_default(),
+                max: u32v("CRAP_MAX", 12),
             }),
         bench: g("BENCH").filter(|s| !s.trim().is_empty()),
         no_ignored: boolv("NO_IGNORED", true),
@@ -148,7 +158,11 @@ pub fn dispatch(cmd: &Cmd, root: &Path) -> anyhow::Result<()> {
     let cfg = load_config(root)?;
     match cmd {
         Cmd::Init => unreachable!(),
-        Cmd::New { arg, no_red } => new::new_cmd(&store, Some(arg), no_red.as_deref())?,
+        Cmd::New {
+            arg,
+            no_red,
+            no_crap,
+        } => new::new_cmd(&store, Some(arg), no_red.as_deref(), no_crap.as_deref())?,
         Cmd::Auto { from, max } => auto::auto(&store, &cfg, from.as_deref(), max.unwrap_or(0))?,
         Cmd::List => misc::list(&store, &cfg),
         Cmd::Hint { id } => {
