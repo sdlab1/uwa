@@ -89,6 +89,7 @@ pub fn init(root: &Path) -> anyhow::Result<()> {
     let min_kill = env_num_or("MIN_KILL", 90);
     let bench = env_or("BENCH", "");
     let no_ignored = env_num_or("NO_IGNORED", 1);
+    let ignored_allowlist = env_or("IGNORED_ALLOWLIST", "scripts/ignored-tests.txt");
     let lint = env_num_or("LINT", 1);
     let lint_cmd = env_or("LINT_CMD", "");
     let review = env_num_or("REVIEW", 1);
@@ -131,7 +132,8 @@ pub fn init(root: &Path) -> anyhow::Result<()> {
     c += &format!("RULES='{rules}'               # файл правил проекта; промпт: «прочитай полностью, исполняй беспрекословно»\n");
     c += &format!("RULES_LOG='{rules_log}'       # куда дописывать «## Session N …» после merge (пусто = выкл)\n");
     c += &format!("MSG_DENY='{msg_deny}'         # гигиена сообщения коммита (grep -E): матч → reject, лечение: devh commit\n");
-    c += &format!("NO_IGNORED={no_ignored}          # 1 = ни одного ignored-теста в выводе verify (0 = выкл для чужих форматов)\n");
+    c += &format!("NO_IGNORED={no_ignored}          # 1 = незаявленный ignored-тест в verify = fail (0 = выкл для чужих форматов)\n");
+    c += &format!("IGNORED_ALLOWLIST='{ignored_allowlist}'  # файл: regex имён ignored-тестов, которым разрешён игнор (нет файла = пустой allowlist)\n");
     c += &format!("LINT={lint}                      # 1 = авто-shellcheck изменённых *.sh\n");
     c += &format!("LINT_CMD='{lint_cmd}'         # проектный линтер (напр. cargo clippy -- -D warnings); пусто = выкл\n");
     c += &format!("REVIEW={review}                  # 1 = self-review диффа вторым запросом агенту (VERDICT: OK|ISSUES)\n");

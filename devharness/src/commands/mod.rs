@@ -16,7 +16,7 @@ use crate::core::types::{CrapCfg, ItemId, MutateCfg, RunConfig};
 use crate::shell::store::{Item, Store};
 use crate::Cmd;
 
-pub const CONFIG_KEYS: [&str; 24] = [
+pub const CONFIG_KEYS: [&str; 25] = [
     "VERIFY",
     "BOOTSTRAP",
     "AGENT",
@@ -38,6 +38,7 @@ pub const CONFIG_KEYS: [&str; 24] = [
     "RULES_LOG",
     "MSG_DENY",
     "NO_IGNORED",
+    "IGNORED_ALLOWLIST",
     "LINT",
     "LINT_CMD",
     "REVIEW",
@@ -60,6 +61,20 @@ pub fn load_config(root: &Path) -> anyhow::Result<RunConfig> {
     let boolv = |k: &str, d: bool| {
         g(k).map(|v| matches!(v.trim(), "1" | "true" | "yes"))
             .unwrap_or(d)
+    };
+    let ignored_allowlist = {
+        let path = g("IGNORED_ALLOWLIST")
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "scripts/ignored-tests.txt".into());
+        std::fs::read_to_string(root.join(&path))
+            .map(|t| {
+                t.lines()
+                    .map(str::trim)
+                    .filter(|l| !l.is_empty() && !l.starts_with('#'))
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default()
     };
     Ok(RunConfig {
         verify: g("VERIFY").unwrap_or_default(),
@@ -90,6 +105,7 @@ pub fn load_config(root: &Path) -> anyhow::Result<RunConfig> {
             }),
         bench: g("BENCH").filter(|s| !s.trim().is_empty()),
         no_ignored: boolv("NO_IGNORED", true),
+        ignored_allowlist,
         lint: boolv("LINT", true),
         lint_cmd: g("LINT_CMD").unwrap_or_default(),
         review: boolv("REVIEW", true),

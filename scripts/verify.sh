@@ -6,6 +6,41 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+# ── NO-IGNORED: allowlist-семантика ──────────────────────────────────────────
+# игнор разрешён, если имя теста матчится одному из regex в IGNORED_ALLOWLIST;
+# незаявленный (неallowlisted) игнор — FAIL. см. scripts/ignored-tests.txt
+IGNORED_ALLOWLIST="${IGNORED_ALLOWLIST:-scripts/ignored-tests.txt}"
+
+ignored_allowed() {
+    local name="$1"
+    [ -f "$IGNORED_ALLOWLIST" ] || return 1
+    while IFS= read -r pat || [ -n "$pat" ]; do
+        pat="${pat%$'\r'}"
+        case "$pat" in '' | '#'*) continue ;; esac
+        if printf '%s\n' "$name" | grep -Eq -- "$pat"; then
+            return 0
+        fi
+    done <"$IGNORED_ALLOWLIST"
+    return 1
+}
+
+# check_ignored(log): извлекает имена ignored-тестов ("test <name> ... ignored")
+# и падает ТОЛЬКО по незаявленным; в stderr — нарушители + как добавить в allowlist.
+check_ignored() {
+    local log="$1" bad="" name
+    while IFS= read -r name; do
+        [ -z "$name" ] && continue
+        ignored_allowed "$name" || bad="$bad $name"
+    done < <(grep -E '^test .+ \.\.\. ignored' "$log" 2>/dev/null |
+        sed -E 's/^test (.+) \.\.\. ignored.*/\1/' | sort -u)
+    if [ -n "$bad" ]; then
+        echo "FAIL: незаявленные ignored-тесты:$bad" >&2
+        echo "      добавь их regex в $IGNORED_ALLOWLIST (один на строку, '#' — комментарий)" >&2
+        return 1
+    fi
+}
+# ─────────────────────────────────────────────────────────────────────────────
+
 echo "==> 0/10 ui build"
 crates/uwa-api/static/build.sh
 
@@ -23,11 +58,11 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 
 echo "==> 5/10 cargo test (default features)"
 cargo test --workspace --locked 2>&1 | tee /tmp/verify-base.log
-! grep -E '[1-9][0-9]* ignored' /tmp/verify-base.log || { echo "FAIL: ignored tests found"; exit 1; }
+check_ignored /tmp/verify-base.log || exit 1
 
 echo "==> 6/10 cargo test (all features)"
 cargo test --workspace --all-features --locked 2>&1 | tee /tmp/verify-allfeat.log
-! grep -E '[1-9][0-9]* ignored' /tmp/verify-allfeat.log || { echo "FAIL: ignored tests found"; exit 1; }
+check_ignored /tmp/verify-allfeat.log || exit 1
 
 echo "==> 7/10 proptests (PROPTEST_CASES=5000)"
 PROPTEST_CASES=5000 cargo test -p uwa-tools --test proptest_parser --locked
@@ -55,7 +90,7 @@ fi
 echo "==> 10/10 insta snapshot tests"
 if command -v cargo-insta >/dev/null 2>&1; then
     cargo insta test --workspace --all-features 2>&1 | tee /tmp/verify-insta.log
-    ! grep -E '[1-9][0-9]* ignored' /tmp/verify-insta.log || { echo "FAIL: ignored in insta"; exit 1; }
+    check_ignored /tmp/verify-insta.log || exit 1
 else
     echo "   cargo-insta not installed, skipping (run: cargo install cargo-insta --locked)"
 fi
