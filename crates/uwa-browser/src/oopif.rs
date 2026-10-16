@@ -425,7 +425,7 @@ mod tests {
         // Get all sessions
         let all = registry.all_sessions().await;
         assert_eq!(all.len(), 1);
-        assert_eq!(all.get(0).unwrap_or_else(|| unreachable!()).session_id, session.session_id);
+        assert_eq!(all.first().unwrap_or_else(|| unreachable!()).session_id, session.session_id);
     }
 
     #[tokio::test]

@@ -688,12 +688,12 @@ mod tests {
             .unwrap_or_else(|e| unreachable!("converts: {e}"));
         assert_eq!(c.messages.len(), 1);
         assert_eq!(
-            c.messages.get(0).map(|m| m.role),
+            c.messages.first().map(|m| m.role),
             Some(Role::User),
             "messages[0].role wrong"
         );
         assert_eq!(
-            content_of(c.messages.get(0).unwrap_or_else(|| unreachable!("messages[0] missing"))),
+            content_of(c.messages.first().unwrap_or_else(|| unreachable!("messages[0] missing"))),
             json!("hello")
         );
     }
@@ -708,7 +708,7 @@ mod tests {
         };
         assert_eq!(c.messages.len(), 2);
         assert_eq!(
-            c.messages.get(0).unwrap_or_else(|| unreachable!()).role,
+            c.messages.first().unwrap_or_else(|| unreachable!()).role,
             Role::System
         );
     }
@@ -723,7 +723,7 @@ mod tests {
             Err(_) => unreachable!("converts"),
         };
         assert_eq!(
-            content_of(&c.messages.get(0).unwrap_or_else(|| unreachable!())),
+            content_of(&c.messages.first().unwrap_or_else(|| unreachable!())),
             json!("yo")
         );
     }
@@ -774,7 +774,7 @@ mod tests {
         assert_eq!(r.output.len(), 1);
         assert_eq!(r.usage.total_tokens, 7);
         assert!(matches!(
-            r.output.get(0).unwrap_or_else(|| unreachable!()),
+            r.output.first().unwrap_or_else(|| unreachable!()),
             OutputItem::Message { .. }
         ));
     }
@@ -796,7 +796,7 @@ mod tests {
         });
         let r = reshape("gpt-4o", &chat);
         assert_eq!(r.output.len(), 1);
-        match r.output.get(0).unwrap_or_else(|| unreachable!()) {
+        match r.output.first().unwrap_or_else(|| unreachable!()) {
             OutputItem::FunctionCall {
                 call_id,
                 name,
@@ -825,7 +825,7 @@ mod tests {
         assert_eq!(c.messages.len(), 3);
         assert_eq!(
             c.messages
-                .get(0)
+                .first()
                 .unwrap_or_else(|| unreachable!())
                 .role,
             Role::User
@@ -840,7 +840,7 @@ mod tests {
             .as_ref()
             .unwrap_or_else(|| unreachable!("tool_calls"));
         let tc0 = tc
-            .get(0)
+            .first()
             .unwrap_or_else(|| unreachable!());
         assert_eq!(tc0.id, "call_1");
         assert_eq!(tc0.function.name, "get_weather");
@@ -873,7 +873,7 @@ mod tests {
 };
         assert_eq!(
             tools
-                .get(0)
+                .first()
                 .unwrap_or_else(|| unreachable!())
                 .get("function")
                 .unwrap_or_else(|| unreachable!())
@@ -894,7 +894,7 @@ mod tests {
         ])))
         .unwrap_or_else(|_| unreachable!("converts"));
         let tool = c.messages
-            .get(0)
+            .first()
             .unwrap_or_else(|| unreachable!());
         assert_eq!(tool.role, Role::Tool);
         assert!(matches!(&tool.content, Some(MessageContent::Text(s)) if s.contains("ok")));
@@ -1047,7 +1047,7 @@ mod tests {
             .and_then(|o| o.as_array())
             .unwrap_or_else(|| unreachable!("response.output array missing"));
         assert_eq!(
-            output.get(0).and_then(|o| o.get("type")).and_then(|t| t.as_str()),
+            output.first().and_then(|o| o.get("type")).and_then(|t| t.as_str()),
             Some("message"),
             "output[0].type wrong"
         );

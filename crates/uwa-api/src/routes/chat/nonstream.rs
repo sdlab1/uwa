@@ -92,14 +92,14 @@ mod tests {
         assert_eq!(r.object, "chat.completion");
         assert_eq!(
             r.choices
-                .get(0)
+                .first()
                 .unwrap_or_else(|| unreachable!())
                 .finish_reason,
             Some(FinishReason::Stop)
         );
         assert!(
             r.choices
-                .get(0)
+                .first()
                 .unwrap_or_else(|| unreachable!())
                 .message
                 .tool_calls
@@ -125,7 +125,7 @@ mod tests {
             vec![],
         );
         let tc = r.choices
-            .get(0)
+            .first()
             .unwrap_or_else(|| unreachable!())
             .message
             .tool_calls
@@ -133,11 +133,11 @@ mod tests {
             .unwrap_or_else(|| unreachable!());
         assert_eq!(tc.len(), 1);
         assert_eq!(
-            tc.get(0).unwrap_or_else(|| unreachable!()).function.name,
+            tc.first().unwrap_or_else(|| unreachable!()).function.name,
             "echo"
         );
         assert_eq!(
-            tc.get(0)
+            tc.first()
                 .unwrap_or_else(|| unreachable!())
                 .function
                 .arguments,

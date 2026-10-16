@@ -721,7 +721,7 @@ mod tests {
             content: json!("hello"),
         };
         let oms = convert_message(&m);
-        let oa = oms.get(0).unwrap_or_else(|| unreachable!());
+        let oa = oms.first().unwrap_or_else(|| unreachable!());
         assert_eq!(oa.role, Role::User);
         assert!(matches!(oa.content, Some(MessageContent::Text(ref s)) if s == "hello"));
     }
@@ -736,18 +736,18 @@ mod tests {
             ]),
         };
         let cms = convert_message(&m);
-        let oa = cms.get(0).unwrap_or_else(|| unreachable!());
+        let oa = cms.first().unwrap_or_else(|| unreachable!());
         assert_eq!(oa.role, Role::Assistant);
         let tc = oa
             .tool_calls
             .clone()
             .unwrap_or_else(|| unreachable!());
         assert_eq!(
-            tc.get(0).unwrap_or_else(|| unreachable!()).function.name,
+            tc.first().unwrap_or_else(|| unreachable!()).function.name,
             "w"
         );
         assert!(
-            tc.get(0)
+            tc.first()
                 .unwrap_or_else(|| unreachable!())
                 .function
                 .arguments
@@ -764,7 +764,7 @@ mod tests {
             ]),
         };
         let oms = convert_message(&m);
-        let oa = oms.get(0).unwrap_or_else(|| unreachable!());
+        let oa = oms.first().unwrap_or_else(|| unreachable!());
         assert_eq!(oa.role, Role::Tool);
         assert_eq!(oa.tool_call_id.as_deref(), Some("t1"));
         assert!(matches!(oa.content, Some(MessageContent::Text(ref s)) if s == "22C sunny"));
@@ -786,18 +786,18 @@ mod tests {
         let out = convert_message(&m);
         assert_eq!(out.len(), 3, "{out:?}");
         assert_eq!(
-            out.get(0).unwrap_or_else(|| unreachable!()).role,
+            out.first().unwrap_or_else(|| unreachable!()).role,
             Role::Tool
         );
         assert_eq!(
-            out.get(0)
+            out.first()
                 .unwrap_or_else(|| unreachable!())
                 .tool_call_id
                 .as_deref(),
             Some("t1")
         );
         assert!(matches!(
-            out.get(0)
+            out.first()
                 .unwrap_or_else(|| unreachable!())
                 .content,
             Some(MessageContent::Text(ref s)) if s == "22C"
@@ -927,7 +927,7 @@ mod tests {
         assert_eq!(oa.messages.len(), 1);
         assert!(matches!(
             oa.messages
-                .get(0)
+                .first()
                 .unwrap_or_else(|| unreachable!())
                 .content,
             Some(MessageContent::Text(ref s)) if s == "a\nb"
@@ -995,13 +995,13 @@ mod tests {
             ]),
         };
         let tc = convert_message(&m)
-            .get(0)
+            .first()
             .unwrap_or_else(|| unreachable!())
             .tool_calls
             .clone()
             .unwrap_or_else(|| unreachable!());
         assert_eq!(
-            tc.get(0).unwrap_or_else(|| unreachable!()).function.arguments,
+            tc.first().unwrap_or_else(|| unreachable!()).function.arguments,
             "{}"
         );
         assert_eq!(
@@ -1015,13 +1015,13 @@ mod tests {
             content: json!([{"type": "tool_use", "id": "t3", "name": "w", "input": {"a": 1}}]),
         };
         let tc = convert_message(&m)
-            .get(0)
+            .first()
             .unwrap_or_else(|| unreachable!())
             .tool_calls
             .clone()
             .unwrap_or_else(|| unreachable!());
         assert_eq!(
-            tc.get(0).unwrap_or_else(|| unreachable!()).function.arguments,
+            tc.first().unwrap_or_else(|| unreachable!()).function.arguments,
             r#"{"a":1}"#
         );
     }
