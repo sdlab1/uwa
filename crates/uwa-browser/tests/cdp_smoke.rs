@@ -66,7 +66,8 @@ async fn serve(port: u16) {
                         return;
                     }
                 };
-                buf.extend_from_slice(&chunk[..n]);
+                let slice: &[u8] = chunk.get(..n).unwrap_or_else(|| &[]);
+                buf.extend_from_slice(slice);
                 if buf.windows(4).any(|w| w == b"\r\n\r\n") {
                     break;
                 }
@@ -113,7 +114,8 @@ async fn self_check(port: u16) {
         if n == 0 {
             break;
         }
-        buf.extend_from_slice(&chunk[..n]);
+        let slice: &[u8] = chunk.get(..n).unwrap_or_else(|| &[]);
+        buf.extend_from_slice(slice);
     }
     let s = String::from_utf8_lossy(&buf);
     assert!(s.contains("200 OK"), "self check failed, got: {s:?}");
@@ -356,7 +358,8 @@ async fn cdp_http_ready(url: &str) -> bool {
             if n == 0 {
                 break;
             }
-            buf.extend_from_slice(&chunk[..n]);
+            let slice: &[u8] = chunk.get(..n).unwrap_or_else(|| &[]);
+            buf.extend_from_slice(slice);
             if buf.windows(20).any(|w| w == b"webSocketDebuggerUrl") {
                 return Some(());
             }
@@ -792,7 +795,7 @@ async fn chrome_renders_a_local_page_without_cdp() {
         html.contains("smoke-body"),
         "the page never rendered the fetched payload ({} bytes): {}",
         html.len(),
-        &html[..html.len().min(600)]
+        html.get(..html.len().min(600)).unwrap_or_else(|| "")
     );
     eprintln!("[dump] {} bytes, payload rendered", html.len());
 }
@@ -825,7 +828,8 @@ async fn serve_oopif_site(port: u16) {
                     Ok(0) | Err(_) => return,
                     Ok(n) => n,
                 };
-                buf.extend_from_slice(&chunk[..n]);
+                let slice: &[u8] = chunk.get(..n).unwrap_or_else(|| &[]);
+                buf.extend_from_slice(slice);
                 if buf.windows(4).any(|w| w == b"\r\n\r\n") {
                     break;
                 }
@@ -879,7 +883,7 @@ async fn live_frames_eval_and_oopif_tracking() {
     tokio::spawn(serve_oopif_site(site_port));
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let guard = ChromeGuard::spawn(chrome_port).unwrap_or_else(|_| unreachable!("no chromium found; set UWA_CHROME_BIN"));
+    let guard = ChromeGuard::spawn(chrome_port).unwrap_or_else(|| unreachable!("no chromium found; set UWA_CHROME_BIN"));
     let debug_url = guard.debug_url(chrome_port);
     assert!(
         wait_for_ws(&debug_url, Duration::from_secs(20)).await,
@@ -1014,7 +1018,7 @@ async fn live_oopif_eval_and_stealth() {
     tokio::spawn(serve_oopif_site(site_port));
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let guard = ChromeGuard::spawn(chrome_port).unwrap_or_else(|_| unreachable!("no chromium found; set UWA_CHROME_BIN"));
+    let guard = ChromeGuard::spawn(chrome_port).unwrap_or_else(|| unreachable!("no chromium found; set UWA_CHROME_BIN"));
     let debug_url = guard.debug_url(chrome_port);
     assert!(
         wait_for_ws(&debug_url, Duration::from_secs(20)).await,
