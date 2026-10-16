@@ -285,7 +285,7 @@ mod tests {
         })
         .await;
 
-        let last = frames.last().unwrap_or_else(|_| unreachable!("frames"));
+        let last = frames.last().unwrap_or_else(|| unreachable!("frames"));
         assert!(last.is_done_sentinel());
         let finish_chunk = &frames
             .get(frames.len() - 2)
@@ -366,7 +366,7 @@ mod tests {
         })
         .await;
 
-        let last = frames.last().unwrap_or_else(|_| unreachable!("frames"));
+        let last = frames.last().unwrap_or_else(|| unreachable!("frames"));
         assert!(last.is_done_sentinel());
         let error_chunk = &frames
             .get(frames.len() - 2)
@@ -389,7 +389,7 @@ mod tests {
                 .get("message")
                 .unwrap_or_else(|| unreachable!())
                 .as_str()
-                .unwrap_or_else(|_| unreachable!())
+                .unwrap_or_else(|| unreachable!())
                 .contains("dropped")
         );
         // ...and no clean `stop` finish chunk anywhere.

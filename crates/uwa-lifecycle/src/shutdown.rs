@@ -82,7 +82,10 @@ impl Shutdown {
 mod tests {
     use super::*;
 
-    #[tokio::test]
+    // Pure Notify + virtual clock: paused time makes the 20ms sleep and
+    // the 1s timeouts instantaneous (tokio auto-advances the clock when
+    // every task is parked on a timer), so this test costs ~0 wall time.
+    #[tokio::test(start_paused = true)]
     async fn trigger_wakes_waiters() {
         let s = Shutdown::new();
         let a = s.clone();
@@ -103,7 +106,7 @@ mod tests {
         assert!(s.is_triggered());
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn wait_returns_immediately_after_trigger() {
         let s = Shutdown::new();
         s.trigger();

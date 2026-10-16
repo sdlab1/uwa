@@ -1,0 +1,22 @@
+# nextest configuration for the uwa workspace.
+#
+# Machine context: 2 physical cores / 4 threads, ~7.5G RAM, shared with
+# other build sessions. Process-per-test model uses the cores better than
+# libtest's in-binary threads, so we leave test-threads at the default
+# (logical CPUs = 4) but guard against runaway processes.
+
+[profile.default]
+# A single test that exceeds 60s is almost certainly hung waiting on a
+# port or a browser; 3 slow periods before we kill it instead of letting
+# CI sit on it forever.
+slow-timeout = { period = "60s", terminate-after = 3 }
+# Per-test timeout so one broken test can't wedge the whole run.
+# 120s is generous for pure mocks; raise if a real chromium e2e needs it.
+#fail-timeout = { period = "120s" }
+
+[profile.ci]
+fail-fast = { max = 10 }
+# flaky-test detection: e2e fixtures (browser/port races) may flake; a
+# single retry is cheap compared to a re-run of the whole suite.
+retries = { backoff = "exponential", count = 1, max-delay = "1s" }
+slow-timeout = { period = "120s", terminate-after = 3 }

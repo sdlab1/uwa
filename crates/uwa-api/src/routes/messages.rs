@@ -735,12 +735,13 @@ mod tests {
                 {"type": "tool_use", "id": "toolu_1", "name": "w", "input": {"city": "NYC"}}
             ]),
         };
-        let oa = convert_message(&m).get(0).unwrap_or_else(|| unreachable!());
+        let cms = convert_message(&m);
+        let oa = cms.get(0).unwrap_or_else(|| unreachable!());
         assert_eq!(oa.role, Role::Assistant);
         let tc = oa
             .tool_calls
             .clone()
-            .unwrap_or_else(|_| unreachable!());
+            .unwrap_or_else(|| unreachable!());
         assert_eq!(
             tc.get(0).unwrap_or_else(|| unreachable!()).function.name,
             "w"
@@ -852,7 +853,7 @@ mod tests {
                 .get("message")
                 .unwrap_or_else(|| unreachable!())
                 .as_str()
-                .unwrap_or_else(|_| unreachable!())
+                .unwrap_or_else(|| unreachable!())
                 .contains("nope")
         );
         assert!(
@@ -998,7 +999,7 @@ mod tests {
             .unwrap_or_else(|| unreachable!())
             .tool_calls
             .clone()
-            .unwrap_or_else(|_| unreachable!());
+            .unwrap_or_else(|| unreachable!());
         assert_eq!(
             tc.get(0).unwrap_or_else(|| unreachable!()).function.arguments,
             "{}"
@@ -1018,7 +1019,7 @@ mod tests {
             .unwrap_or_else(|| unreachable!())
             .tool_calls
             .clone()
-            .unwrap_or_else(|_| unreachable!());
+            .unwrap_or_else(|| unreachable!());
         assert_eq!(
             tc.get(0).unwrap_or_else(|| unreachable!()).function.arguments,
             r#"{"a":1}"#
@@ -1214,7 +1215,7 @@ mod tests {
                 .get("message")
                 .unwrap_or_else(|| unreachable!())
                 .as_str()
-                .unwrap_or_else(|_| unreachable!())
+                .unwrap_or_else(|| unreachable!())
                 .contains("boom")
         );
     }
@@ -1258,7 +1259,7 @@ mod tests {
                 .get("message")
                 .unwrap_or_else(|| unreachable!())
                 .as_str()
-                .unwrap_or_else(|_| unreachable!())
+                .unwrap_or_else(|| unreachable!())
                 .contains("dropped")
         );
         // No message_delta with stop_reason end_turn anywhere.

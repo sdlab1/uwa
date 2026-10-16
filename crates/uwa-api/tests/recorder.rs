@@ -56,8 +56,26 @@ async fn start_status_stop_round_trip() {
             .starts_with("rec_")
     );
 
-    // Give the poller a beat to see at least one batch.
-    tokio::time::sleep(std::time::Duration::from_millis(900)).await;
+    // The poller emits its first batch at t≈0 (it polls once before
+    // settling into the interval; see `recorder.rs`). Wait for that batch
+    // instead of sleeping a blind 900ms — bounded, and never flaky.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        let status = s
+            .get("/admin/recorder/status")
+            .add_header("Authorization", TEST_AUTH_HEADER)
+            .await;
+        status.assert_status_ok();
+        let sv: serde_json::Value = status.json();
+        if sv.get("events").and_then(|v| v.as_u64()).unwrap_or(0) >= 1 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "recorder produced no events within 2s"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
 
     // Status reflects progress.
     let status = s

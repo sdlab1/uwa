@@ -180,7 +180,10 @@ mod tests {
         pool.add(TabId::new());
         let mut seen = std::collections::HashSet::new();
         for _ in 0..6 {
-            let g = pool.acquire().await.unwrap();
+            let g = pool
+                .acquire()
+                .await
+                .unwrap_or_else(|e| unreachable!("acquire failed: {e}"));
             seen.insert(g.tab.clone());
         }
         assert_eq!(seen.len(), 3);
@@ -190,8 +193,15 @@ mod tests {
     async fn acquire_fails_when_all_busy() {
         let pool = TabPool::new(Duration::from_secs(60));
         pool.add(TabId::new());
-        let _g = pool.acquire().await.unwrap();
-        let err = pool.acquire().await.unwrap_err();
+        let _g = pool
+            .acquire()
+            .await
+            .unwrap_or_else(|e| unreachable!("acquire failed: {e}"));
+        let err = pool
+            .acquire()
+            .await
+            .err()
+            .unwrap_or_else(|| unreachable!("expected Ok"));
         assert!(matches!(err, UwaError::Unavailable(_)));
     }
 
@@ -214,7 +224,10 @@ mod tests {
         pool.add(b.clone());
         pool.mark_unhealthy(&a);
         for _ in 0..4 {
-            let g = pool.acquire().await.unwrap();
+            let g = pool
+                .acquire()
+                .await
+                .unwrap_or_else(|e| unreachable!("acquire failed: {e}"));
             assert_eq!(g.tab, b);
         }
     }

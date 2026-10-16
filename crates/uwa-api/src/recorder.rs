@@ -88,14 +88,18 @@ impl Recorder {
             let tab = tab.clone();
             tokio::spawn(async move {
                 let started = tokio::time::Instant::now();
+                let mut first_tick = true;
                 loop {
-                    tokio::select! {
-                        _ = stop.notified() => break,
-                        _ = tokio::time::sleep(POLL_INTERVAL) => {}
+                    if !first_tick {
+                        tokio::select! {
+                            _ = stop.notified() => break,
+                            _ = tokio::time::sleep(POLL_INTERVAL) => {}
+                        }
+                        if started.elapsed() >= MAX_DURATION {
+                            break;
+                        }
                     }
-                    if started.elapsed() >= MAX_DURATION {
-                        break;
-                    }
+                    first_tick = false;
                     let Ok(page) = transport.page(&tab).await else {
                         continue;
                     };

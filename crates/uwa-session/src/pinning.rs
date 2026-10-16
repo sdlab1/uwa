@@ -310,14 +310,12 @@ mod tests {
         match decide(Some(&st), &tab, &msgs, 0) {
             PinDecision::Delta { messages } => {
                 assert_eq!(messages.len(), 2);
-                assert!(
-                    matches!(&messages[0].content, Some(MessageContent::Text(s)) if s == "fine")
-                );
-                assert!(
-                    matches!(&messages[1].content, Some(MessageContent::Text(s)) if s == "great")
-                );
+                let m0 = messages.first().unwrap_or_else(|| unreachable!());
+                assert!(matches!(&m0.content, Some(MessageContent::Text(s)) if s == "fine"));
+                let m1 = messages.get(1).unwrap_or_else(|| unreachable!());
+                assert!(matches!(&m1.content, Some(MessageContent::Text(s)) if s == "great"));
             }
-            other => panic!("expected Delta, got {other:?}"),
+            other => unreachable!("expected Delta, got {other:?}"),
         }
     }
 
@@ -354,7 +352,7 @@ mod tests {
         let st = state("t1", 1, hash_messages(&seen), 0);
         match decide(Some(&st), &tab, &msgs, 0) {
             PinDecision::Delta { messages } => assert_eq!(messages.len(), 2),
-            other => panic!("expected Delta, got {other:?}"),
+            other => unreachable!("expected Delta, got {other:?}"),
         }
     }
 

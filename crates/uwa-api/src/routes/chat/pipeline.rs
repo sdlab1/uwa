@@ -1090,7 +1090,7 @@ mod tests {
         )
         .await
         .unwrap_or_else(|_| unreachable!());
-        let ev = rx.recv().await.unwrap_or_else(|_| unreachable!());
+        let ev = rx.recv().await.unwrap_or_else(|| unreachable!());
         assert!(matches!(ev, StreamEvent::Done { .. }));
     }
 }

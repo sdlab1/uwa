@@ -130,7 +130,7 @@ mod tests {
             .message
             .tool_calls
             .as_ref()
-            .unwrap_or_else(|_| unreachable!());
+            .unwrap_or_else(|| unreachable!());
         assert_eq!(tc.len(), 1);
         assert_eq!(
             tc.get(0).unwrap_or_else(|| unreachable!()).function.name,

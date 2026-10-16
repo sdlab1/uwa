@@ -80,14 +80,14 @@ mod tests {
             Ok(())
         }
         async fn url(&self) -> Result<Url> {
-            Ok("https://x/".parse().unwrap())
+            Ok("https://x/".parse().unwrap_or_else(|_| unreachable!()))
         }
         async fn eval(&self, js: &str) -> Result<Value> {
-            self.immediate.lock().unwrap().push(js.into());
+            self.immediate.lock().unwrap_or_else(|_| unreachable!()).push(js.into());
             Ok(Value::Null)
         }
         async fn eval_early(&self, js: &str) -> Result<()> {
-            self.early.lock().unwrap().push(js.into());
+            self.early.lock().unwrap_or_else(|_| unreachable!()).push(js.into());
             Ok(())
         }
         async fn wait_for_selector(&self, _: &str, _: Duration) -> Result<()> {
@@ -114,26 +114,27 @@ mod tests {
         let p = RecordingPage::new();
         apply_pack(&p, &crate::builtin::default_pack())
             .await
-            .unwrap();
-        assert_eq!(p.early.lock().unwrap().len(), 3);
-        assert!(p.immediate.lock().unwrap().is_empty());
+            .unwrap_or_else(|_| unreachable!());
+        assert_eq!(p.early.lock().unwrap_or_else(|_| unreachable!()).len(), 3);
+        assert!(p.immediate.lock().unwrap_or_else(|_| unreachable!()).is_empty());
     }
 
     #[tokio::test]
     async fn current_document_uses_eval() {
         let p = RecordingPage::new();
         let pack = StealthPack::new().add(StealthScript::current_document("x", "1"));
-        apply_pack(&p, &pack).await.unwrap();
-        assert!(p.early.lock().unwrap().is_empty());
-        assert_eq!(p.immediate.lock().unwrap().len(), 1);
+        apply_pack(&p, &pack).await.unwrap_or_else(|_| unreachable!());
+        assert!(p.early.lock().unwrap_or_else(|_| unreachable!()).is_empty());
+        assert_eq!(p.immediate.lock().unwrap_or_else(|_| unreachable!()).len(), 1);
     }
 
     #[tokio::test]
     async fn wrapping_adds_try_catch_and_iife() {
         let p = RecordingPage::new();
         let pack = StealthPack::new().add(StealthScript::new("x", "let a = 1;"));
-        apply_pack(&p, &pack).await.unwrap();
-        let js = &p.early.lock().unwrap()[0];
+        apply_pack(&p, &pack).await.unwrap_or_else(|_| unreachable!());
+        let early = p.early.lock().unwrap_or_else(|_| unreachable!());
+        let js = early.first().unwrap_or_else(|| unreachable!());
         assert!(js.starts_with("(function(){try{"));
         assert!(js.ends_with("}catch(_e){}})();"));
         assert!(js.contains("let a = 1;"));
@@ -148,7 +149,7 @@ mod tests {
                 Ok(())
             }
             async fn url(&self) -> Result<Url> {
-                Ok("https://x/".parse().unwrap())
+                Ok("https://x/".parse().unwrap_or_else(|_| unreachable!()))
             }
             async fn eval(&self, _: &str) -> Result<Value> {
                 Ok(Value::Null)
@@ -177,7 +178,7 @@ mod tests {
 
         let p = FailPage;
         let pack = StealthPack::new().add(StealthScript::new("my-script", "1"));
-        let err = apply_pack(&p, &pack).await.unwrap_err();
+        let err = match apply_pack(&p, &pack).await { Err(e) => e, Ok(_) => unreachable!() };
         let msg = err.to_string();
         assert!(msg.contains("my-script"), "got: {msg}");
     }
@@ -185,8 +186,8 @@ mod tests {
     #[tokio::test]
     async fn empty_pack_is_noop() {
         let p = RecordingPage::new();
-        apply_pack(&p, &StealthPack::new()).await.unwrap();
-        assert!(p.early.lock().unwrap().is_empty());
-        assert!(p.immediate.lock().unwrap().is_empty());
+        apply_pack(&p, &StealthPack::new()).await.unwrap_or_else(|_| unreachable!());
+        assert!(p.early.lock().unwrap_or_else(|_| unreachable!()).is_empty());
+        assert!(p.immediate.lock().unwrap_or_else(|_| unreachable!()).is_empty());
     }
 }

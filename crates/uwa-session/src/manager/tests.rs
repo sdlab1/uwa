@@ -32,10 +32,10 @@ fn key(s: &str) -> SessionKey {
 async fn same_conversation_same_tab() {
     let sm = SessionManager::new(cfg(60_000, 8));
     let t = tabs(3);
-    let a = sm.acquire(&cid("c1"), &t).await.unwrap();
+    let a = sm.acquire(&cid("c1"), &t).await.unwrap_or_else(|_| unreachable!());
     let tab = a.tab.clone();
     drop(a);
-    let b = sm.acquire(&cid("c1"), &t).await.unwrap();
+    let b = sm.acquire(&cid("c1"), &t).await.unwrap_or_else(|_| unreachable!());
     assert_eq!(b.tab, tab);
     assert_eq!(sm.len(), 1);
 }
@@ -55,7 +55,7 @@ async fn concurrent_same_cid_serialize() {
         let inside = inside.clone();
         let peak = peak.clone();
         handles.push(tokio::spawn(async move {
-            let h = sm.acquire(&cid("shared"), t.as_ref()).await.unwrap();
+            let h = sm.acquire(&cid("shared"), t.as_ref()).await.unwrap_or_else(|_| unreachable!());
             let now = inside.fetch_add(1, Ordering::SeqCst) + 1;
             peak.fetch_max(now, Ordering::SeqCst);
             tokio::time::sleep(Duration::from_millis(5)).await;
@@ -63,9 +63,9 @@ async fn concurrent_same_cid_serialize() {
             h.tab.clone()
         }));
     }
-    let first = handles.pop().unwrap().await.unwrap();
+    let first = handles.pop().unwrap_or_else(|| unreachable!()).await.unwrap_or_else(|_| unreachable!());
     for h in handles {
-        assert_eq!(h.await.unwrap(), first);
+        assert_eq!(h.await.unwrap_or_else(|_| unreachable!()), first);
     }
     assert_eq!(sm.len(), 1);
     assert_eq!(
@@ -79,7 +79,7 @@ async fn concurrent_same_cid_serialize() {
 async fn evict_idle_removes_old() {
     let sm = SessionManager::new(cfg(20, 8));
     let t = tabs(1);
-    let h = sm.acquire(&cid("old"), &t).await.unwrap();
+    let h = sm.acquire(&cid("old"), &t).await.unwrap_or_else(|_| unreachable!());
     drop(h);
     assert_eq!(sm.len(), 1);
     tokio::time::sleep(Duration::from_millis(60)).await;
@@ -92,7 +92,7 @@ async fn evict_idle_removes_old() {
 async fn evict_idle_keeps_leased_session() {
     let sm = SessionManager::new(cfg(20, 8));
     let t = tabs(1);
-    let h = sm.acquire(&cid("busy"), &t).await.unwrap();
+    let h = sm.acquire(&cid("busy"), &t).await.unwrap_or_else(|_| unreachable!());
     tokio::time::sleep(Duration::from_millis(60)).await;
     let evicted = sm.evict_idle().await;
     assert!(evicted.is_empty());
@@ -104,8 +104,8 @@ async fn evict_idle_keeps_leased_session() {
 async fn recover_drops_unhealthy() {
     let sm = SessionManager::new(cfg(60_000, 8));
     let t = tabs(2);
-    let h1 = sm.acquire(&cid("good"), &t).await.unwrap();
-    let h2 = sm.acquire(&cid("bad"), &t).await.unwrap();
+    let h1 = sm.acquire(&cid("good"), &t).await.unwrap_or_else(|_| unreachable!());
+    let h2 = sm.acquire(&cid("bad"), &t).await.unwrap_or_else(|_| unreachable!());
     let dead_tab = h2.tab.clone();
     drop(h2); // Park the session first
     t.mark_unhealthy(&dead_tab);
@@ -120,13 +120,13 @@ async fn recover_drops_unhealthy() {
 async fn max_sessions_evicts_oldest() {
     let sm = SessionManager::new(cfg(60_000, 2));
     let t = tabs(4);
-    let a = sm.acquire(&cid("a"), &t).await.unwrap();
+    let a = sm.acquire(&cid("a"), &t).await.unwrap_or_else(|_| unreachable!());
     drop(a);
     tokio::time::sleep(Duration::from_millis(5)).await;
-    let b = sm.acquire(&cid("b"), &t).await.unwrap();
+    let b = sm.acquire(&cid("b"), &t).await.unwrap_or_else(|_| unreachable!());
     drop(b);
     tokio::time::sleep(Duration::from_millis(5)).await;
-    let c = sm.acquire(&cid("c"), &t).await.unwrap();
+    let c = sm.acquire(&cid("c"), &t).await.unwrap_or_else(|_| unreachable!());
     drop(c);
     assert!(sm.len() <= 2);
     assert!(!sm.entries.contains_key(&key("a")));
@@ -139,8 +139,8 @@ async fn distinct_conversations_spread_across_tabs() {
     // funneling every conversation onto the browser's first tab.
     let sm = SessionManager::new(cfg(60_000, 8));
     let t = tabs(2);
-    let a = sm.acquire(&cid("c1"), &t).await.unwrap();
-    let b = sm.acquire(&cid("c2"), &t).await.unwrap();
+    let a = sm.acquire(&cid("c1"), &t).await.unwrap_or_else(|_| unreachable!());
+    let b = sm.acquire(&cid("c2"), &t).await.unwrap_or_else(|_| unreachable!());
     assert_ne!(
         a.tab, b.tab,
         "two idle pools of conversations must not share the only two tabs"
@@ -154,12 +154,12 @@ async fn over_capacity_never_evicts_a_busy_session() {
     // handles, silently forking a mid-flight conversation onto another tab.
     let sm = SessionManager::new(cfg(60_000, 1));
     let t = tabs(2);
-    let busy = sm.acquire(&cid("busy"), &t).await.unwrap();
+    let busy = sm.acquire(&cid("busy"), &t).await.unwrap_or_else(|_| unreachable!());
     let tab_of_busy = busy.tab.clone();
 
     // At capacity with the only session busy: the manager must grow past
     // the cap rather than evicting the live lease.
-    let other = sm.acquire(&cid("other"), &t).await.unwrap();
+    let other = sm.acquire(&cid("other"), &t).await.unwrap_or_else(|_| unreachable!());
     assert!(sm.entries.contains_key(&key("busy")));
     assert!(sm.entries.contains_key(&key("other")));
     assert_eq!(busy.tab, tab_of_busy, "the live lease keeps its tab");
@@ -172,22 +172,23 @@ async fn over_capacity_never_evicts_a_busy_session() {
 async fn list_reports_sessions() {
     let sm = SessionManager::new(cfg(60_000, 8));
     let t = tabs(1);
-    let h = sm.acquire(&cid("x"), &t).await.unwrap();
+    let h = sm.acquire(&cid("x"), &t).await.unwrap_or_else(|_| unreachable!());
     let list = sm.list().await;
     assert_eq!(list.len(), 1);
-    assert_eq!(list[0].conversation, cid("x"));
-    assert_eq!(list[0].tab, h.tab);
-    assert_eq!(list[0].holders, 1);
+    let l0 = list.first().unwrap_or_else(|| unreachable!());
+    assert_eq!(l0.conversation, cid("x"));
+    assert_eq!(l0.tab, h.tab);
+    assert_eq!(l0.holders, 1);
     drop(h);
     let list = sm.list().await;
-    assert_eq!(list[0].holders, 0);
+    assert_eq!(list.first().unwrap_or_else(|| unreachable!()).holders, 0);
 }
 
 #[tokio::test]
 async fn remove_returns_tab() {
     let sm = SessionManager::new(cfg(60_000, 8));
     let t = tabs(1);
-    let h = sm.acquire(&cid("gone"), &t).await.unwrap();
+    let h = sm.acquire(&cid("gone"), &t).await.unwrap_or_else(|_| unreachable!());
     let tab = h.tab.clone();
     drop(h);
     assert_eq!(sm.remove(&cid("gone")), Some(tab));
@@ -205,7 +206,7 @@ async fn eviction_does_not_hang_under_contention() {
         let h = sm
             .acquire(&cid(&format!("c{i}")), t.as_ref())
             .await
-            .unwrap();
+            .unwrap_or_else(|_| unreachable!());
         drop(h);
     }
 
@@ -216,7 +217,7 @@ async fn eviction_does_not_hang_under_contention() {
         workers.push(tokio::spawn(async move {
             for j in 0..16 {
                 let id = cid(&format!("c{}", (i * 16 + j) % 16));
-                let h = sm.acquire(&id, t.as_ref()).await.unwrap();
+                let h = sm.acquire(&id, t.as_ref()).await.unwrap_or_else(|_| unreachable!());
                 h.touch().await;
                 drop(h);
                 let _ = sm.evict_idle().await;
@@ -224,7 +225,7 @@ async fn eviction_does_not_hang_under_contention() {
         }));
     }
     for w in workers {
-        w.await.unwrap();
+        w.await.unwrap_or_else(|_| unreachable!());
     }
     assert!(!sm.is_empty());
 }
@@ -233,8 +234,8 @@ async fn eviction_does_not_hang_under_contention() {
 async fn recover_drops_parked_sessions_on_dead_tabs() {
     let sm = SessionManager::new(cfg(60_000, 8));
     let t = tabs(2);
-    let h1 = sm.acquire(&cid("good"), &t).await.unwrap();
-    let h2 = sm.acquire(&cid("bad"), &t).await.unwrap();
+    let h1 = sm.acquire(&cid("good"), &t).await.unwrap_or_else(|_| unreachable!());
+    let h2 = sm.acquire(&cid("bad"), &t).await.unwrap_or_else(|_| unreachable!());
     let dead_tab = h2.tab.clone();
     drop(h2);
     t.mark_unhealthy(&dead_tab);
@@ -249,7 +250,7 @@ async fn recover_drops_parked_sessions_on_dead_tabs() {
 async fn recover_keeps_leased_session_but_reports_its_dead_tab() {
     let sm = SessionManager::new(cfg(60_000, 8));
     let t = tabs(2);
-    let h = sm.acquire(&cid("busy"), &t).await.unwrap();
+    let h = sm.acquire(&cid("busy"), &t).await.unwrap_or_else(|_| unreachable!());
     let dead_tab = h.tab.clone();
     t.mark_unhealthy(&dead_tab);
 
@@ -266,7 +267,7 @@ async fn recover_reports_each_dead_tab_once() {
     let sm = SessionManager::new(cfg(60_000, 8));
     let t = tabs(1);
     for name in ["a", "b", "c"] {
-        drop(sm.acquire(&cid(name), &t).await.unwrap());
+        drop(sm.acquire(&cid(name), &t).await.unwrap_or_else(|_| unreachable!()));
     }
     let only = t.tab_ids().remove(0);
     t.mark_unhealthy(&only);
@@ -279,20 +280,20 @@ async fn recover_reports_each_dead_tab_once() {
 async fn acquire_repins_conversation_whose_tab_was_closed() {
     let sm = SessionManager::new(cfg(60_000, 8));
     let t = tabs(2);
-    let first = sm.acquire(&cid("c"), &t).await.unwrap();
+    let first = sm.acquire(&cid("c"), &t).await.unwrap_or_else(|_| unreachable!());
     let old_tab = first.tab.clone();
     let old_gen = first.generation;
     drop(first);
 
     t.close_tab(&old_tab);
-    let second = sm.acquire(&cid("c"), &t).await.unwrap();
+    let second = sm.acquire(&cid("c"), &t).await.unwrap_or_else(|_| unreachable!());
     assert_ne!(second.tab, old_tab, "must move off the closed tab");
     assert!(t.page(&second.tab).await.is_ok(), "new tab must be usable");
     assert!(second.generation > old_gen, "a tab swap must be visible");
     assert_eq!(sm.len(), 1, "same conversation, same entry");
     drop(second);
 
-    let third = sm.acquire(&cid("c"), &t).await.unwrap();
+    let third = sm.acquire(&cid("c"), &t).await.unwrap_or_else(|_| unreachable!());
     assert_ne!(third.tab, old_tab);
 }
 
@@ -300,12 +301,12 @@ async fn acquire_repins_conversation_whose_tab_was_closed() {
 async fn acquire_repins_when_tab_turns_unhealthy() {
     let sm = SessionManager::new(cfg(60_000, 8));
     let t = tabs(2);
-    let first = sm.acquire(&cid("c"), &t).await.unwrap();
+    let first = sm.acquire(&cid("c"), &t).await.unwrap_or_else(|_| unreachable!());
     let old_tab = first.tab.clone();
     drop(first);
     t.mark_unhealthy(&old_tab);
 
-    let second = sm.acquire(&cid("c"), &t).await.unwrap();
+    let second = sm.acquire(&cid("c"), &t).await.unwrap_or_else(|_| unreachable!());
     assert_ne!(second.tab, old_tab);
     assert!(t.health(&second.tab).await.is_ok());
 }
@@ -314,7 +315,7 @@ async fn acquire_repins_when_tab_turns_unhealthy() {
 async fn repin_invalidates_pinning_state() {
     let sm = SessionManager::new(cfg(60_000, 8));
     let t = tabs(2);
-    let first = sm.acquire(&cid("c"), &t).await.unwrap();
+    let first = sm.acquire(&cid("c"), &t).await.unwrap_or_else(|_| unreachable!());
     let old_tab = first.tab.clone();
     drop(first);
     let state = crate::ConversationState {
@@ -325,7 +326,7 @@ async fn repin_invalidates_pinning_state() {
         last_updated: Instant::now(),
     };
     t.close_tab(&old_tab);
-    let second = sm.acquire(&cid("c"), &t).await.unwrap();
+    let second = sm.acquire(&cid("c"), &t).await.unwrap_or_else(|_| unreachable!());
     assert_eq!(
         crate::decide(Some(&state), &second.tab, &[], state.system_hash),
         crate::PinDecision::Full
@@ -337,19 +338,19 @@ async fn no_healthy_tab_is_unavailable_and_keeps_the_session() {
     let sm = SessionManager::new(cfg(60_000, 8));
     let t = tabs(1);
     let only = t.tab_ids().remove(0);
-    drop(sm.acquire(&cid("c"), &t).await.unwrap());
+    drop(sm.acquire(&cid("c"), &t).await.unwrap_or_else(|_| unreachable!()));
 
     t.mark_unhealthy(&only);
     match sm.acquire(&cid("c"), &t).await {
         Err(UwaError::Unavailable(_)) => {}
-        Err(other) => panic!("expected Unavailable, got {other:?}"),
-        Ok(_) => panic!("a dead pool must not hand out a lease"),
+        Err(other) => unreachable!("expected Unavailable, got {other:?}"),
+        Ok(_) => unreachable!("a dead pool must not hand out a lease"),
     }
     assert_eq!(sm.len(), 1, "a transient outage must not drop the session");
     assert!(sm.list().await.first().map(|s| s.holders) == Some(0));
 
     t.mark_healthy(&only);
-    let back = sm.acquire(&cid("c"), &t).await.unwrap();
+    let back = sm.acquire(&cid("c"), &t).await.unwrap_or_else(|_| unreachable!());
     assert_eq!(back.tab, only);
 }
 
@@ -361,9 +362,9 @@ async fn fresh_sessions_never_land_on_unhealthy_tabs() {
     for dead in ids.iter().take(2) {
         t.mark_unhealthy(dead);
     }
-    let alive = ids.get(2).unwrap().clone();
+    let alive = ids.get(2).unwrap_or_else(|| unreachable!()).clone();
     for i in 0..9 {
-        let h = sm.acquire(&cid(&format!("c{i}")), &t).await.unwrap();
+        let h = sm.acquire(&cid(&format!("c{i}")), &t).await.unwrap_or_else(|_| unreachable!());
         assert_eq!(h.tab, alive);
     }
 }
@@ -372,10 +373,10 @@ async fn fresh_sessions_never_land_on_unhealthy_tabs() {
 async fn fresh_sessions_skip_closed_tabs_in_the_pool() {
     let sm = SessionManager::new(cfg(60_000, 64));
     let t = tabs(3);
-    let closed = t.tab_ids().first().unwrap().clone();
+    let closed = t.tab_ids().first().unwrap_or_else(|| unreachable!()).clone();
     t.close_tab(&closed);
     for i in 0..6 {
-        let h = sm.acquire(&cid(&format!("c{i}")), &t).await.unwrap();
+        let h = sm.acquire(&cid(&format!("c{i}")), &t).await.unwrap_or_else(|_| unreachable!());
         assert_ne!(h.tab, closed);
     }
 }
@@ -384,7 +385,7 @@ async fn fresh_sessions_skip_closed_tabs_in_the_pool() {
 async fn queued_waiter_counts_as_holder_and_blocks_eviction() {
     let sm = Arc::new(SessionManager::new(cfg(10, 8)));
     let t = Arc::new(tabs(1));
-    let first = sm.acquire(&cid("c"), t.as_ref()).await.unwrap();
+    let first = sm.acquire(&cid("c"), t.as_ref()).await.unwrap_or_else(|_| unreachable!());
 
     let waiter = {
         let (sm, t) = (sm.clone(), t.clone());
@@ -399,7 +400,7 @@ async fn queued_waiter_counts_as_holder_and_blocks_eviction() {
     assert!(sm.evict_idle().await.is_empty(), "leased + queued: keep");
 
     drop(first);
-    waiter.await.unwrap().unwrap();
+    waiter.await.unwrap_or_else(|_| unreachable!()).unwrap_or_else(|_| unreachable!());
     assert_eq!(sm.list().await.first().map(|s| s.holders), Some(0));
 }
 
@@ -407,7 +408,7 @@ async fn queued_waiter_counts_as_holder_and_blocks_eviction() {
 async fn cancelled_acquire_releases_its_lease() {
     let sm = SessionManager::new(cfg(10, 8));
     let t = tabs(1);
-    let held = sm.acquire(&cid("c"), &t).await.unwrap();
+    let held = sm.acquire(&cid("c"), &t).await.unwrap_or_else(|_| unreachable!());
     let timed_out =
         tokio::time::timeout(Duration::from_millis(20), sm.acquire(&cid("c"), &t)).await;
     assert!(timed_out.is_err(), "second acquire must be queued");
@@ -426,7 +427,7 @@ async fn cancelled_acquire_releases_its_lease() {
 async fn entry_removed_while_queued_does_not_fork_the_conversation() {
     let sm = Arc::new(SessionManager::new(cfg(60_000, 8)));
     let t = Arc::new(tabs(2));
-    let first = sm.acquire(&cid("c"), t.as_ref()).await.unwrap();
+    let first = sm.acquire(&cid("c"), t.as_ref()).await.unwrap_or_else(|_| unreachable!());
 
     let waiter = {
         let (sm, t) = (sm.clone(), t.clone());
@@ -436,7 +437,7 @@ async fn entry_removed_while_queued_does_not_fork_the_conversation() {
     assert!(sm.remove(&cid("c")).is_some());
     drop(first);
 
-    let second = waiter.await.unwrap().unwrap();
+    let second = waiter.await.unwrap_or_else(|_| unreachable!()).unwrap_or_else(|_| unreachable!());
     assert_eq!(sm.len(), 1, "waiter re-resolved onto a live entry");
 
     let third =
@@ -449,7 +450,7 @@ async fn entry_removed_while_queued_does_not_fork_the_conversation() {
 async fn released_long_request_is_not_immediately_evicted() {
     let sm = SessionManager::new(cfg(20, 8));
     let t = tabs(1);
-    let h = sm.acquire(&cid("c"), &t).await.unwrap();
+    let h = sm.acquire(&cid("c"), &t).await.unwrap_or_else(|_| unreachable!());
     tokio::time::sleep(Duration::from_millis(60)).await;
     drop(h);
     assert!(sm.evict_idle().await.is_empty());
@@ -460,7 +461,7 @@ async fn released_long_request_is_not_immediately_evicted() {
 async fn touch_keeps_a_leased_session_fresh_after_release() {
     let sm = SessionManager::new(cfg(40, 8));
     let t = tabs(1);
-    let h = sm.acquire(&cid("c"), &t).await.unwrap();
+    let h = sm.acquire(&cid("c"), &t).await.unwrap_or_else(|_| unreachable!());
     for _ in 0..4 {
         tokio::time::sleep(Duration::from_millis(15)).await;
         h.touch().await;
@@ -473,12 +474,12 @@ async fn touch_keeps_a_leased_session_fresh_after_release() {
 async fn capacity_eviction_takes_oldest_parked_and_spares_busy() {
     let sm = SessionManager::new(cfg(60_000, 2));
     let t = tabs(4);
-    let busy = sm.acquire(&cid("busy"), &t).await.unwrap(); // oldest, but leased
+    let busy = sm.acquire(&cid("busy"), &t).await.unwrap_or_else(|_| unreachable!()); // oldest, but leased
     tokio::time::sleep(Duration::from_millis(5)).await;
-    drop(sm.acquire(&cid("parked"), &t).await.unwrap());
+    drop(sm.acquire(&cid("parked"), &t).await.unwrap_or_else(|_| unreachable!()));
     tokio::time::sleep(Duration::from_millis(5)).await;
 
-    let newcomer = sm.acquire(&cid("new"), &t).await.unwrap();
+    let newcomer = sm.acquire(&cid("new"), &t).await.unwrap_or_else(|_| unreachable!());
     assert!(sm.entries.contains_key(&key("busy")), "leased entry spared");
     assert!(
         !sm.entries.contains_key(&key("parked")),
@@ -492,10 +493,10 @@ async fn capacity_eviction_takes_oldest_parked_and_spares_busy() {
 async fn list_reports_generation_bumps() {
     let sm = SessionManager::new(cfg(60_000, 8));
     let t = tabs(2);
-    drop(sm.acquire(&cid("c"), &t).await.unwrap());
-    let g1 = sm.list().await.first().map(|s| s.generation).unwrap();
-    drop(sm.acquire(&cid("c"), &t).await.unwrap());
-    let g2 = sm.list().await.first().map(|s| s.generation).unwrap();
+    drop(sm.acquire(&cid("c"), &t).await.unwrap_or_else(|_| unreachable!()));
+    let g1 = sm.list().await.first().map(|s| s.generation).unwrap_or_else(|| unreachable!());
+    drop(sm.acquire(&cid("c"), &t).await.unwrap_or_else(|_| unreachable!()));
+    let g2 = sm.list().await.first().map(|s| s.generation).unwrap_or_else(|| unreachable!());
     assert!(g2 > g1, "every release bumps the generation");
 }
 
@@ -517,8 +518,8 @@ async fn churn_never_runs_one_conversation_twice_at_once() {
                 let h = sm
                     .acquire(&cid(&format!("c{c}")), t.as_ref())
                     .await
-                    .unwrap();
-                let slot = inside.get(c).unwrap();
+                    .unwrap_or_else(|_| unreachable!());
+                let slot = inside.get(c).unwrap_or_else(|| unreachable!());
                 if slot.fetch_add(1, Ordering::SeqCst) != 0 {
                     violations.fetch_add(1, Ordering::SeqCst);
                 }
@@ -544,7 +545,7 @@ async fn churn_never_runs_one_conversation_twice_at_once() {
         }));
     }
     for w in workers {
-        w.await.unwrap();
+        w.await.unwrap_or_else(|_| unreachable!());
     }
     assert_eq!(violations.load(Ordering::SeqCst), 0, "conversation forked");
     for s in sm.list().await {
@@ -570,11 +571,11 @@ async fn same_conversation_different_profiles_get_different_tabs() {
     let work = sm
         .acquire_with_profile(&cid("c1"), profile("work"), &t)
         .await
-        .unwrap();
+        .unwrap_or_else(|_| unreachable!());
     let personal = sm
         .acquire_with_profile(&cid("c1"), profile("personal"), &t)
         .await
-        .unwrap();
+        .unwrap_or_else(|_| unreachable!());
 
     assert_eq!(work.conversation, personal.conversation);
     assert_ne!(work.profile, personal.profile);
@@ -593,14 +594,14 @@ async fn same_profile_reuses_the_tab() {
     let a = sm
         .acquire_with_profile(&cid("c1"), profile("work"), &t)
         .await
-        .unwrap();
+        .unwrap_or_else(|_| unreachable!());
     let tab = a.tab.clone();
     drop(a);
 
     let b = sm
         .acquire_with_profile(&cid("c1"), profile("work"), &t)
         .await
-        .unwrap();
+        .unwrap_or_else(|_| unreachable!());
     assert_eq!(b.tab, tab);
     assert_eq!(sm.len(), 1);
 }
@@ -614,7 +615,7 @@ async fn new_profile_opens_a_tab_lazily() {
     let h = sm
         .acquire_with_profile(&cid("c1"), profile("work"), &t)
         .await
-        .unwrap();
+        .unwrap_or_else(|_| unreachable!());
 
     let work_tabs = t.list_tabs_in("work").await.unwrap_or_default();
     assert_eq!(work_tabs.len(), 1);
@@ -643,7 +644,7 @@ async fn empty_header_profile_falls_back_to_default() {
     let h = sm
         .acquire_with_profile(&cid("c1"), ProfileName::new(""), &t)
         .await
-        .unwrap();
+        .unwrap_or_else(|_| unreachable!());
     assert!(h.profile.is_default());
 }
 
@@ -654,11 +655,11 @@ async fn remove_drops_every_profile_for_a_conversation() {
     let _ = sm
         .acquire_with_profile(&cid("c1"), profile("work"), &t)
         .await
-        .unwrap();
+        .unwrap_or_else(|_| unreachable!());
     let _ = sm
         .acquire_with_profile(&cid("c1"), profile("personal"), &t)
         .await
-        .unwrap();
+        .unwrap_or_else(|_| unreachable!());
     assert_eq!(sm.len(), 2);
     let removed = sm.remove(&cid("c1"));
     assert!(removed.is_some());
@@ -672,11 +673,11 @@ async fn remove_for_drops_only_one_profile() {
     let _ = sm
         .acquire_with_profile(&cid("c1"), profile("work"), &t)
         .await
-        .unwrap();
+        .unwrap_or_else(|_| unreachable!());
     let _ = sm
         .acquire_with_profile(&cid("c1"), profile("personal"), &t)
         .await
-        .unwrap();
+        .unwrap_or_else(|_| unreachable!());
 
     let removed = sm.remove_for(&cid("c1"), &profile("work"));
     assert!(removed.is_some());
@@ -694,7 +695,7 @@ async fn list_includes_profile_name() {
     let _ = sm
         .acquire_with_profile(&cid("c1"), profile("work"), &t)
         .await
-        .unwrap();
+        .unwrap_or_else(|_| unreachable!());
     let list = sm.list().await;
     assert_eq!(list.len(), 1);
     assert_eq!(list.first().map(|s| s.profile.as_str()), Some("work"));
@@ -710,11 +711,11 @@ async fn empty_profiles_each_get_their_own_lazy_tab() {
     let a = sm
         .acquire_with_profile(&cid("c1"), profile("work"), &t)
         .await
-        .unwrap();
+        .unwrap_or_else(|_| unreachable!());
     let b = sm
         .acquire_with_profile(&cid("c1"), profile("personal"), &t)
         .await
-        .unwrap();
+        .unwrap_or_else(|_| unreachable!());
     assert_ne!(a.tab, b.tab);
     assert_eq!(sm.len(), 2);
     drop((a, b));

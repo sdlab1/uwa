@@ -702,9 +702,15 @@ mod tests {
     fn instructions_become_a_leading_system_message() {
         let mut r = req(json!("hi"));
         r.instructions = Some("be brief".into());
-        let c = to_chat_request(&r).expect("converts");
+        let c = match to_chat_request(&r) {
+            Ok(c) => c,
+            Err(_) => unreachable!("converts"),
+        };
         assert_eq!(c.messages.len(), 2);
-        assert_eq!(c.messages[0].role, Role::System);
+        assert_eq!(
+            c.messages.get(0).unwrap_or_else(|| unreachable!()).role,
+            Role::System
+        );
     }
 
     #[test]
@@ -712,8 +718,14 @@ mod tests {
         let r = req(json!([
             {"role": "user", "content": [{"type": "input_text", "text": "yo"}]}
         ]));
-        let c = to_chat_request(&r).expect("converts");
-        assert_eq!(content_of(&c.messages[0]), json!("yo"));
+        let c = match to_chat_request(&r) {
+            Ok(c) => c,
+            Err(_) => unreachable!("converts"),
+        };
+        assert_eq!(
+            content_of(&c.messages.get(0).unwrap_or_else(|| unreachable!())),
+            json!("yo")
+        );
     }
 
     #[test]
@@ -722,9 +734,15 @@ mod tests {
             {"role": "assistant", "content": [{"type": "output_text", "text": "prior"}]},
             {"role": "user", "content": [{"type": "input_text", "text": "next"}]}
         ]));
-        let c = to_chat_request(&r).expect("converts");
+        let c = match to_chat_request(&r) {
+            Ok(c) => c,
+            Err(_) => unreachable!("converts"),
+        };
         assert_eq!(c.messages.len(), 2);
-        assert_eq!(content_of(&c.messages[1]), json!("next"));
+        assert_eq!(
+            content_of(&c.messages.get(1).unwrap_or_else(|| unreachable!())),
+            json!("next")
+        );
     }
 
     #[test]
@@ -755,7 +773,10 @@ mod tests {
         assert_eq!(r.status, "completed");
         assert_eq!(r.output.len(), 1);
         assert_eq!(r.usage.total_tokens, 7);
-        assert!(matches!(r.output[0], OutputItem::Message { .. }));
+        assert!(matches!(
+            r.output.get(0).unwrap_or_else(|| unreachable!()),
+            OutputItem::Message { .. }
+        ));
     }
 
     #[test]
@@ -775,7 +796,7 @@ mod tests {
         });
         let r = reshape("gpt-4o", &chat);
         assert_eq!(r.output.len(), 1);
-        match &r.output[0] {
+        match r.output.get(0).unwrap_or_else(|| unreachable!()) {
             OutputItem::FunctionCall {
                 call_id,
                 name,
@@ -786,7 +807,7 @@ mod tests {
                 assert_eq!(name, "get_weather");
                 assert_eq!(arguments, r#"{"city":"NYC"}"#);
             }
-            other => panic!("expected function_call, got {other:?}"),
+            other => unreachable!("expected function_call, got {other:?}"),
         }
     }
 
@@ -800,7 +821,7 @@ mod tests {
             {"type": "function_call", "call_id": "call_1", "name": "get_weather", "arguments": "{\"city\":\"NYC\"}"},
             {"type": "function_call_output", "call_id": "call_1", "output": "22C"}
         ])))
-        .unwrap_or_else(|| unreachable!("converts"));
+        .unwrap_or_else(|_| unreachable!("converts"));
         assert_eq!(c.messages.len(), 3);
         assert_eq!(
             c.messages
@@ -842,11 +863,14 @@ mod tests {
             "description": "lookup",
             "parameters": {"type": "object"},
         })]);
-        let c = to_chat_request(&r).unwrap_or_else(|| unreachable!("converts"));
-        let tools = c
-            .tools
-            .clone()
-            .unwrap_or_else(|| unreachable!("tools"));
+        let c = match to_chat_request(&r) {
+    Ok(c) => c,
+    Err(_) => unreachable!("converts"),
+};
+        let tools = match c.tools.clone() {
+    Some(tools) => tools,
+    None => unreachable!("tools"),
+};
         assert_eq!(
             tools
                 .get(0)
@@ -859,7 +883,7 @@ mod tests {
         );
         // And the chat layer can now parse them.
         assert!(!chat::local_tools(&c)
-            .unwrap_or_else(|| unreachable!("parse"))
+            .unwrap_or_else(|_| unreachable!("parse"))
             .is_empty());
     }
 
@@ -868,7 +892,7 @@ mod tests {
         let c = to_chat_request(&req(json!([
             {"type": "function_call_output", "call_id": "c1", "output": {"ok": true}}
         ])))
-        .unwrap_or_else(|| unreachable!("converts"));
+        .unwrap_or_else(|_| unreachable!("converts"));
         let tool = c.messages
             .get(0)
             .unwrap_or_else(|| unreachable!());
