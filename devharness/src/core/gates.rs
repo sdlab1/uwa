@@ -90,10 +90,10 @@ pub fn parse_ignored_count(log: &str) -> u32 {
             .map(|w| w.trim_end_matches(';'))
             .collect();
         for w in words.windows(2) {
-            if w[1] == "ignored" {
-                if let Ok(n) = w[0].parse::<u32>() {
+            if w.get(1).unwrap_or_else(|| unreachable!()) == &"ignored" {
+                if let Ok(n) = w.first().unwrap_or_else(|| unreachable!()).parse::<u32>() {
                     if n > 0 {
-                        total += 1;
+                        total = total.saturating_add(1);
                     }
                 }
             }
@@ -111,7 +111,7 @@ pub enum ReviewVerdict {
 
 pub fn parse_review_verdict(log: &str) -> ReviewVerdict {
     if let Some(pos) = log.find("VERDICT: ISSUES") {
-        let rest = &log[pos + "VERDICT: ISSUES:".len()..];
+        let rest = &log[pos.saturating_add("VERDICT: ISSUES:".len())..];
         let line = rest.lines().next().unwrap_or("").trim();
         return ReviewVerdict::Issues(line.to_string());
     }
@@ -154,7 +154,7 @@ pub fn parse_crap_report(raw: &str, max: u32) -> Option<CrapReport> {
     });
     let mut derived = String::new();
     for r in &violations {
-        derived += &format!(
+        derived.push_str(&format!(
             "crap VIOLATION: CRAP {}:{} {} C={} cov={} score={}\n",
             r.file,
             r.line,
@@ -162,12 +162,12 @@ pub fn parse_crap_report(raw: &str, max: u32) -> Option<CrapReport> {
             r.c,
             r.cov,
             (r.score * 1000.0) as i64 / 1000
-        );
+        ));
     }
-    derived += &format!(
+    derived.push_str(&format!(
         "crap: {functions} functions, {} violations (CRAP_MAX={max})\n",
         violations.len()
-    );
+    ));
     Some(CrapReport {
         functions,
         violations,
@@ -193,13 +193,11 @@ pub fn parse_crap_output(raw: &str) -> Option<(u32, Vec<CrapRow>)> {
 fn parse_crap_row(line: &str) -> Option<CrapRow> {
     let l = line.trim();
     let idx_c = l.find(" C=")?;
-    let idx_cov = l.find(" cov=")?;
-    if idx_cov < idx_c {
-        return None;
-    }
-    let head = l[..idx_c].trim_end();
-    let c: u32 = l[idx_c + 3..].split_whitespace().next()?.parse().ok()?;
-    let cov: u32 = l[idx_cov + 5..].split_whitespace().next()?.parse().ok()?;
+    let (head, after_c) = l.split_at(idx_c);
+    let head = head.trim_end();
+    let c: u32 = after_c[3..].split_whitespace().next()?.parse().ok()?;
+    let rel = after_c.find(" cov=")?;
+    let cov: u32 = after_c[rel.saturating_add(5)..].split_whitespace().next()?.parse().ok()?;
     let mut ws = head.split_whitespace();
     let loc = ws.next()?;
     let fun = ws.next()?;
@@ -299,7 +297,7 @@ fn judge_mutation(raw: &Raw, min_kill: u32) -> Verdict {
         },
         Some(MutationStats { mutants: 0, .. }) => Verdict::Pass,
         Some(MutationStats { mutants, killed }) => {
-            let rate = 100 * killed / mutants;
+            let rate = 100_u32.saturating_mul(killed).checked_div(mutants).unwrap_or(0);
             if rate >= min_kill {
                 Verdict::Pass
             } else {
@@ -532,17 +530,18 @@ mod tests {
     #[test]
     fn crap_parse_format() {
         let raw = "src/lib.rs:10 parse_ok C=6 cov=45 score=11.99\nCRAP: functions=1\n";
-        let (n, rows) = parse_crap_output(raw).unwrap();
+        let (n, rows) = parse_crap_output(raw).unwrap_or_else(|| unreachable!());
         assert_eq!(n, 1);
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].file, "src/lib.rs");
-        assert_eq!(rows[0].line, 10);
-        assert_eq!(rows[0].fun, "parse_ok");
-        assert_eq!(rows[0].c, 6);
-        assert_eq!(rows[0].cov, 45);
-        assert!((rows[0].score - 11.9895).abs() < 1e-9);
+        let r0 = rows.first().unwrap_or_else(|| unreachable!());
+        assert_eq!(r0.file, "src/lib.rs");
+        assert_eq!(r0.line, 10);
+        assert_eq!(r0.fun, "parse_ok");
+        assert_eq!(r0.c, 6);
+        assert_eq!(r0.cov, 45);
+        assert!((r0.score - 11.9895).abs() < 1e-9);
 
-        let (n, rows) = parse_crap_output("CRAP: functions=0\n").unwrap();
+        let (n, rows) = parse_crap_output("CRAP: functions=0\n").unwrap_or_else(|| unreachable!());
         assert_eq!(n, 0);
         assert!(rows.is_empty());
 
@@ -563,6 +562,14 @@ mod tests {
             parse_crap_output("CRAP: functions=1\nsrc/a.rs:9 fun C=3\n").is_none(),
             "строка без cov="
         );
+        assert!(
+            parse_crap_output("CRAP: functions=1\nsrc/a.rs:9 fun cov=50 C=3\n").is_none(),
+            "cov= до C= — не строка отчёта"
+        );
+        assert!(
+            parse_crap_output("CRAP: functions=1\n:12 myfun C=6 cov=45\n").is_none(),
+            "пустой file — контракт нарушен"
+        );
     }
 
     #[test]
@@ -580,15 +587,15 @@ mod tests {
         let bad = "src/a.rs:1 low C=14 cov=100\nsrc/b.rs:2 hi C=20 cov=100\nCRAP: functions=2\n";
         match judge_crap(bad, 12) {
             Verdict::Fail { tail, .. } => {
-                let hi = tail.find("C=20").expect("C=20 в tail");
-                let lo = tail.find("C=14").expect("C=14 в tail");
+                let hi = tail.find("C=20").unwrap_or_else(|| unreachable!());
+                let lo = tail.find("C=14").unwrap_or_else(|| unreachable!());
                 assert!(hi < lo, "худший первым: {tail}");
                 assert!(
                     tail.contains("crap: 2 functions, 2 violations (CRAP_MAX=12)"),
                     "{tail}"
                 );
             }
-            v => panic!("ожидали Fail, got {v:?}"),
+            v => unreachable!("ожидали Fail, got {v:?}"),
         }
 
         let tight = "src/c.rs:3 tight C=12 cov=99\nCRAP: functions=1\n";
