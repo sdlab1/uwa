@@ -197,7 +197,11 @@ fn parse_crap_row(line: &str) -> Option<CrapRow> {
     let head = head.trim_end();
     let c: u32 = after_c[3..].split_whitespace().next()?.parse().ok()?;
     let rel = after_c.find(" cov=")?;
-    let cov: u32 = after_c[rel.saturating_add(5)..].split_whitespace().next()?.parse().ok()?;
+    let cov: u32 = after_c[rel.saturating_add(5)..]
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()?;
     let mut ws = head.split_whitespace();
     let loc = ws.next()?;
     let fun = ws.next()?;
@@ -297,7 +301,10 @@ fn judge_mutation(raw: &Raw, min_kill: u32) -> Verdict {
         },
         Some(MutationStats { mutants: 0, .. }) => Verdict::Pass,
         Some(MutationStats { mutants, killed }) => {
-            let rate = 100_u32.saturating_mul(killed).checked_div(mutants).unwrap_or(0);
+            let rate = 100_u32
+                .saturating_mul(killed)
+                .checked_div(mutants)
+                .unwrap_or(0);
             if rate >= min_kill {
                 Verdict::Pass
             } else {
