@@ -189,11 +189,13 @@ mod tests {
             max: Duration::from_secs(1),
         };
         let start = tokio::time::Instant::now();
-        retry(&cfg, || async {
+        match retry(&cfg, || async {
             Err::<(), _>(uwa_core::UwaError::Unavailable("x".into()))
         })
-        .await
-        .unwrap_or_else(|_| unreachable!());
+        .await {
+            Err(_) => {},
+            Ok(_) => unreachable!("retry should have exhausted all attempts"),
+        }
         // 50 + 100 + 200, each plus up to 30% jitter: [350ms, 455ms).
         assert!(start.elapsed() < Duration::from_secs(1));
     }
@@ -236,11 +238,13 @@ mod tests {
             max: Duration::from_millis(150),
         };
         let start = tokio::time::Instant::now();
-        retry(&cfg, || async {
+        match retry(&cfg, || async {
             Err::<(), _>(uwa_core::UwaError::Unavailable("x".into()))
         })
-        .await
-        .unwrap_or_else(|_| unreachable!());
+        .await {
+            Err(_) => {},
+            Ok(_) => unreachable!("retry should have exhausted all attempts"),
+        }
         let elapsed = start.elapsed();
         // 550ms of sleeping, plus up to 30% jitter per delay: [550ms, 715ms).
         assert!(elapsed >= Duration::from_millis(500), "{elapsed:?}");
