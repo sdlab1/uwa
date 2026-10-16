@@ -75,17 +75,17 @@ async fn list_returns_recent_events_newest_first() {
     assert_eq!(events.len(), 3);
     // Newest first: claude.
     assert_eq!(
-        events[0].get("target").and_then(|t| t.as_str()),
+        events.first().and_then(|e| e.get("target")).and_then(|t| t.as_str()),
         Some("tab_b"),
         "first target wrong: {v}"
     );
     assert_eq!(
-        events[2].get("target").and_then(|t| t.as_str()),
+        events.get(2).and_then(|e| e.get("target")).and_then(|t| t.as_str()),
         Some("tab_a"),
         "third target wrong: {v}"
     );
     assert_eq!(
-        events[2].get("kind").and_then(|k| k.as_str()),
+        events.get(2).and_then(|e| e.get("kind")).and_then(|k| k.as_str()),
         Some("response_body"),
         "third kind wrong: {v}"
     );

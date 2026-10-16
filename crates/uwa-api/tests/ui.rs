@@ -55,11 +55,11 @@ async fn pool_status_has_urls() {
     assert_eq!(tabs.len(), 1);
     // MockTab reports a URL (about:blank default); the shape is what matters.
     assert!(
-        tabs.get(0).and_then(|t| t.get("id")).and_then(|v| v.is_string()).unwrap_or(false),
+        tabs.first().and_then(|t| t.get("id")).map(|v| v.is_string()).unwrap_or(false),
         "tab entry has id"
     );
     assert!(
-        tabs.get(0).and_then(|t| t.get("url")).and_then(|v| v.is_string()).unwrap_or(false),
+        tabs.first().and_then(|t| t.get("url")).map(|v| v.is_string()).unwrap_or(false),
         "tab entry has url"
     );
 }

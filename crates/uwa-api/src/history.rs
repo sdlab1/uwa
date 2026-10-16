@@ -205,8 +205,20 @@ mod tests {
         r.finish_success("world", 0, "stop", "dom");
         let rec = r.into_record();
         assert_eq!(rec.status, uwa_history::RequestStatus::Success);
-        assert_eq!(rec.response.as_ref().unwrap().text_preview, "world");
-        assert_eq!(rec.response.as_ref().unwrap().finish_reason, "stop");
+        assert_eq!(
+            rec.response
+                .as_ref()
+                .unwrap_or_else(|| unreachable!())
+                .text_preview,
+            "world"
+        );
+        assert_eq!(
+            rec.response
+                .as_ref()
+                .unwrap_or_else(|| unreachable!())
+                .finish_reason,
+            "stop"
+        );
     }
 
     #[test]

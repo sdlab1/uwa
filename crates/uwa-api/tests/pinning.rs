@@ -59,8 +59,12 @@ fn cfg_toml(pin: bool) -> String {
 
 fn app_with(pin: bool, page: MockPage) -> axum_test::TestServer {
     let cfg: Arc<uwa_config::Config> =
-        Arc::new(uwa_config::Config::load_from_str(&cfg_toml(pin)).unwrap());
-    let provider_cfg = cfg.providers.get("demo").unwrap().clone();
+        Arc::new(uwa_config::Config::load_from_str(&cfg_toml(pin)).unwrap_or_else(|e| unreachable!("config load failed: {e}")));
+    let provider_cfg = cfg
+        .providers
+        .get("demo")
+        .cloned()
+        .unwrap_or_else(|| unreachable!("demo provider missing"));
     let provider = GenericProvider::new(provider_cfg, Arc::new(ExtractionPipeline::new()));
 
     let page = Arc::new(page);
@@ -122,7 +126,7 @@ async fn second_turn_is_a_delta() {
 
     // The first request fills "hello". The second must fill only the new
     // user turn ("second"), not the full history.
-    let last = fills.last().unwrap();
+    let last = fills.last().unwrap_or_else(|| unreachable!("fills is empty"));
     assert!(
         last.contains("second"),
         "delta turn must contain the new user message: {last}"
@@ -132,9 +136,9 @@ async fn second_turn_is_a_delta() {
         "delta turn must not repeat earlier user messages: {last}"
     );
     assert!(
-        fills[0].contains("hello"),
+        fills.first().map(|s| s.contains("hello")).unwrap_or(false),
         "first turn fills the first message: {:?}",
-        fills[0]
+        fills.first()
     );
 }
 
@@ -166,12 +170,12 @@ async fn pinning_disabled_resends_full_history() {
     // difference from delta mode is that the *system prompt* (if any)
     // and full turn body would be sent. This test at least pins the
     // "still works with pinning off" contract.
-    let last = fills.last().unwrap();
+    let last = fills.last().unwrap_or_else(|| unreachable!("fills is empty"));
     assert!(last.contains("beta"), "{last}");
     assert!(
-        fills[0].contains("alpha"),
+        fills.first().map(|s| s.contains("alpha")).unwrap_or(false),
         "first turn fills the first message: {:?}",
-        fills[0]
+        fills.first()
     );
 }
 
@@ -200,7 +204,7 @@ async fn edited_history_forces_full_send() {
         "the edited history still produces a send: {:?}",
         fills
     );
-    let last = fills.last().unwrap();
+    let last = fills.last().unwrap_or_else(|| unreachable!("fills is empty"));
     // Full mode composes everything after the last assistant — "next".
     // Same visible content as delta. The invariant we can check here is
     // that the send still happened and produced a valid response — full
@@ -213,8 +217,15 @@ async fn different_tab_forces_full_send() {
     // Two tabs; the session manager rotates, so the second turn lands on
     // a fresh tab and pinning must reset.
     let cfg: Arc<uwa_config::Config> =
-        Arc::new(uwa_config::Config::load_from_str(&cfg_toml(true)).unwrap());
-    let provider_cfg = cfg.providers.get("demo").unwrap().clone();
+        Arc::new(
+            uwa_config::Config::load_from_str(&cfg_toml(true))
+                .unwrap_or_else(|e| unreachable!("config load failed: {e}")),
+        );
+    let provider_cfg = cfg
+        .providers
+        .get("demo")
+        .cloned()
+        .unwrap_or_else(|| unreachable!("demo provider missing"));
     let provider = GenericProvider::new(provider_cfg, Arc::new(ExtractionPipeline::new()));
 
     let page_a = Arc::new(happy_page());

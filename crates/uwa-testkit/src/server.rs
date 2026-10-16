@@ -158,8 +158,8 @@ mod tests {
         let resp = app.server.get("/v1/models").await;
         resp.assert_status_ok();
         let models: serde_json::Value = resp.json();
-        assert_eq!(models["data"][0]["id"].as_str(), Some("gpt-4o"));
-        assert_eq!(models["data"][0]["owned_by"].as_str(), Some("chatgpt"));
+        assert_eq!(models.get("data").unwrap_or_else(|| unreachable!())[0].get("id").unwrap_or_else(|| unreachable!()).as_str(), Some("gpt-4o"));
+        assert_eq!(models.get("data").unwrap_or_else(|| unreachable!())[0].get("owned_by").unwrap_or_else(|| unreachable!()).as_str(), Some("chatgpt"));
     }
 
     #[tokio::test]

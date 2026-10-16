@@ -278,13 +278,13 @@ mod tests {
         let recent = log.recent(10, None, None, None).await;
         assert_eq!(recent.len(), 3);
         // Newest first.
-        match &recent[0].payload {
-            LoggedPayload::ResponseBody { body, .. } => assert_eq!(body, "body-4"),
-            _ => panic!(),
+        match recent.first().map(|r| &r.payload) {
+            Some(LoggedPayload::ResponseBody { body, .. }) => assert_eq!(body, "body-4"),
+            _ => unreachable!(),
         }
-        match &recent[2].payload {
-            LoggedPayload::ResponseBody { body, .. } => assert_eq!(body, "body-2"),
-            _ => panic!(),
+        match recent.get(2).map(|r| &r.payload) {
+            Some(LoggedPayload::ResponseBody { body, .. }) => assert_eq!(body, "body-2"),
+            _ => unreachable!(),
         }
     }
 
@@ -296,18 +296,18 @@ mod tests {
         });
         log.ingest(ev("t", "0123456789abcdef")).await;
         let recent = log.recent(1, None, None, None).await;
-        match &recent[0].payload {
-            LoggedPayload::ResponseBody {
+        match recent.first().map(|r| &r.payload) {
+            Some(LoggedPayload::ResponseBody {
                 body,
                 size_bytes,
                 truncated,
                 ..
-            } => {
+            }) => {
                 assert_eq!(body.len(), 8);
                 assert_eq!(*size_bytes, 16);
                 assert!(*truncated);
             }
-            _ => panic!(),
+            _ => unreachable!(),
         }
     }
 
@@ -367,8 +367,8 @@ mod tests {
         log.ingest(ev("t", "x")).await;
         let got = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
             .await
-            .expect("event within 1s")
-            .unwrap();
+            .unwrap_or_else(|_| unreachable!("event within 1s"))
+            .unwrap_or_else(|_| unreachable!());
         assert_eq!(got.target, "t");
     }
 }

@@ -52,11 +52,12 @@ async fn claude_code_tool_use_flow() {
         "tool_use"
     );
 
-    let tool = v
+    let content_array = v
         .get("content")
         .and_then(|c| c.as_array())
         .cloned()
-        .unwrap_or_default()
+        .unwrap_or_default();
+    let tool = content_array
         .iter()
         .find(|c| c.get("type").and_then(|t| t.as_str()).unwrap_or("") == "tool_use")
         .unwrap_or_else(|| unreachable!("tool_use block"));

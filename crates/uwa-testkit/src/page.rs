@@ -339,9 +339,9 @@ mod tests {
         let _ = p.type_text("#in", "hi").await;
         let l = p.log();
         assert_eq!(l.len(), 3);
-        assert_eq!(l.get(0), Some(&"1".to_string()));
-        assert!(l.get(1).map_or(false, |s| s.starts_with("click:")), "{l:?}");
-        assert!(l.get(2).map_or(false, |s| s.starts_with("type:#in=hi")), "{l:?}");
+        assert_eq!(l.first(), Some(&"1".to_string()));
+        assert!(l.get(1).is_some_and(|s| s.starts_with("click:")), "{l:?}");
+        assert!(l.get(2).is_some_and(|s| s.starts_with("type:#in=hi")), "{l:?}");
     }
 
     #[tokio::test]

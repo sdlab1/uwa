@@ -126,6 +126,68 @@ pub async fn fetch_blob(page: &dyn uwa_core::Page, url: &str) -> Result<Vec<u8>>
         .map_err(|e| uwa_core::UwaError::Transport(format!("decode b64: {e}")))
 }
 
+use uwa_core::types::media::{MediaAsset, MediaKind};
+
+const COLLECT_TEMPLATE: &str = include_str!("js/media_collect.js");
+
+/// Collect media inside the last assistant message.
+///
+/// `blob:` URLs are returned verbatim; the caller decides whether to
+/// fetch them via [`fetch_blob`].
+pub async fn collect_media(
+    page: &dyn uwa_core::Page,
+    container_selector: &str,
+    max_assets: usize,
+    max_bytes: u64,
+) -> Result<Vec<MediaAsset>> {
+    let js = format!(
+        "{}({}, {}, {})",
+        COLLECT_TEMPLATE.trim_end_matches(';'),
+        serde_json::to_string(container_selector).unwrap_or_else(|_| "\"\"".into()),
+        max_assets.min(64),
+        max_bytes,
+    );
+    let v = page.eval(&js).await?;
+    let Some(arr) = v.as_array() else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::with_capacity(arr.len());
+    for item in arr {
+        let Some(kind) = item.get("kind").and_then(|x| x.as_str()) else {
+            continue;
+        };
+        let kind = match kind {
+            "image" => MediaKind::Image,
+            "audio" => MediaKind::Audio,
+            "video" => MediaKind::Video,
+            "canvas" => MediaKind::Canvas,
+            _ => continue,
+        };
+        let Some(url) = item.get("url").and_then(|x| x.as_str()) else {
+            continue;
+        };
+        if url.is_empty() {
+            continue;
+        }
+        out.push(MediaAsset {
+            kind,
+            url: url.to_string(),
+            mime: item
+                .get("mime")
+                .and_then(|x| x.as_str())
+                .map(str::to_string),
+            size_bytes: item.get("size_bytes").and_then(|x| x.as_u64()),
+            local_path: None,
+            alt: item.get("alt").and_then(|x| x.as_str()).map(str::to_string),
+            source: item
+                .get("source")
+                .and_then(|x| x.as_str())
+                .map(str::to_string),
+        });
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -189,66 +251,4 @@ mod tests {
         let p = MockPage::new().expect_default(json!({"ok": true}));
         assert!(scan_media(&p).await.unwrap().is_empty());
     }
-}
-
-use uwa_core::types::media::{MediaAsset, MediaKind};
-
-const COLLECT_TEMPLATE: &str = include_str!("js/media_collect.js");
-
-/// Collect media inside the last assistant message.
-///
-/// `blob:` URLs are returned verbatim; the caller decides whether to
-/// fetch them via [`fetch_blob`].
-pub async fn collect_media(
-    page: &dyn uwa_core::Page,
-    container_selector: &str,
-    max_assets: usize,
-    max_bytes: u64,
-) -> Result<Vec<MediaAsset>> {
-    let js = format!(
-        "{}({}, {}, {})",
-        COLLECT_TEMPLATE.trim_end_matches(';'),
-        serde_json::to_string(container_selector).unwrap_or_else(|_| "\"\"".into()),
-        max_assets.min(64),
-        max_bytes,
-    );
-    let v = page.eval(&js).await?;
-    let Some(arr) = v.as_array() else {
-        return Ok(Vec::new());
-    };
-    let mut out = Vec::with_capacity(arr.len());
-    for item in arr {
-        let Some(kind) = item.get("kind").and_then(|x| x.as_str()) else {
-            continue;
-        };
-        let kind = match kind {
-            "image" => MediaKind::Image,
-            "audio" => MediaKind::Audio,
-            "video" => MediaKind::Video,
-            "canvas" => MediaKind::Canvas,
-            _ => continue,
-        };
-        let Some(url) = item.get("url").and_then(|x| x.as_str()) else {
-            continue;
-        };
-        if url.is_empty() {
-            continue;
-        }
-        out.push(MediaAsset {
-            kind,
-            url: url.to_string(),
-            mime: item
-                .get("mime")
-                .and_then(|x| x.as_str())
-                .map(str::to_string),
-            size_bytes: item.get("size_bytes").and_then(|x| x.as_u64()),
-            local_path: None,
-            alt: item.get("alt").and_then(|x| x.as_str()).map(str::to_string),
-            source: item
-                .get("source")
-                .and_then(|x| x.as_str())
-                .map(str::to_string),
-        });
-    }
-    Ok(out)
 }

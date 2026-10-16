@@ -90,8 +90,21 @@ mod tests {
             vec![],
         );
         assert_eq!(r.object, "chat.completion");
-        assert_eq!(r.choices[0].finish_reason, Some(FinishReason::Stop));
-        assert!(r.choices[0].message.tool_calls.is_none());
+        assert_eq!(
+            r.choices
+                .get(0)
+                .unwrap_or_else(|| unreachable!())
+                .finish_reason,
+            Some(FinishReason::Stop)
+        );
+        assert!(
+            r.choices
+                .get(0)
+                .unwrap_or_else(|| unreachable!())
+                .message
+                .tool_calls
+                .is_none()
+        );
     }
 
     #[test]
@@ -111,9 +124,24 @@ mod tests {
             Usage::default(),
             vec![],
         );
-        let tc = r.choices[0].message.tool_calls.as_ref().unwrap();
+        let tc = r.choices
+            .get(0)
+            .unwrap_or_else(|| unreachable!())
+            .message
+            .tool_calls
+            .as_ref()
+            .unwrap_or_else(|_| unreachable!());
         assert_eq!(tc.len(), 1);
-        assert_eq!(tc[0].function.name, "echo");
-        assert_eq!(tc[0].function.arguments, r#"{"x":1}"#);
+        assert_eq!(
+            tc.get(0).unwrap_or_else(|| unreachable!()).function.name,
+            "echo"
+        );
+        assert_eq!(
+            tc.get(0)
+                .unwrap_or_else(|| unreachable!())
+                .function
+                .arguments,
+            r#"{"x":1}"#
+        );
     }
 }

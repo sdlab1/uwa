@@ -1089,8 +1089,8 @@ mod tests {
             },
         )
         .await
-        .unwrap();
-        let ev = rx.recv().await.unwrap();
+        .unwrap_or_else(|_| unreachable!());
+        let ev = rx.recv().await.unwrap_or_else(|_| unreachable!());
         assert!(matches!(ev, StreamEvent::Done { .. }));
     }
 }

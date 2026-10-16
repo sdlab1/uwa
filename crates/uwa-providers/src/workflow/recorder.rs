@@ -427,8 +427,9 @@ mod tests {
         ]);
         let p = propose_workflow(&t, &sels());
         assert_eq!(p.workflow.steps.len(), 3);
+        let step = p.workflow.steps.first().unwrap_or_else(|| unreachable!());
         assert!(
-            matches!(p.workflow.steps.get(0).unwrap_or_else(|| unreachable!()), Action::FillInput { target, value }
+            matches!(step, Action::FillInput { target, value }
             if target == "input_box" && value.is_none())
         );
         assert!(matches!(p.workflow.steps.get(1).unwrap_or_else(|| unreachable!()), Action::Click { target, .. }
@@ -455,7 +456,8 @@ mod tests {
         let p = propose_workflow(&trace(events), &sels());
         // One FillInput + the appended StreamWait.
         assert_eq!(p.workflow.steps.len(), 2);
-        assert!(matches!(p.workflow.steps.get(0).unwrap_or_else(|| unreachable!()), Action::FillInput { .. }));
+        let step = p.workflow.steps.first().unwrap_or_else(|| unreachable!());
+        assert!(matches!(step, Action::FillInput { .. }));
     }
 
     #[test]
@@ -493,8 +495,9 @@ mod tests {
             src: "".into(),
         }]);
         let p = propose_workflow(&t, &sels());
+        let step = p.workflow.steps.first().unwrap_or_else(|| unreachable!());
         assert!(
-            matches!(p.workflow.steps.get(0).unwrap_or_else(|| unreachable!()), Action::Click { target, optional }
+            matches!(step, Action::Click { target, optional }
             if target == "#new-chat-button" && *optional)
         );
     }
@@ -508,8 +511,9 @@ mod tests {
             src: "".into(),
         }]);
         let p = propose_workflow(&t, &sels());
+        let step = p.workflow.steps.first().unwrap_or_else(|| unreachable!());
         assert!(
-            matches!(p.workflow.steps.get(0).unwrap_or_else(|| unreachable!()), Action::Click { target, optional }
+            matches!(step, Action::Click { target, optional }
             if target == "send_btn" && !*optional)
         );
     }
@@ -524,8 +528,9 @@ mod tests {
             src: "".into(),
         }]);
         let p = propose_workflow(&t, &sels());
+        let step = p.workflow.steps.first().unwrap_or_else(|| unreachable!());
         assert!(
-            matches!(p.workflow.steps.get(0).unwrap_or_else(|| unreachable!()), Action::FillInput { value, .. }
+            matches!(step, Action::FillInput { value, .. }
             if value.is_none())
         );
     }
@@ -540,8 +545,9 @@ mod tests {
             src: "".into(),
         }]);
         let p = propose_workflow(&t, &sels());
+        let step = p.workflow.steps.first().unwrap_or_else(|| unreachable!());
         assert!(
-            matches!(p.workflow.steps.get(0).unwrap_or_else(|| unreachable!()), Action::FillInput { value, .. }
+            matches!(step, Action::FillInput { value, .. }
             if value.as_deref() == Some("3"))
         );
     }

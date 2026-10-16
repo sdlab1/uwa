@@ -140,7 +140,7 @@ mod tests {
         let a = analyze(&p).await.unwrap_or_else(|_| unreachable!());
         assert_eq!(a.inputs.len(), 2);
         assert_eq!(
-            a.inputs.get(0).unwrap_or_else(|| unreachable!()).selector,
+            a.inputs.first().unwrap_or_else(|| unreachable!()).selector,
             "textarea#prompt"
         ); // sorted by score
         assert_eq!(a.send_buttons.len(), 1);

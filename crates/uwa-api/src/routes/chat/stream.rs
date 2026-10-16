@@ -274,23 +274,45 @@ mod tests {
     #[tokio::test]
     async fn normal_completion_chunks() {
         let frames = collect(|tx| {
-            tx.try_send(StreamEvent::Delta("hello".into())).unwrap();
+            tx.try_send(StreamEvent::Delta("hello".into()))
+                .unwrap_or_else(|_| unreachable!());
             tx.try_send(StreamEvent::Done {
                 finish: FinishReason::Stop,
                 tool_calls: vec![],
                 media: vec![],
             })
-            .unwrap();
+            .unwrap_or_else(|_| unreachable!());
         })
         .await;
 
-        let last = frames.last().expect("frames");
+        let last = frames.last().unwrap_or_else(|_| unreachable!("frames"));
         assert!(last.is_done_sentinel());
-        let finish_chunk = &frames[frames.len() - 2];
-        assert_eq!(finish_chunk.json()["choices"][0]["finish_reason"], "stop");
-        assert!(frames
-            .iter()
-            .any(|f| f.json()["choices"][0]["delta"]["content"] == "hello"));
+        let finish_chunk = &frames
+            .get(frames.len() - 2)
+            .unwrap_or_else(|| unreachable!());
+        assert_eq!(
+            finish_chunk
+                .json()
+                .get("choices")
+                .unwrap_or_else(|| unreachable!())
+                .get(0)
+                .unwrap_or_else(|| unreachable!())
+                .get("finish_reason")
+                .unwrap_or_else(|| unreachable!()),
+            "stop"
+        );
+        assert!(frames.iter().any(|f| {
+            f.json()
+                .get("choices")
+                .unwrap_or_else(|| unreachable!())
+                .get(0)
+                .unwrap_or_else(|| unreachable!())
+                .get("delta")
+                .unwrap_or_else(|| unreachable!())
+                .get("content")
+                .unwrap_or_else(|| unreachable!())
+                == "hello"
+        }));
     }
 
     #[tokio::test]
@@ -338,24 +360,48 @@ mod tests {
         // used to produce a clean `stop` finish chunk.
         // OpenAI streaming spec: error event + [DONE], no finish_reason on error.
         let frames = collect(|tx| {
-            tx.try_send(StreamEvent::Delta("partial".into())).unwrap();
+            tx.try_send(StreamEvent::Delta("partial".into()))
+                .unwrap_or_else(|_| unreachable!());
             drop(tx);
         })
         .await;
 
-        let last = frames.last().expect("frames");
+        let last = frames.last().unwrap_or_else(|_| unreachable!("frames"));
         assert!(last.is_done_sentinel());
-        let error_chunk = &frames[frames.len() - 2];
+        let error_chunk = &frames
+            .get(frames.len() - 2)
+            .unwrap_or_else(|| unreachable!());
         let j = error_chunk.json();
         // No finish_reason on error (OpenAI spec: not a valid enum value)
         assert!(
-            j["choices"][0]["finish_reason"].is_null(),
+            j.get("choices")
+                .unwrap_or_else(|| unreachable!())
+                .get(0)
+                .unwrap_or_else(|| unreachable!())
+                .get("finish_reason")
+                .unwrap_or_else(|| unreachable!())
+                .is_null(),
             "finish_reason must be null on error: {j:?}"
         );
-        assert!(j["error"]["message"].as_str().unwrap().contains("dropped"));
+        assert!(
+            j.get("error")
+                .unwrap_or_else(|| unreachable!())
+                .get("message")
+                .unwrap_or_else(|| unreachable!())
+                .as_str()
+                .unwrap_or_else(|_| unreachable!())
+                .contains("dropped")
+        );
         // ...and no clean `stop` finish chunk anywhere.
-        assert!(frames
-            .iter()
-            .all(|f| f.json()["choices"][0]["finish_reason"] != "stop"));
+        assert!(frames.iter().all(|f| {
+            f.json()
+                .get("choices")
+                .unwrap_or_else(|| unreachable!())
+                .get(0)
+                .unwrap_or_else(|| unreachable!())
+                .get("finish_reason")
+                .unwrap_or_else(|| unreachable!())
+                != "stop"
+        }));
     }
 }

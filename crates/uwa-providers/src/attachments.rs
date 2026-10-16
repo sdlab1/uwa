@@ -144,11 +144,11 @@ mod tests {
         let req = req_with_image(&url);
         let atts = extract_attachments(&req).await.unwrap_or_else(|_| unreachable!());
         assert_eq!(atts.len(), 1);
-        assert_eq!(atts.get(0).unwrap_or_else(|| unreachable!()).mime, "image/png");
-        assert!(atts.get(0).unwrap_or_else(|| unreachable!()).size > 0);
-        assert!(atts.get(0).unwrap_or_else(|| unreachable!()).path.exists());
+        assert_eq!(atts.first().unwrap_or_else(|| unreachable!()).mime, "image/png");
+        assert!(atts.first().unwrap_or_else(|| unreachable!()).size > 0);
+        assert!(atts.first().unwrap_or_else(|| unreachable!()).path.exists());
         cleanup(&atts);
-        assert!(!atts.get(0).unwrap_or_else(|| unreachable!()).path.exists());
+        assert!(!atts.first().unwrap_or_else(|| unreachable!()).path.exists());
     }
 
     #[tokio::test]

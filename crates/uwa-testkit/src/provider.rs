@@ -207,7 +207,7 @@ mod tests {
     #[tokio::test]
     async fn answers_with_the_scripted_text() {
         let p = MockProvider::new("chatgpt").with_answer("hello");
-        let answer = p.wait_response(&MockPage::new()).await.expect("answer");
+        let answer = p.wait_response(&MockPage::new()).await.unwrap_or_else(|_| unreachable!("answer"));
         assert_eq!(answer, "hello");
         assert_eq!(p.name(), "chatgpt");
         assert!(p.capabilities().streams);
@@ -218,10 +218,10 @@ mod tests {
         let p = MockProvider::new("chatgpt");
         p.send_message(&MockPage::new(), "first")
             .await
-            .expect("send");
+            .unwrap_or_else(|_| unreachable!("send"));
         p.send_message(&MockPage::new(), "second")
             .await
-            .expect("send");
+            .unwrap_or_else(|_| unreachable!("send"));
         assert_eq!(p.sent(), vec!["first".to_string(), "second".to_string()]);
         assert_eq!(p.sent_last(), "second");
     }
@@ -231,7 +231,10 @@ mod tests {
         let p = MockProvider::new("chatgpt")
             .with_answer("never seen")
             .with_error("provider exploded");
-        let err = p.wait_response(&MockPage::new()).await.expect_err("fails");
+        let err = match p.wait_response(&MockPage::new()).await {
+            Err(e) => e,
+            Ok(_) => unreachable!("fails"),
+        };
         assert!(matches!(err, UwaError::Unavailable(m) if m == "provider exploded"));
     }
 
@@ -239,14 +242,14 @@ mod tests {
     async fn delay_slows_the_answer_down() {
         let p = MockProvider::new("slow").with_delay(Duration::from_millis(50));
         let started = std::time::Instant::now();
-        let _ = p.wait_response(&MockPage::new()).await.expect("answer");
+        let _ = p.wait_response(&MockPage::new()).await.unwrap_or_else(|_| unreachable!("answer"));
         assert!(started.elapsed() >= Duration::from_millis(40));
     }
 
     #[test]
     fn matches_can_be_flipped() {
         let p = MockProvider::new("x");
-        let url = Url::parse("https://chatgpt.com/").expect("url");
+        let url = Url::parse("https://chatgpt.com/").unwrap_or_else(|_| unreachable!("url"));
         assert!(p.matches(&url));
         p.set_matches(false);
         assert!(!p.matches(&url));

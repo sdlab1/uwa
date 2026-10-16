@@ -63,7 +63,7 @@ async fn streaming_pipeline_produces_sse_chunks_with_ttft() {
         .build();
 
     // Streaming request
-    let mut stream = app
+    let stream = app
         .server
         .post("/v1/chat/completions")
         .add_header("Accept", "text/event-stream")
@@ -154,7 +154,7 @@ async fn anthropic_messages_nonstreaming_round_trip() {
 
     // Anthropic Messages shape: content[] with text blocks
     assert!(
-        v.get("content").and_then(|c| c.is_array()).unwrap_or(false),
+        v.get("content").map(|c| c.is_array()).unwrap_or(false),
         "missing content array: {v}"
     );
     assert_eq!(

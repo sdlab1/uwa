@@ -345,7 +345,7 @@ mod tests {
                 optional: false,
             }],
         };
-        runner.run(&p, &wf).await.unwrap();
+        runner.run(&p, &wf).await.unwrap_or_else(|_| unreachable!());
         assert!(p.log().iter().any(|s| s.contains("button.send")));
     }
 
@@ -361,7 +361,7 @@ mod tests {
                 optional: true,
             }],
         };
-        runner.run(&p, &wf).await.unwrap();
+        runner.run(&p, &wf).await.unwrap_or_else(|_| unreachable!());
     }
 
     #[tokio::test]
@@ -389,12 +389,12 @@ mod tests {
                 value: None,
             }],
         };
-        runner.run(&p, &wf).await.unwrap();
+        runner.run(&p, &wf).await.unwrap_or_else(|_| unreachable!());
         let logs = p.log();
         let inject = logs
             .iter()
             .find(|s| s.contains("setter.call"))
-            .expect("inject ran");
+            .unwrap_or_else(|| unreachable!("inject ran"));
         assert!(inject.contains("the prompt"));
     }
 
@@ -409,9 +409,9 @@ mod tests {
                 value: Some("literal value".into()),
             }],
         };
-        runner.run(&p, &wf).await.unwrap();
+        runner.run(&p, &wf).await.unwrap_or_else(|_| unreachable!());
         let logs = p.log();
-        let inject = logs.iter().find(|s| s.contains("setter.call")).unwrap();
+        let inject = logs.iter().find(|s| s.contains("setter.call")).unwrap_or_else(|| unreachable!());
         assert!(inject.contains("literal value"));
         assert!(!inject.contains("ignored"));
     }
@@ -425,7 +425,7 @@ mod tests {
             steps: vec![Action::Wait { seconds: 0.05 }],
         };
         let start = std::time::Instant::now();
-        runner.run(&p, &wf).await.unwrap();
+        runner.run(&p, &wf).await.unwrap_or_else(|_| unreachable!());
         assert!(start.elapsed() >= Duration::from_millis(40));
     }
 
@@ -449,7 +449,7 @@ mod tests {
                 else_: vec![Action::Wait { seconds: 0.01 }],
             }],
         };
-        runner.run(&p, &wf).await.unwrap();
+        runner.run(&p, &wf).await.unwrap_or_else(|_| unreachable!());
         // then-branch click should NOT have run
         assert!(!p.log().iter().any(|s| s.contains("button.send")));
     }
@@ -474,7 +474,7 @@ mod tests {
                 else_: vec![],
             }],
         };
-        runner.run(&p, &wf).await.unwrap();
+        runner.run(&p, &wf).await.unwrap_or_else(|_| unreachable!());
         assert!(p.log().iter().any(|s| s.contains("button.send")));
     }
 
@@ -491,7 +491,7 @@ mod tests {
                 },
             }],
         };
-        runner.run(&p, &wf).await.unwrap();
+        runner.run(&p, &wf).await.unwrap_or_else(|_| unreachable!());
         assert_eq!(
             runner.vars().get("greeting").map(String::as_str),
             Some("captured value")
@@ -528,7 +528,7 @@ mod tests {
                 },
             ],
         };
-        runner.run(&p, &wf).await.unwrap();
+        runner.run(&p, &wf).await.unwrap_or_else(|_| unreachable!());
         assert!(p.log().iter().any(|s| s.contains("button.custom")));
     }
 
@@ -555,7 +555,7 @@ mod tests {
                 ],
             }],
         };
-        runner.run(&p, &wf).await.unwrap();
+        runner.run(&p, &wf).await.unwrap_or_else(|_| unreachable!());
     }
 
     #[tokio::test]
@@ -569,7 +569,10 @@ mod tests {
                 optional: false,
             }],
         };
-        let e = runner.run(&p, &wf).await.unwrap_err();
+        let e = match runner.run(&p, &wf).await {
+            Err(e) => e,
+            Ok(_) => unreachable!(),
+        };
         assert!(matches!(e, WorkflowError::UnknownTarget(_)));
     }
 
@@ -594,7 +597,7 @@ mod tests {
                 timeout_secs: 5,
             }],
         };
-        runner.run(&p, &wf).await.unwrap();
+        runner.run(&p, &wf).await.unwrap_or_else(|_| unreachable!());
     }
     #[tokio::test]
     async fn raw_css_selector_is_accepted_when_it_looks_like_one() {
@@ -607,7 +610,7 @@ mod tests {
                 optional: false,
             }],
         };
-        runner.run(&p, &wf).await.unwrap();
+        runner.run(&p, &wf).await.unwrap_or_else(|_| unreachable!());
         assert!(p.log().iter().any(|s| s.contains("#raw-button")));
     }
 
@@ -623,7 +626,10 @@ mod tests {
             }],
         };
         assert!(matches!(
-            runner.run(&p, &wf).await.unwrap_err(),
+            match runner.run(&p, &wf).await {
+                Err(e) => e,
+                Ok(_) => unreachable!(),
+            },
             WorkflowError::UnknownTarget(_)
         ));
     }

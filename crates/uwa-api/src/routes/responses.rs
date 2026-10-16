@@ -684,10 +684,18 @@ mod tests {
 
     #[test]
     fn string_input_becomes_user_message() {
-        let c = to_chat_request(&req(json!("hello"))).expect("converts");
+        let c = to_chat_request(&req(json!("hello")))
+            .unwrap_or_else(|e| unreachable!("converts: {e}"));
         assert_eq!(c.messages.len(), 1);
-        assert_eq!(c.messages[0].role, Role::User);
-        assert_eq!(content_of(&c.messages[0]), json!("hello"));
+        assert_eq!(
+            c.messages.get(0).map(|m| m.role),
+            Some(Role::User),
+            "messages[0].role wrong"
+        );
+        assert_eq!(
+            content_of(c.messages.get(0).unwrap_or_else(|| unreachable!("messages[0] missing"))),
+            json!("hello")
+        );
     }
 
     #[test]
@@ -792,17 +800,33 @@ mod tests {
             {"type": "function_call", "call_id": "call_1", "name": "get_weather", "arguments": "{\"city\":\"NYC\"}"},
             {"type": "function_call_output", "call_id": "call_1", "output": "22C"}
         ])))
-        .expect("converts");
+        .unwrap_or_else(|| unreachable!("converts"));
         assert_eq!(c.messages.len(), 3);
-        assert_eq!(c.messages[0].role, Role::User);
+        assert_eq!(
+            c.messages
+                .get(0)
+                .unwrap_or_else(|| unreachable!())
+                .role,
+            Role::User
+        );
 
-        let assistant = &c.messages[1];
+        let assistant = c.messages
+            .get(1)
+            .unwrap_or_else(|| unreachable!());
         assert_eq!(assistant.role, Role::Assistant);
-        let tc = assistant.tool_calls.as_ref().expect("tool_calls");
-        assert_eq!(tc[0].id, "call_1");
-        assert_eq!(tc[0].function.name, "get_weather");
+        let tc = assistant
+            .tool_calls
+            .as_ref()
+            .unwrap_or_else(|| unreachable!("tool_calls"));
+        let tc0 = tc
+            .get(0)
+            .unwrap_or_else(|| unreachable!());
+        assert_eq!(tc0.id, "call_1");
+        assert_eq!(tc0.function.name, "get_weather");
 
-        let tool = &c.messages[2];
+        let tool = c.messages
+            .get(2)
+            .unwrap_or_else(|| unreachable!());
         assert_eq!(tool.role, Role::Tool);
         assert_eq!(tool.tool_call_id.as_deref(), Some("call_1"));
         assert!(matches!(&tool.content, Some(MessageContent::Text(s)) if s == "22C"));
@@ -818,11 +842,25 @@ mod tests {
             "description": "lookup",
             "parameters": {"type": "object"},
         })]);
-        let c = to_chat_request(&r).expect("converts");
-        let tools = c.tools.clone().expect("tools");
-        assert_eq!(tools[0]["function"]["name"], "get_weather");
+        let c = to_chat_request(&r).unwrap_or_else(|| unreachable!("converts"));
+        let tools = c
+            .tools
+            .clone()
+            .unwrap_or_else(|| unreachable!("tools"));
+        assert_eq!(
+            tools
+                .get(0)
+                .unwrap_or_else(|| unreachable!())
+                .get("function")
+                .unwrap_or_else(|| unreachable!())
+                .get("name")
+                .unwrap_or_else(|| unreachable!()),
+            "get_weather"
+        );
         // And the chat layer can now parse them.
-        assert!(!chat::local_tools(&c).expect("parse").is_empty());
+        assert!(!chat::local_tools(&c)
+            .unwrap_or_else(|| unreachable!("parse"))
+            .is_empty());
     }
 
     #[test]
@@ -830,8 +868,10 @@ mod tests {
         let c = to_chat_request(&req(json!([
             {"type": "function_call_output", "call_id": "c1", "output": {"ok": true}}
         ])))
-        .expect("converts");
-        let tool = &c.messages[0];
+        .unwrap_or_else(|| unreachable!("converts"));
+        let tool = c.messages
+            .get(0)
+            .unwrap_or_else(|| unreachable!());
         assert_eq!(tool.role, Role::Tool);
         assert!(matches!(&tool.content, Some(MessageContent::Text(s)) if s.contains("ok")));
     }
@@ -843,11 +883,36 @@ mod tests {
             "created": 7,
             "choices": [{"message": {"role": "assistant", "content": "hi"}}]
         });
-        let v = serde_json::to_value(reshape("gpt-4o", &chat)).expect("serializes");
-        assert_eq!(v["object"], "response");
-        assert_eq!(v["output"][0]["type"], "message");
-        assert_eq!(v["output"][0]["content"][0]["type"], "output_text");
-        assert_eq!(v["output"][0]["content"][0]["text"], "hi");
+        let v = serde_json::to_value(reshape("gpt-4o", &chat)).unwrap_or_else(|e| unreachable!("serializes: {e}"));
+        assert_eq!(v.get("object").and_then(|o| o.as_str()), Some("response"), "object wrong: {v}");
+        assert_eq!(
+            v.get("output")
+                .and_then(|o| o.get(0))
+                .and_then(|o| o.get("type"))
+                .and_then(|t| t.as_str()),
+            Some("message"),
+            "output[0].type wrong: {v}"
+        );
+        assert_eq!(
+            v.get("output")
+                .and_then(|o| o.get(0))
+                .and_then(|o| o.get("content"))
+                .and_then(|c| c.get(0))
+                .and_then(|c| c.get("type"))
+                .and_then(|t| t.as_str()),
+            Some("output_text"),
+            "output[0].content[0].type wrong: {v}"
+        );
+        assert_eq!(
+            v.get("output")
+                .and_then(|o| o.get(0))
+                .and_then(|o| o.get("content"))
+                .and_then(|c| c.get(0))
+                .and_then(|c| c.get("text"))
+                .and_then(|t| t.as_str()),
+            Some("hi"),
+            "output[0].content[0].text wrong: {v}"
+        );
         assert!(v.get("error").is_none(), "absent fields are skipped");
     }
 
@@ -897,7 +962,7 @@ mod tests {
                 ],
                 media: vec![],
             })
-            .unwrap();
+            .unwrap_or_else(|e| unreachable!("try_send done failed: {e}"));
         })
         .await;
 
@@ -933,7 +998,7 @@ mod tests {
         // to match the final `output` array.
         let frames = collect(|tx| {
             tx.try_send(chat::pipeline::StreamEvent::Delta("thinking".into()))
-                .unwrap();
+                .unwrap_or_else(|e| unreachable!("try_send delta failed: {e}"));
             tx.try_send(chat::pipeline::StreamEvent::Done {
                 finish: uwa_core::types::FinishReason::ToolCalls,
                 tool_calls: vec![
@@ -942,7 +1007,7 @@ mod tests {
                 ],
                 media: vec![],
             })
-            .unwrap();
+            .unwrap_or_else(|e| unreachable!("try_send done failed: {e}"));
         })
         .await;
 

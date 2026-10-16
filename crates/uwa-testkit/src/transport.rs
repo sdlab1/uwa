@@ -270,7 +270,7 @@ mod tests {
     #[tokio::test]
     async fn health_toggles() {
         let t = MockTransport::with_n_tabs(1);
-        let id = t.tab_ids()[0].clone();
+        let id = t.tab_ids().first().unwrap_or_else(|| unreachable!()).clone();
         assert!(t.health(&id).await.is_ok());
         t.mark_unhealthy(&id);
         assert!(t.health(&id).await.is_err());
@@ -284,18 +284,18 @@ mod tests {
         let id = TabId::new();
         println!("MockTransport: generated tab id: {}", id.as_str());
         let t = MockTransport::new().with_page(id.clone(), page);
-        let got = t.page(&id).await.expect("known tab");
-        assert_eq!(got.html().await.expect("html"), "<b>hi</b>");
-        assert_eq!(t.list_tabs().await.expect("tabs"), vec![id]);
+        let got = t.page(&id).await.unwrap_or_else(|_| unreachable!("known tab"));
+        assert_eq!(got.html().await.unwrap_or_else(|_| unreachable!("html")), "<b>hi</b>");
+        assert_eq!(t.list_tabs().await.unwrap_or_else(|_| unreachable!("tabs")), vec![id]);
     }
 
     #[tokio::test]
     async fn round_robin_rotates_the_first_tab() {
         let t = MockTransport::with_n_tabs(3).with_round_robin();
         let first: Vec<TabId> = vec![
-            t.list_tabs().await.expect("1")[0].clone(),
-            t.list_tabs().await.expect("2")[0].clone(),
-            t.list_tabs().await.expect("3")[0].clone(),
+            t.list_tabs().await.unwrap_or_else(|_| unreachable!("1")).first().unwrap_or_else(|| unreachable!()).clone(),
+            t.list_tabs().await.unwrap_or_else(|_| unreachable!("2")).first().unwrap_or_else(|| unreachable!()).clone(),
+            t.list_tabs().await.unwrap_or_else(|_| unreachable!("3")).first().unwrap_or_else(|| unreachable!()).clone(),
         ];
         let distinct: std::collections::HashSet<_> = first.iter().collect();
         assert_eq!(
@@ -312,7 +312,7 @@ mod tests {
         println!("MockTransport: generated tab id: {}", id.as_str());
         match t.page(&id).await {
             Err(e) => assert!(matches!(e, UwaError::TabNotFound(_)), "{e:?}"),
-            Ok(_) => panic!("unknown tab must not produce a page"),
+            Ok(_) => unreachable!("unknown tab must not produce a page"),
         }
     }
 
@@ -320,10 +320,10 @@ mod tests {
     async fn closed_tab_disappears_everywhere() {
         let t = MockTransport::with_n_tabs(2);
         let ids = t.tab_ids();
-        let gone = ids.first().expect("tab 0").clone();
-        let kept = ids.get(1).expect("tab 1").clone();
+        let gone = ids.first().unwrap_or_else(|| unreachable!("tab 0")).clone();
+        let kept = ids.get(1).unwrap_or_else(|| unreachable!("tab 1")).clone();
         t.close_tab(&gone);
-        assert_eq!(t.list_tabs().await.expect("tabs"), vec![kept.clone()]);
+        assert_eq!(t.list_tabs().await.unwrap_or_else(|_| unreachable!("tabs")), vec![kept.clone()]);
         assert!(t.health(&gone).await.is_err());
         assert!(t.page(&gone).await.is_err());
         assert!(t.health(&kept).await.is_ok());
@@ -337,8 +337,8 @@ mod profile_tests {
     #[tokio::test]
     async fn open_tab_creates_a_tab_in_the_profile() {
         let t = MockTransport::new().with_profiles();
-        let a = t.open_tab("work", "about:blank").await.unwrap();
-        let b = t.open_tab("work", "about:blank").await.unwrap();
+        let a = t.open_tab("work", "about:blank").await.unwrap_or_else(|_| unreachable!());
+        let b = t.open_tab("work", "about:blank").await.unwrap_or_else(|_| unreachable!());
         assert_ne!(a, b);
         let work = t.list_tabs_in("work").await.unwrap_or_default();
         assert_eq!(work.len(), 2);
@@ -399,7 +399,7 @@ mod profile_tests {
     #[tokio::test]
     async fn closed_dynamic_tab_leaves_its_profile() {
         let t = MockTransport::new().with_profiles();
-        let id = t.open_tab("work", "about:blank").await.unwrap();
+        let id = t.open_tab("work", "about:blank").await.unwrap_or_else(|_| unreachable!());
         t.close_tab(&id);
         assert!(t.list_tabs_in("work").await.unwrap_or_default().is_empty());
     }

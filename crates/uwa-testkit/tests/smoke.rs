@@ -26,7 +26,7 @@ async fn builder_transport_has_a_tab_to_type_into() {
     let app = AppBuilder::new()
         .with_provider(Arc::new(MockProvider::new("chatgpt").with_answer("hi")))
         .build();
-    let tabs = app.state.transport.list_tabs().await.unwrap();
+    let tabs = app.state.transport.list_tabs().await.unwrap_or_else(|_| unreachable!());
     assert!(!tabs.is_empty());
 }
 
@@ -47,7 +47,17 @@ async fn app_builder_runs_a_chat_turn() {
         .await;
     r.assert_status_ok();
     let v: serde_json::Value = r.json();
-    assert_eq!(v["choices"][0]["message"]["content"], "ok");
+    assert_eq!(
+        v.get("choices")
+            .unwrap_or_else(|| unreachable!())
+            .get(0)
+            .unwrap_or_else(|| unreachable!())
+            .get("message")
+            .unwrap_or_else(|| unreachable!())
+            .get("content")
+            .unwrap_or_else(|| unreachable!()),
+        "ok"
+    );
 }
 
 #[tokio::test]

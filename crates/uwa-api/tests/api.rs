@@ -292,7 +292,7 @@ async fn streaming_ends_with_done_and_finish_reason() {
             .and_then(|d| d.get("tool_calls"))
             .and_then(|t| t.as_array())
         {
-            let call = calls.get(0).unwrap_or_else(|| unreachable!("empty tool_calls array"));
+            let call = calls.first().unwrap_or_else(|| unreachable!("empty tool_calls array"));
             args.push_str(
                 call.get("function")
                     .and_then(|f| f.get("name"))
