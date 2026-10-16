@@ -262,6 +262,7 @@ impl ConformanceBackend for LiveBackend {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                uwa_media: Vec::new(),
             });
         }
         messages.push(uwa_core::types::openai::ChatMessage {
@@ -272,6 +273,7 @@ impl ConformanceBackend for LiveBackend {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            uwa_media: Vec::new(),
         });
 
         let req = ChatCompletionRequest {
@@ -289,7 +291,7 @@ impl ConformanceBackend for LiveBackend {
         let all_specs =
             uwa_api::routes::chat::local_tools(&req).map_err(|e| format!("local_tools: {e}"))?;
 
-        let (text, calls, _finish) = uwa_api::routes::chat::run_pipeline(
+        let outcome = uwa_api::routes::chat::run_pipeline(
             &self.state,
             &req,
             &all_specs,
@@ -301,7 +303,10 @@ impl ConformanceBackend for LiveBackend {
         .map_err(|e| format!("pipeline: {e}"))?;
 
         Ok(BackendOutcome {
-            outcome: uwa_tools::ToolParseOutcome { calls, text },
+            outcome: uwa_tools::ToolParseOutcome {
+                calls: outcome.tool_calls,
+                text: outcome.text,
+            },
         })
     }
 }

@@ -340,6 +340,7 @@ mod tests {
                         arguments: "{\"city\":\"NYC\"}".into(),
                     },
                 }]),
+                uwa_media: Vec::new(),
             },
             ChatMessage {
                 role: Role::Tool,
@@ -347,6 +348,7 @@ mod tests {
                 name: None,
                 tool_call_id: Some("call_1".into()),
                 tool_calls: None,
+                uwa_media: Vec::new(),
             },
         ];
         let st = state("t1", 1, hash_messages(&seen), 0);

@@ -33,6 +33,7 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use tokio::sync::mpsc;
+use uwa_core::types::media::MediaAsset;
 use uwa_core::types::openai::{ChatCompletionRequest, ChatMessage};
 use uwa_core::types::FinishReason;
 use uwa_core::TabId;
@@ -55,13 +56,23 @@ use uwa_session::ProfileName;
 pub enum StreamEvent {
     /// Incremental assistant text (already stripped of tool-call markers).
     Delta(String),
-    /// Final chunk: finish reason + aggregated tool calls.
+    /// Final chunk: finish reason + aggregated tool calls + media.
     Done {
         finish: FinishReason,
         tool_calls: Vec<ToolCall>,
+        media: Vec<MediaAsset>,
     },
     /// Pipeline failure after the stream already started.
     Error(UwaError),
+}
+
+/// Complete outcome of a pipeline run (buffered or streaming).
+#[derive(Debug)]
+pub struct PipelineOutcome {
+    pub text: String,
+    pub tool_calls: Vec<ToolCall>,
+    pub finish: FinishReason,
+    pub media: Vec<MediaAsset>,
 }
 
 /// Why the streaming turn ended early.
@@ -103,7 +114,7 @@ pub async fn run_pipeline(
     pinned_tab: Option<&TabId>,
     profile: &ProfileName,
     hint: &RoutingHint,
-) -> Result<(String, Vec<ToolCall>, FinishReason), UwaError> {
+) -> Result<PipelineOutcome, UwaError> {
     let provider_cfg = state.config.provider_for_model(&req.model).ok_or_else(|| {
         UwaError::UnknownModel(uwa_core::ModelNotFound::new(
             req.model.clone(),
@@ -138,12 +149,12 @@ pub async fn run_pipeline(
     .await;
 
     match &result {
-        Ok((text, calls, finish)) => {
+        Ok(outcome) => {
             breaker.record_success();
             recorder.finish_success(
-                text,
-                calls.len(),
-                match finish {
+                &outcome.text,
+                outcome.tool_calls.len(),
+                match outcome.finish {
                     FinishReason::Stop => "stop",
                     FinishReason::ToolCalls => "tool_calls",
                     FinishReason::Length => "length",
@@ -189,7 +200,7 @@ pub async fn run_pipeline_with_hint(
     req: &ChatCompletionRequest,
     all_specs: &[ToolSpec],
     hint: &crate::routing::RoutingHint,
-) -> Result<(String, Vec<ToolCall>, FinishReason), UwaError> {
+) -> Result<PipelineOutcome, UwaError> {
     let profile = hint
         .profile
         .clone()
@@ -267,7 +278,7 @@ pub async fn run_pipeline_streaming(
 
     // Decided on the typed `Abort`, not by comparing error text afterwards.
     let client_gone = matches!(result, Err(Abort::ClientGone));
-    let result: Result<_, UwaError> = match result {
+    let result: Result<PipelineOutcome, UwaError> = match result {
         Ok(v) => Ok(v),
         Err(Abort::Failed(e)) => Err(e),
         Err(Abort::ClientGone) => {
@@ -279,12 +290,12 @@ pub async fn run_pipeline_streaming(
     };
 
     match &result {
-        Ok((text, calls, finish)) => {
+        Ok(outcome) => {
             breaker.record_success();
             recorder.finish_success(
-                text,
-                calls.len(),
-                match finish {
+                &outcome.text,
+                outcome.tool_calls.len(),
+                match outcome.finish {
                     FinishReason::Stop => "stop",
                     FinishReason::ToolCalls => "tool_calls",
                     FinishReason::Length => "length",
@@ -337,7 +348,7 @@ async fn run_pipeline_streaming_inner(
     recorder: &mut RequestRecorder,
     tx: &mpsc::Sender<StreamEvent>,
     hint: &RoutingHint,
-) -> Result<(String, Vec<ToolCall>, FinishReason), Abort> {
+) -> Result<PipelineOutcome, Abort> {
     let provider_cfg = state.config.provider_for_model(&req.model).ok_or_else(|| {
         UwaError::UnknownModel(uwa_core::ModelNotFound::new(
             req.model.clone(),
@@ -566,16 +577,30 @@ async fn run_pipeline_streaming_inner(
         recorder.record_tool_calls(calls.len());
     }
 
+    // Check if this is the first turn (no assistant message in history yet)
+    let is_first_turn = !conversation
+        .iter()
+        .any(|m| m.role == uwa_core::types::openai::Role::Assistant);
+
+    // Extract and persist media if enabled
+    let media = collect_and_persist_media(page.as_ref(), provider_cfg, is_first_turn).await;
+
     emit(
         tx,
         StreamEvent::Done {
             finish,
             tool_calls: calls.clone(),
+            media: media.clone(),
         },
     )
     .await?;
 
-    Ok((text, calls, finish))
+    Ok(PipelineOutcome {
+        text,
+        tool_calls: calls,
+        finish,
+        media,
+    })
 }
 
 async fn run_pipeline_inner(
@@ -586,7 +611,7 @@ async fn run_pipeline_inner(
     profile: &ProfileName,
     recorder: &mut RequestRecorder,
     hint: &RoutingHint,
-) -> Result<(String, Vec<ToolCall>, FinishReason), UwaError> {
+) -> Result<PipelineOutcome, UwaError> {
     let provider_cfg = state.config.provider_for_model(&req.model).ok_or_else(|| {
         UwaError::UnknownModel(uwa_core::ModelNotFound::new(
             req.model.clone(),
@@ -719,11 +744,19 @@ async fn run_pipeline_inner(
     let raw = site.wait_response(page.as_ref()).await?;
     recorder.mark_wait_end();
 
+    // Check if this is the first turn (no assistant message in history yet)
+    let is_first_turn = !conversation
+        .iter()
+        .any(|m| m.role == uwa_core::types::openai::Role::Assistant);
+
+    // Extract and persist media if enabled
+    let media = collect_and_persist_media(page.as_ref(), provider_cfg, is_first_turn).await;
+
     if let Some(h) = &session_handle {
         h.touch().await;
     }
 
-    resolve_tool_calls(
+    let (text, tool_calls, finish) = resolve_tool_calls(
         site.as_ref(),
         page.as_ref(),
         provider_cfg,
@@ -733,7 +766,14 @@ async fn run_pipeline_inner(
         recorder,
         raw,
     )
-    .await
+    .await?;
+
+    Ok(crate::routes::chat::pipeline::PipelineOutcome {
+        text,
+        tool_calls,
+        finish,
+        media,
+    })
 }
 
 /// Bridge-with-self-heal, shared by the buffered and streaming paths.
@@ -804,6 +844,56 @@ async fn resolve_tool_calls(
             }
         }
     }
+}
+
+/// Collect and persist response media if enabled in provider config.
+///
+/// Returns the list of media assets (with URLs rewritten to served paths
+/// when persisted). Failures are logged and don't fail the pipeline.
+async fn collect_and_persist_media(
+    page: &dyn Page,
+    provider_cfg: &uwa_config::ProviderCfg,
+    is_first_turn: bool,
+) -> Vec<MediaAsset> {
+    if !provider_cfg.media.extract_from_response {
+        return Vec::new();
+    }
+    if provider_cfg.media.skip_first_response && is_first_turn {
+        return Vec::new();
+    }
+    let Some(container) = provider_cfg.selectors.assistant_message.as_deref() else {
+        return Vec::new();
+    };
+    let mut assets = match page
+        .collect_media(
+            container,
+            provider_cfg.media.max_assets,
+            provider_cfg.media.max_asset_bytes,
+        )
+        .await
+    {
+        Ok(a) if !a.is_empty() => a,
+        _ => return Vec::new(),
+    };
+    let cfg = uwa_providers::media_store::StoreCfg {
+        max_bytes: provider_cfg.media.max_asset_bytes,
+        data_uri: if provider_cfg.media.save_data_uris {
+            uwa_providers::media_store::DataUriMode::Save
+        } else {
+            uwa_providers::media_store::DataUriMode::Inline
+        },
+        download_remote: provider_cfg.media.download_remote,
+        fetch_blobs: provider_cfg.media.fetch_blobs,
+        save_audio: provider_cfg.media.save_audio,
+        ..Default::default()
+    };
+    let _saved = uwa_providers::media_store::persist(page, &mut assets, &cfg).await;
+    tracing::debug!(
+        provider = %provider_cfg.name,
+        found = assets.len(),
+        "media extracted from response"
+    );
+    assets
 }
 
 /// Plan what to send to the browser this turn. Returns `(body, pin_mode)`.
@@ -924,6 +1014,7 @@ mod tests {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            uwa_media: Vec::new(),
         }
     }
 
@@ -990,6 +1081,7 @@ mod tests {
             StreamEvent::Done {
                 finish: uwa_core::types::FinishReason::Stop,
                 tool_calls: vec![],
+                media: vec![],
             },
         )
         .await

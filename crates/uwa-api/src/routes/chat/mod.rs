@@ -31,6 +31,7 @@ use uwa_tools::ToolDefinition;
 use crate::error::ApiResult;
 use crate::state::AppState;
 
+use crate::routing::RoutingHint;
 pub use pipeline::run_pipeline;
 use pipeline::run_pipeline_with_hint;
 use tokio::sync::mpsc;
@@ -96,6 +97,13 @@ pub async fn chat_completions(
         ..req
     };
 
+    // Ensure the resolved provider is in the hint so conversation_id is
+    // scoped by provider (UWA-137).
+    let hint = RoutingHint {
+        provider: Some(site.name().to_string()),
+        ..hint
+    };
+
     let request_id = RequestId::new();
     let created = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -134,10 +142,10 @@ pub async fn chat_completions(
         ));
     }
 
-    let (text, calls, finish) = run_pipeline_with_hint(&state, &req, &all_specs, &hint).await?;
+    let outcome = run_pipeline_with_hint(&state, &req, &all_specs, &hint).await?;
     let prompt_tokens = estimate_prompt_tokens(&req);
-    let mut completion_tokens = uwa_tools::estimate(&text);
-    for c in &calls {
+    let mut completion_tokens = uwa_tools::estimate(&outcome.text);
+    for c in &outcome.tool_calls {
         completion_tokens = completion_tokens
             .saturating_add(uwa_tools::estimate(&c.name))
             .saturating_add(uwa_tools::estimate(&c.arguments.to_string()));
@@ -151,10 +159,11 @@ pub async fn chat_completions(
         request_id,
         effective_model,
         created,
-        text,
-        calls,
-        finish,
+        outcome.text,
+        outcome.tool_calls,
+        outcome.finish,
         usage,
+        outcome.media,
     ))
     .into_response())
 }

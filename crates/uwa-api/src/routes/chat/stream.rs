@@ -14,6 +14,7 @@ use uwa_core::RequestId;
 use uwa_tools::ToolCall;
 
 use super::pipeline::StreamEvent;
+use uwa_core::types::media::MediaAsset;
 
 pub fn stream_response(
     id: RequestId,
@@ -46,6 +47,7 @@ pub fn stream_response(
         let mut finish = FinishReason::Stop;
         let mut completion_text = String::new();
         let mut saw_done = false;
+        let mut media: Vec<MediaAsset> = Vec::new();
 
         while let Some(ev) = rx.recv().await {
             match ev {
@@ -68,9 +70,11 @@ pub fn stream_response(
                 StreamEvent::Done {
                     finish: f,
                     tool_calls,
+                    media: captured_media,
                 } => {
                     finish = f;
                     calls = tool_calls;
+                    media = captured_media;
                     saw_done = true;
                     break;
                 }
@@ -172,12 +176,21 @@ pub fn stream_response(
             FinishReason::Length => "length",
             FinishReason::ContentFilter => "content_filter",
         };
+
+        // Build the final delta chunk. Include media as an extension field
+        // if we have any.
+        let final_delta = if media.is_empty() {
+            json!({})
+        } else {
+            json!({ "uwa_media": media })
+        };
+
         if tx
             .send(Ok(sse_chunk(
                 &stream_id,
                 created,
                 &model,
-                json!({}),
+                final_delta,
                 Some(finish_str),
             )))
             .await
@@ -265,6 +278,7 @@ mod tests {
             tx.try_send(StreamEvent::Done {
                 finish: FinishReason::Stop,
                 tool_calls: vec![],
+                media: vec![],
             })
             .unwrap();
         })

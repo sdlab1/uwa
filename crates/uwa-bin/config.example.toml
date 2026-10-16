@@ -282,3 +282,23 @@ profile = "natural"
 # burst = true
 # burst_chars = 48
 # burst_pause_ms = [250, 700]
+
+# ---------- Response media extraction ----------
+#
+# Scan the last assistant message for images, canvas snapshots, audio,
+# and video. Returned to the client as `uwa_media` array on the message.
+# Off by default — turn on per provider.
+
+[providers.chatgpt.media]
+audio_capture_enabled = false
+video_detection_enabled = false
+# Response media extraction: scan the last assistant message for
+# images, canvas snapshots, audio, and video.
+extract_from_response = false
+# skip_first_response = true
+# save_data_uris = true
+# download_remote = false
+# fetch_blobs = true
+# save_audio = true
+# max_asset_bytes = 20000000
+# max_assets = 8

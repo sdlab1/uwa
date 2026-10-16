@@ -1,5 +1,6 @@
 //! Non-streaming JSON response for `/v1/chat/completions`.
 
+use uwa_core::types::media::MediaAsset;
 use uwa_core::types::openai::MessageContent;
 use uwa_core::types::openai::{
     ChatChoice, ChatCompletionResponse, ChatMessage, FunctionCall, ToolCallRef, Usage,
@@ -8,6 +9,7 @@ use uwa_core::types::{FinishReason, Role};
 use uwa_core::RequestId;
 use uwa_tools::ToolCall;
 
+#[allow(clippy::too_many_arguments)]
 pub fn build_non_streaming(
     id: RequestId,
     model: String,
@@ -16,6 +18,7 @@ pub fn build_non_streaming(
     calls: Vec<ToolCall>,
     finish: FinishReason,
     usage: Usage,
+    media: Vec<MediaAsset>,
 ) -> ChatCompletionResponse {
     let (content, tool_calls) = if calls.is_empty() {
         (
@@ -41,6 +44,7 @@ pub fn build_non_streaming(
         name: None,
         tool_call_id: None,
         tool_calls,
+        uwa_media: media,
     };
 
     ChatCompletionResponse {
@@ -83,6 +87,7 @@ mod tests {
             vec![],
             FinishReason::Stop,
             Usage::default(),
+            vec![],
         );
         assert_eq!(r.object, "chat.completion");
         assert_eq!(r.choices[0].finish_reason, Some(FinishReason::Stop));
@@ -104,6 +109,7 @@ mod tests {
             calls,
             FinishReason::ToolCalls,
             Usage::default(),
+            vec![],
         );
         let tc = r.choices[0].message.tool_calls.as_ref().unwrap();
         assert_eq!(tc.len(), 1);

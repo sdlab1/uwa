@@ -151,7 +151,7 @@ pub async fn create(
         return Ok(stream_response(chat_req.model.clone(), input_chars, rx));
     }
 
-    let (text, calls, finish) = chat::run_pipeline(
+    let outcome = chat::run_pipeline(
         &state,
         &chat_req,
         &local_tools,
@@ -164,8 +164,8 @@ pub async fn create(
     let id = RequestId::new();
     let created = now_secs();
     let prompt_tokens = chat::estimate_prompt_tokens(&chat_req);
-    let mut completion_tokens = uwa_tools::estimate(&text);
-    for c in &calls {
+    let mut completion_tokens = uwa_tools::estimate(&outcome.text);
+    for c in &outcome.tool_calls {
         completion_tokens = completion_tokens
             .saturating_add(uwa_tools::estimate(&c.name))
             .saturating_add(uwa_tools::estimate(&c.arguments.to_string()));
@@ -179,10 +179,11 @@ pub async fn create(
         id,
         chat_req.model.clone(),
         created,
-        text,
-        calls,
-        finish,
+        outcome.text,
+        outcome.tool_calls,
+        outcome.finish,
         usage,
+        outcome.media,
     );
     let body = serde_json::to_value(&body)
         .map_err(|e| UwaError::Internal(format!("serialize chat answer: {e}")))?;
@@ -243,6 +244,7 @@ fn stream_response(
                 chat::pipeline::StreamEvent::Done {
                     finish: _,
                     tool_calls,
+                    media: _,
                 } => {
                     calls = tool_calls;
                     saw_done = true;
@@ -434,6 +436,7 @@ fn to_chat_request(req: &ResponsesRequest) -> Result<ChatCompletionRequest, UwaE
                                         .to_string(),
                                 },
                             }]),
+                            uwa_media: Vec::new(),
                         });
                         continue;
                     }
@@ -456,6 +459,7 @@ fn to_chat_request(req: &ResponsesRequest) -> Result<ChatCompletionRequest, UwaE
                                     .to_string(),
                             ),
                             tool_calls: None,
+                            uwa_media: Vec::new(),
                         });
                         continue;
                     }
@@ -484,6 +488,7 @@ fn to_chat_request(req: &ResponsesRequest) -> Result<ChatCompletionRequest, UwaE
                     // Tool calls the client echoes back are not replayed:
                     // the site is the only source of truth for what happened.
                     tool_calls: None,
+                    uwa_media: Vec::new(),
                 });
             }
         }
@@ -885,6 +890,7 @@ mod tests {
                     call("c2", "get_time", json!({})),
                     call("c3", "get_date", json!({})),
                 ],
+                media: vec![],
             })
             .unwrap();
         })
@@ -918,6 +924,7 @@ mod tests {
                     call("c1", "get_weather", json!({})),
                     call("c2", "get_time", json!({})),
                 ],
+                media: vec![],
             })
             .unwrap();
         })

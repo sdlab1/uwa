@@ -21,6 +21,7 @@ pub mod autogen;
 pub mod file_attach;
 pub mod generic;
 pub mod input;
+pub mod media_store;
 pub mod registry;
 pub mod timing;
 pub mod workflow;
@@ -29,4 +30,7 @@ pub mod workflow;
 pub(crate) mod test_support;
 
 pub use generic::GenericProvider;
+pub use media_store::{
+    fetch_blob_from_page, persist, resolve_for_serving, DataUriMode, StoreCfg, URL_PREFIX,
+};
 pub use registry::build_providers;

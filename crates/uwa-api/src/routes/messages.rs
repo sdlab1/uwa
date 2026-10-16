@@ -151,7 +151,7 @@ async fn messages_inner(
             rx,
         ))
     } else {
-        let (text, calls, finish) = crate::routes::chat::pipeline::run_pipeline(
+        let outcome = crate::routes::chat::pipeline::run_pipeline(
             &state,
             &oa_req,
             &all_specs,
@@ -164,9 +164,9 @@ async fn messages_inner(
             &req,
             msg_id,
             effective_model,
-            text,
-            calls,
-            finish,
+            outcome.text,
+            outcome.tool_calls,
+            outcome.finish,
         ))
         .into_response())
     }
@@ -214,6 +214,7 @@ fn to_openai_request(
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                uwa_media: Vec::new(),
             });
         }
     }
@@ -276,6 +277,7 @@ fn convert_message(m: &AnthropicMessage) -> Vec<ChatMessage> {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            uwa_media: Vec::new(),
         }];
     }
 
@@ -298,6 +300,7 @@ fn convert_message(m: &AnthropicMessage) -> Vec<ChatMessage> {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                uwa_media: Vec::new(),
             });
             text_parts.clear();
         }
@@ -364,6 +367,7 @@ fn convert_message(m: &AnthropicMessage) -> Vec<ChatMessage> {
                     name: None,
                     tool_call_id: Some(id),
                     tool_calls: None,
+                    uwa_media: Vec::new(),
                 });
             }
             _ => {}
@@ -378,6 +382,7 @@ fn convert_message(m: &AnthropicMessage) -> Vec<ChatMessage> {
             name: None,
             tool_call_id: None,
             tool_calls: Some(tool_calls),
+            uwa_media: Vec::new(),
         });
     } else {
         flush_text(&mut out, &mut text_parts);
@@ -545,6 +550,7 @@ fn stream_anthropic_from_channel(
                 StreamEvent::Done {
                     finish: f,
                     tool_calls,
+                    media: _,
                 } => {
                     finish = f;
                     calls = tool_calls;
@@ -956,6 +962,7 @@ mod tests {
                     tool_call("t1", "get_weather", json!({"city": "NYC"})),
                     tool_call("t2", "get_time", json!({})),
                 ],
+                media: vec![],
             })
             .unwrap();
         })

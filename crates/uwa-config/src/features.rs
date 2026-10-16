@@ -115,7 +115,7 @@ impl PromptPaddingCfg {
 
 /// Audio capture + video detection knobs. Everything off by default —
 /// capture costs a Web Audio hook and a Chrome autoplay flag.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MediaCfg {
     /// Hook `HTMLMediaElement.prototype.play` and record whatever plays
     /// during the response into a webm temp file.
@@ -132,10 +132,83 @@ pub struct MediaCfg {
     /// auto-downloads.
     #[serde(default)]
     pub video_detection_enabled: bool,
+
+    // ---- response media extraction ----
+    /// Scan the last assistant message for images, canvas snapshots,
+    /// audio, and video. Returned to the client as `uwa_media`.
+    #[serde(default)]
+    pub extract_from_response: bool,
+    /// Skip `extract_from_response` for the very first response of a
+    /// session — the request has no assistant container yet, so the scan
+    /// would find the site's own chrome (avatars, icons).
+    #[serde(default = "default_skip_first")]
+    pub skip_first_response: bool,
+    /// Save inline `data:` assets to disk. When `false`, the `data:`
+    /// URI is returned verbatim.
+    #[serde(default = "default_save_data_uris")]
+    pub save_data_uris: bool,
+    /// Download `http(s):` sources to disk. Off by default — most
+    /// clients render remote URLs fine, and downloading is a
+    /// bandwidth cost that isn't always wanted.
+    #[serde(default)]
+    pub download_remote: bool,
+    /// Fetch `blob:` URLs from inside the page and save the bytes.
+    /// Blob URLs are unreachable from outside the tab, so when this is
+    /// `false`, blobs are dropped from the response.
+    #[serde(default = "default_fetch_blobs")]
+    pub fetch_blobs: bool,
+    /// Save `<audio>` assets. Off means audio URLs pass through
+    /// untouched, no bytes written.
+    #[serde(default = "default_save_audio")]
+    pub save_audio: bool,
+    /// Upper bound for a single asset. Assets larger than this are left
+    /// as URLs, not saved.
+    #[serde(default = "default_max_asset_bytes")]
+    pub max_asset_bytes: u64,
+    /// Cap on assets per response. The first N in DOM order win.
+    #[serde(default = "default_max_assets")]
+    pub max_assets: usize,
 }
 
 fn default_audio_max_wait() -> u64 {
     12
+}
+fn default_skip_first() -> bool {
+    true
+}
+fn default_save_data_uris() -> bool {
+    true
+}
+fn default_fetch_blobs() -> bool {
+    true
+}
+fn default_save_audio() -> bool {
+    true
+}
+fn default_max_asset_bytes() -> u64 {
+    20 * 1024 * 1024
+}
+fn default_max_assets() -> usize {
+    8
+}
+
+impl Default for MediaCfg {
+    fn default() -> Self {
+        Self {
+            audio_capture_enabled: false,
+            audio_max_wait_secs: default_audio_max_wait(),
+            attach_audio_to_response: false,
+            video_detection_enabled: false,
+            extract_from_response: false,
+            skip_first_response: default_skip_first(),
+            save_data_uris: default_save_data_uris(),
+            download_remote: false,
+            fetch_blobs: default_fetch_blobs(),
+            save_audio: default_save_audio(),
+            max_asset_bytes: default_max_asset_bytes(),
+            max_assets: default_max_assets(),
+        }
+    }
 }
 
 // ---------- Proxy ----------
@@ -215,5 +288,27 @@ mod tests {
         let c = FilePasteCfg::default();
         assert!(!c.enabled);
         assert_eq!(c.threshold_bytes, 130_000);
+    }
+
+    #[test]
+    fn media_response_extraction_defaults_off() {
+        let c = MediaCfg::default();
+        assert!(!c.extract_from_response);
+        assert!(c.skip_first_response);
+        assert_eq!(c.max_assets, 8);
+        assert_eq!(c.max_asset_bytes, 20 * 1024 * 1024);
+    }
+
+    #[test]
+    fn media_response_extraction_can_be_enabled() {
+        let toml = r#"
+            extract_from_response = true
+            download_remote = true
+            max_assets = 3
+        "#;
+        let c: MediaCfg = toml::from_str(toml).unwrap();
+        assert!(c.extract_from_response);
+        assert!(c.download_remote);
+        assert_eq!(c.max_assets, 3);
     }
 }

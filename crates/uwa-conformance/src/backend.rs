@@ -35,5 +35,6 @@ pub fn scenario_to_message(s: &Scenario) -> ChatMessage {
         name: None,
         tool_call_id: None,
         tool_calls: None,
+        uwa_media: Vec::new(),
     }
 }

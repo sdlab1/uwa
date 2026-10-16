@@ -44,6 +44,7 @@ pub fn stream_chunks(text: &str) -> Vec<String> {
     out
 }
 
+use crate::types::media::MediaAsset;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -87,6 +88,10 @@ pub struct ChatMessage {
     pub tool_call_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCallRef>>,
+    /// UWA extension: media produced by the assistant. Not part of the
+    /// OpenAI schema; clients that don't know it ignore it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub uwa_media: Vec<MediaAsset>,
 }
 
 impl ChatMessage {
@@ -98,6 +103,7 @@ impl ChatMessage {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            uwa_media: Vec::new(),
         }
     }
 
@@ -246,6 +252,7 @@ pub struct ModelList {
 ///     name: None,
 ///     tool_call_id: None,
 ///     tool_calls: None,
+///     uwa_media: Vec::new(),
 /// };
 /// assert_eq!(m.content_text(), "hi");
 /// ```

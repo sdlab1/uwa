@@ -92,6 +92,7 @@ mod tests {
                 name: None,
                 tool_call_id: Some("call_1".into()),
                 tool_calls: None,
+                uwa_media: Vec::new(),
             },
         ];
         let out = compose_browser_turn(&msgs);
