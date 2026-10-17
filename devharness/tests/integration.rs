@@ -686,7 +686,7 @@ fn section17_no_ignored() {
     let mut c = sb.devh(&["run"]);
     c.env(
         "HARNESS_VERIFY",
-        "if [ -f ign-fix ]; then echo \"3 passed; 0 failed; 0 ignored\"; else echo \"3 passed; 0 failed; 2 ignored\"; fi; test -f done.txt",
+        "if [ -f ign-fix ]; then echo \"test result: ok. 3 passed; 0 failed; 0 ignored\"; else echo \"test mod::hidden_one ... ignored\"; echo \"test mod::hidden_two ... ignored, причина\"; echo \"test result: ok. 1 passed; 2 ignored\"; fi; test -f done.txt",
     )
     .env("HARNESS_AGENT", sb.stubs.join("stub-ign.sh"));
     let out = c.output().unwrap_or_else(|_| unreachable!());
