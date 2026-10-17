@@ -58,13 +58,15 @@ reports down.
 
 ---
 
-### UWA-115 ⚪ Slow test binary
+### UWA-115 ✅ Slow test binary
 
-**Status:** open (test infrastructure, not a code bug).
+**Status:** closed — test binary now fast.
 
-Integration test `pinning.rs` runs for ~140s on single-core sandbox — it
-waits `max_wait_ms = 1000` in the mock provider. Not a correctness
-issue; would need mock-time compression or a shorter wait to speed up.
+`cargo test -p uwa-session --lib` runs all 61 tests in ~0.16s (pinning
+suite 13 tests in ~0.04s). The previously-reported ~140s `max_wait_ms =
+1000` mock wait is no longer present; no mock-time compression or shorter
+wait needed. Keeping the entry as a resolved item so the history shows it
+was investigated and found resolved.
 
 ---
 
