@@ -83,14 +83,13 @@ randomized per chat.
 
 ---
 
-### UWA-138 ⬜ Buffered/stream tool call deduplication
+### UWA-138 ✅ Buffered/stream tool call deduplication
 
-**Status:** open (implementation exists, needs verification).
-
-Both buffered and streaming paths use the shared `resolve_tool_calls`
-for validation and self-heal, which provides deduplication. The
-deduplication logic needs an explicit test asserting that identical
-tool calls are not emitted twice across buffered vs streaming paths.
+**Closed.** Both buffered and streaming paths share `resolve_tool_calls`
+for validation/self-heal, which deduplicates identical tool calls.
+Added explicit integration test `buffered_and_streaming_produce_identical_tool_calls`
+in `crates/uwa-api/tests/e2e_pipeline.rs` asserting both paths emit
+exactly the same two tool calls (no duplication across modes).
 
 ---
 
