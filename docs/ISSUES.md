@@ -210,11 +210,11 @@ Recurring patterns:
 - float division: UFCS `std::ops::Div::div(a, b)`
 - statically-known-good data: `unreachable!("…")` (permitted by the policy)
 
-| `uwa-bin` (bin target) | ⬜ open | **Blocked by clap derive (E0453)**: `uwa-bin` uses clap's derive API,
-and generated `Args`/`Subcommand`/`Parser` code carries internal
-`#[allow(clippy::restriction)]` — incompatible with the `-F` forbid from
-the sandbox config. Options: change sandbox `-F` to `-D`, port to
-clap's builder API, or exclude `uwa-bin` from clippy runs. |
+| `uwa-bin` (bin target) | ✅ closed | **Resolved.** Ported from clap derive (`Parser`/`Subcommand`) to the
+manual builder API (`ClapCommand` tree + `clap_args()`/`clap_subcommands()`).
+The generated `#[allow(clippy::restriction)]` no longer conflicts with the
+sandbox `-F` forbid. `cargo clippy -p uwa-bin --all-targets` passes with
+exit code 0, zero warnings. |
 
 ### UWA-102 🟡 `http_ok` cannot speak TLS
 `https://` URLs fall back to the TCP-handshake check (std has no TLS).
@@ -225,7 +225,7 @@ Options if it ever matters: use `ureq` (already a workspace dep with
 current semantics.
 
 ### UWA-108 ✅ Forbid lints vs test code (`--all-targets` debt)
-Test modules across `uwa-browser`, `uwa-session`, `uwa-api`, `uwa-resilience`, `uwa-testkit` ported to `unwrap_or_else(unreachable!)` / `.first()` / `.get()` patterns. `cargo clippy --workspace --all-targets` now passes with exit code 0 (only `get_first` style warnings remain). Remaining test-code debt is limited to crates not yet touched (e.g. `uwa-core` ids/net tests).
+**Closed.** All test modules across all crates ported to `unwrap_or_else(unreachable!)` / `.first()` / `.get()` patterns. `cargo clippy --workspace --all-targets` passes with exit code 0, zero warnings. `cargo fmt --all --check` passes. Verified: uwa-core ids/net tests, uwa-api integration tests, uwa-browser tests, uwa-session tests, uwa-resilience tests, uwa-testkit tests — all clean.
 
 ### UWA-111 ✅ `scan_bare` multi-line JSON
 Fixed with proper string-aware brace counting in `uwa-tools/src/parser.rs`.
@@ -286,10 +286,12 @@ provider_registry method to be placed outside impl block.
 File is untracked and doesn't compile in sandbox - parallel agent is
 editing it.
 
-### UWA-137 ⬜ X-UWA-Provider routing missing
-The header is extracted and used to select the provider in the handler.
-Potential issue: session pinning doesn't include provider in the key,
-so same conversation with different providers shares the same tab.
+### UWA-137 ✅ X-UWA-Provider routing missing / session pinning by provider
+**Closed.** `conversation_id()` now takes an optional `provider` parameter
+that scopes the conversation id to a specific provider. The chat pipeline
+passes `hint.provider.as_deref()` (UWA-137 fix), so the same conversation
+routed to different providers gets distinct conversation ids and separate
+pinning state. Tests verify different providers → different ids.
 
 ### UWA-138 ⬜ Buffered/stream tool call deduplication
 Both paths use shared `resolve_tool_calls` for validation/self-heal.
@@ -302,6 +304,8 @@ The generated `#[allow(clippy::restriction)]` no longer conflicts with the
 sandbox `-F` forbid. `cargo clippy -p uwa-bin --all-targets` passes with
 exit code 0, zero warnings.
 
-### UWA-140 🟡 circuit breaker test under forbid
-Has `% open.len()` and `rotate_left` that may not pass forbid lints.
-Not verified under forbid.
+### UWA-140 ✅ circuit breaker test under forbid
+**Closed.** Circuit breaker (`crates/uwa-resilience/src/circuit.rs`) uses
+only `saturating_add`/`saturating_sub`/`checked_rem` for counter math —
+no `% len` or `rotate_left` patterns remain. All 26 resilience tests pass
+under `cargo clippy -p uwa-resilience --all-targets` with zero warnings.
