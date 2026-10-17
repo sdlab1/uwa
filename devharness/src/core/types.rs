@@ -53,6 +53,9 @@ pub struct RunConfig {
     pub remote: String,
     pub main_branch: String,
     pub wt_root: PathBuf,
+    /// P1a: один стабильный worktree-путь на все задачи (тёплый инкремент).
+    /// По умолчанию выключен; `devh run` включает, `bg`/параллель — нет.
+    pub wt_reuse: bool,
     pub log_days: u32,
     pub mutate: Option<MutateCfg>,
     pub crap: Option<CrapCfg>,
@@ -79,6 +82,7 @@ impl Default for RunConfig {
             remote: "origin".into(),
             main_branch: "main".into(),
             wt_root: PathBuf::from("/tmp"),
+            wt_reuse: false,
             log_days: 30,
             mutate: None,
             crap: None,

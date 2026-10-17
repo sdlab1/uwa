@@ -92,6 +92,29 @@ pub fn branch_delete(root: &Path, branch: &str) -> anyhow::Result<()> {
     git(root, &["branch", "-D", branch]).map(|_| ())
 }
 
+/// Сбросить reuse-worktree на ветку задачи `branch`, сохранив `target/`.
+/// Аварийные состояния прошлой задачи (краш посреди merge/rebase/cherry-pick)
+/// снимаем молча — в общем пути это чужой мусор. Ветку задачи могло не быть
+/// (reuse-путь помнит чужую) — тогда создаём от `base` (обычно main).
+/// `clean -fd` БЕЗ `-x` выкидывает untracked-неигнорируемое, но цельно
+/// оставляет gitignored `target/` — ради его тепла весь reuse и затевается.
+pub fn reuse_checkout(wt: &Path, branch: &str, base: &str) -> anyhow::Result<()> {
+    for st in ["merge", "rebase", "cherry-pick"] {
+        let _ = git(wt, &[st, "--abort"]);
+    }
+    if git_ok(
+        wt,
+        &["show-ref", "--verify", &format!("refs/heads/{branch}")],
+    ) {
+        git(wt, &["checkout", "-f", branch])?;
+    } else {
+        git(wt, &["checkout", "-b", branch, base])?;
+    }
+    git(wt, &["reset", "--hard"])?;
+    let _ = git(wt, &["clean", "-fd"]);
+    Ok(())
+}
+
 pub fn add_all(wt: &Path) -> anyhow::Result<()> {
     git(wt, &["add", "-A"]).map(|_| ())
 }
