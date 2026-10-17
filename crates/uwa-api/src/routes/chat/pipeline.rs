@@ -106,6 +106,30 @@ impl Drop for AttachmentGuard {
     }
 }
 
+/// Provider selection for a turn: an explicit routing hint — `X-UWA-Provider`
+/// header, `/url/{domain}/…` path or a routing group — wins over the model
+/// alias table, mirroring what the route already does for the capability
+/// check and what `messages.rs` does end to end. Without a hint the model
+/// alias decides, exactly as before. The client model is echoed back
+/// untouched either way.
+fn provider_for<'a>(
+    config: &'a uwa_config::Config,
+    req_model: &str,
+    hint: &RoutingHint,
+) -> Result<&'a uwa_config::ProviderCfg, UwaError> {
+    match hint.provider.as_deref() {
+        Some(p) => config.providers.get(p).ok_or_else(|| {
+            UwaError::Config(format!("routing hint points at unknown provider `{p}`"))
+        }),
+        None => config.provider_for_model(req_model).ok_or_else(|| {
+            UwaError::UnknownModel(uwa_core::ModelNotFound::new(
+                req_model.to_string(),
+                config.available_models(),
+            ))
+        }),
+    }
+}
+
 /// Full pipeline. Public because `messages.rs` (Anthropic) also calls it.
 pub async fn run_pipeline(
     state: &AppState,
@@ -116,12 +140,7 @@ pub async fn run_pipeline(
     hint: &RoutingHint,
 ) -> Result<PipelineOutcome, UwaError> {
     let config = state.cfg();
-    let provider_cfg = config.provider_for_model(&req.model).ok_or_else(|| {
-        UwaError::UnknownModel(uwa_core::ModelNotFound::new(
-            req.model.clone(),
-            config.available_models(),
-        ))
-    })?;
+    let provider_cfg = provider_for(&config, &req.model, hint)?;
 
     let breaker = state.breaker(&provider_cfg.name);
     breaker.allow()?;
@@ -241,12 +260,7 @@ pub async fn run_pipeline_streaming(
     hint: &RoutingHint,
 ) -> Result<(), UwaError> {
     let config = state.cfg();
-    let provider_cfg = config.provider_for_model(&req.model).ok_or_else(|| {
-        UwaError::UnknownModel(uwa_core::ModelNotFound::new(
-            req.model.clone(),
-            config.available_models(),
-        ))
-    })?;
+    let provider_cfg = provider_for(&config, &req.model, hint)?;
 
     let breaker = state.breaker(&provider_cfg.name);
     // Early exits must reach the SSE writer as an error event; otherwise the
@@ -352,12 +366,7 @@ async fn run_pipeline_streaming_inner(
     hint: &RoutingHint,
 ) -> Result<PipelineOutcome, Abort> {
     let config = state.cfg();
-    let provider_cfg = config.provider_for_model(&req.model).ok_or_else(|| {
-        UwaError::UnknownModel(uwa_core::ModelNotFound::new(
-            req.model.clone(),
-            config.available_models(),
-        ))
-    })?;
+    let provider_cfg = provider_for(&config, &req.model, hint)?;
     let site = state.registry().get(&provider_cfg.name)?;
 
     // --- identical setup to the buffered path ---
@@ -616,12 +625,7 @@ async fn run_pipeline_inner(
     hint: &RoutingHint,
 ) -> Result<PipelineOutcome, UwaError> {
     let config = state.cfg();
-    let provider_cfg = config.provider_for_model(&req.model).ok_or_else(|| {
-        UwaError::UnknownModel(uwa_core::ModelNotFound::new(
-            req.model.clone(),
-            config.available_models(),
-        ))
-    })?;
+    let provider_cfg = provider_for(&config, &req.model, hint)?;
     let site = state.registry().get(&provider_cfg.name)?;
 
     // Tool-defs → system prompt. Empty when the client sent no tools.
