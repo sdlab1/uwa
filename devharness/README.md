@@ -88,7 +88,8 @@ RED-пруф первым, MSG_DENY-гигиена последней. Паде�
 | merge | `devh merge [id]` | guard (дерево чисто, есть коммиты) → rebase → ff-push в MAIN → `## Session N` в RULES_LOG → лог → cleanup → `next:` |
 | abort | `devh abort [id]` | worktree/ветку вон, item → open (работа выброшена) |
 | clean | `devh clean` | worktree/ветки done-items + retention логов (LOG_DAYS) |
-| doctor | `devh doctor` | окружение: git/VERIFY (+ smoke-запуск ≤120s)/агент/flock/timeout/remote/exclude/mutation/CRAP (+ smoke)/shellcheck/bench + crash-recovery сироты; exit≠0 при fail |
+| sweep | `devh sweep [--maxsize 20GB]` | вернуть диск: `cargo sweep` в главном дереве + worktree/ветки done-items (reuse-путь только возвращается на main — target/ остаётся тёплым) + `git worktree prune` сирот |
+| doctor | `devh doctor` | окружение: git/VERIFY (+ smoke-запуск ≤120s)/агент/flock/timeout/remote/exclude/mutation/CRAP (+ smoke)/shellcheck/bench + crash-recovery сироты + P3: cargo-mutants ≥25 и `.cargo/mutants.toml`, тёплый `target/`, сироты `git worktree`, sccache hit-rate; exit≠0 при fail |
 | logs | `devh logs [id]` | пути логов item + хвосты agent/verify; без id — свежие логи всех items |
 | bg | `devh bg [id]` / `devh bg auto --from <dir> [--max N]` | detached-прогон: setsid+nohup (свой session, immune to HUP), лог в bg.log / bg-auto.log; параллельная работа безопасна (run.lock + WIP) |
 | ps | `devh ps` | PID, elapsed, текущая стадия из timing.log; живые авто-прогоны (auto.pid); мёртвые pid-файлы помечаются |
