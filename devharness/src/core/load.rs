@@ -7,7 +7,7 @@
 /// Парсер первой строки /proc/loadavg (средняя за 1 минуту).
 /// None: файла нет / поле не число — вызывающий код трактует как «неизвестно».
 pub fn parse_load(line: &str) -> Option<f64> {
-    line.split_whitespace().next()?.parse::<f64>().ok()
+    None /* ~ changed by cargo-mutants ~ */
 }
 
 /// Первая строка /proc/loadavg операционной системы.
@@ -109,5 +109,33 @@ mod tests {
         let msg = block_reason(env, 9.36).unwrap_or_default();
         assert!(msg.contains("load 9.4"), "{msg}");
         assert!(msg.contains("порог 4.0"), "{msg}");
+    }
+
+    /// Прямой тест обёртки: приёмка 255 мутантов (§9.12) показала MISSED на
+    /// `load_average -> Some(1.0)` — обёртка не имела assertion'а.
+    /// /proc/loadavg — атомарный снапшот на чтение, но два чтения вокруг
+    /// вызова могут застать соседние тики 1-мин load: принимаем оба соседних
+    /// значения (константный мутант не совпадёт ни с одним).
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn load_average_matches_procfs() {
+        let before = std::fs::read_to_string("/proc/loadavg").unwrap_or_default();
+        let got = load_average();
+        let after = std::fs::read_to_string("/proc/loadavg").unwrap_or_default();
+        let (a, b) = (parse_load(&before), parse_load(&after));
+        assert!(
+            got == a || got == b,
+            "load_average должен читать /proc/loadavg как parse_load: got={got:?}, чтения {a:?}..{b:?}"
+        );
+    }
+
+    /// MISSED приёмки: `max_load -> Some(-1.0)` — env-обёртка без теста.
+    /// Значение из env имеет приоритет над дефолтом; заодно снятие.
+    #[test]
+    fn max_load_reads_env_value() {
+        std::env::set_var("HARNESS_MUTATE_MAX_LOAD", "3");
+        assert_eq!(max_load(), Some(3.0));
+        std::env::remove_var("HARNESS_MUTATE_MAX_LOAD");
+        assert_eq!(max_load(), threshold_from(None, cpu_count()));
     }
 }
