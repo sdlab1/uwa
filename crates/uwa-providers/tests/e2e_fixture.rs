@@ -28,8 +28,12 @@ impl FixtureServer {
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .kill_on_drop(true)
-            .spawn()?;
-        let stdout = child.stdout.take().unwrap();
+            .spawn()
+            .map_err(|e| anyhow::anyhow!("spawn fixture server: {e}"))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("stdout captured"))?;
         let mut lines = tokio::io::BufReader::new(stdout).lines();
         let mut base_url = None;
         while let Ok(Some(line)) = lines.next_line().await {
@@ -52,20 +56,35 @@ impl Drop for FixtureServer {
 async fn run_fixture_flow(fixture_path: &str, selectors_toml: &str) -> String {
     let ws = uwa_testkit::chromium_ws_url();
 
-    let server = FixtureServer::spawn().await.expect("fixture server");
+    let server = FixtureServer::spawn()
+        .await
+        .unwrap_or_else(|e| unreachable!("fixture server spawn failed: {e}"));
     let url = format!("{}{fixture_path}", server.base_url);
 
     let transport = uwa_browser::CdpTransport::connect(&ws, Duration::from_secs(60), None)
         .await
-        .expect("connect Chromium");
+        .unwrap_or_else(|e| unreachable!("connect Chromium: {e}"));
 
     use uwa_core::Transport;
     let tab = {
-        let tabs = transport.list_tabs().await.unwrap();
-        tabs.into_iter().next().expect("a tab")
+        let tabs = transport
+            .list_tabs()
+            .await
+            .unwrap_or_else(|e| unreachable!("list_tabs: {e}"));
+        tabs.into_iter()
+            .next()
+            .unwrap_or_else(|| unreachable!("a tab"))
     };
-    let page = transport.page(&tab).await.unwrap();
-    page.goto(&url.parse().unwrap()).await.unwrap();
+    let page = transport
+        .page(&tab)
+        .await
+        .unwrap_or_else(|e| unreachable!("page: {e}"));
+    page.goto(
+        &url.parse()
+            .unwrap_or_else(|e| unreachable!("parse URL: {e}")),
+    )
+    .await
+    .unwrap_or_else(|e| unreachable!("goto: {e}"));
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     let cfg = uwa_config::Config::load_from_str(&format!(
@@ -88,17 +107,24 @@ async fn run_fixture_flow(fixture_path: &str, selectors_toml: &str) -> String {
         "##,
         base = server.base_url
     ))
-    .unwrap();
+    .unwrap_or_else(|e| unreachable!("config parse: {e}"));
 
-    let provider_cfg = cfg.providers.get("fake").unwrap().clone();
+    let provider_cfg = cfg
+        .providers
+        .get("fake")
+        .unwrap_or_else(|| unreachable!("provider fake"))
+        .clone();
     let provider = uwa_providers::GenericProvider::from_config(provider_cfg);
 
     use uwa_core::SiteProvider;
     provider
         .send_message(page.as_ref(), "hello fixture")
         .await
-        .unwrap();
-    provider.wait_response(page.as_ref()).await.unwrap()
+        .unwrap_or_else(|e| unreachable!("send_message: {e}"));
+    provider
+        .wait_response(page.as_ref())
+        .await
+        .unwrap_or_else(|e| unreachable!("wait_response: {e}"))
 }
 
 #[tokio::test]
@@ -168,22 +194,32 @@ async fn workflow_clicks_send_instead_of_default_path() {
         return;
     }
     let ws = uwa_testkit::chromium_ws_url();
-    let server = FixtureServer::spawn().await.expect("fixture server");
+    let server = FixtureServer::spawn()
+        .await
+        .unwrap_or_else(|e| unreachable!("fixture server spawn failed: {e}"));
     let url = format!("{}/fake/chat", server.base_url);
 
     let transport = uwa_browser::CdpTransport::connect(&ws, Duration::from_secs(60), None)
         .await
-        .expect("connect Chromium");
+        .unwrap_or_else(|e| unreachable!("connect Chromium: {e}"));
     use uwa_core::Transport;
     let tab = transport
         .list_tabs()
         .await
-        .unwrap()
+        .unwrap_or_else(|e| unreachable!("list_tabs: {e}"))
         .into_iter()
         .next()
-        .expect("a tab");
-    let page = transport.page(&tab).await.unwrap();
-    page.goto(&url.parse().unwrap()).await.unwrap();
+        .unwrap_or_else(|| unreachable!("a tab"));
+    let page = transport
+        .page(&tab)
+        .await
+        .unwrap_or_else(|e| unreachable!("page: {e}"));
+    page.goto(
+        &url.parse()
+            .unwrap_or_else(|e| unreachable!("parse URL: {e}")),
+    )
+    .await
+    .unwrap_or_else(|e| unreachable!("goto: {e}"));
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // A minimal workflow: fill the input, click send, wait for the
@@ -223,17 +259,24 @@ async fn workflow_clicks_send_instead_of_default_path() {
         "##,
         base = server.base_url
     ))
-    .unwrap();
+    .unwrap_or_else(|e| unreachable!("config parse: {e}"));
 
-    let provider_cfg = cfg.providers.get("fake").unwrap().clone();
+    let provider_cfg = cfg
+        .providers
+        .get("fake")
+        .unwrap_or_else(|| unreachable!("provider fake"))
+        .clone();
     let provider = uwa_providers::GenericProvider::from_config(provider_cfg);
 
     use uwa_core::SiteProvider;
     provider
         .send_message(page.as_ref(), "workflow hello")
         .await
-        .unwrap();
-    let text = provider.wait_response(page.as_ref()).await.unwrap();
+        .unwrap_or_else(|e| unreachable!("send_message: {e}"));
+    let text = provider
+        .wait_response(page.as_ref())
+        .await
+        .unwrap_or_else(|e| unreachable!("wait_response: {e}"));
     assert!(
         text.contains("FIXTURE_REPLY: workflow hello"),
         "unexpected response: {text}"

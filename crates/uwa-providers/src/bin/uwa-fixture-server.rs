@@ -15,21 +15,34 @@
 use axum::response::Html;
 use axum::routing::get;
 use axum::Router;
-use clap::Parser;
+use clap::{Arg, ArgAction, Command};
 
-#[derive(Parser)]
-struct Cli {
-    /// Listen address. Use port 0 for ephemeral.
-    #[arg(long, default_value = "127.0.0.1:0")]
-    addr: String,
+fn build_cli() -> Command {
+    Command::new("uwa-fixture-server")
+        .about("Serves synthetic provider HTML fixtures over localhost")
+        .arg(
+            Arg::new("addr")
+                .long("addr")
+                .action(ArgAction::Set)
+                .default_value("127.0.0.1:0")
+                .help("Listen address. Use port 0 for ephemeral."),
+        )
+}
+
+fn parse_addr(matches: &clap::ArgMatches) -> String {
+    matches
+        .get_one::<String>("addr")
+        .cloned()
+        .unwrap_or_else(|| unreachable!("addr has a default value"))
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
+    let matches = build_cli().get_matches();
+    let addr = parse_addr(&matches);
     let app = router();
 
-    let listener = tokio::net::TcpListener::bind(&cli.addr).await?;
+    let listener = tokio::net::TcpListener::bind(&addr).await?;
     let local = listener.local_addr()?;
     println!("PORT={}", local.port());
     println!("URL=http://{}", local);

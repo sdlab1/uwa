@@ -14,8 +14,11 @@ async fn spawn() -> (tokio::process::Child, String) {
         .stderr(Stdio::inherit())
         .kill_on_drop(true)
         .spawn()
-        .expect("spawn");
-    let stdout = child.stdout.take().unwrap();
+        .unwrap_or_else(|e| unreachable!("spawn fixture server: {e}"));
+    let stdout = child
+        .stdout
+        .take()
+        .unwrap_or_else(|| unreachable!("stdout captured"));
     let mut lines = tokio::io::BufReader::new(stdout).lines();
     let mut url = None;
     while let Ok(Some(line)) = lines.next_line().await {
@@ -24,18 +27,24 @@ async fn spawn() -> (tokio::process::Child, String) {
             break;
         }
     }
-    (child, url.expect("URL printed"))
+    let url = url.unwrap_or_else(|| unreachable!("URL printed by fixture server"));
+    (child, url)
+}
+
+async fn get_text(url: &str, path: &str) -> String {
+    let full = format!("{url}{path}");
+    reqwest::get(&full)
+        .await
+        .unwrap_or_else(|e| unreachable!("GET {full}: {e}"))
+        .text()
+        .await
+        .unwrap_or_else(|e| unreachable!("read body of {full}: {e}"))
 }
 
 #[tokio::test]
 async fn serves_chat_fixture() {
     let (_child, url) = spawn().await;
-    let body = reqwest::get(format!("{url}/fake/chat"))
-        .await
-        .unwrap()
-        .text()
-        .await
-        .unwrap();
+    let body = get_text(&url, "/fake/chat").await;
     assert!(body.contains("prompt-textarea"));
     assert!(body.contains("data-testid=\"send-button\""));
     assert!(body.contains("data-message-author-role"));
@@ -44,21 +53,11 @@ async fn serves_chat_fixture() {
 #[tokio::test]
 async fn serves_claude_and_gemini_fixtures() {
     let (_child, url) = spawn().await;
-    let claude = reqwest::get(format!("{url}/fake/claude"))
-        .await
-        .unwrap()
-        .text()
-        .await
-        .unwrap();
+    let claude = get_text(&url, "/fake/claude").await;
     assert!(claude.contains("contenteditable"));
     assert!(claude.contains("assistant-message"));
 
-    let gemini = reqwest::get(format!("{url}/fake/gemini"))
-        .await
-        .unwrap()
-        .text()
-        .await
-        .unwrap();
+    let gemini = get_text(&url, "/fake/gemini").await;
     assert!(gemini.contains("ql-editor"));
     assert!(gemini.contains("model-response"));
 }
@@ -66,6 +65,6 @@ async fn serves_claude_and_gemini_fixtures() {
 #[tokio::test]
 async fn serves_index() {
     let (_child, url) = spawn().await;
-    let body = reqwest::get(&url).await.unwrap().text().await.unwrap();
+    let body = get_text(&url, "/").await;
     assert!(body.contains("uwa fixture server"));
 }

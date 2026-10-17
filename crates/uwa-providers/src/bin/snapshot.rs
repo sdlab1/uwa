@@ -54,9 +54,9 @@ async fn main() {
 
     let mut i = 0;
     while i < args.len() {
-        let flag = args[i].as_str();
+        let flag = args.get(i).map(|s| s.as_str()).unwrap_or_else(|| usage());
         let next = |i: &mut usize| -> String {
-            *i += 1;
+            *i = (*i).saturating_add(1);
             args.get(*i).cloned().unwrap_or_else(|| usage())
         };
         match flag {
@@ -79,7 +79,7 @@ async fn main() {
                 usage();
             }
         }
-        i += 1;
+        i = i.saturating_add(1);
     }
     let url = url.unwrap_or_else(|| usage());
     let target = url::Url::parse(&url).unwrap_or_else(|e| fail("bad --url", e));
@@ -168,7 +168,7 @@ async fn dump_child_frames(page: &dyn Page, transport: &CdpTransport, main_path:
     let base_str = base.to_string_lossy().to_string();
 
     for (idx, (frame_id, frame_url)) in frames.iter().enumerate().skip(1) {
-        let frame_path = format!("{base_str}.frame_{}.html", idx - 1);
+        let frame_path = format!("{base_str}.frame_{}.html", idx.saturating_sub(1));
 
         // Try to evaluate inside this frame to get its HTML.
         match page
