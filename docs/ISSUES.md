@@ -220,6 +220,18 @@ to `run_pipeline` / `run_pipeline_streaming` on both streaming and
 buffered paths. `uwa-api` tests pass (55 lib + integration suites).
 Session 7 entry added to `docs/BRIDGE-HARDENING.md`.
 
+### UWA-145 ✅ Session profile hint ignored by `/v1/messages` (X-UWA-Session)
+`POST /v1/messages` (Anthropic Messages API) passed
+`ProfileName::default_name()` to `run_pipeline` / `run_pipeline_streaming`
+on both streaming and buffered paths, ignoring the `X-UWA-Session`
+header (`hint.profile`). `chat/mod.rs` (`run_pipeline_with_hint`) and
+`responses.rs` already derived the profile from `hint.profile`;
+`messages.rs` had the same hole. **Fix:**
+`crates/uwa-api/src/routes/messages.rs`: compute the profile from
+`hint.profile` once before the streaming/buffered split and pass it
+through to both pipeline entry points. `uwa-api` tests pass (55 lib +
+integration suites).
+
 ---
 
 ## ⬜ Open
