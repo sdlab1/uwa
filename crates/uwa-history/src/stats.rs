@@ -49,6 +49,15 @@ pub struct ProviderStats {
     /// Extraction source distribution.
     pub network_count: u64,
     pub dom_count: u64,
+    /// Estimated token usage rolled up per provider.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub tokens_in: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub tokens_out: u64,
+}
+
+fn is_zero_u64(n: &u64) -> bool {
+    *n == 0
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -75,6 +84,33 @@ pub struct Stats {
     pub tab_utilization: HashMap<String, u64>,
     /// Requests per minute over the last hour (buckets of 1 min).
     pub requests_per_minute: Vec<u64>,
+    /// Estimated token usage totals for the window.
+    #[serde(default)]
+    pub tokens_in: u64,
+    #[serde(default)]
+    pub tokens_out: u64,
+    /// Token sums per minute, most recent last (60 slots). Same shape
+    /// as `requests_per_minute`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tokens_in_per_minute: Vec<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tokens_out_per_minute: Vec<u64>,
+    /// Requests and tokens rolled up by browser profile.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub profiles: Vec<ProfileStats>,
+}
+
+/// Tokens and requests rolled up by browser profile. The profile name
+/// is the `X-UWA-Session` value; `"default"` covers requests without
+/// the header.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ProfileStats {
+    pub profile: String,
+    pub total: u64,
+    pub success: u64,
+    pub error: u64,
+    pub tokens_in: u64,
+    pub tokens_out: u64,
 }
 
 pub fn compute(records: &[RequestRecord], window: StatsWindow) -> Stats {
@@ -92,6 +128,10 @@ pub fn compute(records: &[RequestRecord], window: StatsWindow) -> Stats {
     let mut durations: Vec<u64> = Vec::with_capacity(slice.len());
     let mut per_provider: HashMap<String, ProviderStats> = HashMap::new();
     let mut per_provider_durations: HashMap<String, Vec<u64>> = HashMap::new();
+    let mut per_profile: HashMap<String, ProfileStats> = HashMap::new();
+    let now = SystemTime::now();
+    let mut tok_in_buckets = vec![0u64; 60];
+    let mut tok_out_buckets = vec![0u64; 60];
 
     for r in slice {
         match r.status {
@@ -117,12 +157,64 @@ pub fn compute(records: &[RequestRecord], window: StatsWindow) -> Stats {
             *cell = cell.saturating_add(1);
         }
 
+        let usage = r.response.as_ref().and_then(|x| x.usage.as_ref());
+
+        // Window totals and per-minute buckets (newest last).
+        if let Some(u) = usage {
+            s.tokens_in = s.tokens_in.saturating_add(u.prompt_tokens as u64);
+            s.tokens_out = s.tokens_out.saturating_add(u.completion_tokens as u64);
+            if let Ok(age) = now.duration_since(r.started_at) {
+                let mins = age.as_secs() / 60; // constant divisor: lint-safe
+                if mins < 60 {
+                    let idx = 59usize.saturating_sub(mins as usize);
+                    if let (Some(cell_in), Some(cell_out)) =
+                        (tok_in_buckets.get_mut(idx), tok_out_buckets.get_mut(idx))
+                    {
+                        *cell_in = cell_in.saturating_add(u.prompt_tokens as u64);
+                        *cell_out = cell_out.saturating_add(u.completion_tokens as u64);
+                    }
+                }
+            }
+        }
+
+        // Per-provider tokens.
         let entry = per_provider
             .entry(r.provider.clone())
             .or_insert_with(|| ProviderStats {
                 provider: r.provider.clone(),
                 ..Default::default()
             });
+
+        if let Some(u) = usage {
+            entry.tokens_in = entry.tokens_in.saturating_add(u.prompt_tokens as u64);
+            entry.tokens_out = entry.tokens_out.saturating_add(u.completion_tokens as u64);
+        }
+
+        // Per-profile rollup (`X-UWA-Session`, "default" when absent).
+        let profile_name = r.profile.clone().unwrap_or_else(|| "default".into());
+        let profile_entry =
+            per_profile
+                .entry(profile_name.clone())
+                .or_insert_with(|| ProfileStats {
+                    profile: profile_name,
+                    ..Default::default()
+                });
+        profile_entry.total = profile_entry.total.saturating_add(1);
+        match r.status {
+            RequestStatus::Success => {
+                profile_entry.success = profile_entry.success.saturating_add(1)
+            }
+            RequestStatus::Error => profile_entry.error = profile_entry.error.saturating_add(1),
+            RequestStatus::Pending => {}
+        }
+        if let Some(u) = usage {
+            profile_entry.tokens_in = profile_entry
+                .tokens_in
+                .saturating_add(u.prompt_tokens as u64);
+            profile_entry.tokens_out = profile_entry
+                .tokens_out
+                .saturating_add(u.completion_tokens as u64);
+        }
 
         entry.total = entry.total.saturating_add(1);
         match r.status {
@@ -205,7 +297,6 @@ pub fn compute(records: &[RequestRecord], window: StatsWindow) -> Stats {
     s.providers.sort_by_key(|p| std::cmp::Reverse(p.total));
 
     // Requests per minute over last hour.
-    let now = SystemTime::now();
     let mut buckets = vec![0u64; 60];
     for r in slice {
         if let Ok(age) = now.duration_since(r.started_at) {
@@ -220,6 +311,12 @@ pub fn compute(records: &[RequestRecord], window: StatsWindow) -> Stats {
         }
     }
     s.requests_per_minute = buckets;
+    s.tokens_in_per_minute = tok_in_buckets;
+    s.tokens_out_per_minute = tok_out_buckets;
+
+    let mut profiles: Vec<ProfileStats> = per_profile.into_values().collect();
+    profiles.sort_by_key(|p| std::cmp::Reverse(p.total));
+    s.profiles = profiles;
 
     s
 }
@@ -290,6 +387,7 @@ mod tests {
                 finish_reason: "stop".into(),
                 extraction_source: "dom".into(),
                 pin_mode: None,
+                usage: None,
             }),
             RequestStatus::Error => r.mark_error("x"),
             _ => {}
@@ -381,5 +479,109 @@ mod tests {
         // Newest-first, as HistoryStore::recent returns.
         let s = compute(&[new, old], StatsWindow::All);
         assert_eq!(s.providers.first().and_then(|p| p.last_seen), Some(newest));
+    }
+
+    fn rec_with_tokens(
+        provider: &str,
+        profile: Option<&str>,
+        status: RequestStatus,
+        tokens_in: u32,
+        tokens_out: u32,
+    ) -> RequestRecord {
+        let mut r = RequestRecord::new(
+            "r",
+            "gpt-4o",
+            provider,
+            RequestSnapshot {
+                model: "gpt-4o".into(),
+                user_preview: String::new(),
+                messages: 1,
+                tools: 0,
+                stream: false,
+            },
+        );
+        r.profile = profile.map(str::to_string);
+        match status {
+            RequestStatus::Success => r.mark_success(ResponseSnapshot {
+                text_preview: String::new(),
+                tool_calls: 0,
+                finish_reason: "stop".into(),
+                extraction_source: "dom".into(),
+                pin_mode: None,
+                usage: Some(uwa_core::types::openai::Usage {
+                    prompt_tokens: tokens_in,
+                    completion_tokens: tokens_out,
+                    total_tokens: tokens_in.saturating_add(tokens_out),
+                }),
+            }),
+            RequestStatus::Error => r.mark_error("x"),
+            _ => {}
+        }
+        r
+    }
+
+    #[test]
+    fn token_totals_are_summed() {
+        let recs = vec![
+            rec_with_tokens("a", None, RequestStatus::Success, 100, 50),
+            rec_with_tokens("a", None, RequestStatus::Success, 40, 20),
+        ];
+        let s = compute(&recs, StatsWindow::All);
+        assert_eq!(s.tokens_in, 140);
+        assert_eq!(s.tokens_out, 70);
+    }
+
+    #[test]
+    fn per_provider_tokens_are_rolled_up() {
+        let recs = vec![
+            rec_with_tokens("a", None, RequestStatus::Success, 100, 50),
+            rec_with_tokens("b", None, RequestStatus::Success, 20, 10),
+        ];
+        let s = compute(&recs, StatsWindow::All);
+        let a = s
+            .providers
+            .iter()
+            .find(|p| p.provider == "a")
+            .unwrap_or_else(|| unreachable!("provider a"));
+        let b = s
+            .providers
+            .iter()
+            .find(|p| p.provider == "b")
+            .unwrap_or_else(|| unreachable!("provider b"));
+        assert_eq!(a.tokens_in, 100);
+        assert_eq!(a.tokens_out, 50);
+        assert_eq!(b.tokens_in, 20);
+    }
+
+    #[test]
+    fn per_profile_groups_default_and_named() {
+        let recs = vec![
+            rec_with_tokens("a", None, RequestStatus::Success, 10, 5),
+            rec_with_tokens("a", Some("work"), RequestStatus::Success, 30, 15),
+            rec_with_tokens("a", Some("work"), RequestStatus::Error, 0, 0),
+        ];
+        let s = compute(&recs, StatsWindow::All);
+        let work = s
+            .profiles
+            .iter()
+            .find(|p| p.profile == "work")
+            .unwrap_or_else(|| unreachable!("work profile"));
+        assert_eq!(work.total, 2);
+        assert_eq!(work.success, 1);
+        assert_eq!(work.error, 1);
+        assert_eq!(work.tokens_in, 30);
+        assert_eq!(work.tokens_out, 15);
+        assert!(s.profiles.iter().any(|p| p.profile == "default"));
+    }
+
+    #[test]
+    fn per_minute_buckets_have_60_slots() {
+        let recs = vec![rec_with_tokens("a", None, RequestStatus::Success, 5, 3)];
+        let s = compute(&recs, StatsWindow::All);
+        assert_eq!(s.tokens_in_per_minute.len(), 60);
+        assert_eq!(s.tokens_out_per_minute.len(), 60);
+        // The event just happened, so it lands in the last bucket.
+        assert_eq!(s.tokens_in_per_minute.last(), Some(&5));
+        assert_eq!(s.tokens_out_per_minute.last(), Some(&3));
     }
 }

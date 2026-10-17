@@ -34,14 +34,14 @@ use std::time::Duration;
 use futures::StreamExt;
 use tokio::sync::mpsc;
 use uwa_core::types::media::MediaAsset;
-use uwa_core::types::openai::{ChatCompletionRequest, ChatMessage, ResponseFormat};
+use uwa_core::types::openai::{ChatCompletionRequest, ChatMessage, ResponseFormat, Usage};
 use uwa_core::types::FinishReason;
 use uwa_core::TabId;
 use uwa_core::{Page, SiteProvider, ToolSpec, UwaError};
 use uwa_tools::emulation::{correction_prompt, validate_calls, ValidationOutcome};
 use uwa_tools::{
-    build_system_prompt, compose_browser_turn, json_mode, parse, safe_emit_end_for, ToolCall,
-    ToolDefinition, ToolParseOutcome,
+    build_system_prompt, compose_browser_turn, json_mode, parse, safe_emit_end_for, usage_for,
+    ToolCall, ToolDefinition, ToolParseOutcome,
 };
 
 use crate::history::RequestRecorder;
@@ -61,6 +61,7 @@ pub enum StreamEvent {
         finish: FinishReason,
         tool_calls: Vec<ToolCall>,
         media: Vec<MediaAsset>,
+        usage: Usage,
     },
     /// Pipeline failure after the stream already started.
     Error(UwaError),
@@ -73,6 +74,8 @@ pub struct PipelineOutcome {
     pub tool_calls: Vec<ToolCall>,
     pub finish: FinishReason,
     pub media: Vec<MediaAsset>,
+    /// Estimated token usage, computed once for the whole turn.
+    pub usage: Usage,
 }
 
 /// Why the streaming turn ended early.
@@ -181,6 +184,7 @@ pub async fn run_pipeline(
                     FinishReason::ContentFilter => "content_filter",
                 },
                 "bridge",
+                Some(outcome.usage.clone()),
             );
         }
         Err(e) => {
@@ -318,6 +322,7 @@ pub async fn run_pipeline_streaming(
                     FinishReason::ContentFilter => "content_filter",
                 },
                 "stream",
+                Some(outcome.usage.clone()),
             );
         }
         Err(_) if client_gone => breaker.release(),
@@ -432,6 +437,7 @@ async fn run_pipeline_streaming_inner(
     };
     let page = state.transport.page(&tab).await?;
     recorder.set_tab(tab.as_str());
+    recorder.set_profile(profile.as_str());
 
     let (body, pin_mode, _system_used) = plan_browser_turn(
         state,
@@ -620,17 +626,20 @@ async fn run_pipeline_streaming_inner(
     // Extract and persist media if enabled
     let media = collect_and_persist_media(page.as_ref(), provider_cfg, is_first_turn).await;
 
+    let usage = usage_for(req, &text, &calls);
     emit(
         tx,
         StreamEvent::Done {
             finish,
             tool_calls: calls.clone(),
             media: media.clone(),
+            usage: usage.clone(),
         },
     )
     .await?;
 
     Ok(PipelineOutcome {
+        usage,
         text,
         tool_calls: calls,
         finish,
@@ -720,6 +729,7 @@ async fn run_pipeline_inner(
     };
     let page = state.transport.page(&tab).await?;
     recorder.set_tab(tab.as_str());
+    recorder.set_profile(profile.as_str());
 
     let (body, pin_mode, _system_used) = plan_browser_turn(
         state,
@@ -813,6 +823,7 @@ async fn run_pipeline_inner(
     }
 
     Ok(crate::routes::chat::pipeline::PipelineOutcome {
+        usage: usage_for(req, &text, &tool_calls),
         text,
         tool_calls,
         finish,
@@ -1219,6 +1230,7 @@ mod tests {
                 finish: uwa_core::types::FinishReason::Stop,
                 tool_calls: vec![],
                 media: vec![],
+                usage: Usage::default(),
             },
         )
         .await

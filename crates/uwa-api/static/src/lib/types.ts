@@ -45,10 +45,17 @@ export interface RegistryInfo {
   entries: Record<string, { version: string; updated_at: string }>;
 }
 
+export interface Usage {
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+}
+
 export interface HistoryRecord {
   id: string;
   provider: string;
   model: string;
+  profile?: string | null;
   status: 'success' | 'error' | 'pending' | string;
   started_at: { secs_since_epoch: number; nanos_since_epoch: number } | null;
   error: string | null;
@@ -57,6 +64,7 @@ export interface HistoryRecord {
     finish_reason: string;
     tool_calls: number;
     pin_mode?: string | null;
+    usage?: Usage | null;
   } | null;
   request: { user_preview: string; messages: number; tools: number; stream: boolean };
   timing: {
@@ -75,6 +83,7 @@ export interface ProviderStats {
   avg_ttft_ms?: number; p50_ttft_ms?: number; p95_ttft_ms?: number;
   tabs_used?: number; last_seen?: unknown;
   network_count?: number; dom_count?: number;
+  tokens_in?: number; tokens_out?: number;
 }
 export interface StatsResp {
   window: string;
@@ -85,6 +94,20 @@ export interface StatsResp {
   providers: ProviderStats[];
   tab_utilization: Record<string, number>;
   requests_per_minute: number[];
+  tokens_in?: number;
+  tokens_out?: number;
+  tokens_in_per_minute?: number[];
+  tokens_out_per_minute?: number[];
+  profiles?: ProfileStats[];
+}
+
+export interface ProfileStats {
+  profile: string;
+  total: number;
+  success: number;
+  error: number;
+  tokens_in: number;
+  tokens_out: number;
 }
 
 export interface ProfileSummary {

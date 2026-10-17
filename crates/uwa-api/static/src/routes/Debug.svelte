@@ -3,7 +3,7 @@
   import type { HistoryRecord, ProviderMap, StatsResp } from '../lib/types';
   import { getHistory, getPool, getProviders, getStats } from '../lib/api';
   import { stream, toast } from '../lib/stores';
-  import { fmtMs, fmtNum, fmtPercent } from '../lib/format';
+  import { fmtMs, fmtNum, fmtPercent, fmtTokens } from '../lib/format';
   import { downloadJson } from '../lib/download';
 
   import Card from '../lib/components/Card.svelte';
@@ -252,6 +252,11 @@
                   />
                 </td>
                 <td class="text-right font-mono">{fmtMs(r.timing.ttft_ms)}</td>
+                <td class="text-right font-mono text-[11px]">
+                  {#if r.response?.usage}
+                    {fmtTokens(r.response.usage.prompt_tokens)}/{fmtTokens(r.response.usage.completion_tokens)}
+                  {:else}—{/if}
+                </td>
                 <td>
                   {#if r.response?.pin_mode === 'delta'}
                     <span class="pill" style="border-color: var(--ok); color: var(--ok);">delta</span>

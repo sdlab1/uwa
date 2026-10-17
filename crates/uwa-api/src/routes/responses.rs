@@ -205,18 +205,7 @@ pub async fn create(
 
     let id = RequestId::new();
     let created = now_secs();
-    let prompt_tokens = chat::estimate_prompt_tokens(&chat_req);
-    let mut completion_tokens = uwa_tools::estimate(&outcome.text);
-    for c in &outcome.tool_calls {
-        completion_tokens = completion_tokens
-            .saturating_add(uwa_tools::estimate(&c.name))
-            .saturating_add(uwa_tools::estimate(&c.arguments.to_string()));
-    }
-    let usage = uwa_core::types::openai::Usage {
-        prompt_tokens,
-        completion_tokens,
-        total_tokens: prompt_tokens.saturating_add(completion_tokens),
-    };
+    let usage = outcome.usage;
     let body = chat::nonstream::build_non_streaming(
         id,
         chat_req.model.clone(),
@@ -287,6 +276,7 @@ fn stream_response(
                     finish: _,
                     tool_calls,
                     media: _,
+                    usage: _,
                 } => {
                     calls = tool_calls;
                     saw_done = true;
@@ -1049,6 +1039,7 @@ mod tests {
                     call("c3", "get_date", json!({})),
                 ],
                 media: vec![],
+                usage: Default::default(),
             })
             .unwrap_or_else(|e| unreachable!("try_send done failed: {e}"));
         })
@@ -1094,6 +1085,7 @@ mod tests {
                     call("c2", "get_time", json!({})),
                 ],
                 media: vec![],
+                usage: Default::default(),
             })
             .unwrap_or_else(|e| unreachable!("try_send done failed: {e}"));
         })

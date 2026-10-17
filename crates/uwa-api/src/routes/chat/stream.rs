@@ -9,6 +9,7 @@ use serde_json::json;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
+use uwa_core::types::openai::Usage;
 use uwa_core::types::FinishReason;
 use uwa_core::RequestId;
 use uwa_tools::ToolCall;
@@ -48,6 +49,7 @@ pub fn stream_response(
         let mut completion_text = String::new();
         let mut saw_done = false;
         let mut media: Vec<MediaAsset> = Vec::new();
+        let mut usage_from_stream: Option<Usage> = None;
 
         while let Some(ev) = rx.recv().await {
             match ev {
@@ -71,10 +73,12 @@ pub fn stream_response(
                     finish: f,
                     tool_calls,
                     media: captured_media,
+                    usage: captured_usage,
                 } => {
                     finish = f;
                     calls = tool_calls;
                     media = captured_media;
+                    usage_from_stream = Some(captured_usage);
                     saw_done = true;
                     break;
                 }
@@ -203,11 +207,18 @@ pub fn stream_response(
         // shape is: empty choices array, populated usage object. Emitted
         // once, immediately before [DONE].
         if include_usage {
-            let completion_tokens = uwa_tools::estimate(&completion_text);
+            // The pipeline computed the usage for the whole turn; fall
+            // back to the local estimate only if no Done arrived (never
+            // in practice — the stream errors out first).
+            let u = usage_from_stream.unwrap_or_else(|| Usage {
+                prompt_tokens,
+                completion_tokens: uwa_tools::estimate(&completion_text),
+                total_tokens: 0,
+            });
             let usage = json!({
-                "prompt_tokens": prompt_tokens,
-                "completion_tokens": completion_tokens,
-                "total_tokens": prompt_tokens.saturating_add(completion_tokens),
+                "prompt_tokens": u.prompt_tokens,
+                "completion_tokens": u.completion_tokens,
+                "total_tokens": u.total_tokens,
             });
             let usage_chunk = json!({
                 "id": stream_id,
@@ -280,6 +291,7 @@ mod tests {
                 finish: FinishReason::Stop,
                 tool_calls: vec![],
                 media: vec![],
+                usage: Usage::default(),
             })
             .unwrap_or_else(|_| unreachable!());
         })

@@ -28,3 +28,10 @@ export function pct(n: number, max: number): number {
   if (max <= 0) return 0;
   return Math.min(100, (n / max) * 100);
 }
+
+export function fmtTokens(n: number | undefined | null): string {
+  if (n == null) return '—';
+  if (n < 1000) return String(n);
+  if (n < 1_000_000) return `${(n / 1000).toFixed(1)}k`;
+  return `${(n / 1_000_000).toFixed(2)}M`;
+}

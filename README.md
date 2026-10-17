@@ -282,6 +282,9 @@ Everything is at `http://127.0.0.1:8080`:
 
 - **Dashboard** — request totals, TTFT (avg / p50 / p95), per-provider
   breakdown, tab pool, finish reasons, tab utilization.
+- **Tokens** — estimated `tokens_in` / `tokens_out` per window,
+  per-minute sparklines, and a per-profile breakdown. See
+  [docs/TOKENS.md](docs/TOKENS.md).
 - **Playground** — real token-by-token streaming with a live TTFT badge
   and tool-call rendering. Cancel works mid-stream.
 - **Clients** — copy-paste configs for the editors above, using your
@@ -345,6 +348,7 @@ points:
 - [API](docs/API.md) — request/response shapes, error codes, examples.
 - [Streaming](docs/STREAMING.md) — where the tokens come from, TTFT, cancel.
 - [Structured output](docs/JSON_MODE.md) — `response_format`, JSON-mode retries, streaming behaviour.
+- [Token accounting](docs/TOKENS.md) — how usage is estimated and rolled up.
 - [Compatibility](docs/COMPATIBILITY.md) — tested clients and versions.
 - [Conformance](docs/CONFORMANCE.md) — tool-calling conformance across providers.
 - [Providers](docs/PROVIDERS.md) — selector registry, merge rules, self-heal.

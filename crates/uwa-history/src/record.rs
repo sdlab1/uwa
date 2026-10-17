@@ -64,6 +64,10 @@ pub struct ResponseSnapshot {
     /// browser. Absent when the record predates this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pin_mode: Option<String>,
+    /// Estimated token usage for the request/response pair. `None` for
+    /// records written before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<uwa_core::types::openai::Usage>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -75,6 +79,10 @@ pub struct RequestRecord {
 
     pub model: String,
     pub provider: String,
+    /// Browser profile this request ran under (`X-UWA-Session`).
+    /// `None` = default context.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preset: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -108,6 +116,7 @@ impl RequestRecord {
             finished_at: None,
             model: model.into(),
             provider: provider.into(),
+            profile: None,
             preset: None,
             tab_id: None,
             session_id: None,
@@ -168,6 +177,7 @@ mod tests {
             finish_reason: "stop".into(),
             extraction_source: "dom".into(),
             pin_mode: None,
+            usage: None,
         });
         assert_eq!(r.status, RequestStatus::Success);
         assert!(r.finished_at.is_some());

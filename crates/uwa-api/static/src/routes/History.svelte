@@ -3,7 +3,7 @@
   import type { HistoryRecord, HistoryResp, ProviderMap } from '../lib/types';
   import { getHistory, getHistoryRecord, getProviders } from '../lib/api';
   import { toast } from '../lib/stores';
-  import { fmtMs, fmtNum, fmtRel } from '../lib/format';
+  import { fmtMs, fmtNum, fmtRel, fmtTokens } from '../lib/format';
   import Modal from '../lib/components/Modal.svelte';
   import KV from '../lib/components/KV.svelte';
   import CodeBlock from '../lib/components/CodeBlock.svelte';
@@ -160,6 +160,11 @@
                 <span class="pill pill-warn">×{r.response.tool_calls}</span>
               {:else}—{/if}
             </td>
+            <td class="text-right font-mono text-[12px]">
+              {#if r.response?.usage}
+                {fmtTokens(r.response.usage.prompt_tokens)} / {fmtTokens(r.response.usage.completion_tokens)}
+              {:else}—{/if}
+            </td>
           </tr>
         {/each}
       </tbody>
@@ -176,6 +181,10 @@
       ['status', detail.status],
       ['error', detail.error],
       ['finish', detail.response?.finish_reason],
+      ['profile', detail.profile],
+      ['tokens in', fmtTokens(detail.response?.usage?.prompt_tokens)],
+      ['tokens out', fmtTokens(detail.response?.usage?.completion_tokens)],
+      ['tokens total', fmtTokens(detail.response?.usage?.total_tokens)],
       ['acquisition', fmtMs(detail.timing.acquisition_ms)],
       ['send', fmtMs(detail.timing.send_ms)],
       ['wait', fmtMs(detail.timing.wait_ms)],

@@ -7,7 +7,7 @@
   import MiniBars from '../lib/components/MiniBars.svelte';
   import LiveDot from '../lib/components/LiveDot.svelte';
   import PoolPanel from '../lib/components/PoolPanel.svelte';
-  import { fmtMs, fmtNum, fmtPercent, pct } from '../lib/format';
+  import { fmtMs, fmtNum, fmtPercent, fmtTokens, pct } from '../lib/format';
 
   type WindowKey = 'last50' | 'last200' | 'all';
 
@@ -149,8 +149,26 @@
     </div>
   </div>
 
-  <!-- TTFT + RPM -->
-  <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+  <!-- Tokens -->
+  <div class="card">
+    <div class="card-head">
+      <h3 class="m-0">Tokens</h3>
+      <span class="text-[11px] muted">estimated, {statsWindow} window</span>
+    </div>
+    <div class="grid grid-cols-2 sm:grid-cols-3 gap-2.5">
+      <StatCard label="Tokens in"  value={fmtTokens(stats.tokens_in)} />
+      <StatCard label="Tokens out" value={fmtTokens(stats.tokens_out)} />
+      <StatCard
+        label="Ratio"
+        value={stats.tokens_in && stats.tokens_out
+          ? (stats.tokens_out / stats.tokens_in).toFixed(2)
+          : '—'}
+        sub="out / in" />
+    </div>
+  </div>
+
+  <!-- TTFT + RPM + tokens/min -->
+  <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
     <Card title="Time to first token">
       <div class="grid grid-cols-3 gap-2.5 mb-3">
         <StatCard label="avg TTFT"
@@ -191,6 +209,31 @@
         <span>-60m</span><span>-30m</span><span>now</span>
       </div>
     </Card>
+
+    <Card title="Tokens per minute" subtitle="last 60 min">
+      {@const tokIn = stats.tokens_in_per_minute ?? (Array(60).fill(0) as number[])}
+      {@const tokOut = stats.tokens_out_per_minute ?? (Array(60).fill(0) as number[])}
+      <div class="grid grid-cols-2 gap-2 mb-3">
+        <div>
+          <div class="text-[11px] muted uppercase tracking-[0.5px]">in</div>
+          <div class="text-xl font-semibold">
+            {fmtTokens(tokIn[tokIn.length - 1] ?? 0)}
+          </div>
+        </div>
+        <div>
+          <div class="text-[11px] muted uppercase tracking-[0.5px]">out</div>
+          <div class="text-xl font-semibold">
+            {fmtTokens(tokOut[tokOut.length - 1] ?? 0)}
+          </div>
+        </div>
+      </div>
+      <MiniBars values={tokIn} height={32} color="var(--ok)" />
+      <div style="height: 6px"></div>
+      <MiniBars values={tokOut} height={32} color="var(--accent)" />
+      <div class="flex justify-between text-[10px] muted mt-1">
+        <span>-60m</span><span>-30m</span><span>now</span>
+      </div>
+    </Card>
   </div>
 
   <!-- Per provider -->
@@ -208,6 +251,8 @@
               <th class="text-right">Avg</th>
               <th class="text-right">p95</th>
               <th class="text-right">Avg TTFT</th>
+              <th class="text-right">Tokens in</th>
+              <th class="text-right">Tokens out</th>
               <th class="text-right">Source</th>
             </tr>
           </thead>
@@ -226,11 +271,43 @@
                 <td class="text-right">{fmtMs(p.avg_total_ms)}</td>
                 <td class="text-right">{fmtMs(p.p95_total_ms)}</td>
                 <td class="text-right">{fmtMs(p.avg_ttft_ms)}</td>
+                <td class="text-right font-mono">{fmtTokens(p.tokens_in)}</td>
+                <td class="text-right font-mono">{fmtTokens(p.tokens_out)}</td>
                 <td class="text-right text-[11px] muted">
                   {#if p.network_count != null || p.dom_count != null}
                     {p.network_count ?? 0} net / {p.dom_count ?? 0} dom
                   {:else}—{/if}
                 </td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      </div>
+    {/if}
+  </Card>
+
+  <!-- Per profile -->
+  <Card title="Per profile">
+    {#if !stats.profiles || stats.profiles.length === 0}
+      <p class="muted text-[13px]">No profile traffic yet.</p>
+    {:else}
+      <div class="overflow-x-auto">
+        <table>
+          <thead>
+            <tr>
+              <th>Profile</th>
+              <th class="text-right">Requests</th>
+              <th class="text-right">Tokens in</th>
+              <th class="text-right">Tokens out</th>
+            </tr>
+          </thead>
+          <tbody>
+            {#each stats.profiles as p (p.profile)}
+              <tr>
+                <td class="font-mono text-[12px]">{p.profile}</td>
+                <td class="text-right">{fmtNum(p.total)}</td>
+                <td class="text-right font-mono">{fmtTokens(p.tokens_in)}</td>
+                <td class="text-right font-mono">{fmtTokens(p.tokens_out)}</td>
               </tr>
             {/each}
           </tbody>

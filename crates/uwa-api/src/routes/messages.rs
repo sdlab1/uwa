@@ -558,6 +558,7 @@ fn stream_anthropic_from_channel(
                     finish: f,
                     tool_calls,
                     media: _,
+                    usage: _,
                 } => {
                     finish = f;
                     calls = tool_calls;
@@ -1070,6 +1071,7 @@ mod tests {
                     tool_call("t2", "get_time", json!({})),
                 ],
                 media: vec![],
+                usage: Default::default(),
             })
             .unwrap_or_else(|_| unreachable!());
         })

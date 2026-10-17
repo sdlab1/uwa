@@ -23,9 +23,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::Value;
 use uwa_core::types::openai::ChatCompletionRequest;
-use uwa_core::types::openai::Usage;
 use uwa_core::{RequestId, ToolSpec, UwaError};
-use uwa_tools::estimate_for_content;
 use uwa_tools::ToolDefinition;
 
 use crate::error::ApiResult;
@@ -117,7 +115,7 @@ pub async fn chat_completions(
             .as_ref()
             .map(|o| o.include_usage)
             .unwrap_or(false);
-        let prompt_tokens = estimate_prompt_tokens(&req);
+        let prompt_tokens = uwa_tools::estimate_chat_request_prompt(&req);
         let (tx, rx) = mpsc::channel::<pipeline::StreamEvent>(64);
         let state_task = state.clone();
         let req_clone = req.clone();
@@ -144,18 +142,7 @@ pub async fn chat_completions(
     }
 
     let outcome = run_pipeline_with_hint(&state, &req, &all_specs, &hint).await?;
-    let prompt_tokens = estimate_prompt_tokens(&req);
-    let mut completion_tokens = uwa_tools::estimate(&outcome.text);
-    for c in &outcome.tool_calls {
-        completion_tokens = completion_tokens
-            .saturating_add(uwa_tools::estimate(&c.name))
-            .saturating_add(uwa_tools::estimate(&c.arguments.to_string()));
-    }
-    let usage = Usage {
-        prompt_tokens,
-        completion_tokens,
-        total_tokens: prompt_tokens.saturating_add(completion_tokens),
-    };
+    let usage = outcome.usage;
     Ok(Json(nonstream::build_non_streaming(
         request_id,
         effective_model,
@@ -167,28 +154,4 @@ pub async fn chat_completions(
         outcome.media,
     ))
     .into_response())
-}
-
-/// Estimate prompt tokens from the request messages + tools.
-pub fn estimate_prompt_tokens(req: &ChatCompletionRequest) -> u32 {
-    let mut total: u32 = 0;
-    for m in &req.messages {
-        let content_tokens = estimate_for_content(
-            m.content.as_ref().map(|c| c.as_text()).as_deref(),
-            4, // role + delimiters
-        );
-        total = total.saturating_add(content_tokens);
-        if let Some(calls) = &m.tool_calls {
-            for c in calls {
-                total = total.saturating_add(uwa_tools::estimate(&c.function.name));
-                total = total.saturating_add(uwa_tools::estimate(&c.function.arguments));
-            }
-        }
-    }
-    if let Some(arr) = &req.tools {
-        if let Ok(s) = serde_json::to_string(arr) {
-            total = total.saturating_add(uwa_tools::estimate(&s));
-        }
-    }
-    total.max(1)
 }

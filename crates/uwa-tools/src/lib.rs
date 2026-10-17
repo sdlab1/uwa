@@ -31,4 +31,7 @@ pub use parser::{
 };
 pub use prompt::{already_injected, build_system_prompt, tool_correction};
 pub use schema::validate_arguments;
-pub use tokenizer::{estimate, estimate_for_content};
+pub use tokenizer::{
+    estimate, estimate_chat_request_prompt, estimate_completion, estimate_for_content, usage_for,
+    usage_for_prompt_tokens,
+};

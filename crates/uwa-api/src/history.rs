@@ -1,6 +1,7 @@
 //! Per-request recorder: passed through `run_pipeline`, writes one
 //! `RequestRecord` at the end.
 
+use uwa_core::types::openai::Usage;
 use uwa_core::types::openai::{ChatCompletionRequest, MessageContent};
 use uwa_history::{RequestRecord, RequestSnapshot, ResponseSnapshot};
 
@@ -110,6 +111,12 @@ impl RequestRecorder {
 
     /// Record what the pipeline sent to the browser this turn. `"full"`
     /// or `"delta"` — see `uwa_session::pinning`.
+    /// Browser profile this request ran under (X-UWA-Session); lands in
+    /// the history record and the per-profile stats rollup.
+    pub fn set_profile(&mut self, profile: &str) {
+        self.record.profile = Some(profile.to_string());
+    }
+
     pub fn set_pin_mode(&mut self, mode: &str) {
         self.pin_mode = Some(mode.to_string());
     }
@@ -120,6 +127,7 @@ impl RequestRecorder {
         tool_calls: usize,
         finish_reason: &str,
         extraction_source: &str,
+        usage: Option<Usage>,
     ) {
         self.record.timing.total_ms = self.start.elapsed().as_millis() as u64;
         self.record.mark_success(ResponseSnapshot {
@@ -128,6 +136,7 @@ impl RequestRecorder {
             finish_reason: finish_reason.to_string(),
             extraction_source: extraction_source.to_string(),
             pin_mode: self.pin_mode.take(),
+            usage,
         });
     }
 
@@ -203,7 +212,7 @@ mod tests {
     #[test]
     fn recorder_marks_success() {
         let mut r = RequestRecorder::new(&req(), "chatgpt", None);
-        r.finish_success("world", 0, "stop", "dom");
+        r.finish_success("world", 0, "stop", "dom", None);
         let rec = r.into_record();
         assert_eq!(rec.status, uwa_history::RequestStatus::Success);
         assert_eq!(
