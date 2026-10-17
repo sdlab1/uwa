@@ -331,3 +331,24 @@ No test added due to raw-string escaping in the test harness; existing
 - `cargo fmt --all -- --check` — passes
 - `cargo check --workspace --all-targets` — zero warnings
 - All tests pass: uwa-core (26), uwa-session (61), uwa-browser (41), uwa-api (55 + ~120 integration), uwa-resilience (26), uwa-config (66), uwa-extract (46), uwa-tools (24 + 30), uwa-conformance (11), uwa-providers (49), uwa-history (15), uwa-lifecycle (6), uwa-stealth (15), uwa-testkit (32 + 5), uwa-bin (5), devharness (31)
+
+---
+
+## Session 7 — X-UWA-Provider honored in `/v1/responses` (this change)
+
+`POST /v1/responses` (the OpenAI Responses API endpoint for Codex) used
+`RoutingHint::default()` and never extracted the `HintExtractor`, so the
+`X-UWA-Provider` header was silently ignored. A request routed to Claude
+via `X-UWA-Provider: claude` would still be served by whichever provider
+the model alias table selected. `chat/mod.rs` and `messages.rs` already
+honored the hint; `/v1/responses` had the same hole.
+
+**Fix:** `crates/uwa-api/src/routes/responses.rs`:
+- Extract `crate::routing::HintExtractor(hint)` in the `create` handler.
+- Call `resolve_hint(&state, &hint)` to process path/header hints.
+- Derive the profile from `hint.profile` and pass the full hint through
+  to `run_pipeline` / `run_pipeline_streaming` (both streaming and
+  buffered paths), so `provider_for()` in the pipeline selects the
+  hinted provider.
+
+All `uwa-api` tests pass (55 lib + integration suites).

@@ -27,7 +27,6 @@ use uwa_core::{RequestId, UwaError};
 
 use crate::error::ApiResult;
 use crate::routes::chat;
-use crate::routing::RoutingHint;
 use crate::state::AppState;
 
 // ---------- request ----------
@@ -140,8 +139,10 @@ pub struct ResponsesUsage {
 /// Runs the shared pipeline and republishes the answer in Responses shape.
 pub async fn create(
     State(state): State<AppState>,
+    crate::routing::HintExtractor(hint): crate::routing::HintExtractor,
     Json(req): Json<ResponsesRequest>,
 ) -> ApiResult<Response> {
+    let hint = crate::routing::resolve_hint(&state, &hint).await?;
     let chat_req = to_chat_request(&req)?;
 
     // Same entry the chat route uses, so breaker, semaphore and session
@@ -152,6 +153,12 @@ pub async fn create(
     // Codex (and the SDKs) drive this endpoint with SSE: without it the
     // tool loop cannot show progress and some clients refuse the body.
     if req.stream.unwrap_or(false) {
+        let hint_clone = hint.clone();
+        let profile_clone = hint_clone
+            .profile
+            .clone()
+            .map(|p| uwa_session::ProfileName::new(&p))
+            .unwrap_or_else(uwa_session::ProfileName::default_name);
         let (tx, rx) = mpsc::channel::<chat::pipeline::StreamEvent>(64);
         let state_task = state.clone();
         let req_task = chat_req.clone();
@@ -161,10 +168,10 @@ pub async fn create(
                 &state_task,
                 &req_task,
                 &specs_task,
-                None,
-                &uwa_session::ProfileName::default_name(),
+                hint_clone.tab.as_ref(),
+                &profile_clone,
                 tx,
-                &RoutingHint::default(),
+                &hint_clone,
             )
             .await;
         });
@@ -179,13 +186,20 @@ pub async fn create(
         return Ok(stream_response(chat_req.model.clone(), input_chars, rx));
     }
 
+    let profile = hint
+        .profile
+        .clone()
+        .map(|p| uwa_session::ProfileName::new(&p))
+        .unwrap_or_else(uwa_session::ProfileName::default_name);
+
+    let pinned_tab = hint.tab.as_ref();
     let outcome = chat::run_pipeline(
         &state,
         &chat_req,
         &local_tools,
-        None,
-        &uwa_session::ProfileName::default_name(),
-        &RoutingHint::default(),
+        pinned_tab,
+        &profile,
+        &hint,
     )
     .await?;
 
