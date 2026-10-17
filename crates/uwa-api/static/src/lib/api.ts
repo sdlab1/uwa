@@ -73,10 +73,23 @@ export const getPool     = () => request<PoolStatus>('/api/pool/status');
 export const getStats = (window?: 'last50' | 'last200' | 'all') =>
   request<StatsResp>(`/admin/stats${window ? `?window=${window}` : ''}`);
 
-export function getHistory(limit = 100, provider?: string, status?: string): Promise<HistoryResp> {
-  const p = new URLSearchParams({ limit: String(limit) });
-  if (provider) p.set('provider', provider);
-  if (status) p.set('status', status);
+export interface HistoryQuery {
+  limit?: number;
+  provider?: string;
+  status?: string;
+  profile?: string;
+  model?: string;
+  before_id?: string;
+}
+
+export function getHistory(q: HistoryQuery = {}): Promise<HistoryResp> {
+  const p = new URLSearchParams();
+  if (q.limit) p.set('limit', String(q.limit));
+  if (q.provider) p.set('provider', q.provider);
+  if (q.status) p.set('status', q.status);
+  if (q.profile) p.set('profile', q.profile);
+  if (q.model) p.set('model', q.model);
+  if (q.before_id) p.set('before_id', q.before_id);
   return request<HistoryResp>(`/admin/history?${p}`);
 }
 

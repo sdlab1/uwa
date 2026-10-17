@@ -20,6 +20,14 @@ pub struct HistoryQuery {
     /// `success` | `error` | `pending`
     #[serde(default)]
     pub status: Option<String>,
+    /// Profile name; `"default"` matches records without a profile.
+    #[serde(default)]
+    pub profile: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Cursor: the id of the newest record the caller has already seen.
+    #[serde(default)]
+    pub before_id: Option<String>,
 }
 
 fn default_limit() -> usize {
@@ -34,7 +42,6 @@ pub async fn history(
         return Err(UwaError::Internal("history store not configured".into()).into());
     };
 
-    let limit = q.limit.min(500);
     // Both filters may be combined; previously `?provider=x&status=error`
     // silently ignored the status.
     let status = match q.status.as_deref() {
@@ -46,13 +53,24 @@ pub async fn history(
             return Err(UwaError::BadRequest(format!("bad status `{other}`")).into());
         }
     };
-    let records = store.query(q.provider.as_deref(), status, limit).await;
+    let page = store
+        .query(uwa_history::HistoryQuery {
+            limit: q.limit,
+            before_id: q.before_id.as_deref(),
+            provider: q.provider.as_deref(),
+            status,
+            profile: q.profile.as_deref(),
+            model: q.model.as_deref(),
+        })
+        .await;
 
-    let count = records.len();
+    let count = page.records.len();
     Ok(Json(serde_json::json!({
         "count": count,
         "buffer_size": store.len().await,
-        "records": records,
+        "total_matching": page.total_matching,
+        "next_before_id": page.next_before_id,
+        "records": page.records,
     })))
 }
 

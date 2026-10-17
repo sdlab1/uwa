@@ -226,14 +226,17 @@ async fn history_rejects_unknown_status_even_with_a_provider_filter() {
 }
 
 #[tokio::test]
-async fn history_limit_is_capped_and_zero_is_empty() {
+async fn history_limit_is_clamped_not_rejected() {
     let s = server_with_history().await;
     let _ = s
         .post("/v1/chat/completions")
         .add_header("Authorization", TEST_AUTH_HEADER)
         .json(&json!({"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]}))
         .await;
-    assert_eq!(history_count(&s, "?limit=0").await, 0);
+    // Cursor-paginated query clamps the page size to 1..=500 instead of
+    // treating 0 as "nothing": an empty page is the end-of-stream marker,
+    // and `limit=0` was a silent no-op trap before.
+    assert_eq!(history_count(&s, "?limit=0").await, 1);
     assert_eq!(history_count(&s, "?limit=1000000").await, 1);
 }
 

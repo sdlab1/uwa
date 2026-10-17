@@ -23,7 +23,7 @@
     try {
       const [s, h, p] = await Promise.all([
         getStats('last200'),
-        getHistory(200),
+        getHistory({ limit: 200 }),
         getProviders().catch(() => ({})),
       ]);
       stats = s;
@@ -89,7 +89,7 @@
     try {
       const [s, h, p, pool] = await Promise.all([
         getStats('last200').catch(() => null),
-        getHistory(500).catch(() => null),
+        getHistory({ limit: 500 }).catch(() => null),
         getProviders().catch(() => null),
         getPool().catch(() => null),
       ]);

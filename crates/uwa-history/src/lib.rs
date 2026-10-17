@@ -26,4 +26,4 @@ pub mod store;
 
 pub use record::{RequestRecord, RequestSnapshot, RequestStatus, RequestTiming, ResponseSnapshot};
 pub use stats::{ProviderStats, Stats, StatsWindow};
-pub use store::{HistoryCfg, HistoryStore};
+pub use store::{HistoryCfg, HistoryPage, HistoryQuery, HistoryStore};

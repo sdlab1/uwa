@@ -1,6 +1,6 @@
 //! Append-only JSONL store with in-memory ring buffer.
 
-use crate::record::RequestRecord;
+use crate::record::{RequestRecord, RequestStatus};
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -28,6 +28,72 @@ impl Default for HistoryCfg {
             max_preview_bytes: 1024,
         }
     }
+}
+
+/// One page request. All fields are optional except `limit`.
+///
+/// `before_id` is a cursor: the id of the newest record the caller has
+/// already seen. Results start strictly *after* that record in the
+/// newest-first ordering — i.e. strictly older. `None` starts from the
+/// newest record in the ring.
+///
+/// If the cursor record has already been evicted from the ring (a
+/// bounded buffer, so this happens after a while), the query returns an
+/// empty page with `next_before_id: None`. That's the honest answer:
+/// the caller asked for records older than something that no longer
+/// exists, and we can't guess where to resume.
+#[derive(Debug, Clone, Default)]
+pub struct HistoryQuery<'a> {
+    pub limit: usize,
+    pub before_id: Option<&'a str>,
+    pub provider: Option<&'a str>,
+    pub status: Option<RequestStatus>,
+    /// `"default"` matches records with no `profile` set.
+    pub profile: Option<&'a str>,
+    pub model: Option<&'a str>,
+}
+
+/// One page of results plus enough info for the caller to know whether
+/// to ask for another.
+#[derive(Debug, Clone)]
+pub struct HistoryPage {
+    pub records: Vec<RequestRecord>,
+    /// Total matching records in the scanned range (from the cursor
+    /// backwards through the whole ring). This is what a UI shows as
+    /// "N of M" — it's a **scan count**, not a promise that N more are
+    /// reachable via the cursor if the ring evicts between pages.
+    pub total_matching: usize,
+    /// Pass as `before_id` to fetch the next page. `None` means there is
+    /// no next page (we ran out of matches, or the ring is exhausted
+    /// relative to the filters).
+    pub next_before_id: Option<String>,
+}
+
+/// Whether a record satisfies every filter in `q`. Extracted so the
+/// counting pass and the collecting pass share one definition.
+fn matches(q: &HistoryQuery<'_>, r: &RequestRecord) -> bool {
+    if let Some(p) = q.provider {
+        if r.provider != p {
+            return false;
+        }
+    }
+    if let Some(s) = q.status {
+        if r.status != s {
+            return false;
+        }
+    }
+    if let Some(prof) = q.profile {
+        let actual = r.profile.as_deref().unwrap_or("default");
+        if actual != prof {
+            return false;
+        }
+    }
+    if let Some(m) = q.model {
+        if r.model != m {
+            return false;
+        }
+    }
+    true
 }
 
 /// History store. Cloneable — inner state is `Arc`.
@@ -140,27 +206,63 @@ impl HistoryStore {
         buf.iter().rev().take(limit).cloned().collect()
     }
 
-    /// Newest-first records matching *every* given filter.
+    /// Filtered, cursor-paginated query over the in-memory ring.
     ///
-    /// This method applies **all** filters before `take(limit)`, so combining
-    /// `provider` and `status` here is correct. Do **not** reimplement this by
-    /// chaining `by_provider` followed by `by_status`: each of those methods
-    /// applies its own `take(limit)` first, which would silently drop matches
-    /// that pass the second filter.
-    pub async fn query(
-        &self,
-        provider: Option<&str>,
-        status: Option<crate::record::RequestStatus>,
-        limit: usize,
-    ) -> Vec<RequestRecord> {
+    /// Iterates newest-first, starting after `before_id` if set. Two
+    /// passes over the same range: one to count matches, one to collect
+    /// up to `limit`. On a ring of 1000 records this is a nanosecond-scale
+    /// difference; a single pass with a "we hit the limit but don't know
+    /// if there are more" heuristic would cost the UI a round-trip on
+    /// every page boundary.
+    pub async fn query(&self, q: HistoryQuery<'_>) -> HistoryPage {
         let buf = self.inner.buffer.read().await;
-        buf.iter()
-            .rev()
-            .filter(|r| provider.map_or(true, |p| r.provider == p))
-            .filter(|r| status.map_or(true, |s| r.status == s))
-            .take(limit)
-            .cloned()
-            .collect()
+        let limit = q.limit.clamp(1, 500);
+
+        // Locate the cursor. Records are FIFO (oldest at index 0,
+        // newest at `len() - 1`), so "older than X" is the prefix
+        // `[0 .. pos_of_X)`.
+        let end = match q.before_id {
+            None => buf.len(),
+            Some(id) => match buf.iter().position(|r| r.id == id) {
+                Some(pos) => pos,
+                None => {
+                    // Cursor evicted; can't honour the request.
+                    return HistoryPage {
+                        records: Vec::new(),
+                        total_matching: 0,
+                        next_before_id: None,
+                    };
+                }
+            },
+        };
+
+        let mut total_matching: usize = 0;
+        let mut collected: Vec<RequestRecord> = Vec::with_capacity(limit);
+
+        // Newest-first iteration over the prefix.
+        for r in buf.iter().take(end).rev() {
+            if !matches(&q, r) {
+                continue;
+            }
+            total_matching = total_matching.saturating_add(1);
+            if collected.len() < limit {
+                collected.push(r.clone());
+            }
+        }
+
+        // There's a next page iff we returned a full page *and* there
+        // was more than a page worth of matches.
+        let next_before_id = if collected.len() == limit && total_matching > limit {
+            collected.last().map(|r| r.id.clone())
+        } else {
+            None
+        };
+
+        HistoryPage {
+            records: collected,
+            total_matching,
+            next_before_id,
+        }
     }
 
     /// Filter by provider.
@@ -260,6 +362,23 @@ mod tests {
         )
     }
 
+    fn rec_named(id: &str, provider: &str, profile: Option<&str>, model: &str) -> RequestRecord {
+        let mut r = RequestRecord::new(
+            id,
+            model,
+            provider,
+            RequestSnapshot {
+                model: model.into(),
+                user_preview: String::new(),
+                messages: 1,
+                tools: 0,
+                stream: false,
+            },
+        );
+        r.profile = profile.map(str::to_string);
+        r
+    }
+
     #[tokio::test]
     async fn query_applies_all_filters_before_the_limit() -> Result<(), Box<dyn std::error::Error>>
     {
@@ -276,31 +395,269 @@ mod tests {
             r.status = st;
             store.append(r).await;
         }
-        let ids = |v: Vec<RequestRecord>| v.into_iter().map(|r| r.id).collect::<Vec<_>>();
+        let ids = |page: HistoryPage| page.records.into_iter().map(|r| r.id).collect::<Vec<_>>();
 
         // Both filters, newest first, and the limit counts *matches*.
         assert_eq!(
             ids(store
-                .query(Some("chatgpt"), Some(RequestStatus::Error), 10)
+                .query(HistoryQuery {
+                    limit: 10,
+                    provider: Some("chatgpt"),
+                    status: Some(RequestStatus::Error),
+                    ..Default::default()
+                })
                 .await),
             ["a3", "a1"]
         );
         assert_eq!(
             ids(store
-                .query(Some("chatgpt"), Some(RequestStatus::Error), 1)
+                .query(HistoryQuery {
+                    limit: 1,
+                    provider: Some("chatgpt"),
+                    status: Some(RequestStatus::Error),
+                    ..Default::default()
+                })
                 .await),
             ["a3"],
             "limit must apply after filtering"
         );
         // Single filters and no filter behave like the dedicated methods.
-        assert_eq!(ids(store.query(Some("claude"), None, 10).await), ["b1"]);
-        assert_eq!(ids(store.query(None, None, 2).await), ["a4", "a3"]);
+        assert_eq!(
+            ids(store
+                .query(HistoryQuery {
+                    limit: 10,
+                    provider: Some("claude"),
+                    ..Default::default()
+                })
+                .await),
+            ["b1"]
+        );
+        assert_eq!(
+            ids(store
+                .query(HistoryQuery {
+                    limit: 2,
+                    ..Default::default()
+                })
+                .await),
+            ["a4", "a3"]
+        );
         assert!(store
-            .query(Some("nope"), Some(RequestStatus::Success), 10)
+            .query(HistoryQuery {
+                limit: 10,
+                provider: Some("nope"),
+                status: Some(RequestStatus::Success),
+                ..Default::default()
+            })
             .await
+            .records
             .is_empty());
-        assert!(store.query(None, None, 0).await.is_empty());
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn query_returns_pages_with_cursors() {
+        let store = HistoryStore::new(
+            HistoryCfg {
+                buffer_size: 20,
+                ..Default::default()
+            },
+            false,
+        )
+        .await
+        .unwrap_or_else(|e| unreachable!("store: {e}"));
+        for i in 0..10 {
+            store
+                .append(rec_named(&format!("r{i}"), "p", None, "m"))
+                .await;
+        }
+
+        // Page 1 — first 4, newest first.
+        let page = store
+            .query(HistoryQuery {
+                limit: 4,
+                ..Default::default()
+            })
+            .await;
+        assert_eq!(page.records.len(), 4);
+        assert_eq!(page.records.first().map(|r| r.id.as_str()), Some("r9"));
+        assert_eq!(page.records.get(3).map(|r| r.id.as_str()), Some("r6"));
+        assert_eq!(page.total_matching, 10);
+        assert_eq!(page.next_before_id.as_deref(), Some("r6"));
+
+        // Page 2 — continues from the cursor.
+        let page = store
+            .query(HistoryQuery {
+                limit: 4,
+                before_id: Some("r6"),
+                ..Default::default()
+            })
+            .await;
+        assert_eq!(page.records.first().map(|r| r.id.as_str()), Some("r5"));
+        assert_eq!(page.records.get(3).map(|r| r.id.as_str()), Some("r2"));
+        assert_eq!(page.next_before_id.as_deref(), Some("r2"));
+
+        // Page 3 — last two, no cursor (nothing left).
+        let page = store
+            .query(HistoryQuery {
+                limit: 4,
+                before_id: Some("r2"),
+                ..Default::default()
+            })
+            .await;
+        assert_eq!(page.records.len(), 2);
+        assert_eq!(page.records.first().map(|r| r.id.as_str()), Some("r1"));
+        assert_eq!(page.records.get(1).map(|r| r.id.as_str()), Some("r0"));
+        assert!(page.next_before_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn query_pages_do_not_overlap_or_repeat() {
+        let store = HistoryStore::new(
+            HistoryCfg {
+                buffer_size: 30,
+                ..Default::default()
+            },
+            false,
+        )
+        .await
+        .unwrap_or_else(|e| unreachable!("store: {e}"));
+        for i in 0..13 {
+            store
+                .append(rec_named(&format!("r{i:02}"), "p", None, "m"))
+                .await;
+        }
+        let mut all_ids: Vec<String> = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let page = store
+                .query(HistoryQuery {
+                    limit: 5,
+                    before_id: cursor.as_deref(),
+                    ..Default::default()
+                })
+                .await;
+            for r in &page.records {
+                all_ids.push(r.id.clone());
+            }
+            match page.next_before_id {
+                Some(c) => cursor = Some(c),
+                None => break,
+            }
+        }
+        assert_eq!(all_ids.len(), 13);
+        let unique: std::collections::HashSet<_> = all_ids.iter().collect();
+        assert_eq!(unique.len(), 13, "pagination repeated an id");
+    }
+
+    #[tokio::test]
+    async fn query_filters_by_profile() {
+        let store = HistoryStore::new(HistoryCfg::default(), false)
+            .await
+            .unwrap_or_else(|e| unreachable!("store: {e}"));
+        store.append(rec_named("a", "p", None, "m")).await;
+        store.append(rec_named("b", "p", Some("work"), "m")).await;
+        store.append(rec_named("c", "p", Some("work"), "m")).await;
+
+        let work = store
+            .query(HistoryQuery {
+                limit: 10,
+                profile: Some("work"),
+                ..Default::default()
+            })
+            .await;
+        assert_eq!(work.records.len(), 2);
+        assert_eq!(work.total_matching, 2);
+
+        let default = store
+            .query(HistoryQuery {
+                limit: 10,
+                profile: Some("default"),
+                ..Default::default()
+            })
+            .await;
+        assert_eq!(default.records.len(), 1);
+        assert_eq!(
+            default.records.first().map(|r| r.id.clone()),
+            Some("a".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn query_filters_by_model() {
+        let store = HistoryStore::new(HistoryCfg::default(), false)
+            .await
+            .unwrap_or_else(|e| unreachable!("store: {e}"));
+        store.append(rec_named("a", "p", None, "gpt-4o")).await;
+        store
+            .append(rec_named("b", "p", None, "claude-3-5-sonnet"))
+            .await;
+
+        let r = store
+            .query(HistoryQuery {
+                limit: 10,
+                model: Some("claude-3-5-sonnet"),
+                ..Default::default()
+            })
+            .await;
+        assert_eq!(r.records.len(), 1);
+        assert_eq!(r.records.first().map(|x| x.id.clone()), Some("b".into()));
+    }
+
+    #[tokio::test]
+    async fn query_combines_filters_with_and() {
+        let store = HistoryStore::new(HistoryCfg::default(), false)
+            .await
+            .unwrap_or_else(|e| unreachable!("store: {e}"));
+        store
+            .append(rec_named("a", "chatgpt", Some("work"), "gpt-4o"))
+            .await;
+        store
+            .append(rec_named("b", "chatgpt", Some("work"), "claude"))
+            .await;
+        store
+            .append(rec_named("c", "claude", Some("work"), "gpt-4o"))
+            .await;
+
+        let r = store
+            .query(HistoryQuery {
+                limit: 10,
+                provider: Some("chatgpt"),
+                profile: Some("work"),
+                model: Some("gpt-4o"),
+                ..Default::default()
+            })
+            .await;
+        assert_eq!(r.records.len(), 1);
+        assert_eq!(r.records.first().map(|x| x.id.clone()), Some("a".into()));
+    }
+
+    #[tokio::test]
+    async fn query_returns_empty_when_cursor_is_evicted() {
+        let store = HistoryStore::new(
+            HistoryCfg {
+                buffer_size: 3,
+                ..Default::default()
+            },
+            false,
+        )
+        .await
+        .unwrap_or_else(|e| unreachable!("store: {e}"));
+        for i in 0..5 {
+            store
+                .append(rec_named(&format!("r{i}"), "p", None, "m"))
+                .await;
+        }
+        // r0 and r1 are evicted; cursor at r1 finds nothing.
+        let page = store
+            .query(HistoryQuery {
+                limit: 10,
+                before_id: Some("r1"),
+                ..Default::default()
+            })
+            .await;
+        assert!(page.records.is_empty());
+        assert!(page.next_before_id.is_none());
+        assert_eq!(page.total_matching, 0);
     }
 
     #[tokio::test]

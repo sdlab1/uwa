@@ -73,7 +73,15 @@ export interface HistoryRecord {
     rounds?: Array<{ round: number; send_ms: number; wait_ms: number; tool_calls: number }>;
   };
 }
-export interface HistoryResp { count: number; buffer_size: number; records: HistoryRecord[]; }
+export interface HistoryResp {
+  count: number;
+  buffer_size: number;
+  /** Matches across the whole scanned range (respecting filters). */
+  total_matching: number;
+  /** Cursor for the next page, or `null` when there's nothing left. */
+  next_before_id: string | null;
+  records: HistoryRecord[];
+}
 
 export interface ProviderStats {
   provider: string; total: number; success: number; error: number; pending: number;

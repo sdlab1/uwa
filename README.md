@@ -289,8 +289,9 @@ Everything is at `http://127.0.0.1:8080`:
   and tool-call rendering. Cancel works mid-stream.
 - **Clients** — copy-paste configs for the editors above, using your
   real base URL and models.
-- **History** — every request with a per-stage waterfall (acquisition →
-  send → wait). Click a row for the full record.
+- **History** — cursor-paginated request log with provider, status,
+  profile and model filters; per-stage waterfall per record. See
+  [docs/PAGINATION.md](docs/PAGINATION.md).
 - **Sessions** — conversation-to-tab pins, idle reap, drop, recover.
 - **Logs** — live SSE tail of tracing output, filterable by level and target.
 - **Debug** — bottleneck summary, slowest requests, per-provider deep-dive,

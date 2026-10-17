@@ -23,8 +23,10 @@ test.describe('history', () => {
   });
 
   test('empty state', async ({ page, gotoApp, request }) => {
-    await request.post('/__test__/history', { data: { count: 0, buffer_size: 0, records: [] } });
+    await request.post('/__test__/history', {
+      data: { count: 0, buffer_size: 0, total_matching: 0, next_before_id: null, records: [] },
+    });
     await gotoApp('/history');
-    await expect(page.getByText('No records yet', { exact: false })).toBeVisible();
+    await expect(page.getByText('No records match the filters', { exact: false })).toBeVisible();
   });
 });
