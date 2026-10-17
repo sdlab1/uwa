@@ -9,6 +9,7 @@
 
 pub mod error;
 pub mod events;
+pub mod headers;
 pub mod history;
 pub mod metrics;
 pub mod middleware;

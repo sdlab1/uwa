@@ -56,6 +56,7 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use tokio::sync::mpsc;
+use uwa_core::ConversationId;
 use uwa_core::types::media::MediaAsset;
 use uwa_core::types::openai::{ChatCompletionRequest, ChatMessage, ResponseFormat, Usage};
 use uwa_core::types::FinishReason;
@@ -85,6 +86,10 @@ pub enum StreamEvent {
         tool_calls: Vec<ToolCall>,
         media: Vec<MediaAsset>,
         usage: Usage,
+        /// How many corrective sends were issued.
+        retry_count: u32,
+        /// Tab the request ran on.
+        tab: Option<String>,
     },
     /// Pipeline failure after the stream already started.
     Error(UwaError),
@@ -99,6 +104,14 @@ pub struct PipelineOutcome {
     pub media: Vec<MediaAsset>,
     /// Estimated token usage, computed once for the whole turn.
     pub usage: Usage,
+    /// Conversation id this request pinned to. Same value `uwa-session`
+    /// used to pick the tab.
+    pub conversation: ConversationId,
+    /// How many corrective sends the pipeline issued (tool retries, JSON
+    /// retries). `0` on the happy path.
+    pub retry_count: u32,
+    /// Tab the request ran on, as `TabId::as_str()`.
+    pub tab: Option<String>,
 }
 
 /// Why the streaming turn ended early.
@@ -413,6 +426,7 @@ async fn run_pipeline_streaming_inner(
         .conversation
         .clone()
         .unwrap_or_else(|| uwa_session::conversation_id(&req.messages, hint.provider.as_deref()));
+    let conversation_id = cid.clone();
     let session_handle = match &state.runtime.sessions {
         Some(sm) => Some(
             sm.acquire_with_profile(&cid, profile.clone(), state.transport.as_ref())
@@ -467,6 +481,7 @@ async fn run_pipeline_streaming_inner(
     let page = state.transport.page(&tab).await?;
     recorder.set_tab(tab.as_str());
     recorder.set_profile(profile.as_str());
+    let tab_str: Option<String> = Some(tab.as_str().to_string());
 
     let (body, pin_mode, _system_used) = plan_browser_turn(
         state,
@@ -520,6 +535,7 @@ async fn run_pipeline_streaming_inner(
     // the client then gets one clean chunk, like OpenAI's own structured
     // streaming.
     let json_fmt = req.response_format.as_ref().filter(|f| json_constrained(f));
+    let mut retry_count: u32 = 0;
     let mut stream = site.wait_response_stream(page.as_ref()).await?;
     let mut acc = String::new();
     let mut emitted_until: usize = 0;
@@ -584,6 +600,7 @@ async fn run_pipeline_streaming_inner(
                 acc.clone(),
                 send_timeout,
                 recorder,
+                &mut retry_count,
             )
             .await?;
             emit(tx, StreamEvent::Delta(cleaned.clone())).await?;
@@ -605,6 +622,7 @@ async fn run_pipeline_streaming_inner(
             &defs,
             &known_names,
             send_timeout,
+            &mut retry_count,
             recorder,
             acc,
         )
@@ -663,6 +681,8 @@ async fn run_pipeline_streaming_inner(
             tool_calls: calls.clone(),
             media: media.clone(),
             usage: usage.clone(),
+            retry_count,
+            tab: tab_str.clone(),
         },
     )
     .await?;
@@ -673,6 +693,9 @@ async fn run_pipeline_streaming_inner(
         tool_calls: calls,
         finish,
         media,
+        conversation: conversation_id,
+        retry_count,
+        tab: tab_str.clone(),
     })
 }
 
@@ -706,6 +729,7 @@ async fn run_pipeline_inner(
         .conversation
         .clone()
         .unwrap_or_else(|| uwa_session::conversation_id(&req.messages, hint.provider.as_deref()));
+    let conversation_id = cid.clone();
     let session_handle = match &state.runtime.sessions {
         Some(sm) => Some(
             sm.acquire_with_profile(&cid, profile.clone(), state.transport.as_ref())
@@ -765,6 +789,7 @@ async fn run_pipeline_inner(
     let page = state.transport.page(&tab).await?;
     recorder.set_tab(tab.as_str());
     recorder.set_profile(profile.as_str());
+    let tab_str: Option<String> = Some(tab.as_str().to_string());
 
     let (body, pin_mode, _system_used) = plan_browser_turn(
         state,
@@ -786,6 +811,7 @@ async fn run_pipeline_inner(
     );
 
     recorder.mark_send_start();
+    let mut retry_count: u32 = 0;
     if _attachments.0.is_empty() {
         tokio::time::timeout(send_timeout, site.send_message(page.as_ref(), &body))
             .await
@@ -835,6 +861,7 @@ async fn run_pipeline_inner(
         &defs,
         &known_names,
         send_timeout,
+        &mut retry_count,
         recorder,
         raw,
     )
@@ -852,6 +879,7 @@ async fn run_pipeline_inner(
                 text,
                 send_timeout,
                 recorder,
+                &mut retry_count,
             )
             .await?;
         }
@@ -863,6 +891,9 @@ async fn run_pipeline_inner(
         tool_calls,
         finish,
         media,
+        conversation: conversation_id,
+        retry_count,
+        tab: tab_str.clone(),
     })
 }
 
@@ -881,6 +912,7 @@ async fn resolve_tool_calls(
     defs: &[ToolDefinition],
     known_names: &[String],
     send_timeout: Duration,
+    retry_count: &mut u32,
     recorder: &mut RequestRecorder,
     mut raw: String,
 ) -> Result<(String, Vec<ToolCall>, FinishReason), UwaError> {
@@ -912,6 +944,7 @@ async fn resolve_tool_calls(
                     )));
                 }
                 attempt = attempt.saturating_add(1);
+                *retry_count = retry_count.saturating_add(1);
                 tracing::warn!(
                     provider = %provider_cfg.name,
                     attempt,
@@ -994,6 +1027,7 @@ async fn resolve_json_mode(
     first_text: String,
     send_timeout: Duration,
     recorder: &mut RequestRecorder,
+    retry_count: &mut u32,
 ) -> Result<String, UwaError> {
     let budget = json_mode::retry_budget(provider_cfg.max_tool_retries, fmt);
     let mut attempt: usize = 0;
@@ -1010,6 +1044,7 @@ async fn resolve_json_mode(
                     )));
                 }
                 attempt = attempt.saturating_add(1);
+                *retry_count = retry_count.saturating_add(1);
                 tracing::warn!(
                     provider = %provider_cfg.name,
                     attempt,
@@ -1266,6 +1301,8 @@ mod tests {
                 tool_calls: vec![],
                 media: vec![],
                 usage: Usage::default(),
+                retry_count: 0,
+                tab: None,
             },
         )
         .await

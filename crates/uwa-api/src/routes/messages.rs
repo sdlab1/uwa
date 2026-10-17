@@ -34,6 +34,7 @@ use uwa_core::{ToolSpec, UwaError};
 use uwa_tools::{ToolCall, ToolDefinition};
 
 use crate::error::ApiResult;
+use crate::headers::{self, UwaMeta};
 use crate::routing::RoutingHint;
 use crate::state::AppState;
 
@@ -134,6 +135,8 @@ async fn messages_inner(
     let msg_id = format!("msg_{}", uuid::Uuid::new_v4().simple());
 
     if req.stream.unwrap_or(false) {
+        let conversation = uwa_session::conversation_id(&oa_req.messages, hint.provider.as_deref());
+        let meta = UwaMeta::stream_prefix(conversation);
         let (tx, rx) = mpsc::channel::<crate::routes::chat::pipeline::StreamEvent>(64);
         let state_task = state.clone();
         let oa_req_task = oa_req.clone();
@@ -149,18 +152,24 @@ async fn messages_inner(
             )
             .await;
         });
-        Ok(stream_anthropic_from_channel(
+        let response = stream_anthropic_from_channel(
             msg_id,
             effective_model,
             estimate_input_tokens(&req),
             rx,
-        ))
+        );
+        Ok(headers::attach(response, &meta))
     } else {
         let outcome = crate::routes::chat::pipeline::run_pipeline_with_hint(
             &state, &oa_req, &all_specs, &hint,
         )
         .await?;
-        Ok(Json(build_response(
+        let meta = UwaMeta::complete(
+            outcome.conversation.clone(),
+            outcome.retry_count,
+            outcome.tab.clone(),
+        );
+        let body = Json(build_response(
             &req,
             msg_id,
             effective_model,
@@ -168,7 +177,8 @@ async fn messages_inner(
             outcome.tool_calls,
             outcome.finish,
         ))
-        .into_response())
+        .into_response();
+        Ok(headers::attach(body, &meta))
     }
 }
 
@@ -553,6 +563,8 @@ fn stream_anthropic_from_channel(
                     tool_calls,
                     media: _,
                     usage: _,
+                    retry_count: _,
+                    tab: _,
                 } => {
                     finish = f;
                     calls = tool_calls;
@@ -1066,6 +1078,8 @@ mod tests {
                 ],
                 media: vec![],
                 usage: Default::default(),
+                retry_count: 0,
+                tab: None,
             })
             .unwrap_or_else(|_| unreachable!());
         })

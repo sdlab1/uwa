@@ -26,6 +26,7 @@ use uwa_core::types::Role;
 use uwa_core::{RequestId, UwaError};
 
 use crate::error::ApiResult;
+use crate::headers::{self, UwaMeta};
 use crate::routes::chat;
 use crate::state::AppState;
 
@@ -153,6 +154,9 @@ pub async fn create(
     // Codex (and the SDKs) drive this endpoint with SSE: without it the
     // tool loop cannot show progress and some clients refuse the body.
     if req.stream.unwrap_or(false) {
+        let conversation =
+            uwa_session::conversation_id(&chat_req.messages, hint.provider.as_deref());
+        let meta = UwaMeta::stream_prefix(conversation);
         let hint_clone = hint.clone();
         let profile_clone = hint_clone
             .profile
@@ -183,7 +187,8 @@ pub async fn create(
                 _ => 0,
             })
             .sum();
-        return Ok(stream_response(chat_req.model.clone(), input_chars, rx));
+        let response = stream_response(chat_req.model.clone(), input_chars, rx);
+        return Ok(headers::attach(response, &meta));
     }
 
     let profile = hint
@@ -199,6 +204,11 @@ pub async fn create(
     let id = RequestId::new();
     let created = now_secs();
     let usage = outcome.usage;
+    let meta = UwaMeta::complete(
+        outcome.conversation.clone(),
+        outcome.retry_count,
+        outcome.tab.clone(),
+    );
     let body = chat::nonstream::build_non_streaming(
         id,
         chat_req.model.clone(),
@@ -212,7 +222,7 @@ pub async fn create(
     let body = serde_json::to_value(&body)
         .map_err(|e| UwaError::Internal(format!("serialize chat answer: {e}")))?;
 
-    Ok(Json(reshape(&chat_req.model, &body)).into_response())
+    Ok(headers::attach(Json(reshape(&chat_req.model, &body)).into_response(), &meta))
 }
 
 /// Responses-API SSE: `response.created` → `response.output_text.delta`*
@@ -270,6 +280,8 @@ fn stream_response(
                     tool_calls,
                     media: _,
                     usage: _,
+                    retry_count: _,
+                    tab: _,
                 } => {
                     calls = tool_calls;
                     saw_done = true;
@@ -1033,6 +1045,8 @@ mod tests {
                 ],
                 media: vec![],
                 usage: Default::default(),
+                retry_count: 0,
+                tab: None,
             })
             .unwrap_or_else(|e| unreachable!("try_send done failed: {e}"));
         })
@@ -1079,6 +1093,8 @@ mod tests {
                 ],
                 media: vec![],
                 usage: Default::default(),
+                retry_count: 0,
+                tab: None,
             })
             .unwrap_or_else(|e| unreachable!("try_send done failed: {e}"));
         })

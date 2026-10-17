@@ -50,6 +50,8 @@ pub fn stream_response(
         let mut saw_done = false;
         let mut media: Vec<MediaAsset> = Vec::new();
         let mut usage_from_stream: Option<Usage> = None;
+        let mut retry_count: u32 = 0;
+        let mut tab: Option<String> = None;
 
         while let Some(ev) = rx.recv().await {
             match ev {
@@ -74,11 +76,15 @@ pub fn stream_response(
                     tool_calls,
                     media: captured_media,
                     usage: captured_usage,
+                    retry_count: rc,
+                    tab: t,
                 } => {
                     finish = f;
                     calls = tool_calls;
                     media = captured_media;
                     usage_from_stream = Some(captured_usage);
+                    retry_count = rc;
+                    tab = t;
                     saw_done = true;
                     break;
                 }
@@ -181,13 +187,20 @@ pub fn stream_response(
             FinishReason::ContentFilter => "content_filter",
         };
 
-        // Build the final delta chunk. Include media as an extension field
-        // if we have any.
-        let final_delta = if media.is_empty() {
+        // Build the final delta chunk. `uwa_meta` carries retry_count and
+        // tab — the fields that can't be HTTP headers on a streaming
+        // response because they're only known after the pipeline runs.
+        let mut final_delta = if media.is_empty() {
             json!({})
         } else {
             json!({ "uwa_media": media })
         };
+        if let serde_json::Value::Object(ref mut map) = final_delta {
+            map.insert(
+                "uwa_meta".to_string(),
+                json!({ "retry_count": retry_count, "tab": tab }),
+            );
+        }
 
         if tx
             .send(Ok(sse_chunk(
@@ -292,6 +305,8 @@ mod tests {
                 tool_calls: vec![],
                 media: vec![],
                 usage: Usage::default(),
+                retry_count: 0,
+                tab: None,
             })
             .unwrap_or_else(|_| unreachable!());
         })

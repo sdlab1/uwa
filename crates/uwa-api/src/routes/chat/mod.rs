@@ -27,6 +27,7 @@ use uwa_core::{RequestId, ToolSpec, UwaError};
 use uwa_tools::ToolDefinition;
 
 use crate::error::ApiResult;
+use crate::headers::{self, UwaMeta};
 use crate::state::AppState;
 
 use crate::routing::RoutingHint;
@@ -131,19 +132,27 @@ pub async fn chat_completions(
             )
             .await;
         });
-        return Ok(stream::stream_response(
+        let conversation = uwa_session::conversation_id(&req.messages, hint.provider.as_deref());
+        let meta = UwaMeta::stream_prefix(conversation);
+        let response = stream::stream_response(
             request_id,
             effective_model,
             created,
             rx,
             include_usage,
             prompt_tokens,
-        ));
+        );
+        return Ok(headers::attach(response, &meta));
     }
 
     let outcome = run_pipeline_with_hint(&state, &req, &all_specs, &hint).await?;
     let usage = outcome.usage;
-    Ok(Json(nonstream::build_non_streaming(
+    let meta = UwaMeta::complete(
+        outcome.conversation.clone(),
+        outcome.retry_count,
+        outcome.tab.clone(),
+    );
+    let body = Json(nonstream::build_non_streaming(
         request_id,
         effective_model,
         created,
@@ -153,5 +162,6 @@ pub async fn chat_completions(
         usage,
         outcome.media,
     ))
-    .into_response())
+    .into_response();
+    Ok(headers::attach(body, &meta))
 }
