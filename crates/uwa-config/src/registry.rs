@@ -411,6 +411,8 @@ mod tests {
                     stop_button: None,
                     assistant_message: Some("#reg-assistant".into()),
                     conversation_root: None,
+                    logged_in: None,
+                    logged_out: None,
                 },
                 alternates: Alternates::default(),
                 net: None,

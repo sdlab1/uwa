@@ -1,7 +1,15 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
   import type { ProfileListResp, ProfileSummary } from '../lib/types';
-  import { getProfiles, openProfileTab, resetProfile } from '../lib/api';
+  import type { ProfileHealth, CookieRecord } from '../lib/api';
+  import {
+    getProfiles,
+    openProfileTab,
+    resetProfile,
+    getProfileHealth,
+    exportProfileCookies,
+    importProfileCookies,
+  } from '../lib/api';
   import { toast } from '../lib/stores';
   import CodeBlock from '../lib/components/CodeBlock.svelte';
 
@@ -9,6 +17,8 @@
   let err = $state<string | null>(null);
   let loading = $state(true);
   let busy: string | null = $state(null);
+  let healthByProfile: Record<string, ProfileHealth> = $state({});
+  let healthTimer: number | undefined;
 
   async function load() {
     try {
@@ -21,47 +31,97 @@
     }
   }
 
-  async function openSite(p: ProfileSummary, url: string) {
+  async function checkHealth(p: ProfileSummary) {
+    if (!p.named) return;
+    try {
+      healthByProfile = {
+        ...healthByProfile,
+        [p.name]: await getProfileHealth(p.name),
+      };
+    } catch (e) {
+      toast(`Health ${p.name}: ${String(e)}`, 'err');
+    }
+  }
+
+  async function checkAll() {
+    if (!data) return;
+    for (const p of data.profiles) {
+      if (p.named) await checkHealth(p);
+    }
+  }
+
+  async function exportCookies(p: ProfileSummary) {
     busy = p.name;
     try {
-      const r = await openProfileTab(p.name, { url, reuse_if_url_starts_with: url });
-      toast(r.reused ? `Reused tab ${r.tab}` : `Opened tab ${r.tab} in ${p.name}`, 'ok');
-      await load();
+      const e = await exportProfileCookies(p.name);
+      const blob = new Blob([JSON.stringify(e, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+      a.download = `uwa-cookies-${p.name}-${stamp}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      toast(`Exported ${e.cookies.length} cookie(s)`, 'ok');
     } catch (e) {
-      toast(`Open failed: ${String(e)}`, 'err');
+      toast(`Export failed: ${String(e)}`, 'err');
     } finally {
       busy = null;
     }
   }
 
-  async function reset(p: ProfileSummary) {
-    const confirmed = confirm(
-      `Reset profile "${p.label}"?\n\n` +
-        'Every tab in this profile will be closed and its cookies cleared. ' +
-        'You will have to log in again the next time you use it.',
-    );
-    if (!confirmed) return;
-    busy = p.name;
-    try {
-      const r = await resetProfile(p.name);
-      const n = r.dropped_tabs?.length ?? 0;
-      toast(`Reset ${p.name} (dropped ${n} tab(s))`, 'ok');
-      await load();
-    } catch (e) {
-      toast(`Reset failed: ${String(e)}`, 'err');
-    } finally {
-      busy = null;
+  async function importCookies(p: ProfileSummary) {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'application/json,.json';
+    input.onchange = async () => {
+      const file = input.files?.[0];
+      if (!file) return;
+      busy = p.name;
+      try {
+        const raw = await file.text();
+        const parsed = JSON.parse(raw);
+        const cookies: CookieRecord[] = Array.isArray(parsed)
+          ? parsed
+          : (parsed.cookies ?? []);
+        if (cookies.length === 0) {
+          toast('File has no cookies', 'warn');
+          return;
+        }
+        const r = await importProfileCookies(p.name, cookies);
+        toast(`Imported ${r.imported} cookie(s) into ${p.name}`, 'ok');
+        await checkHealth(p);
+      } catch (e) {
+        toast(`Import failed: ${String(e)}`, 'err');
+      } finally {
+        busy = null;
+      }
+    };
+    input.click();
+  }
+
+  function statusTone(s: ProfileHealth['providers'][number]['status']): string {
+    switch (s) {
+      case 'logged_in': return 'ok';
+      case 'logged_out': return 'err';
+      case 'no_tab': return 'muted';
+      default: return 'warn';
     }
   }
 
-  /** Prompt the user for a URL — a full URL picker is overkill, and
-   * most usage is a provider login page. */
-  function promptUrl(): string | null {
-    const v = prompt('URL to open in this profile', 'https://chatgpt.com/');
-    return v && v.trim() ? v.trim() : null;
-  }
+  onMount(async () => {
+    await load();
+    void checkAll();
+    healthTimer = window.setInterval(() => {
+      if (document.visibilityState === 'visible') void checkAll();
+    }, 60_000);
+  });
 
-  onMount(load);
+  onDestroy(() => {
+    if (healthTimer) window.clearInterval(healthTimer);
+  });
 </script>
 
 <div class="flex items-center justify-between mb-1">
@@ -143,6 +203,61 @@ label = "Work accounts"</code></pre>
           </div>
         </div>
 
+        <div class="text-[12.5px] mt-3">
+          <div class="flex items-center justify-between mb-1">
+            <span class="muted uppercase tracking-[0.5px] text-[10px]">login health</span>
+            {#if p.named}
+              <button
+                class="ghost-btn"
+                disabled={busy === p.name}
+                onclick={() => checkHealth(p)}>
+                Check now
+              </button>
+            {/if}
+          </div>
+          {#if !p.named}
+            <span class="muted">The default context's login state can't be probed
+              from uwa — check it directly in Chromium.</span>
+          {:else if !healthByProfile[p.name]}
+            <span class="muted">Not checked yet.</span>
+          {:else if healthByProfile[p.name].providers.length === 0}
+            <span class="muted">No providers configured.</span>
+          {:else}
+            <ul class="list-none m-0 p-0 space-y-0.5">
+              {#each healthByProfile[p.name].providers as h (h.provider)}
+                <li class="flex items-center gap-2">
+                  <span
+                    class="pill pill-{statusTone(h.status)} text-[10px]"
+                    style="min-width: 88px; text-align: center;">
+                    {h.status}
+                  </span>
+                  <span class="flex-1">{h.provider}</span>
+                  {#if h.note}<span class="muted text-[11px] truncate" title={h.note}>{h.note}</span>{/if}
+                </li>
+              {/each}
+            </ul>
+          {/if}
+        </div>
+
+        {#if p.named}
+          <div class="flex gap-2 mt-3 pt-3 border-t border-border">
+            <button
+              class="btn-secondary"
+              disabled={busy === p.name}
+              onclick={() => exportCookies(p)}>
+              {busy === p.name ? '…' : 'Export cookies'}
+            </button>
+            <button
+              class="btn-secondary"
+              disabled={busy === p.name}
+              onclick={() => importCookies(p)}>
+              {busy === p.name ? '…' : 'Import cookies'}
+            </button>
+            <span class="text-[11px] muted ml-auto self-center">
+              portable JSON · includes login cookies
+            </span>
+          </div>
+        {/if}
         <div class="text-[12.5px]">
           {#if p.tabs.length === 0}
             <span class="muted">No tabs — the profile has never been used.</span>

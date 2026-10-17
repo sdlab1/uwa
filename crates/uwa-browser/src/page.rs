@@ -278,4 +278,12 @@ impl uwa_core::Page for CdpPageAdapter {
     ) -> Result<Vec<uwa_core::MediaAsset>> {
         crate::media_capture::collect_media(self, container_selector, max_assets, max_bytes).await
     }
+
+    async fn export_cookies(&self) -> Result<Vec<uwa_core::CookieRecord>> {
+        crate::cookies::export(&self.page).await
+    }
+
+    async fn import_cookies(&self, cookies: &[uwa_core::CookieRecord]) -> Result<usize> {
+        crate::cookies::import(&self.page, cookies).await
+    }
 }

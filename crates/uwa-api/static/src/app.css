@@ -59,6 +59,7 @@ body {
 .pill-ok   { color: #06180f; background: var(--ok);   border-color: var(--ok); }
 .pill-warn { color: #241a06; background: var(--warn); border-color: var(--warn); }
 .pill-err  { color: #240606; background: var(--err);  border-color: var(--err); }
+  .pill-muted{ background: transparent; border-color: var(--border); color: var(--muted); }
 
 .card {
   background: var(--panel); border: 1px solid var(--border);

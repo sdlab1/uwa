@@ -88,6 +88,26 @@ pub trait Page: Send + Sync {
     ) -> Result<Vec<MediaAsset>> {
         Ok(Vec::new())
     }
+
+    /// Read every cookie in the page's browser context.
+    ///
+    /// Default: empty. Real browsers answer via CDP
+    /// `Network.getAllCookies`; test mocks can return a canned list.
+    async fn export_cookies(&self) -> Result<Vec<crate::CookieRecord>> {
+        Ok(Vec::new())
+    }
+
+    /// Import cookies into the page's context, replacing any with the
+    /// same `(name, domain, path)` triple. Returns the number of
+    /// cookies actually written — a browser that refuses a subset (bad
+    /// domain, expired) reports the count it accepted.
+    ///
+    /// Default: unsupported.
+    async fn import_cookies(&self, _cookies: &[crate::CookieRecord]) -> Result<usize> {
+        Err(crate::UwaError::Unsupported(
+            "this transport cannot import cookies".into(),
+        ))
+    }
 }
 
 /// One detected media element on a page (for scan_media).

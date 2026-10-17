@@ -380,6 +380,20 @@ pub struct Selectors {
     pub stop_button: Option<String>,
     pub assistant_message: Option<String>,
     pub conversation_root: Option<String>,
+
+    /// Present when the user is signed in. Used by
+    /// `/admin/profiles/:name/health` to answer "is this profile still
+    /// logged in?" without sending a message. Optional; the health
+    /// endpoint reports `unknown` when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logged_in: Option<String>,
+
+    /// Present when the user is signed out (login form, "Sign in"
+    /// button). Optional; when both this and `logged_in` are set, the
+    /// health endpoint uses whichever matches — a match on this
+    /// overrides a match on `logged_in`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logged_out: Option<String>,
 }
 
 /// Canonical strategy type; `uwa-config` re-exports it so config and the
@@ -775,6 +789,33 @@ mod tests {
         send_button = "button[aria-label='Send message']"
         assistant_message = "[data-testid=assistant-message]"
     "#;
+
+    #[test]
+    fn login_selectors_parse() {
+        let toml = r##"
+            [server]
+            bind = "127.0.0.1"
+            port = 8080
+            [providers.x]
+            name = "x"
+            url_patterns = ["https://x/*"]
+            capabilities = { streams = true, tool_calls = false, vision = false }
+            [providers.x.selectors]
+            input = "#i"
+            send_button = "#s"
+            assistant_message = "#a"
+            logged_in = "[data-testid='user-menu']"
+            logged_out = "a[href='/login']"
+        "##;
+        let cfg = Config::load_from_str(toml).unwrap_or_else(|e| unreachable!("parse: {e}"));
+        let s = cfg
+            .providers
+            .get("x")
+            .map(|p| &p.selectors)
+            .unwrap_or_else(|| unreachable!("provider x"));
+        assert_eq!(s.logged_in.as_deref(), Some("[data-testid='user-menu']"));
+        assert_eq!(s.logged_out.as_deref(), Some("a[href='/login']"));
+    }
 
     #[test]
     fn loads_sample_config() {

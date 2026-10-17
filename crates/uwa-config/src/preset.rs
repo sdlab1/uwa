@@ -157,6 +157,8 @@ fn merge_selectors(top: &Selectors, preset: &Selectors) -> Selectors {
             .assistant_message
             .clone()
             .or_else(|| top.assistant_message.clone()),
+        logged_in: preset.logged_in.clone().or_else(|| top.logged_in.clone()),
+        logged_out: preset.logged_out.clone().or_else(|| top.logged_out.clone()),
         conversation_root: preset
             .conversation_root
             .clone()

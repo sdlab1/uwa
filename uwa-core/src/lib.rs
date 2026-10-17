@@ -27,4 +27,5 @@ pub use traits::{
     Capabilities, MediaResource, MediaSourceKind, NetworkEvent, Page, ResponseStream, SiteProvider,
     TappedEvent, ToolSpec, Transport,
 };
+pub use types::cookie::{CookieExport, CookieRecord};
 pub use types::media::{MediaAsset, MediaKind, MediaSummary};

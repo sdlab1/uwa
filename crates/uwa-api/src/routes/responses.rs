@@ -27,8 +27,6 @@ use uwa_core::{RequestId, UwaError};
 
 use crate::error::ApiResult;
 use crate::routes::chat;
-use crate::routes::chat::pipeline::run_pipeline_with_hint;
-use crate::routing::RoutingHint;
 use crate::state::AppState;
 
 // ---------- request ----------
@@ -152,38 +150,28 @@ pub async fn create(
     // client request only.
     let local_tools = chat::local_tools(&chat_req)?;
 
-    // Scope conversation_id by provider (UWA-137) — same as chat/mod.rs.
-    let config = state.cfg();
-    let (provider_cfg, _effective_model) = if let Some(p) = hint.provider.as_deref() {
-        let cfg = config
-            .providers
-            .get(p)
-            .ok_or_else(|| UwaError::NoProviderForUrl(p.to_string()))?;
-        (cfg, chat_req.model.clone())
-    } else {
-        config.resolve_model(&chat_req.model)?
-    };
-    let site = state.registry().get(&provider_cfg.name)?;
-    let hint = RoutingHint {
-        provider: Some(site.name().to_string()),
-        ..hint
-    };
-
     // Codex (and the SDKs) drive this endpoint with SSE: without it the
     // tool loop cannot show progress and some clients refuse the body.
     if req.stream.unwrap_or(false) {
         let hint_clone = hint.clone();
+        let profile_clone = hint_clone
+            .profile
+            .clone()
+            .map(|p| uwa_session::ProfileName::new(&p))
+            .unwrap_or_else(uwa_session::ProfileName::default_name);
         let (tx, rx) = mpsc::channel::<chat::pipeline::StreamEvent>(64);
         let state_task = state.clone();
         let req_task = chat_req.clone();
         let specs_task = local_tools.clone();
         tokio::spawn(async move {
-            let _ = chat::pipeline::run_pipeline_streaming_with_hint(
+            let _ = chat::pipeline::run_pipeline_streaming(
                 &state_task,
                 &req_task,
                 &specs_task,
-                &hint_clone,
+                hint_clone.tab.as_ref(),
+                &profile_clone,
                 tx,
+                &hint_clone,
             )
             .await;
         });
@@ -198,7 +186,15 @@ pub async fn create(
         return Ok(stream_response(chat_req.model.clone(), input_chars, rx));
     }
 
-    let outcome = run_pipeline_with_hint(&state, &chat_req, &local_tools, &hint).await?;
+    let profile = hint
+        .profile
+        .clone()
+        .map(|p| uwa_session::ProfileName::new(&p))
+        .unwrap_or_else(uwa_session::ProfileName::default_name);
+
+    let pinned_tab = hint.tab.as_ref();
+    let outcome =
+        chat::run_pipeline(&state, &chat_req, &local_tools, pinned_tab, &profile, &hint).await?;
 
     let id = RequestId::new();
     let created = now_secs();

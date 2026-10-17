@@ -49,6 +49,9 @@ enum CliCommand {
     /// Point installed editors at this uwa instance.
     Clients(commands::clients::ClientsArgs),
 
+    /// Manage browser profiles: list, export/import cookies, check login health.
+    Profiles(commands::profiles::ProfilesAction),
+
     /// Print resolved config, provider list and detected browser.
     Doctor,
 }
@@ -118,6 +121,11 @@ fn build_clap_command() -> ClapCommand {
             ClapCommand::new("doctor")
                 .about("Print resolved config, provider list and detected browser."),
         )
+        .subcommand(
+            ClapCommand::new("profiles")
+                .about("Manage browser profiles: list, export/import cookies, check login health.")
+                .subcommands(commands::profiles::ProfilesAction::clap_subcommands()),
+        )
 }
 
 /// Parse command-line args into a [`Cli`] value. Returns `None` for the
@@ -184,6 +192,18 @@ fn parse_cli() -> Cli {
                 std::process::exit(2);
             });
             Some(CliCommand::Clients(args))
+        }
+        Some(("profiles", sub)) => {
+            let name = sub.subcommand_name().unwrap_or_else(|| unreachable!());
+            let sub_sub = sub
+                .subcommand_matches(name)
+                .unwrap_or_else(|| unreachable!());
+            let action = commands::profiles::ProfilesAction::from_matches(name, sub_sub)
+                .unwrap_or_else(|e| {
+                    eprintln!("{e}");
+                    std::process::exit(2);
+                });
+            Some(CliCommand::Profiles(action))
         }
         Some(("doctor", _)) => Some(CliCommand::Doctor),
         _ => None,
@@ -272,6 +292,7 @@ async fn main() -> anyhow::Result<()> {
         CliCommand::Conformance(args) => commands::conformance::run(args).await,
         CliCommand::Providers(args) => commands::providers::run(args).await,
         CliCommand::Clients(args) => commands::clients::run(args).await,
+        CliCommand::Profiles(action) => commands::profiles::run(config_path.clone(), action).await,
         CliCommand::Doctor => commands::doctor::run(config_path.clone()).await,
     };
 

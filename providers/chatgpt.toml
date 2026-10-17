@@ -27,6 +27,11 @@ stop_button       = "[data-testid=stop-button]"
 assistant_message = "[data-message-author-role=assistant]"
 conversation_root = "main"
 
+# Optional: used by `uwa profiles health` to detect a logged-out state
+# without sending a message.
+# logged_in  = "[data-testid='profile-button']"
+# logged_out = "a[href='/auth/login'], button[data-testid='login-button']"
+
 [alternates.input]
 candidates = [
     "#prompt-textarea",

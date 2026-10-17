@@ -32,6 +32,8 @@ fn provider_cfg() -> ProviderCfg {
         stop_button: Some("#stop".into()),
         assistant_message: Some(".assistant".into()),
         conversation_root: None,
+        logged_in: None,
+        logged_out: None,
     };
     cfg.extraction = ExtractionStrategy::DomOnly;
     cfg.finisher = uwa_core::FinisherTuning {

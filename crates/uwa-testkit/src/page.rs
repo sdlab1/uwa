@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::broadcast;
 use url::Url;
-use uwa_core::{MediaResource, NetworkEvent, Page, Result, UwaError};
+use uwa_core::{CookieRecord, MediaResource, NetworkEvent, Page, Result, UwaError};
 
 /// A [`Page`] whose every answer the test chooses.
 #[derive(Clone)]
@@ -34,6 +34,10 @@ struct Inner {
     /// what was sent *after* `subscribe()`, so these are replayed there.
     net_pending: Mutex<Vec<NetworkEvent>>,
     log: Mutex<Vec<String>>,
+    /// Backing store for the cookie trait methods; import replaces any
+    /// record sharing (name, domain, path), mirroring real browser
+    /// semantics, and everything else is appended.
+    cookies: Mutex<Vec<CookieRecord>>,
 }
 
 enum Html {
@@ -64,6 +68,7 @@ impl MockPage {
                 net_tx,
                 net_pending: Mutex::new(Vec::new()),
                 log: Mutex::new(Vec::new()),
+                cookies: Mutex::new(Vec::new()),
             }),
         }
     }
@@ -140,6 +145,19 @@ impl MockPage {
     /// subscribed through [`network_events`](Page::network_events).
     pub fn network_sender(&self) -> broadcast::Sender<NetworkEvent> {
         self.inner.net_tx.clone()
+    }
+
+    /// Pre-load the backing store `export_cookies` will return. Mostly
+    /// useful for the export round-trip; import tests usually start empty.
+    pub fn with_cookies(self, cookies: Vec<CookieRecord>) -> Self {
+        *crate::lock(&self.inner.cookies) = cookies;
+        self
+    }
+
+    /// Snapshot of the current backing store — assert what an import
+    /// actually stored without going through `export_cookies` again.
+    pub fn cookies(&self) -> Vec<CookieRecord> {
+        crate::lock(&self.inner.cookies).clone()
     }
 
     /// Every `eval`/`click`/`type_text` recorded so far.
@@ -267,12 +285,95 @@ impl Page for MockPage {
         let scripted = self.eval("scan_media").await?;
         Ok(serde_json::from_value(scripted).unwrap_or_default())
     }
+
+    async fn export_cookies(&self) -> Result<Vec<CookieRecord>> {
+        crate::lock(&self.inner.log).push("export_cookies".into());
+        Ok(crate::lock(&self.inner.cookies).clone())
+    }
+
+    async fn import_cookies(&self, cookies: &[CookieRecord]) -> Result<usize> {
+        let mut written: usize = 0;
+        let mut store = crate::lock(&self.inner.cookies);
+        for c in cookies {
+            let slot = store.iter().position(|existing| {
+                existing.name == c.name && existing.domain == c.domain && existing.path == c.path
+            });
+            if let Some(i) = slot {
+                let Some(existing) = store.get_mut(i) else {
+                    // Unreachable: `i` was just found by `position`.
+                    unreachable!("cookie slot vanished mid-import");
+                };
+                *existing = c.clone();
+            } else {
+                store.push(c.clone());
+            }
+            written = written.saturating_add(1);
+        }
+        crate::lock(&self.inner.log).push("import_cookies".into());
+        Ok(written)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn import_replaces_matching_cookie() {
+        let p = MockPage::new().with_cookies(vec![CookieRecord {
+            name: "sid".into(),
+            value: "old".into(),
+            domain: "chat.example.com".into(),
+            path: "/".into(),
+            expires: Some(1_800_000_000.0),
+            http_only: true,
+            secure: true,
+            session: false,
+            same_site: Some("Lax".into()),
+        }]);
+        p.import_cookies(&[CookieRecord {
+            name: "sid".into(),
+            value: "new".into(),
+            domain: "chat.example.com".into(),
+            path: "/".into(),
+            expires: None,
+            http_only: false,
+            secure: true,
+            session: true,
+            same_site: None,
+        }])
+        .await
+        .unwrap_or_else(|_| unreachable!("import is mocked"));
+        p.import_cookies(&[CookieRecord {
+            name: "extra".into(),
+            value: "v".into(),
+            domain: "other.example.com".into(),
+            path: "/".into(),
+            expires: None,
+            http_only: false,
+            secure: false,
+            session: true,
+            same_site: None,
+        }])
+        .await
+        .unwrap_or_else(|_| unreachable!("import is mocked"));
+
+        let exported = p
+            .export_cookies()
+            .await
+            .unwrap_or_else(|_| unreachable!("export is mocked"));
+        assert_eq!(exported.len(), 2, "same-name import replaces, new appends");
+        let sid = exported
+            .iter()
+            .find(|c| c.name == "sid")
+            .cloned()
+            .unwrap_or_else(|| unreachable!("sid survived"));
+        assert_eq!(sid.value, "new");
+        assert!(sid.session);
+        assert!(p.log().iter().any(|l| l == "import_cookies"));
+        assert!(p.log().iter().any(|l| l == "export_cookies"));
+    }
 
     #[tokio::test]
     async fn eval_matches_substring_once() {

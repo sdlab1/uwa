@@ -357,6 +357,51 @@ export const resetProfile = (name: string) =>
     { method: 'POST' },
   );
 
+// === cookies / login health ===
+export interface CookieRecord {
+  name: string;
+  value: string;
+  domain: string;
+  path: string;
+  expires?: number;
+  http_only: boolean;
+  secure: boolean;
+  session: boolean;
+  same_site?: string;
+}
+export interface CookieExport {
+  profile: string;
+  exported_at: string;
+  uwa_version: string;
+  cookies: CookieRecord[];
+}
+export const exportProfileCookies = (name: string) =>
+  request<CookieExport>(
+    `/admin/profiles/${encodeURIComponent(name)}/cookies`,
+  );
+export const importProfileCookies = (name: string, cookies: CookieRecord[]) =>
+  request<{ profile: string; imported: number }>(
+    `/admin/profiles/${encodeURIComponent(name)}/cookies`,
+    { method: 'POST', body: JSON.stringify(cookies) },
+  );
+
+export interface ProviderHealth {
+  provider: string;
+  status: 'logged_in' | 'logged_out' | 'unknown' | 'no_tab' | 'error';
+  tab?: string;
+  note?: string;
+}
+export interface ProfileHealth {
+  profile: string;
+  checked_at: string;
+  providers: ProviderHealth[];
+}
+export const getProfileHealth = (name: string) =>
+  request<ProfileHealth>(
+    `/admin/profiles/${encodeURIComponent(name)}/health`,
+  );
+
+
 
 // === recorder (observe a manual flow, propose a workflow) ===
 export const recorderStatus = () => request<RecorderStatus>('/admin/recorder/status');

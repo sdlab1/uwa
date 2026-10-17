@@ -397,6 +397,8 @@ mod tests {
             stop_button: Some("[data-testid=stop-button]".into()),
             assistant_message: Some("[data-message-author-role=assistant]".into()),
             conversation_root: None,
+            logged_in: None,
+            logged_out: None,
         }
     }
 

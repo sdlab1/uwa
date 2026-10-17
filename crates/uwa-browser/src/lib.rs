@@ -13,6 +13,7 @@
 pub mod attach;
 pub mod bus;
 pub mod cdp_cmd;
+pub mod cookies;
 pub mod frame;
 pub mod media_capture;
 #[cfg(feature = "nodriver")]

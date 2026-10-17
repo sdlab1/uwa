@@ -173,6 +173,9 @@ pub enum UwaError {
     #[error("upstream timeout after {0:?}")]
     Timeout(std::time::Duration),
 
+    #[error("not supported: {0}")]
+    Unsupported(String),
+
     #[error("upstream unavailable: {0}")]
     Unavailable(String),
 
@@ -207,6 +210,7 @@ impl UwaError {
                 (409, "server_error", "human_verification_required")
             }
             UwaError::Internal(_) => (500, "server_error", "internal_error"),
+            UwaError::Unsupported(_) => (501, "server_error", "not_supported"),
         }
     }
 }

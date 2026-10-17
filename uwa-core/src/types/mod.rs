@@ -2,11 +2,13 @@
 
 pub mod anthropic;
 pub mod attachment;
+pub mod cookie;
 pub mod media;
 pub mod openai;
 
 pub use anthropic::*;
 pub use attachment::Attachment;
+pub use cookie::{CookieExport, CookieRecord};
 pub use media::{MediaAsset, MediaKind, MediaSummary};
 pub use openai::*;
 

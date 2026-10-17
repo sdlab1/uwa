@@ -5,6 +5,7 @@ pub mod conformance;
 pub mod daemon;
 pub mod doctor;
 pub mod paths;
+pub mod profiles;
 pub mod providers;
 pub mod service;
 pub mod start;
