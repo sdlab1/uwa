@@ -7,7 +7,7 @@
 /// Парсер первой строки /proc/loadavg (средняя за 1 минуту).
 /// None: файла нет / поле не число — вызывающий код трактует как «неизвестно».
 pub fn parse_load(line: &str) -> Option<f64> {
-    None /* ~ changed by cargo-mutants ~ */
+    line.split_whitespace().next()?.parse::<f64>().ok()
 }
 
 /// Первая строка /proc/loadavg операционной системы.
