@@ -38,15 +38,18 @@ base_env() {
   export HARNESS_REVIEW=0 HARNESS_LINT=1
   # сброс гейтов, которые экспортят отдельные секции (иначе утекают в следующие)
   unset HARNESS_CRAP HARNESS_CRAP_SCOPE HARNESS_CRAP_MAX
+  unset HARNESS_RED_MUTATE HARNESS_RED_MIN_KILL
 }
 
 install_tests() { # мини-раннер тестов в текущем temp-репо: RED = прогон тестов, а не grep
   mkdir -p t scripts
   cat > scripts/test.sh <<'EOF'
 #!/usr/bin/env bash
+pat="${1:-}"
 n=0; bad=0
 for f in t/*.sh; do
   [ -f "$f" ] || continue
+  if [ -n "$pat" ] && [[ "$f" != *"$pat"* ]]; then continue; fi
   n=$((n+1))
   if bash "$f" >/dev/null 2>&1; then echo "ok   $f"; else echo "FAIL $f"; bad=$((bad+1)); fi
 done
@@ -100,7 +103,7 @@ cat > "$T/stub-red.sh" <<'S'
 red="$(dirname "$HARNESS_SPEC")/red.cmd"
 if [ ! -f "$red" ]; then
   printf '%s\n' "$1" > "$(dirname "$red")/red-prompt.txt"
-  printf 'bash scripts/test.sh\n' > "$red"
+  printf '%s\n' "${HARNESS_VERIFY:-bash scripts/test.sh}" > "$red"
 else
   [ -f "$HARNESS_WORKTREE/done.txt" ] && touch "$T_MUT_GOOD"
   echo marker > "$HARNESS_WORKTREE/done.txt"
@@ -120,6 +123,13 @@ cat > "$T/mut-garbage.sh" <<'S'
 #!/usr/bin/env bash
 echo "какой-то чужой вывод без маркеров"
 exit 0
+S
+cat > "$T/redmut.sh" <<'S'
+#!/usr/bin/env bash
+case "$1" in
+  *second*) echo "Mutants: 10, Killed: 2 (20%)";;
+  *) if bash -c "$1" >/dev/null 2>&1; then echo "Mutants: 10, Killed: 10 (100%)"; else echo "Mutants: 10, Killed: 2 (20%)"; fi;;
+esac
 S
 cat > "$T/crap-ok.sh" <<'S'
 #!/usr/bin/env bash
@@ -161,7 +171,7 @@ cat > "$T/crap-zero.sh" <<'S'
 #!/usr/bin/env bash
 echo "CRAP: functions=0"
 S
-chmod +x "$T"/stub*.sh "$T/sleeper.sh" "$T"/mut-*.sh "$T"/crap-*.sh
+chmod +x "$T"/stub*.sh "$T/sleeper.sh" "$T"/mut-*.sh "$T"/crap-*.sh "$T/redmut.sh"
 
 echo "== 0. статика: shellcheck (полный прогон, 4 файла) =="
 if command -v shellcheck >/dev/null 2>&1; then
@@ -449,19 +459,25 @@ grep -q "гейт REVIEW упал" "$T/out" && pass "REVIEW fix-раунд бы�
 grep -q "VERDICT: OK" .harness/logs/W-001-review.log && pass "финальный вердикт OK в review-логе" || fail "финальный вердикт OK в review-логе"
 
 echo "== 25. auto: папка спек → всё само (без RED в спеке его пишет агент) =="
-R="$(fresh r25)"; base_env; export HARNESS_AGENT="$T/stub-red.sh" HARNESS_VERIFY='bash scripts/test.sh'
+R="$(fresh r25)"; base_env; export HARNESS_AGENT="$T/stub-red.sh" HARNESS_VERIFY='bash scripts/test.sh feature'
 cd "$R" || exit 1
 install_tests
+cat > t/second_test.sh <<'EOF'
+#!/usr/bin/env bash
+[ -s done2.txt ] || { echo "done2.txt отсутствует"; exit 1; }
+grep -qx marker done2.txt || { echo "маркер не опубликован"; exit 1; }
+EOF
+git add -A >/dev/null 2>&1 && git commit -qm "второй тест"
 "$DEVH" init >/dev/null
 mkdir -p specs
 printf '# Задача А без RED\nСоздай done.txt с маркером.\n' > specs/spec-a.md
-printf '# Задача Б\nRED: test -f done2.txt\nСоздай done2.txt с маркером.\n' > specs/spec-b.md
+printf '# Задача Б\nRED: bash scripts/test.sh second\nСоздай done2.txt с маркером.\n' > specs/spec-b.md
 "$DEVH" auto --from specs >"$T/out" 2>&1 && pass "auto завершился rc=0" || { fail "auto rc"; cat "$T/out"; }
 grep -q "импортировано 2 спек" "$T/out" && pass "импорт обеих спек" || fail "импорт обеих спек"
 grep -q "RED-пруфа нет — его напишет агент" "$T/out" && pass "auto сообщил: red.cmd напишет агент" || fail "auto сообщил про red.cmd"
 [ "$(cat .harness/items/W-001/status)" = "done" ] && pass "спека А без RED прошла цикл" || fail "спека А не прошла"
-grep -qx 'bash scripts/test.sh' .harness/items/W-001/red.cmd && pass "W-001 red.cmd создан агентом: прогон тестов" || fail "W-001 red.cmd не тест"
-grep -qx 'test -f done2.txt' .harness/items/W-002/red.cmd && pass "W-002 RED из строки спеки сохранён" || fail "W-002 RED из спеки"
+grep -qx 'bash scripts/test.sh feature' .harness/items/W-001/red.cmd && pass "W-001 red.cmd создан агентом: прогон тестов" || fail "W-001 red.cmd не тест"
+grep -qx 'bash scripts/test.sh second' .harness/items/W-002/red.cmd && pass "W-002 RED из строки спеки сохранён (раннер совпал с VERIFY)" || fail "W-002 RED из спеки"
 [ "$(cat .harness/items/W-002/status)" = "done" ] && pass "спека Б прошла цикл" || fail "спека Б не прошла"
 grep -q "остался:" "$T/out" && fail "остаток должен быть пуст" || pass "остаток пуст (обе спеки закрыты)"
 
@@ -574,6 +590,70 @@ grep -q "scripts/test.sh" .harness/items/W-001/red.cmd && pass "red.cmd — пр
 grep -Eq '(^|[[:space:]])(grep|rg|test)[[:space:]-]' .harness/items/W-001/red.cmd && fail "red.cmd — это grep/проверка, а не тест" || pass "red.cmd — не grep и не проверка существования"
 grep -q "ЗАПРЕЩЕНО вместо теста" .harness/items/W-001/red-prompt.txt && pass "red-author промпт запрещает grep/проверку существования" || fail "red-author промпт не запрещает grep"
 grep -q "red-author" .harness/logs/W-001-timing.log && pass "стадия red-author в тайминге" || fail "стадия red-author"
+
+echo "== 29. RED-LINK: red.cmd обязан гонять тот же раннер, что и VERIFY =="
+R="$(fresh r34)"; base_env; export HARNESS_AGENT="$T/stub-red.sh" HARNESS_VERIFY='bash scripts/test.sh' HARNESS_MAX_FIX=0
+cd "$R" || exit 1
+install_tests
+"$DEVH" init >/dev/null
+printf '# Задача\nRED: test -f done.txt\nСоздай done.txt с маркером.\n' | "$DEVH" new "чужой раннер" >/dev/null
+if "$DEVH" run >"$T/out" 2>&1; then
+  fail "RED-LINK: несовпадение раннера должно быть красным"
+else
+  grep -q "RED-LINK" "$T/out" && pass "RED-LINK: жёсткий отказ при несовпадении раннера" || { fail "RED-LINK: жёсткий отказ"; cat "$T/out"; }
+fi
+grep -qx 'test -f done.txt' .harness/items/W-001/red.cmd && pass "RED-LINK: спека не переписана при отказе" || fail "RED-LINK: red.cmd спеки переписали"
+[ "$(cat .harness/items/W-001/status)" != "done" ] && pass "RED-LINK: статус не done" || fail "RED-LINK: статус done"
+
+R="$(fresh r35)"; base_env; export HARNESS_AGENT="$T/stub-red.sh" HARNESS_VERIFY='bash scripts/test.sh' HARNESS_MAX_FIX=3
+cd "$R" || exit 1
+install_tests
+"$DEVH" init >/dev/null
+printf '# Задача\nRED: test -f done.txt\nСоздай done.txt с маркером.\n' | "$DEVH" new "чужой раннер 2" >/dev/null
+"$DEVH" run >"$T/out" 2>&1 && pass "RED-LINK: после пере-авторинга run зелёный" || { fail "RED-LINK: run красный"; cat "$T/out"; }
+grep -q "не совпадает с раннером VERIFY" "$T/out" && pass "RED-LINK: харнесс сообщил о несовпадении раннера" || fail "RED-LINK: нет сообщения о несовпадении"
+grep -qx 'bash scripts/test.sh' .harness/items/W-001/red.cmd && pass "RED-LINK: red.cmd переписан раннером VERIFY" || fail "RED-LINK: red.cmd не переписан"
+grep -q "КОРРЕКЦИЯ" .harness/items/W-001/red-prompt.txt && pass "RED-LINK: корректирующий промпт ушёл агенту" || fail "RED-LINK: нет коррекции в промпте"
+
+echo "== 30. RED-MUT: контроль red-теста мутациями (RED_MUTATE) =="
+R="$(fresh r36)"; base_env; export HARNESS_AGENT="$T/stub-red.sh" HARNESS_VERIFY='bash scripts/test.sh'
+cd "$R" || exit 1; install_tests; "$DEVH" init >/dev/null
+printf 'спека: опубликуй done.txt с маркером\n' | "$DEVH" new "без red-mut" >/dev/null
+"$DEVH" run >"$T/out" 2>&1 && pass "RED-MUT выключен: run зелёный" || { fail "RED-MUT выключен: run красный"; cat "$T/out"; }
+[ -f .harness/logs/W-001-redmut.log ] && fail "RED-MUT выключен: redmut-лог не должен появиться" || pass "RED-MUT выключен: redmut-лог не создан"
+
+R="$(fresh r37)"; base_env; export HARNESS_AGENT="$T/stub-red.sh" HARNESS_VERIFY='bash scripts/test.sh' HARNESS_RED_MUTATE="$T/redmut.sh '{test}'"
+cd "$R" || exit 1; install_tests; "$DEVH" init >/dev/null
+printf 'спека: опубликуй done.txt с маркером\n' | "$DEVH" new "red-mut ok" >/dev/null
+"$DEVH" run >"$T/out" 2>&1 && grep -q "OK red-mutation" "$T/out" && grep -q "red-mutation: Mutants 10, killed 10" .harness/logs/W-001-redmut.log \
+  && pass "RED-MUT: сильный red убивает мутантов" || { fail "RED-MUT: сильный red"; cat "$T/out"; }
+
+R="$(fresh r38)"; base_env; export HARNESS_AGENT="$T/stub-red.sh" HARNESS_VERIFY='bash scripts/test.sh' HARNESS_RED_MUTATE="$T/redmut.sh '{test}'"
+cd "$R" || exit 1
+install_tests
+cat > t/second_test.sh <<'EOF'
+#!/usr/bin/env bash
+[ -s done2.txt ] || { echo "done2.txt отсутствует"; exit 1; }
+grep -qx marker done2.txt || { echo "маркер не опубликован"; exit 1; }
+EOF
+git add -A >/dev/null 2>&1 && git commit -qm "второй тест"
+"$DEVH" init >/dev/null
+printf '# Задача\nRED: bash scripts/test.sh second\nСоздай done2.txt с маркером.\n' | "$DEVH" new "red-mut слабый" >/dev/null
+if "$DEVH" run >"$T/out" 2>&1; then
+  fail "RED-MUT: слабый red должен быть красным"
+else
+  grep -q "RED-MUT" "$T/out" && pass "RED-MUT: слабый red отклонён" || { fail "RED-MUT: нет сообщения"; cat "$T/out"; }
+  [ "$(cat .harness/items/W-001/status)" != "done" ] && pass "RED-MUT: статус не done" || fail "RED-MUT: статус done"
+fi
+
+R="$(fresh r39)"; base_env; export HARNESS_AGENT="$T/stub-red.sh" HARNESS_VERIFY='bash scripts/test.sh' HARNESS_RED_MUTATE="$T/redmut.sh"
+cd "$R" || exit 1; install_tests; "$DEVH" init >/dev/null
+printf 'спека: опубликуй done.txt с маркером\n' | "$DEVH" new "red-mut без {test}" >/dev/null
+if "$DEVH" run >"$T/out" 2>&1; then
+  fail "RED-MUT: отсутствие {test} должно быть красным"
+else
+  grep -q "нет шаблона {test}" "$T/out" && pass "RED-MUT: без {test} — отказ с подсказкой" || { fail "RED-MUT: нет подсказки про {test}"; cat "$T/out"; }
+fi
 
 echo
 echo "ИТОГО: PASS=$PASS FAIL=$FAIL"

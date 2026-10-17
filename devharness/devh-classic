@@ -57,6 +57,8 @@ MAIN="${HARNESS_MAIN:-main}"
 WT_ROOT="${HARNESS_WT_ROOT:-/tmp}"
 MAX_ACTIVE="${HARNESS_MAX_ACTIVE:-3}"
 MIN_KILL="${HARNESS_MIN_KILL:-90}"
+RED_MUTATE="${HARNESS_RED_MUTATE:-}"
+RED_MIN_KILL="${HARNESS_RED_MIN_KILL:-90}"
 MUTATE="${HARNESS_MUTATE:-}"
 MUTATE_SCOPE="${HARNESS_MUTATE_SCOPE:-}"
 CRAP="${HARNESS_CRAP:-}"
@@ -79,7 +81,7 @@ need_conf() {
   # shellcheck disable=SC1090
   . "$CONF"
   local v env
-  for v in VERIFY BOOTSTRAP AGENT MAX_FIX REMOTE MAIN WT_ROOT MAX_ACTIVE MIN_KILL MUTATE MUTATE_SCOPE CRAP CRAP_SCOPE CRAP_MAX BENCH AGENT_TIMEOUT LOG_DAYS RULES RULES_LOG MSG_DENY NO_IGNORED IGNORED_ALLOWLIST LINT LINT_CMD REVIEW; do
+  for v in VERIFY BOOTSTRAP AGENT MAX_FIX REMOTE MAIN WT_ROOT MAX_ACTIVE MIN_KILL RED_MUTATE RED_MIN_KILL MUTATE MUTATE_SCOPE CRAP CRAP_SCOPE CRAP_MAX BENCH AGENT_TIMEOUT LOG_DAYS RULES RULES_LOG MSG_DENY NO_IGNORED IGNORED_ALLOWLIST LINT LINT_CMD REVIEW; do
     env="HARNESS_$v"
     # shellcheck disable=SC2086
     if [ -n "${!env:-}" ]; then printf -v "$v" '%s' "${!env}"; fi
@@ -298,6 +300,8 @@ LOG_DAYS=$LOG_DAYS            # retention логов в .harness/logs (0 = не 
 MUTATE='$MUTATE'  # мутационный гейт; {module}/{file} подставляются на каждый изменённый файл
 MUTATE_SCOPE='$MUTATE_SCOPE'  # какие пути считать «прод-кодом» для мутаций
 MIN_KILL=$MIN_KILL           # минимальный kill-rate, %
+RED_MUTATE='$RED_MUTATE'  # контроль red-теста: шаблон мутантов с {test} (пусто = выкл)
+RED_MIN_KILL=$RED_MIN_KILL      # минимальный kill-rate именно red-теста, %
 CRAP='$CRAP'  # гейт CRAP (guardrail №2): score = C²·(1−cov)³ + C; пусто = выкл
 CRAP_SCOPE='$CRAP_SCOPE'  # какие пути анализировать (пусто = все изменённые)
 CRAP_MAX=$CRAP_MAX            # порог нарушения: score > MAX = красный
@@ -353,6 +357,11 @@ cmd_new() {
   crit_end
   if [ ! -t 0 ]; then cat > "$d/spec.md"
   else : > "$d/spec.md"; "${EDITOR:-vi}" "$d/spec.md"; fi
+  if [ -z "$no_red" ]; then
+    local redl
+    redl="$(grep -m1 '^RED:' "$d/spec.md" 2>/dev/null | sed 's/^RED: *//;s/[[:space:]]*$//' || true)"
+    if [ -n "$redl" ]; then printf '%s\n' "$redl" > "$d/red.cmd"; fi
+  fi
   [ -n "$no_red" ] && echo "$no_red" > "$d/no-red"
   [ -n "$no_crap" ] && echo "$no_crap" > "$d/no-crap"
   echo "${C_G}OK $id: $title (спека: $d/spec.md)${no_red:+ [RED пропущен: $no_red]}${no_crap:+ [CRAP пропущен: $no_crap]}${C_0}"
@@ -389,9 +398,82 @@ cmd_hint() {
   echo; echo '## Контекст для следующей модели:'; prompt_for "$id"
 }
 
+# ─── сигнатура раннера: RED-LINK сравнивает red.cmd с VERIFY ────────
+runner_sig() { # $1 = команда → «интерпретатор + путь» либо первый исполняемый токен
+  local -a toks=()
+  local tok exec next i=0
+  read -r -a toks <<<"$1" || true
+  while [ "$i" -lt "${#toks[@]}" ]; do
+    tok="${toks[$i]}"
+    case "$tok" in
+      if | then | else | elif | fi | do | done | while | until | for | case | 'esac' | 'in' | '!' | '{' | '}' | '(' | ')')
+        i=$((i + 1)); continue ;;
+      [A-Za-z_]*=*) i=$((i + 1)); continue ;;
+    esac
+    break
+  done
+  [ "$i" -lt "${#toks[@]}" ] || return 0
+  exec="${toks[$i]}"; exec="${exec#./}"
+  [ -n "$exec" ] || return 0
+  case "$exec" in
+    bash | sh | zsh | dash | ksh | mksh | python | python3 | python2 | node | deno | ruby | perl)
+      next="${toks[$((i + 1))]:-}"
+      case "$next" in
+        '' | -*) printf '%s' "$exec" ;;
+        *) printf '%s %s' "$exec" "${next#./}" ;;
+      esac ;;
+    *) printf '%s' "$exec" ;;
+  esac
+}
+runner_sigs() { # $1 = команда → сигнатуры подкоманд (;, &&, ||, |), по одной на строку
+  local cmd="$1" cur="" ch nxt ins=0 ind=0 i=0 n part
+  local -a parts=()
+  n="${#cmd}"
+  while [ "$i" -lt "$n" ]; do
+    ch="${cmd:$i:1}"
+    if [ "$ins" = 1 ] || [ "$ind" = 1 ]; then
+      case "$ch" in
+        "'") [ "$ins" = 1 ] && ins=0 || true ;;
+        '"') [ "$ind" = 1 ] && ind=0 || true ;;
+      esac
+      cur="$cur$ch"; i=$((i + 1)); continue
+    fi
+    case "$ch" in
+      "'") ins=1; cur="$cur$ch" ;;
+      '"') ind=1; cur="$cur$ch" ;;
+      ';') parts+=("$cur"); cur="" ;;
+      '|' | '&')
+        nxt="${cmd:$((i + 1)):1}"
+        if [ "$nxt" = "$ch" ]; then i=$((i + 1)); fi
+        parts+=("$cur"); cur="" ;;
+      *) cur="$cur$ch" ;;
+    esac
+    i=$((i + 1))
+  done
+  parts+=("$cur")
+  for part in "${parts[@]}"; do
+    part="$(runner_sig "$part")"
+    [ -n "$part" ] && printf '%s\n' "$part"
+    true
+  done
+  return 0
+}
+red_links_ok() { # $1 = red.cmd, $2 = VERIFY → 0, если раннеры совпадают (или VERIFY пуст)
+  local vs reds s
+  vs="$(runner_sigs "$2")"
+  [ -n "$vs" ] || return 0
+  reds="$(runner_sigs "$1")"
+  while IFS= read -r s; do
+    [ -n "$s" ] || continue
+    printf '%s\n' "$vs" | grep -qxF -- "$s" && return 0
+  done <<<"$reds"
+  return 1
+}
+
 # ─── mutation-гейт ─────────────────────────────────────────────────
 # Вывод инструмента: 'Mutants: N, Killed: M' (muex-формат). Нет вывода → env-блокер (rc=2): среда ≠ работа агента.
-mutate_gate() {
+mutate_gate() { # $1 = команда, $2 = min_kill, $3 = label, $4 = ключ конфига
+  local MUTATE_L="$1" MIN_KILL_L="$2" LABEL="$3" KEY="$4"
   local files f mod out t k pct fail=0
   # shellcheck disable=SC2086  # MUTATE_SCOPE — список pathspec, слово-разбиение намеренно
   files="$(git -C "$wt" diff --name-only HEAD -- $MUTATE_SCOPE 2>/dev/null | sort -u)"
@@ -399,44 +481,44 @@ mutate_gate() {
   if [ -z "$files" ] && [ -n "$(git -C "$wt" status --porcelain -- $MUTATE_SCOPE)" ]; then
     files="$(git -C "$wt" status --porcelain -- $MUTATE_SCOPE 2>/dev/null | cut -c4- | sort -u)"
   fi
-  if [[ "$MUTATE" != *'{'* ]]; then   # без плейсхолдеров — один прогон на всё
-    out="$(cd "$wt" && bash -c "$MUTATE" 2>&1)" || true
+  if [[ "$MUTATE_L" != *'{'* ]]; then   # без плейсхолдеров — один прогон на всё
+    out="$(cd "$wt" && bash -c "$MUTATE_L" 2>&1)" || true
     if [[ "$out" =~ Mutants:[[:space:]]*([0-9]+),[[:space:]]*Killed:[[:space:]]*([0-9]+) ]]; then
       t="${BASH_REMATCH[1]}"; k="${BASH_REMATCH[2]}"
       if [ "$t" -gt 0 ]; then
         pct=$(( k * 100 / t ))
-        echo "mutation: Mutants $t, killed $k (${pct}%)"
-        [ "$pct" -lt "$MIN_KILL" ] && { echo "mutation FAIL: kill-rate ${pct}% < ${MIN_KILL}%"; return 1; }
+        echo "$LABEL: Mutants $t, killed $k (${pct}%)"
+        [ "$pct" -lt "$MIN_KILL_L" ] && { echo "$LABEL FAIL: kill-rate ${pct}% < ${MIN_KILL_L}%"; return 1; }
       else
-        echo "mutation: 0 мутантов — нечего убивать, пропуск"
+        echo "$LABEL: 0 мутантов — нечего убивать, пропуск"
       fi
     else
-      echo "mutation env: инструмент не распознан (нет 'Mutants: N, Killed: M'); MUTATE='$MUTATE'"
+      echo "$LABEL env: инструмент не распознан (нет 'Mutants: N, Killed: M'); $KEY='$MUTATE_L'"
       return 2
     fi
     return 0
   fi
-  [ -n "$files" ] || { echo "mutation: нет изменённых файлов в $MUTATE_SCOPE — гейт пропущен"; return 0; }
+  [ -n "$files" ] || { echo "$LABEL: нет изменённых файлов в $MUTATE_SCOPE — гейт пропущен"; return 0; }
   while IFS= read -r f; do
     [ -n "$f" ] || continue
-    if [ ! -f "$wt/$f" ]; then echo "mutation: $f удалён агентом — мутации не требуется"; continue; fi
+    if [ ! -f "$wt/$f" ]; then echo "$LABEL: $f удалён агентом — мутации не требуется"; continue; fi
     mod="$(mod_of "$f")"
-    local cmd; cmd="${MUTATE//\{module\}/$mod}"; cmd="${cmd//\{file\}/$f}"
+    local cmd; cmd="${MUTATE_L//\{module\}/$mod}"; cmd="${cmd//\{file\}/$f}"
     out="$(cd "$wt" && bash -c "$cmd" 2>&1)" || true
     if [[ "$out" =~ Mutants:[[:space:]]*([0-9]+),[[:space:]]*Killed:[[:space:]]*([0-9]+) ]]; then
       t="${BASH_REMATCH[1]}"; k="${BASH_REMATCH[2]}"
       if [ "$t" -gt 0 ]; then
         pct=$(( k * 100 / t ))
-        echo "mutation $f: Mutants $t, killed $k (${pct}%)"
-        if [ "$pct" -lt "$MIN_KILL" ]; then
-          echo "mutation FAIL $f: kill-rate ${pct}% < ${MIN_KILL}% — тесты не ловят мутантов"
+        echo "$LABEL $f: Mutants $t, killed $k (${pct}%)"
+        if [ "$pct" -lt "$MIN_KILL_L" ]; then
+          echo "$LABEL FAIL $f: kill-rate ${pct}% < ${MIN_KILL_L}% — тесты не ловят мутантов"
           fail=1
         fi
       else
-        echo "mutation $f: 0 мутантов — пропуск"
+        echo "$LABEL $f: 0 мутантов — пропуск"
       fi
     else
-      echo "mutation env: инструмент не распознан для $f; MUTATE='$MUTATE'"
+      echo "$LABEL env: инструмент не распознан для $f; $KEY='$MUTATE_L'"
       return 2
     fi
   done <<<"$files"
@@ -571,7 +653,7 @@ cmd_run() {
   log="$HDIR/logs/$id-verify.log"; sum="$HDIR/summaries/$id.md"
   # per-item маршрутизация агента (лёгкое — дешёвой модели, сложное — сильной)
   if [ -s "$d/agent" ]; then AGENT="$(cat "$d/agent")"; echo ".. агент (per-item): $AGENT"; fi
-  local mlog="$HDIR/logs/$id-mutate.log" blog="$HDIR/logs/$id-bench.log" llog="$HDIR/logs/$id-lint.log" rlog="$HDIR/logs/$id-review.log" craplog="$HDIR/logs/$id-crap.log" which=VERIFY
+  local mlog="$HDIR/logs/$id-mutate.log" rdmlog="$HDIR/logs/$id-redmut.log" blog="$HDIR/logs/$id-bench.log" llog="$HDIR/logs/$id-lint.log" rlog="$HDIR/logs/$id-review.log" craplog="$HDIR/logs/$id-crap.log" which=VERIFY
 
   # claim: WIP-лимит + статус под глобальным локом
   local t0; t0="$(date +%s)"
@@ -595,7 +677,7 @@ cmd_run() {
   run_agent() { # $1 = промпт; $2 = стадия тайминга (опц.); timeout = watchdog «агент сдох»
     # shellcheck disable=SC2086  # $AGENT — команда+аргументы агента; слово-разбиение намеренно
     ( cd "$wt" && env HARNESS_WORKTREE="$wt" HARNESS_SPEC="$d/spec.md" \
-        HARNESS_PLAN="$d/plan.md" HARNESS_SUMMARY="$sum" \
+        HARNESS_PLAN="$d/plan.md" HARNESS_SUMMARY="$sum" HARNESS_VERIFY="$VERIFY" \
         timeout "$AGENT_TIMEOUT" $AGENT "$1" ) > "$HDIR/logs/$id-agent.log" 2>&1 \
       || { echo "${C_R}FAIL агент (код выше; timeout=${AGENT_TIMEOUT}s; лог: $HDIR/logs/$id-agent.log)${C_0}" >&2; set_status "$id" active; exit 1; }
     tstage "${2:-agent-r$((round+1))}"
@@ -624,14 +706,42 @@ cmd_run() {
   if [ -s "$d/no-red" ]; then
     echo "${C_Y}⚠  RED пропущен (записанный обход): $(cat "$d/no-red")${C_0}"
   else
-    if [ ! -f "$d/red.cmd" ]; then
-      echo "${C_Y}.. red: red.cmd отсутствует — поручаю агенту написать его первой задачей${C_0}"
-      run_agent "$(prompt_for_red "$id")" red-author
+    local red_attempt=0 red_max=$(( MAX_FIX > 0 ? MAX_FIX : 1 )) red_prompt red_sigs red_cmd
+    while :; do
+      red_attempt=$((red_attempt + 1))
       if [ ! -f "$d/red.cmd" ]; then
-        echo "${C_R}FAIL: RED-пруф ОБЯЗАТЕЛЕН (в первую очередь). Агент не написал $d/red.cmd — команду, падающую на чистом HEAD и зеленеющую после работы; либо записанный обход: echo \"<причина>\" > $d/no-red${C_0}" >&2
-        exit 1
+        if [ "$red_attempt" = 1 ]; then
+          echo "${C_Y}.. red: red.cmd отсутствует — поручаю агенту написать его первой задачей${C_0}"
+        else
+          echo "${C_Y}.. red: раннер red.cmd не совпадает с раннером VERIFY — поручаю переписать (попытка $red_attempt/$red_max)${C_0}"
+        fi
+        red_prompt="$(prompt_for_red "$id")"
+        if [ "$red_attempt" -gt 1 ]; then
+          red_cmd="$(cat "$d/red.cmd" 2>/dev/null || true)"
+          red_sigs="$(runner_sigs "$red_cmd")"
+          red_prompt="$red_prompt
+
+КОРРЕКЦИЯ: red.cmd обязан запускать тот же раннер/бинарь, что и VERIFY ($VERIFY), а сейчас там: ${red_sigs:-<нет файла>}. Перепиши файл строго этим раннером.
+"
+        fi
+        run_agent "$red_prompt" red-author
+        if [ ! -f "$d/red.cmd" ]; then
+          if [ "$red_attempt" -ge "$red_max" ]; then
+            echo "${C_R}FAIL: RED-пруф ОБЯЗАТЕЛЕН (в первую очередь). Агент не написал $d/red.cmd — команду, падающую на чистом HEAD и зеленеющую после работы; либо записанный обход: echo \"<причина>\" > $d/no-red${C_0}" >&2
+            exit 1
+          fi
+          continue
+        fi
       fi
-    fi
+      red_cmd="$(cat "$d/red.cmd" 2>/dev/null || true)"
+      red_links_ok "$red_cmd" "$VERIFY" && break
+      if [ "$red_attempt" -ge "$red_max" ]; then
+        echo "${C_R}FAIL: RED-LINK: раннер red.cmd ($(runner_sigs "$red_cmd" | tr '\n' '|')) не совпадает с раннером VERIFY ($(runner_sigs "$VERIFY" | tr '\n' '|')) — red обязан гонять тот же тестовый вход${C_0}" >&2
+        echo "      поправь $d/red.cmd (или строку RED: в спеке, либо выровняй VERIFY) и повтори: devh run $id${C_0}"
+        set_status "$id" active; exit 1
+      fi
+      rm -f "$d/red.cmd"
+    done
     if [ "$fresh" = 0 ] && [ -n "$(git -C "$wt" status --porcelain)" ]; then
       echo "${C_G}OK resume: RED pre-check пропущен — дерево уже содержит работу; доказательство RED было на чистом HEAD первой попытки, позеленение проверит пост-гейт${C_0}"
     elif (cd "$wt" && bash "$d/red.cmd") >/dev/null 2>&1; then
@@ -682,7 +792,7 @@ cmd_run() {
       if [ "$rrc" -ne 0 ]; then which=REVIEW; return 1; fi
     fi
     if [ -n "$MUTATE" ]; then
-      mutate_gate > "$mlog" 2>&1
+      mutate_gate "$MUTATE" "$MIN_KILL" mutation MUTATE > "$mlog" 2>&1
       mrc=$?
       tstage "mutate-r$((round+1))"
       if [ "$mrc" -eq 2 ]; then
@@ -749,6 +859,31 @@ $(tail -40 "$blog")
     echo "${C_G}OK red: позеленел${C_0}"
   fi
   tstage "red-post"
+
+  # 4.1 RED-MUT: red-тест обязан убивать мутантов (RED_MUTATE, {test} = red.cmd)
+  if [ -n "$RED_MUTATE" ] && [ -f "$d/red.cmd" ] && [ ! -s "$d/no-red" ]; then
+    case "$RED_MUTATE" in
+      *'{test}'*) ;;
+      *)
+        echo "${C_R}FAIL: RED-MUT: в RED_MUTATE нет шаблона {test} — нечем подставить команду red ($d/red.cmd)${C_0}" >&2
+        echo "      пример: RED_MUTATE=\"bash scripts/mutate.sh '{test}'\" — прогон мутантов, которые ловятся только red-тестом; и повтори: devh run $id${C_0}"
+        set_status "$id" active; exit 1 ;;
+    esac
+    red_cmd="$(cat "$d/red.cmd")"
+    local rrc=0
+    mutate_gate "${RED_MUTATE//\{test\}/$red_cmd}" "$RED_MIN_KILL" red-mutation RED_MUTATE > "$rdmlog" 2>&1 || rrc=$?
+    tstage "redmut"
+    if [ "$rrc" = 2 ]; then
+      echo "${C_R}FAIL: RED-MUT env-блокер — инструмент не распознан (лог: $rdmlog)${C_0}" >&2
+      set_status "$id" active; exit 1
+    fi
+    if [ "$rrc" != 0 ]; then
+      echo "${C_R}FAIL: RED-MUT: red-тест убивает слишком мало мутантов — он не доказывает, что проверяет изменение${C_0}" >&2
+      echo "      усили $d/red.cmd (или удали его — агент напишет заново); лог: $rdmlog${C_0}"
+      set_status "$id" active; exit 1
+    fi
+    echo "${C_G}OK red-mutation: red-тест ловит мутантов в изменённых файлах${C_0}"
+  fi
 
   # 5. summary / BLOCKED
   if [ ! -s "$sum" ]; then echo "${C_R}FAIL: агент не написал summary ($sum)${C_0}" >&2; set_status "$id" active; exit 1; fi

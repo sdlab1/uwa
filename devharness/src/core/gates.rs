@@ -267,6 +267,104 @@ fn judge_crap(log: &str, max: u32) -> Verdict {
     }
 }
 
+const RUNNER_INTERPRETERS: [&str; 13] = [
+    "bash", "sh", "zsh", "dash", "ksh", "mksh", "python", "python3", "python2", "node", "deno",
+    "ruby", "perl",
+];
+
+const SHELL_KEYWORDS: [&str; 18] = [
+    "if", "then", "else", "elif", "fi", "do", "done", "while", "until", "for", "case", "esac",
+    "in", "!", "{", "}", "(", ")",
+];
+
+fn is_env_assign(tok: &str) -> bool {
+    let Some((name, _)) = tok.split_once('=') else {
+        return false;
+    };
+    let mut cs = name.chars();
+    match cs.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {
+            cs.all(|c| c.is_ascii_alphanumeric() || c == '_')
+        }
+        _ => false,
+    }
+}
+
+pub fn runner_signature(cmd: &str) -> Option<String> {
+    let toks: Vec<&str> = cmd
+        .split_whitespace()
+        .filter(|t| !is_env_assign(t))
+        .collect();
+    let mut it = toks
+        .iter()
+        .copied()
+        .skip_while(|t| SHELL_KEYWORDS.contains(t));
+    let exec = it.next()?.trim_start_matches("./");
+    if exec.is_empty() {
+        return None;
+    }
+    if RUNNER_INTERPRETERS.contains(&exec) {
+        let next = it.next()?;
+        if next.starts_with('-') {
+            return Some(exec.to_string());
+        }
+        return Some(format!("{exec} {}", next.trim_start_matches("./")));
+    }
+    Some(exec.to_string())
+}
+
+pub fn runner_signatures(cmd: &str) -> Vec<String> {
+    let mut parts: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut in_s = false;
+    let mut in_d = false;
+    let mut chars = cmd.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\'' if !in_d => {
+                in_s = !in_s;
+                cur.push(ch);
+            }
+            '"' if !in_s => {
+                in_d = !in_d;
+                cur.push(ch);
+            }
+            ';' | '|' if !in_s && !in_d => {
+                if ch == '|' && chars.peek() == Some(&'|') {
+                    chars.next();
+                }
+                parts.push(std::mem::take(&mut cur));
+            }
+            '&' if !in_s && !in_d => {
+                if chars.peek() == Some(&'&') {
+                    chars.next();
+                }
+                parts.push(std::mem::take(&mut cur));
+            }
+            _ => cur.push(ch),
+        }
+    }
+    parts.push(cur);
+    parts
+        .iter()
+        .map(|p| runner_signature(p).unwrap_or_default())
+        .collect()
+}
+
+pub fn red_links_verify(red: &str, verify: &str) -> bool {
+    let vs: Vec<String> = runner_signatures(verify)
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .collect();
+    if vs.is_empty() {
+        return true;
+    }
+    runner_signatures(red)
+        .iter()
+        .filter(|s| !s.is_empty())
+        .any(|s| vs.contains(s))
+}
+
 pub fn judge(gate: &Gate, raw: &Raw, cfg: &RunConfig) -> Verdict {
     if let Some(tool) = &raw.missing_tool {
         return Verdict::EnvBlocked {
@@ -737,5 +835,138 @@ mod tests {
             judge(&Gate::Crap, &raw, &off),
             Verdict::Fail { .. }
         ));
+    }
+
+    #[test]
+    fn runner_signature_interpreter_and_bare() {
+        assert_eq!(
+            runner_signature("bash scripts/test.sh feature").as_deref(),
+            Some("bash scripts/test.sh")
+        );
+        assert_eq!(
+            runner_signature("bash ./scripts/test.sh").as_deref(),
+            Some("bash scripts/test.sh")
+        );
+        assert_eq!(
+            runner_signature("./scripts/verify.sh --all").as_deref(),
+            Some("scripts/verify.sh")
+        );
+        assert_eq!(runner_signature("cargo test").as_deref(), Some("cargo"));
+        assert_eq!(
+            runner_signature("python -m pytest -q").as_deref(),
+            Some("python")
+        );
+        assert_eq!(
+            runner_signature("if [ -f x ]; then run; fi").as_deref(),
+            Some("[")
+        );
+        assert_eq!(
+            runner_signature("PATH=/x cargo test").as_deref(),
+            Some("cargo")
+        );
+        assert_eq!(runner_signature("   "), None);
+    }
+
+    #[test]
+    fn runner_signatures_split_composite_verify() {
+        assert_eq!(
+            runner_signatures("sleep 6; test -f done.txt"),
+            vec!["sleep", "test"]
+        );
+        assert_eq!(
+            runner_signatures("echo \"a; b\" && cargo test"),
+            vec!["echo", "cargo"]
+        );
+        assert_eq!(
+            runner_signatures("true || bash t/run.sh"),
+            vec!["true", "bash t/run.sh"]
+        );
+        assert_eq!(
+            runner_signatures("if true; then go; fi"),
+            vec!["true", "go", ""]
+        );
+    }
+
+    #[test]
+    fn runner_signature_env_assign_edges() {
+        assert_eq!(
+            runner_signature("PATH=/x cargo test").as_deref(),
+            Some("cargo")
+        );
+        assert_eq!(
+            runner_signature("_A=1 cargo test").as_deref(),
+            Some("cargo")
+        );
+        assert_eq!(
+            runner_signature("A_B2=1 sh t.sh").as_deref(),
+            Some("sh t.sh")
+        );
+        assert_eq!(runner_signature("1A=1 cargo test").as_deref(), Some("1A=1"));
+        assert_eq!(
+            runner_signature("--opt=val cargo").as_deref(),
+            Some("--opt=val")
+        );
+        assert_eq!(runner_signature("./"), None);
+        assert_eq!(runner_signature("do cargo test").as_deref(), Some("cargo"));
+    }
+
+    #[test]
+    fn runner_signatures_quote_guards() {
+        assert_eq!(
+            runner_signatures("echo 'a; b' && cargo test"),
+            vec!["echo", "cargo"]
+        );
+        assert_eq!(
+            runner_signatures(r#"echo "a'b" && cargo test"#),
+            vec!["echo", "cargo"]
+        );
+        assert_eq!(
+            runner_signatures("echo 'a\";b' && cargo test"),
+            vec!["echo", "cargo"]
+        );
+        assert_eq!(
+            runner_signatures(r#"echo "a; b" && cargo test"#),
+            vec!["echo", "cargo"]
+        );
+        assert_eq!(
+            runner_signatures(r#"echo "a&&b" && cargo test"#),
+            vec!["echo", "cargo"]
+        );
+        assert_eq!(
+            runner_signatures("echo 'a|b' && cargo test"),
+            vec!["echo", "cargo"]
+        );
+    }
+
+    #[test]
+    fn runner_signatures_separator_consumption() {
+        assert_eq!(runner_signatures("a || b"), vec!["a", "b"]);
+        assert_eq!(runner_signatures("a && b"), vec!["a", "b"]);
+        assert_eq!(runner_signatures("a |b"), vec!["a", "b"]);
+        assert_eq!(runner_signatures("a &b"), vec!["a", "b"]);
+        assert_eq!(runner_signatures("a ||b"), vec!["a", "b"]);
+        assert_eq!(runner_signatures("a &&b"), vec!["a", "b"]);
+        assert_eq!(runner_signatures("a;b;c"), vec!["a", "b", "c"]);
+        assert_eq!(runner_signatures(""), vec![""]);
+    }
+
+    #[test]
+    fn red_links_verify_contract() {
+        assert!(red_links_verify(
+            "bash scripts/test.sh second",
+            "bash scripts/test.sh feature"
+        ));
+        assert!(red_links_verify(
+            "test -f done2.txt",
+            "if [ -f ign ]; then echo x; fi; test -f done.txt"
+        ));
+        assert!(red_links_verify("test -f done.txt", "test -f done.txt"));
+        assert!(red_links_verify("cargo test mod::x", "cargo test"));
+        assert!(!red_links_verify(
+            "test -f done2.txt",
+            "bash scripts/test.sh"
+        ));
+        assert!(!red_links_verify("grep -q x f", "cargo test"));
+        assert!(red_links_verify("anything", ""));
     }
 }

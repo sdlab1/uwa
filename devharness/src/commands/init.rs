@@ -120,6 +120,8 @@ pub fn init(root: &Path) -> anyhow::Result<()> {
     c += &format!("MUTATE='{mutate}'  # мутационный гейт; {{module}}/{{file}} подставляются на каждый изменённый файл\n");
     c += &format!("MUTATE_SCOPE='{mutate_scope}'  # какие пути считать «прод-кодом» для мутаций\n");
     c += &format!("MIN_KILL={min_kill}           # минимальный kill-rate, %\n");
+    c += "RED_MUTATE=''  # контроль red-теста: шаблон мутантов с {test} (пусто = выкл)\n";
+    c += &format!("RED_MIN_KILL={min_kill}      # минимальный kill-rate именно red-теста, %\n");
     c += &format!(
         "CRAP='{crap}'  # гейт CRAP (guardrail №2): score = C²·(1−cov)³ + C; пусто = выкл\n"
     );

@@ -122,41 +122,88 @@ pub fn run(store: &Store, cfg: &RunConfig, id: &ItemId) -> anyhow::Result<()> {
             c.z
         );
     } else {
-        if !has_red {
-            println!(
-                "{}.. red: red.cmd отсутствует — поручаю агенту написать его первой задачей{}",
-                c.y, c.z
-            );
-            let author = prompt::red_author_prompt(store, cfg, &root, &wt, id, &agent);
-            if let Err(e) = run_agent(
-                store,
-                &wt,
-                id,
-                &author,
-                &agent,
-                Duration::from_secs(cfg.agent_timeout as u64),
-                "red-author",
-                &mut timing,
-            ) {
+        let max_attempt = cfg.max_fix.max(1);
+        let mut attempt: u32 = 0;
+        loop {
+            attempt = attempt.saturating_add(1);
+            if !has_red {
+                if attempt == 1 {
+                    println!(
+                        "{}.. red: red.cmd отсутствует — поручаю агенту написать его первой задачей{}",
+                        c.y, c.z
+                    );
+                } else {
+                    println!(
+                        "{}.. red: раннер red.cmd не совпадает с раннером VERIFY — поручаю переписать (попытка {attempt}/{max_attempt}){}",
+                        c.y, c.z
+                    );
+                }
+                let mut author = prompt::red_author_prompt(store, cfg, &root, &wt, id, &agent);
+                if attempt > 1 {
+                    author += &format!(
+                        "\nКОРРЕКЦИЯ: red.cmd обязан запускать тот же раннер/бинарь, что и VERIFY ({}), а сейчас там: {}. Перепиши файл строго этим раннером.\n",
+                        cfg.verify.trim(),
+                        std::fs::read_to_string(&red_file)
+                            .map(|s| gates::runner_signatures(&s).join(" | "))
+                            .unwrap_or_else(|_| "<нет файла>".into())
+                    );
+                }
+                if let Err(e) = run_agent(
+                    store,
+                    &wt,
+                    id,
+                    &author,
+                    &agent,
+                    Duration::from_secs(cfg.agent_timeout as u64),
+                    "red-author",
+                    &mut timing,
+                    cfg,
+                ) {
+                    eprintln!(
+                        "{}FAIL агент на фазе RED (лог: {}){} ({e})",
+                        c.r,
+                        store.log_file(id, "agent").display(),
+                        c.z
+                    );
+                    die(store, id, 1);
+                }
+                has_red = red_file.is_file();
+                if !has_red && attempt >= max_attempt {
+                    eprintln!(
+                        "{}FAIL: RED-пруф ОБЯЗАТЕЛЕН (в первую очередь). Агент не написал {} — команду, падающую на чистом HEAD и зеленеющую после работы; либо записанный обход: echo \"<причина>\" > {}{}",
+                        c.r,
+                        red_file.display(),
+                        store.item_dir(id).join("no-red").display(),
+                        c.z
+                    );
+                    die(store, id, 1);
+                }
+                if !has_red {
+                    continue;
+                }
+            }
+            let src = std::fs::read_to_string(&red_file).unwrap_or_default();
+            if gates::red_links_verify(&src, &cfg.verify) {
+                break;
+            }
+            if attempt >= max_attempt {
                 eprintln!(
-                    "{}FAIL агент на фазе RED (лог: {}){} ({e})",
+                    "{}FAIL: RED-LINK: раннер red.cmd ({}) не совпадает с раннером VERIFY ({}) — red обязан гнать тот же тестовый вход{}",
                     c.r,
-                    store.log_file(id, "agent").display(),
+                    gates::runner_signatures(&src).join(" | "),
+                    gates::runner_signatures(&cfg.verify).join(" | "),
                     c.z
                 );
-                die(store, id, 1);
-            }
-            if !red_file.is_file() {
                 eprintln!(
-                    "{}FAIL: RED-пруф ОБЯЗАТЕЛЕН (в первую очередь). Агент не написал {} — команду, падающую на чистом HEAD и зеленеющую после работы; либо записанный обход: echo \"<причина>\" > {}{}",
-                    c.r,
+                    "      поправь {} (или строку RED: в спеке, либо выровняй VERIFY) и повтори: devh run {}{}",
                     red_file.display(),
-                    store.item_dir(id).join("no-red").display(),
+                    id,
                     c.z
                 );
                 die(store, id, 1);
             }
-            has_red = true;
+            let _ = std::fs::remove_file(&red_file);
+            has_red = false;
         }
         if !fresh && git::tree_dirty(&wt) {
             println!(
@@ -215,6 +262,7 @@ pub fn run(store: &Store, cfg: &RunConfig, id: &ItemId) -> anyhow::Result<()> {
             Duration::from_secs(cfg.agent_timeout as u64),
             format!("agent-r{}", round.saturating_add(1)),
             &mut timing,
+            cfg,
         ) {
             eprintln!(
                 "{}FAIL агент (код выше; timeout={}s; лог: {}){} ({e})",
@@ -290,6 +338,57 @@ pub fn run(store: &Store, cfg: &RunConfig, id: &ItemId) -> anyhow::Result<()> {
         }
     }
     timing.stage("red-post", store, id);
+
+    if let (Some(m), true) = (&cfg.red_mutate, !no_red && has_red) {
+        if !m.tool.contains("{test}") {
+            eprintln!(
+                "{}FAIL: RED-MUT: в RED_MUTATE нет шаблона {{test}} — нечем подставить команду red ({}){}",
+                c.r,
+                red_file.display(),
+                c.z
+            );
+            eprintln!(
+                "      пример: RED_MUTATE=\"bash scripts/mutate.sh '{{test}}'\" — прогон мутантов, которые ловятся только red-тестом; и повтори: devh run {}{}",
+                id, c.z
+            );
+            die(store, id, 1);
+        }
+        let red_cmd = std::fs::read_to_string(&red_file).unwrap_or_default();
+        let (mlog, mres) = mutate_gate(m, &wt, Some(red_cmd.trim()), "red-mutation", "RED_MUTATE");
+        let mpath = store.log_file(id, "redmut");
+        std::fs::write(&mpath, &mlog).ok();
+        timing.stage("redmut", store, id);
+        match mres {
+            MutateOutcome::Env => {
+                eprintln!(
+                    "{}FAIL: RED-MUT env-блокер — инструмент не распознан (лог: {}){}",
+                    c.r,
+                    mpath.display(),
+                    c.z
+                );
+                die(store, id, 1);
+            }
+            MutateOutcome::Fail => {
+                eprintln!(
+                    "{}FAIL: RED-MUT: red-тест убивает слишком мало мутантов — он не доказывает, что проверяет изменение{}",
+                    c.r, c.z
+                );
+                eprintln!(
+                    "      усили {} (или удали его — агент напишет заново); лог: {}{}",
+                    red_file.display(),
+                    mpath.display(),
+                    c.z
+                );
+                die(store, id, 1);
+            }
+            MutateOutcome::Ok => {
+                println!(
+                    "{}OK red-mutation: red-тест ловит мутантов в изменённых файлах{}",
+                    c.g, c.z
+                );
+            }
+        }
+    }
 
     let summary = store.read_summary(id);
     if summary.trim().is_empty() {
@@ -431,9 +530,10 @@ fn run_agent(
     timeout: Duration,
     stage: impl Into<String>,
     timing: &mut Timing,
+    cfg: &RunConfig,
 ) -> anyhow::Result<()> {
     let full = format!("{} {}", agent, prompt::shquote(prompt_text));
-    let envs = agent_env(id, wt, store);
+    let envs = agent_env(id, wt, store, cfg);
     match proc::run_logged(&full, wt, timeout, &envs) {
         Ok(out) => {
             let log = proc::combined(&out);
@@ -453,7 +553,7 @@ fn run_agent(
     }
 }
 
-fn agent_env(id: &ItemId, wt: &Path, store: &Store) -> Vec<(String, String)> {
+fn agent_env(id: &ItemId, wt: &Path, store: &Store, cfg: &RunConfig) -> Vec<(String, String)> {
     vec![
         ("HARNESS_WORKTREE".into(), wt.display().to_string()),
         (
@@ -468,6 +568,7 @@ fn agent_env(id: &ItemId, wt: &Path, store: &Store) -> Vec<(String, String)> {
             "HARNESS_SUMMARY".into(),
             store.summary_file(id).display().to_string(),
         ),
+        ("HARNESS_VERIFY".into(), cfg.verify.trim().to_string()),
     ]
 }
 
@@ -578,7 +679,7 @@ fn gate_ladder(
     }
 
     if let Some(m) = &cfg.mutate {
-        let (mlog, mres) = mutate_gate(m, wt);
+        let (mlog, mres) = mutate_gate(m, wt, None, "mutation", "MUTATE");
         let mpath = store.log_file(id, "mutate");
         std::fs::write(&mpath, &mlog).ok();
         timing.stage(format!("mutate-r{}", round.saturating_add(1)), store, id);
@@ -745,7 +846,7 @@ fn review_gate(store: &Store, cfg: &RunConfig, wt: &Path, id: &ItemId) -> (Strin
         agent.trim(),
         prompt::shquote(&prompt::review_prompt(&diff))
     );
-    let envs = agent_env(id, wt, store);
+    let envs = agent_env(id, wt, store, cfg);
     let out = proc::run_logged(
         &full,
         wt,
@@ -828,33 +929,43 @@ fn crap_gate(wt: &Path, cr: &CrapCfg) -> (String, Verdict) {
     }
 }
 
-fn mutate_gate(m: &MutateCfg, wt: &Path) -> (String, MutateOutcome) {
+fn mutate_gate(
+    m: &MutateCfg,
+    wt: &Path,
+    test: Option<&str>,
+    label: &str,
+    key: &str,
+) -> (String, MutateOutcome) {
     let mut log = String::new();
     let mut fail = false;
+    let tool0 = match test {
+        Some(t) => m.tool.replace("{test}", t),
+        None => m.tool.clone(),
+    };
     let files = git::changed_files(wt);
     let scoped: Vec<String> = files
         .into_iter()
         .filter(|f| m.scope.is_empty() || m.scope == "." || f.starts_with(&m.scope))
         .collect();
 
-    if !m.tool.contains('{') {
-        match run_mut(wt, &m.tool) {
+    if !tool0.contains('{') {
+        match run_mut(wt, &tool0) {
             MutRun::Env => {
                 log += &format!(
-                    "mutation env: инструмент не распознан (нет 'Mutants: N, Killed: M'); MUTATE='{}'\n",
+                    "{label} env: инструмент не распознан (нет 'Mutants: N, Killed: M'); {key}='{}'\n",
                     m.tool
                 );
                 return (log, MutateOutcome::Env);
             }
             MutRun::Stats { total, killed } => {
                 if let Some(pct) = killed.checked_mul(100).and_then(|n| n.checked_div(total)) {
-                    log += &format!("mutation: Mutants {total}, killed {killed} ({pct}%)\n");
+                    log += &format!("{label}: Mutants {total}, killed {killed} ({pct}%)\n");
                     if pct < m.min_kill {
-                        log += &format!("mutation FAIL: kill-rate {pct}% < {}%\n", m.min_kill);
+                        log += &format!("{label} FAIL: kill-rate {pct}% < {}%\n", m.min_kill);
                         fail = true;
                     }
                 } else {
-                    log += "mutation: 0 мутантов — нечего убивать, пропуск\n";
+                    log += &format!("{label}: 0 мутантов — нечего убивать, пропуск\n");
                 }
             }
         }
@@ -870,38 +981,38 @@ fn mutate_gate(m: &MutateCfg, wt: &Path) -> (String, MutateOutcome) {
 
     if scoped.is_empty() {
         log += &format!(
-            "mutation: нет изменённых файлов в {} — гейт пропущен\n",
+            "{label}: нет изменённых файлов в {} — гейт пропущен\n",
             m.scope
         );
         return (log, MutateOutcome::Ok);
     }
     for f in &scoped {
         if !wt.join(f).is_file() {
-            log += &format!("mutation: {f} удалён агентом — мутации не требуется\n");
+            log += &format!("{label}: {f} удалён агентом — мутации не требуется\n");
             continue;
         }
         let module = mod_of(f, &m.scope);
-        let cmd = m.tool.replace("{module}", &module).replace("{file}", f);
+        let cmd = tool0.replace("{module}", &module).replace("{file}", f);
         match run_mut(wt, &cmd) {
             MutRun::Env => {
                 log += &format!(
-                    "mutation env: инструмент не распознан для {f}; MUTATE='{}'\n",
+                    "{label} env: инструмент не распознан для {f}; {key}='{}'\n",
                     m.tool
                 );
                 return (log, MutateOutcome::Env);
             }
             MutRun::Stats { total, killed } => {
                 if let Some(pct) = killed.checked_mul(100).and_then(|n| n.checked_div(total)) {
-                    log += &format!("mutation {f}: Mutants {total}, killed {killed} ({pct}%)\n");
+                    log += &format!("{label} {f}: Mutants {total}, killed {killed} ({pct}%)\n");
                     if pct < m.min_kill {
                         log += &format!(
-                            "mutation FAIL {f}: kill-rate {pct}% < {}% — тесты не ловят мутантов\n",
+                            "{label} FAIL {f}: kill-rate {pct}% < {}% — тесты не ловят мутантов\n",
                             m.min_kill
                         );
                         fail = true;
                     }
                 } else {
-                    log += &format!("mutation {f}: 0 мутантов — пропуск\n");
+                    log += &format!("{label} {f}: 0 мутантов — пропуск\n");
                 }
             }
         }

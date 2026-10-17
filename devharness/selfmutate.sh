@@ -3,7 +3,7 @@
 # Вносим известные баги в ИЗОЛИРОВАННУЮ копию devh-classic и проверяем, что test.sh их убивает.
 # «Тесты на вес золота» — применимо и к тестам самого харнесса.
 # Патчер — чистый awk (ENVIRON, без escape-ловушек -v); python-зависимости нет.
-# Гейт: 19/19. Новые гейты devh должны сопровождаться новым мутантом здесь.
+# Гейт: 21/21. Новые гейты devh должны сопровождаться новым мутантом здесь.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 W="$(mktemp -d /tmp/devh-selfmut-XXXXXX)"
@@ -124,23 +124,25 @@ mutant "M7: merge-guard «нет коммитов» отключён" "$W/m.old"
 
 # ─── M8: kill-rate (per-file) не проверяется ───
 cat > "$W/m.old" <<'S'
-        if [ "$pct" -lt "$MIN_KILL" ]; then
-          echo "mutation FAIL $f: kill-rate ${pct}% < ${MIN_KILL}% — тесты не ловят мутантов"
+        if [ "$pct" -lt "$MIN_KILL_L" ]; then
+          echo "$LABEL FAIL $f: kill-rate ${pct}% < ${MIN_KILL_L}% — тесты не ловят мутантов"
 S
 cat > "$W/m.new" <<'S'
         if false; then
-          echo "mutation FAIL $f: kill-rate ${pct}% < ${MIN_KILL}% — тесты не ловят мутантов"
+          echo "$LABEL FAIL $f: kill-rate ${pct}% < ${MIN_KILL_L}% — тесты не ловят мутантов"
 S
 mutant "M8: kill-rate MIN_KILL не проверяется (per-file)" "$W/m.old" "$W/m.new"
 
 # ─── M9: обязательность RED отключена (red-фаза автора не запускается) ───
 cat > "$W/m.old" <<'S'
-    if [ ! -f "$d/red.cmd" ]; then
-      echo "${C_Y}.. red: red.cmd отсутствует — поручаю агенту написать его первой задачей${C_0}"
+      if [ ! -f "$d/red.cmd" ]; then
+        if [ "$red_attempt" = 1 ]; then
+          echo "${C_Y}.. red: red.cmd отсутствует — поручаю агенту написать его первой задачей${C_0}"
 S
 cat > "$W/m.new" <<'S'
-    if false; then
-      echo "${C_Y}.. red: red.cmd отсутствует — поручаю агенту написать его первой задачей${C_0}"
+      if false; then
+        if [ "$red_attempt" = 1 ]; then
+          echo "${C_Y}.. red: red.cmd отсутствует — поручаю агенту написать его первой задачей${C_0}"
 S
 mutant "M9: обязательность RED отключена (нет red.cmd → run идёт)" "$W/m.old" "$W/m.new"
 
@@ -173,10 +175,10 @@ mutant "M12: BLOCKED-детект отключён" "$W/m.old" "$W/m.new"
 
 # ─── M13: kill-rate (single-run) не проверяется ───
 cat > "$W/m.old" <<'S'
-        [ "$pct" -lt "$MIN_KILL" ] && { echo "mutation FAIL: kill-rate ${pct}% < ${MIN_KILL}%"; return 1; }
+        [ "$pct" -lt "$MIN_KILL_L" ] && { echo "$LABEL FAIL: kill-rate ${pct}% < ${MIN_KILL_L}%"; return 1; }
 S
 cat > "$W/m.new" <<'S'
-        false && { echo "mutation FAIL: kill-rate ${pct}% < ${MIN_KILL}%"; return 1; }
+        false && { echo "$LABEL FAIL: kill-rate ${pct}% < ${MIN_KILL_L}%"; return 1; }
 S
 mutant "M13: kill-rate в single-run ветке не проверяется" "$W/m.old" "$W/m.new"
 
@@ -237,6 +239,24 @@ S
 cat > "$W/m.new" <<'S'
 S
 mutant "M19: red-промпт не запрещает grep/проверку существования" "$W/m.old" "$W/m.new"
+
+# ─── M20: RED-MUT (контроль red-теста мутациями) отключён ───
+cat > "$W/m.old" <<'S'
+  if [ -n "$RED_MUTATE" ] && [ -f "$d/red.cmd" ] && [ ! -s "$d/no-red" ]; then
+S
+cat > "$W/m.new" <<'S'
+  if false; then
+S
+mutant "M20: RED-MUT отключён (слабый red-тест проходит)" "$W/m.old" "$W/m.new"
+
+# ─── M21: RED-LINK (red обязан гонять раннер VERIFY) отключён ───
+cat > "$W/m.old" <<'S'
+      red_links_ok "$red_cmd" "$VERIFY" && break
+S
+cat > "$W/m.new" <<'S'
+      true && break
+S
+mutant "M21: RED-LINK отключён (red с чужим раннером проходит)" "$W/m.old" "$W/m.new"
 
 echo
 echo "KILL-RATE: $KILLED/$TOTAL (skip=$SKIP)"

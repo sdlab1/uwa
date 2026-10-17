@@ -18,7 +18,7 @@ State — `.harness/` у целевого репо (flock + atomic writes, бе�
     # → target/x86_64-unknown-linux-musl/release/devh (static-pie)
 
 `devh` в каталоге — обёртка над Rust-бинарём; bash-эталон сохранён как
-`devh-classic`. `test.sh` — 28 секций / 114 ассертов, по умолчанию
+`devh-classic`. `test.sh` — 30 секций / 127 ассертов, по умолчанию
 гоняется против Rust-`devh` (CI `devharness-rs.yml`), отдельно — против
 bash:
 
@@ -60,9 +60,10 @@ RED-пруф обязателен: строка `RED: …` в спеке пиш�
 
 ## Гейты (обязательны, кроме bench)
 
-verify → no-ignored → lint → crap(score≤CRAP_MAX) → review → mutation(kill≥MIN_KILL) → [bench];
-RED-пруф первым, MSG_DENY-гигиена последней. Падение → fix-раунд с
-хвостом лога (≤ MAX_FIX); нет инструмента = блокер СРЕДЫ, не fix-раунд.
+RED-LINK → RED-пруф (pre) → verify → no-ignored → lint →
+crap(score≤CRAP_MAX) → review → mutation(kill≥MIN_KILL) → [bench] → RED
+(post) → RED-MUT; MSG_DENY-гигиена последней. Падение → fix-раунд с хвостом
+лога (≤ MAX_FIX); нет инструмента = блокер СРЕДЫ, не fix-раунд.
 
 | Гейт | Конфиг | Смысл |
 |---|---|---|
@@ -71,6 +72,8 @@ RED-пруф первым, MSG_DENY-гигиена последней. Паде�
 | MUTATE | `MUTATE`, `MIN_KILL=90` | kill-rate ≥ MIN_KILL% на изменённых `MUTATE_SCOPE`-файлах (`{module}`/`{file}`); формат вывода `Mutants: N, Killed: M` (muex / cargo-mutants); инструмент не установлен = блокер среды (rc=2), не fix-раунд |
 | CRAP | `CRAP`, `CRAP_MAX=12` | guardrail №2 (Uncle Bob): score = C²·(1−cov)³ + C, нарушение = score > CRAP_MAX; формат вывода `file:line fun C=N cov=N` + итог `CRAP: functions=N`; контракт не распознан = блокер среды; обход только записанный (`--no-crap`) |
 | RED | `items/W-NNN/red.cmd` | в первую очередь: падает на чистом HEAD до работы, зеленеет после; источник — строка `RED:` в спеке либо red-фаза агента (первая задача run/auto); обход только записанный (`--no-red`) |
+| RED-LINK | сверяется с `VERIFY` | red.cmd обязан запускать тот же раннер/бинарь, что и VERIFY (сигнатура = интерпретатор+скрипт либо бинарь; подкоманды через `;`/`&&`/`||`/`|` учитываются). Несовпадение → пере-авторинг с корректирующим промптом (≤ MAX_FIX), затем `FAIL: RED-LINK`; пустой VERIFY = проверка не применяется; обход `--no-red` |
+| RED-MUT | `RED_MUTATE`, `RED_MIN_KILL=90` | контроль red-теста мутациями: в шаблоне `{test}` подставляется red.cmd, kill-rate ≥ RED_MIN_KILL% на изменённых `MUTATE_SCOPE`-файлах; нет `{test}` = отказ с подсказкой; лог `logs/W-NNN-redmut.log`; пустой `RED_MUTATE` = выкл |
 | LINT | `LINT=1`, `LINT_CMD` | авто-shellcheck изменённых *.sh + проектный линтер |
 | REVIEW | `REVIEW=1` | self-review диффа вторым запросом; `VERDICT: OK` / `VERDICT: ISSUES: …` → fix-раунд |
 | BENCH | `BENCH` | единственный опциональный: перф против baseline |
@@ -83,7 +86,7 @@ RED-пруф первым, MSG_DENY-гигиена последней. Паде�
 | new | `devh new "title" [--no-red "причина"] [--no-crap "причина"]` / `devh new <N>` | item + spec.md; на TTY stdin — редактор (`$EDITOR`, дефолт vi); `<N>` — копия `todo/N.md` → `W-0NN` |
 | list | `devh list` | таблица: ID / STATUS(open→active→done) / WT / TITLE |
 | hint | `devh hint [id]` | спека + план + готовый промпт следующей модели |
-| run | `devh run [id]` | claim (WIP-лимит, flock) → worktree → RED pre (нет `red.cmd` → поручить агенту написать его первой задачей, потом pre-проверка) → агент → гейт-цикл (падение → fix-раунд с хвостом лога) → RED post → гигиена → commit → push ветки |
+| run | `devh run [id]` | claim (WIP-лимит, flock) → worktree → RED-LINK + pre (нет `red.cmd` → поручить агенту написать его первой задачей; потом сверка раннера с VERIFY и pre-проверка) → агент → гейт-цикл (падение → fix-раунд с хвостом лога) → RED post → RED-MUT (`RED_MUTATE`) → гигиена → commit → push ветки |
 | commit | `devh commit [id]` | повторить commit/push по готовой работе; идемпотентен |
 | merge | `devh merge [id]` | guard (дерево чисто, есть коммиты) → rebase → ff-push в MAIN → `## Session N` в RULES_LOG → лог → cleanup → `next:` |
 | abort | `devh abort [id]` | worktree/ветку вон, item → open (работа выброшена) |
@@ -128,6 +131,7 @@ RED-пруф первым, MSG_DENY-гигиена последней. Паде�
 | WT_ROOT | /tmp | где worktree'и (слаг по репо — коллизий нет) |
 | LOG_DAYS | 30 | retention логов |
 | MUTATE / MUTATE_SCOPE / MIN_KILL | muex / lib / 90 | мутационный гейт (автодетект при init) |
+| RED_MUTATE / RED_MIN_KILL | '' / 90 | контроль red-теста мутациями: `{test}` = red.cmd; пустой RED_MUTATE = выкл |
 | CRAP / CRAP_SCOPE / CRAP_MAX | '' / '' / 12 | гейт CRAP (автодетект при init: gobot→mix crap.report, scripts/crap-rs.sh→bash); пустой CRAP = выкл |
 | BENCH | '' | перф-гейт (опционален) |
 | RULES / RULES_LOG | todo/report.md | справочник граблей в промпте / куда дописывать «## Session N» |
@@ -139,7 +143,7 @@ RED-пруф первым, MSG_DENY-гигиена последней. Паде�
 
 ## Self-test — тот же стек, что гейтит чужие проекты
 
-clippy (shellcheck-слой) → сьют 28 секций (порт `test.sh`, 114 ассертов;
+clippy (shellcheck-слой) → сьют 30 секций (порт `test.sh`, 127 ассертов;
 оракул гоняется напрямую: `DEVH=<rust-bin> bash devharness/test.sh`) →
 cargo-mutants на core/ (kill 100%) → llvm-cov ≥80% → oracle на
 musl-статике (flock/fs2/setsid на static-pie).
@@ -152,7 +156,7 @@ shellcheck → test.sh → selfmutate.sh).
 ## Миграция
 
 - Выполнено: bash-`devh` → `devh-classic` (по-прежнему гейтится CI
-  `devharness.yml`: shellcheck + test.sh + selfmutate 19/19); `devh` —
+  `devharness.yml`: shellcheck + test.sh + selfmutate 21/21); `devh` —
   обёртка над Rust, CI `devharness-rs.yml` гоняет оракул через неё.
 - Спеки старых сессий → по одной через `devh new <N>` / `devh new "..."`.
 

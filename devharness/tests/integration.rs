@@ -101,7 +101,8 @@ printf 'feat: ignored-тесты разобраны\n\nдетали: стаб\n'
             r#"#!/usr/bin/env bash
 red="$(dirname "$HARNESS_SPEC")/red.cmd"
 if [ ! -f "$red" ]; then
-  printf 'bash scripts/test.sh\n' > "$red"
+  printf '%s\n' "$1" > "$(dirname "$red")/red-prompt.txt"
+  printf '%s\n' "${HARNESS_VERIFY:-bash scripts/test.sh}" > "$red"
 else
   [ -f "$HARNESS_WORKTREE/done.txt" ] && touch "$T_MUT_GOOD"
   echo marker > "$HARNESS_WORKTREE/done.txt"
@@ -113,6 +114,15 @@ fi
         write_exec(
             &self.stubs.join("mut-ok.sh"),
             "#!/usr/bin/env bash\necho \"Mutants: 10, Killed: 10 (100%)\"\n",
+        );
+        write_exec(
+            &self.stubs.join("redmut.sh"),
+            r#"#!/usr/bin/env bash
+case "$1" in
+  *second*) echo "Mutants: 10, Killed: 2 (20%)";;
+  *) if bash -c "$1" >/dev/null 2>&1; then echo "Mutants: 10, Killed: 10 (100%)"; else echo "Mutants: 10, Killed: 2 (20%)"; fi;;
+esac
+"#,
         );
         write_exec(
             &self.stubs.join("mut-bad.sh"),
@@ -164,7 +174,9 @@ echo "CRAP: functions=2"
             .env("HARNESS_NO_IGNORED", "1")
             .env("T_MUT_GOOD", &mut_good)
             .env("HARNESS_REVIEW", "0")
-            .env("HARNESS_LINT", "1");
+            .env("HARNESS_LINT", "1")
+            .env_remove("HARNESS_RED_MUTATE")
+            .env_remove("HARNESS_RED_MIN_KILL");
     }
 
     fn run_ok(&self, args: &[&str]) -> Output {
@@ -1064,19 +1076,17 @@ fi
     assert!(contains(&rev_log, "VERDICT: OK"), "{rev_log}");
 }
 
-#[test]
-fn section25_auto() {
-    let sb = Sandbox::new("r25");
-    sb.run_ok(&["init"]);
-    fs::create_dir_all(sb.repo.join("specs")).unwrap_or_else(|_| unreachable!());
+fn install_tests(sb: &Sandbox) {
     fs::create_dir_all(sb.repo.join("scripts")).unwrap_or_else(|_| unreachable!());
     fs::create_dir_all(sb.repo.join("t")).unwrap_or_else(|_| unreachable!());
     write_exec(
         &sb.repo.join("scripts/test.sh"),
         r#"#!/usr/bin/env bash
+pat="${1:-}"
 n=0; bad=0
 for f in t/*.sh; do
   [ -f "$f" ] || continue
+  if [ -n "$pat" ] && [[ "$f" != *"$pat"* ]]; then continue; fi
   n=$((n+1))
   if bash "$f" >/dev/null 2>&1; then echo "ok   $f"; else echo "FAIL $f"; bad=$((bad+1)); fi
 done
@@ -1093,6 +1103,27 @@ grep -qx marker done.txt || { echo "маркер не опубликован"; e
     );
     sb.git_out(&["add", "."]);
     sb.git_out(&["commit", "-qm", "тесты проекта"]);
+}
+
+fn install_second_test(sb: &Sandbox) {
+    write_exec(
+        &sb.repo.join("t/second_test.sh"),
+        r#"#!/usr/bin/env bash
+[ -s done2.txt ] || { echo "done2.txt отсутствует"; exit 1; }
+grep -qx marker done2.txt || { echo "маркер не опубликован"; exit 1; }
+"#,
+    );
+    sb.git_out(&["add", "."]);
+    sb.git_out(&["commit", "-qm", "второй тест"]);
+}
+
+#[test]
+fn section25_auto() {
+    let sb = Sandbox::new("r25");
+    sb.run_ok(&["init"]);
+    fs::create_dir_all(sb.repo.join("specs")).unwrap_or_else(|_| unreachable!());
+    install_tests(&sb);
+    install_second_test(&sb);
     fs::write(
         sb.repo.join("specs/spec-a.md"),
         "# Задача А без RED\nСоздай done.txt с маркером.\n",
@@ -1100,7 +1131,7 @@ grep -qx marker done.txt || { echo "маркер не опубликован"; e
     .unwrap_or_else(|_| unreachable!());
     fs::write(
         sb.repo.join("specs/spec-b.md"),
-        "# Задача Б\nRED: test -f done2.txt\nСоздай done2.txt с маркером.\n",
+        "# Задача Б\nRED: bash scripts/test.sh second\nСоздай done2.txt с маркером.\n",
     )
     .unwrap_or_else(|_| unreachable!());
     let stub = sb.stubs.join("stub-red.sh");
@@ -1109,7 +1140,7 @@ grep -qx marker done.txt || { echo "маркер не опубликован"; e
         &["auto", "--from", "specs"],
         &[
             ("HARNESS_AGENT", stub.as_str()),
-            ("HARNESS_VERIFY", "bash scripts/test.sh"),
+            ("HARNESS_VERIFY", "bash scripts/test.sh feature"),
         ],
     );
     assert!(ok, "auto rc: {out}");
@@ -1120,15 +1151,15 @@ grep -qx marker done.txt || { echo "маркер не опубликован"; e
         fs::read_to_string(sb.item_dir("W-001").join("red.cmd"))
             .unwrap_or_default()
             .trim(),
-        "bash scripts/test.sh",
+        "bash scripts/test.sh feature",
         "спека А без RED: red.cmd написал агент"
     );
     assert_eq!(
         fs::read_to_string(sb.item_dir("W-002").join("red.cmd"))
             .unwrap_or_default()
             .trim(),
-        "test -f done2.txt",
-        "спека Б: RED из строки спеки"
+        "bash scripts/test.sh second",
+        "спека Б: RED из строки спеки (раннер совпал с VERIFY)"
     );
     assert_eq!(sb.status("W-002"), "done", "{out}");
     assert!(!contains(&out, "остался:"), "{out}");
@@ -1158,6 +1189,175 @@ printf '%s\n' "$1" > "$(dirname "$HARNESS_SPEC")/prompt.txt"
         "{prompt}"
     );
     sb.run_ok(&["abort"]);
+}
+
+#[test]
+fn section28_red_link_refused() {
+    let sb = Sandbox::new("r34");
+    sb.run_ok(&["init"]);
+    install_tests(&sb);
+    let stub = sb.stubs.join("stub-red.sh");
+    let stub = stub.display().to_string();
+    sb.new_item(
+        "чужой раннер",
+        "# Задача\nRED: test -f done.txt\nСоздай done.txt с маркером.\n",
+        None,
+    );
+    let (ok, out) = sb.run_capture_env(
+        &["run"],
+        &[
+            ("HARNESS_AGENT", stub.as_str()),
+            ("HARNESS_VERIFY", "bash scripts/test.sh"),
+            ("HARNESS_MAX_FIX", "0"),
+        ],
+    );
+    assert!(!ok, "несовпадение раннера должно быть красным: {out}");
+    assert!(contains(&out, "RED-LINK"), "{out}");
+    assert_eq!(
+        fs::read_to_string(sb.item_dir("W-001").join("red.cmd"))
+            .unwrap_or_default()
+            .trim(),
+        "test -f done.txt",
+        "спека не переписана при отказе"
+    );
+    assert_ne!(sb.status("W-001"), "done", "{out}");
+}
+
+#[test]
+fn section29_red_link_reauthored() {
+    let sb = Sandbox::new("r35");
+    sb.run_ok(&["init"]);
+    install_tests(&sb);
+    let stub = sb.stubs.join("stub-red.sh");
+    let stub = stub.display().to_string();
+    sb.new_item(
+        "чужой раннер 2",
+        "# Задача\nRED: test -f done.txt\nСоздай done.txt с маркером.\n",
+        None,
+    );
+    let (ok, out) = sb.run_capture_env(
+        &["run"],
+        &[
+            ("HARNESS_AGENT", stub.as_str()),
+            ("HARNESS_VERIFY", "bash scripts/test.sh"),
+            ("HARNESS_MAX_FIX", "3"),
+        ],
+    );
+    assert!(ok, "после пере-авторинга run должен быть зелёным: {out}");
+    assert!(
+        contains(&out, "не совпадает с раннером VERIFY"),
+        "харнесс обязан сообщить о несовпадении раннера: {out}"
+    );
+    assert_eq!(
+        fs::read_to_string(sb.item_dir("W-001").join("red.cmd"))
+            .unwrap_or_default()
+            .trim(),
+        "bash scripts/test.sh",
+        "red.cmd переписан раннером VERIFY"
+    );
+    let prompt =
+        fs::read_to_string(sb.item_dir("W-001").join("red-prompt.txt")).unwrap_or_default();
+    assert!(contains(&prompt, "КОРРЕКЦИЯ"), "{prompt}");
+}
+
+#[test]
+fn section30_red_mut() {
+    let sb = Sandbox::new("r36");
+    sb.run_ok(&["init"]);
+    install_tests(&sb);
+    let stub = sb.stubs.join("stub-red.sh");
+    let stub = stub.display().to_string();
+    let redmut = sb.stubs.join("redmut.sh");
+    let redmut = format!("{} '{{test}}'", redmut.display());
+
+    sb.new_item(
+        "без red-mut",
+        "спека: опубликуй done.txt с маркером\n",
+        None,
+    );
+    let (ok, out) = sb.run_capture_env(
+        &["run"],
+        &[
+            ("HARNESS_AGENT", stub.as_str()),
+            ("HARNESS_VERIFY", "bash scripts/test.sh"),
+        ],
+    );
+    assert!(ok, "RED_MUTATE выключен: run должен быть зелёным: {out}");
+    assert!(
+        !sb.log_file("W-001-redmut.log").exists(),
+        "RED_MUTATE выключен: redmut-лог не должен появиться"
+    );
+
+    sb.new_item("red-mut ok", "спека: опубликуй done.txt с маркером\n", None);
+    let (ok, out) = sb.run_capture_env(
+        &["run", "W-002"],
+        &[
+            ("HARNESS_AGENT", stub.as_str()),
+            ("HARNESS_VERIFY", "bash scripts/test.sh"),
+            ("HARNESS_RED_MUTATE", redmut.as_str()),
+        ],
+    );
+    assert!(ok, "сильный red должен убивать мутантов: {out}");
+    assert!(contains(&out, "OK red-mutation"), "{out}");
+    let mlog = fs::read_to_string(sb.log_file("W-002-redmut.log")).unwrap_or_default();
+    assert!(
+        contains(&mlog, "red-mutation: Mutants 10, killed 10"),
+        "{mlog}"
+    );
+}
+
+#[test]
+fn section31_red_mut_weak() {
+    let sb = Sandbox::new("r37");
+    sb.run_ok(&["init"]);
+    install_tests(&sb);
+    install_second_test(&sb);
+    let stub = sb.stubs.join("stub-red.sh");
+    let stub = stub.display().to_string();
+    let redmut = sb.stubs.join("redmut.sh");
+    let redmut = format!("{} '{{test}}'", redmut.display());
+    sb.new_item(
+        "red-mut слабый",
+        "# Задача\nRED: bash scripts/test.sh second\nСоздай done2.txt с маркером.\n",
+        None,
+    );
+    let (ok, out) = sb.run_capture_env(
+        &["run"],
+        &[
+            ("HARNESS_AGENT", stub.as_str()),
+            ("HARNESS_VERIFY", "bash scripts/test.sh"),
+            ("HARNESS_RED_MUTATE", redmut.as_str()),
+        ],
+    );
+    assert!(!ok, "слабый red обязан быть красным: {out}");
+    assert!(contains(&out, "RED-MUT"), "{out}");
+    assert_ne!(sb.status("W-001"), "done", "{out}");
+}
+
+#[test]
+fn section32_red_mut_no_placeholder() {
+    let sb = Sandbox::new("r38");
+    sb.run_ok(&["init"]);
+    install_tests(&sb);
+    let stub = sb.stubs.join("stub-red.sh");
+    let stub = stub.display().to_string();
+    let redmut = sb.stubs.join("redmut.sh");
+    let redmut = redmut.display().to_string();
+    sb.new_item(
+        "red-mut без плейсхолдера",
+        "спека: опубликуй done.txt с маркером\n",
+        None,
+    );
+    let (ok, out) = sb.run_capture_env(
+        &["run"],
+        &[
+            ("HARNESS_AGENT", stub.as_str()),
+            ("HARNESS_VERIFY", "bash scripts/test.sh"),
+            ("HARNESS_RED_MUTATE", redmut.as_str()),
+        ],
+    );
+    assert!(!ok, "RED_MUTATE без {{test}} обязан быть красным: {out}");
+    assert!(contains(&out, "нет шаблона {test}"), "{out}");
 }
 
 #[test]
