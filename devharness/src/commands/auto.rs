@@ -75,11 +75,7 @@ pub fn auto(store: &Store, cfg: &RunConfig, from: Option<&str>, max: u32) -> any
             .map(|s| !s.trim().is_empty())
             .unwrap_or(false);
         if !has_red && !has_no_red {
-            println!(
-                "   ⚠  нет RED-пруфа — добавь в спеку строку 'RED: <команда, падающая сейчас>'"
-            );
-            fail_n = fail_n.saturating_add(1);
-            continue;
+            println!("   .. RED-пруфа нет — его напишет агент (первая задача)");
         }
         let rc = run_child(&exe, store, "run", &next);
         if rc == Some(0) {

@@ -222,6 +222,31 @@ ${extra}4. В конце напиши summary по-русски в файл $HDI
 EOF
 }
 
+prompt_for_red() { # $1=id — фаза RED: агент пишет red-ТЕСТ (его ПЕРВАЯ задача)
+  local id="$1"
+  cat <<EOF
+Ты работаешь в изолированном git-worktree: $(wt_of "$id"). Это ФАЗА RED: твоя ПЕРВАЯ задача — написать RED-ТЕСТ. Саму спеку НЕ реализуй.
+
+ЗАДАЧА: создай файл $HDIR/items/$id/red.cmd — ГОТОВЫЙ К ЗАПУСКУ ТЕСТ, который СЕЙЧАС падает на чистом HEAD и зеленеет после реализации спеки $HDIR/items/$id/spec.md.
+
+Что здесь считается тестом:
+- прогон настоящего тестового входа проекта: той же команды/раннера, что у тебя в VERIFY ($VERIFY), только под нужный тест или сюит;
+- запускается как \`bash <этот файл>\` из корня worktree: exit 0 = тест прошёл, exit ≠ 0 = тест упал;
+- на чистом HEAD тест ОБЯЗАН упасть (exit ≠ 0), иначе гейт RED ответит «уже зелёный»;
+- проверяет поведение из спеки и позеленеет ТОЛЬКО после её реализации.
+
+ЗАПРЕЩЕНО вместо теста: grep/rg по файлам, test -f/-e и прочие проверки существования, «найди строку в файле», одиночные вызовы без тестового раннера. Это не тест — гейт RED такому не обязан верить; настоящий RED — упавший тест.
+
+Правила фазы:
+- в worktree ничего не пиши: исходники и git не трогай — можно только читать код, чтобы написать осмысленный тест;
+- файл ОДИН: $HDIR/items/$id/red.cmd (лежит вне worktree, в .harness);
+- summary в этой фазе не нужен — его напишет фаза реализации.
+
+Контекст репо (HEAD на момент старта задачи):
+$(git -C "$ROOT" log --oneline -3 2>/dev/null | sed 's/^/  /')
+EOF
+}
+
 # ─── init ─────────────────────────────────────────────────────────
 cmd_init() {
   [ -f "$CONF" ] && { echo "devh: $CONF уже есть (перезапись: rm $CONF)" >&2; exit 1; }
@@ -567,13 +592,13 @@ cmd_run() {
   crit_end
   [ "$prev_st" = active ] && echo "${C_G}OK resume: $id уже active — продолжаем${C_0}"
 
-  run_agent() { # $1 = промпт; timeout = watchdog «агент сдох»
+  run_agent() { # $1 = промпт; $2 = стадия тайминга (опц.); timeout = watchdog «агент сдох»
     # shellcheck disable=SC2086  # $AGENT — команда+аргументы агента; слово-разбиение намеренно
     ( cd "$wt" && env HARNESS_WORKTREE="$wt" HARNESS_SPEC="$d/spec.md" \
         HARNESS_PLAN="$d/plan.md" HARNESS_SUMMARY="$sum" \
         timeout "$AGENT_TIMEOUT" $AGENT "$1" ) > "$HDIR/logs/$id-agent.log" 2>&1 \
       || { echo "${C_R}FAIL агент (код выше; timeout=${AGENT_TIMEOUT}s; лог: $HDIR/logs/$id-agent.log)${C_0}" >&2; set_status "$id" active; exit 1; }
-    tstage "agent-r$((round+1))"
+    tstage "${2:-agent-r$((round+1))}"
   }
 
   # 1. worktree (+ однократный bootstrap)
@@ -598,16 +623,23 @@ cmd_run() {
   # 2. RED-пруф — В ПЕРВУЮ ОЧЕРЕДЬ: обязательный гейт
   if [ -s "$d/no-red" ]; then
     echo "${C_Y}⚠  RED пропущен (записанный обход): $(cat "$d/no-red")${C_0}"
-  elif [ ! -f "$d/red.cmd" ]; then
-    echo "${C_R}FAIL: RED-пруф ОБЯЗАТЕЛЕН (в первую очередь). Напиши $d/red.cmd — команду, падающую на чистом HEAD и зеленеющую после работы; либо записанный обход: echo \"<причина>\" > $d/no-red${C_0}" >&2
-    exit 1
-  elif [ "$fresh" = 0 ] && [ -n "$(git -C "$wt" status --porcelain)" ]; then
-    echo "${C_G}OK resume: RED pre-check пропущен — дерево уже содержит работу; доказательство RED было на чистом HEAD первой попытки, позеленение проверит пост-гейт${C_0}"
-  elif (cd "$wt" && bash "$d/red.cmd") >/dev/null 2>&1; then
-    echo "${C_R}FAIL: red.cmd уже зелёный на чистом HEAD — это не баг. Почини red.cmd или удали.${C_0}" >&2
-    exit 1
   else
-    echo "${C_G}OK red: падает на HEAD (пруф воспроизводится)${C_0}"
+    if [ ! -f "$d/red.cmd" ]; then
+      echo "${C_Y}.. red: red.cmd отсутствует — поручаю агенту написать его первой задачей${C_0}"
+      run_agent "$(prompt_for_red "$id")" red-author
+      if [ ! -f "$d/red.cmd" ]; then
+        echo "${C_R}FAIL: RED-пруф ОБЯЗАТЕЛЕН (в первую очередь). Агент не написал $d/red.cmd — команду, падающую на чистом HEAD и зеленеющую после работы; либо записанный обход: echo \"<причина>\" > $d/no-red${C_0}" >&2
+        exit 1
+      fi
+    fi
+    if [ "$fresh" = 0 ] && [ -n "$(git -C "$wt" status --porcelain)" ]; then
+      echo "${C_G}OK resume: RED pre-check пропущен — дерево уже содержит работу; доказательство RED было на чистом HEAD первой попытки, позеленение проверит пост-гейт${C_0}"
+    elif (cd "$wt" && bash "$d/red.cmd") >/dev/null 2>&1; then
+      echo "${C_R}FAIL: red.cmd уже зелёный на чистом HEAD — это не баг. Почини red.cmd или удали.${C_0}" >&2
+      exit 1
+    else
+      echo "${C_G}OK red: падает на HEAD (пруф воспроизводится)${C_0}"
+    fi
   fi
   tstage "red-pre"
 
@@ -955,8 +987,7 @@ cmd_auto() { # devh auto [--from <dir>] [--max N]: всё само, пока е�
     tried="$tried$item "
     echo "── auto: $item — $(cat "$(items_dir)/$item/title" 2>/dev/null)"
     if [ ! -f "$(items_dir)/$item/red.cmd" ] && [ ! -s "$(items_dir)/$item/no-red" ]; then
-      echo "   ⚠  нет RED-пруфа — добавь в спеку строку 'RED: <команда, падающая сейчас>'"
-      fail_n=$((fail_n+1)); continue
+      echo "   .. RED-пруфа нет — его напишет агент (первая задача)"
     fi
     if "$0" run "$item" >/dev/null 2>&1; then
       if "$0" merge "$item" >/dev/null 2>&1; then

@@ -97,6 +97,20 @@ printf 'feat: ignored-тесты разобраны\n\nдетали: стаб\n'
 "#,
         );
         write_exec(
+            &self.stubs.join("stub-red.sh"),
+            r#"#!/usr/bin/env bash
+red="$(dirname "$HARNESS_SPEC")/red.cmd"
+if [ ! -f "$red" ]; then
+  printf 'bash scripts/test.sh\n' > "$red"
+else
+  [ -f "$HARNESS_WORKTREE/done.txt" ] && touch "$T_MUT_GOOD"
+  echo marker > "$HARNESS_WORKTREE/done.txt"
+  grep -q "done2" "$HARNESS_SPEC" && echo marker > "$HARNESS_WORKTREE/done2.txt"
+  printf 'feat: red-тест написан и задача сделана\n\nдетали: стаб\n' > "$HARNESS_SUMMARY"
+fi
+"#,
+        );
+        write_exec(
             &self.stubs.join("mut-ok.sh"),
             "#!/usr/bin/env bash\necho \"Mutants: 10, Killed: 10 (100%)\"\n",
         );
@@ -165,7 +179,15 @@ echo "CRAP: functions=2"
     }
 
     fn run_capture(&self, args: &[&str]) -> (bool, String) {
-        let out = self.devh(args).output().unwrap_or_else(|_| unreachable!());
+        self.run_capture_env(args, &[])
+    }
+
+    fn run_capture_env(&self, args: &[&str], envs: &[(&str, &str)]) -> (bool, String) {
+        let mut c = self.devh(args);
+        for (k, v) in envs {
+            c.env(k, v);
+        }
+        let out = c.output().unwrap_or_else(|_| unreachable!());
         let mut all = String::from_utf8_lossy(&out.stdout).to_string();
         all.push_str(&String::from_utf8_lossy(&out.stderr));
         (out.status.success(), all)
@@ -1047,25 +1069,95 @@ fn section25_auto() {
     let sb = Sandbox::new("r25");
     sb.run_ok(&["init"]);
     fs::create_dir_all(sb.repo.join("specs")).unwrap_or_else(|_| unreachable!());
+    fs::create_dir_all(sb.repo.join("scripts")).unwrap_or_else(|_| unreachable!());
+    fs::create_dir_all(sb.repo.join("t")).unwrap_or_else(|_| unreachable!());
+    write_exec(
+        &sb.repo.join("scripts/test.sh"),
+        r#"#!/usr/bin/env bash
+n=0; bad=0
+for f in t/*.sh; do
+  [ -f "$f" ] || continue
+  n=$((n+1))
+  if bash "$f" >/dev/null 2>&1; then echo "ok   $f"; else echo "FAIL $f"; bad=$((bad+1)); fi
+done
+echo "$n tests, $bad failures"
+exit "$bad"
+"#,
+    );
+    write_exec(
+        &sb.repo.join("t/feature_test.sh"),
+        r#"#!/usr/bin/env bash
+[ -s done.txt ] || { echo "done.txt отсутствует"; exit 1; }
+grep -qx marker done.txt || { echo "маркер не опубликован"; exit 1; }
+"#,
+    );
+    sb.git_out(&["add", "."]);
+    sb.git_out(&["commit", "-qm", "тесты проекта"]);
     fs::write(
         sb.repo.join("specs/spec-a.md"),
-        "# Задача А\nRED: test -f done.txt\nСоздай done.txt.\n",
+        "# Задача А без RED\nСоздай done.txt с маркером.\n",
     )
     .unwrap_or_else(|_| unreachable!());
     fs::write(
         sb.repo.join("specs/spec-b.md"),
-        "# Задача Б без RED\nСделай что-то.\n",
+        "# Задача Б\nRED: test -f done2.txt\nСоздай done2.txt с маркером.\n",
     )
     .unwrap_or_else(|_| unreachable!());
-    let (ok, out) = sb.run_capture(&["auto", "--from", "specs"]);
+    let stub = sb.stubs.join("stub-red.sh");
+    let stub = stub.display().to_string();
+    let (ok, out) = sb.run_capture_env(
+        &["auto", "--from", "specs"],
+        &[
+            ("HARNESS_AGENT", stub.as_str()),
+            ("HARNESS_VERIFY", "bash scripts/test.sh"),
+        ],
+    );
     assert!(ok, "auto rc: {out}");
     assert!(contains(&out, "импортировано 2 спек"), "{out}");
-    assert!(contains(&out, "✓ done"), "{out}");
-    assert!(contains(&out, "нет RED-пруфа"), "{out}");
-    assert_eq!(sb.status("W-001"), "done");
-    assert!(sb.item_dir("W-001").join("red.cmd").is_file());
-    assert_eq!(sb.status("W-002"), "open");
-    assert!(contains(&out, "остался: W-002"), "{out}");
+    assert!(contains(&out, "RED-пруфа нет — его напишет агент"), "{out}");
+    assert_eq!(sb.status("W-001"), "done", "{out}");
+    assert_eq!(
+        fs::read_to_string(sb.item_dir("W-001").join("red.cmd"))
+            .unwrap_or_default()
+            .trim(),
+        "bash scripts/test.sh",
+        "спека А без RED: red.cmd написал агент"
+    );
+    assert_eq!(
+        fs::read_to_string(sb.item_dir("W-002").join("red.cmd"))
+            .unwrap_or_default()
+            .trim(),
+        "test -f done2.txt",
+        "спека Б: RED из строки спеки"
+    );
+    assert_eq!(sb.status("W-002"), "done", "{out}");
+    assert!(!contains(&out, "остался:"), "{out}");
+}
+
+#[test]
+fn section27_red_author_prompt() {
+    let sb = Sandbox::new("r27");
+    sb.run_ok(&["init"]);
+    sb.new_item("без red-пруфа", "спека без строки RED\n", None);
+    let dump = sb.stubs.join("dump-prompt.sh");
+    write_exec(
+        &dump,
+        r#"#!/usr/bin/env bash
+printf '%s\n' "$1" > "$(dirname "$HARNESS_SPEC")/prompt.txt"
+"#,
+    );
+    let dump = dump.display().to_string();
+    let (ok, out) = sb.run_capture_env(&["run"], &[("HARNESS_AGENT", dump.as_str())]);
+    assert!(!ok, "без red.cmd run обязан упасть: {out}");
+    assert!(contains(&out, "RED-пруф ОБЯЗАТЕЛЕН"), "{out}");
+    let prompt = fs::read_to_string(sb.item_dir("W-001").join("prompt.txt")).unwrap_or_default();
+    assert!(contains(&prompt, "ФАЗА RED"), "{prompt}");
+    assert!(contains(&prompt, "тестового входа"), "{prompt}");
+    assert!(
+        contains(&prompt, "ЗАПРЕЩЕНО вместо теста: grep/rg"),
+        "{prompt}"
+    );
+    sb.run_ok(&["abort"]);
 }
 
 #[test]

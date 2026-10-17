@@ -18,12 +18,30 @@ Static binary for distribution (flock/fs2/setsid verified by the full oracle —
     # → target/x86_64-unknown-linux-musl/release/devh (static-pie)
 
 `devh` in the checkout is a wrapper over the Rust binary; the bash
-reference is kept as `devh-classic`. `test.sh` — 105 asserts, by default it
-runs against the Rust `devh` (CI `devharness-rs.yml`), separately — against
-bash:
+reference is kept as `devh-classic`. `test.sh` — 28 sections / 114 asserts,
+by default it runs against the Rust `devh` (CI `devharness-rs.yml`),
+separately — against bash:
 
     bash devharness/test.sh                                    # Rust (default)
     DEVH=$PWD/devharness/devh-classic bash devharness/test.sh  # bash reference
+
+## Quick start — first task
+
+Entry point is `devh` on PATH (`cargo install`) or `./devharness/devh` in the
+checkout; work from the repo root.
+
+    cd <your-repo>
+    devh init                                  # once: VERIFY/RULES/MSG_DENY
+    printf 'What to do: …\nRED: cargo test -- <fails right now>\n' \
+      | devh new "SHORT TITLE"                 # item + spec.md + red.cmd (from the RED: line)
+    devh bg 1 && devh ps                        # detached run + status
+    devh logs 1                                 # agent/verify tails
+    devh merge 1                                # rebase → ff-push, once gates are green
+
+RED proof is mandatory: a `RED: …` line in the spec writes `red.cmd`
+up front; specs without it still enter the cycle — the agent writes
+`red.cmd` as its FIRST task (red-author phase; the prompt demands a real
+test, not a grep). Bypass: `devh new "…" --no-red "reason"`.
 
 ## Daily cycle
 
@@ -34,9 +52,10 @@ bash:
     tail -f .harness/logs/W-001-agent.log
     devh merge                             # rebase → ff-push → log → next:
 
-Autopilot: `devh auto --from specs/ --max 5` — specs → items (RED extracted
-from the `RED:` line) → run+merge+tickets; an item without RED honestly
-stays in the queue. In the background: `devh bg auto --from specs/ --max 5`
+Autopilot: `devh auto --from specs/ --max 5` — specs → items (RED
+extracted from the `RED:` line, otherwise the agent's red phase) →
+run+merge+tickets; a spec without RED does not fall out of the cycle. In
+the background: `devh bg auto --from specs/ --max 5`
 — detached autopilot (log `.harness/logs/bg-auto.log`); `devh ps` also
 shows live autopilot runs (`.harness/auto.pid`).
 
@@ -52,7 +71,7 @@ of the log (≤ MAX_FIX); a missing tool = an ENV blocker, not a fix-round.
 | NO-IGNORED | `NO_IGNORED=1`, `IGNORED_ALLOWLIST` | allowlist semantics: an ignore is allowed if the test name matches a regex in `IGNORED_ALLOWLIST` (file, default `scripts/ignored-tests.txt`); an undeclared ignore = hidden red |
 | MUTATE | `MUTATE`, `MIN_KILL=90` | kill-rate ≥ MIN_KILL% on changed `MUTATE_SCOPE` files (`{module}`/`{file}`); output format `Mutants: N, Killed: M` (muex / cargo-mutants); missing tool = env blocker (rc=2), not a fix-round |
 | CRAP | `CRAP`, `CRAP_MAX=12` | guardrail #2 (Uncle Bob): score = C²·(1−cov)³ + C, violation = score > CRAP_MAX; output format `file:line fun C=N cov=N` + summary `CRAP: functions=N`; unrecognized contract = env blocker; bypass only recorded (`--no-crap`) |
-| RED | `items/W-NNN/red.cmd` | first of all: fails on a clean HEAD before the work, goes green after; only recorded bypass (`--no-red`) |
+| RED | `items/W-NNN/red.cmd` | first of all: fails on a clean HEAD before the work, goes green after; source — the spec's `RED:` line or the agent's red phase (the first task of run/auto); only recorded bypass (`--no-red`) |
 | LINT | `LINT=1`, `LINT_CMD` | auto-shellcheck of changed *.sh + project linter |
 | REVIEW | `REVIEW=1` | self-review of the diff with a second request; `VERDICT: OK` / `VERDICT: ISSUES: …` → fix-round |
 | BENCH | `BENCH` | the only optional gate: perf vs baseline |
@@ -65,7 +84,7 @@ of the log (≤ MAX_FIX); a missing tool = an ENV blocker, not a fix-round.
 | new | `devh new "title" [--no-red "reason"] [--no-crap "reason"]` / `devh new <N>` | item + spec.md; on a TTY stdin — opens an editor (`$EDITOR`, default vi); `<N>` — copy of `todo/N.md` → `W-0NN` |
 | list | `devh list` | table: ID / STATUS(open→active→done) / WT / TITLE |
 | hint | `devh hint [id]` | spec + plan + ready prompt for the next model |
-| run | `devh run [id]` | claim (WIP limit, flock) → worktree → RED pre → agent → gate cycle (failure → fix-round with the log tail) → RED post → hygiene → commit → push branch |
+| run | `devh run [id]` | claim (WIP limit, flock) → worktree → RED pre (no `red.cmd` → the agent is tasked to write it as the first task, then the pre-check) → agent → gate cycle (failure → fix-round with the log tail) → RED post → hygiene → commit → push branch |
 | commit | `devh commit [id]` | re-run commit/push for finished work; idempotent |
 | merge | `devh merge [id]` | guard (clean tree, has commits) → rebase → ff-push to MAIN → `## Session N` into RULES_LOG → log → cleanup → `next:` |
 | abort | `devh abort [id]` | worktree/branch gone, item → open (work discarded) |
@@ -121,7 +140,7 @@ All state and logs live in the target repo under `.harness/` (never committed):
 
 ## Self-test — the same stack that gates other projects
 
-clippy (the shellcheck layer) → 27-section suite (port of `test.sh`, 105
+clippy (the shellcheck layer) → 28-section suite (port of `test.sh`, 114
 asserts; the oracle is run directly: `DEVH=<rust-bin> bash
 devharness/test.sh`) → cargo-mutants on core/ (100% kill) → llvm-cov ≥80%
 → oracle on the musl static binary (flock/fs2/setsid on static-pie).
@@ -134,7 +153,7 @@ shellcheck → test.sh → selfmutate.sh).
 ## Migration
 
 - Done: bash `devh` → `devh-classic` (still gated by CI `devharness.yml`:
-  shellcheck + test.sh + selfmutate 18/18); `devh` is a wrapper over the
+  shellcheck + test.sh + selfmutate 19/19); `devh` is a wrapper over the
   Rust binary, CI `devharness-rs.yml` runs the oracle through it.
 - Specs of old sessions → one by one via `devh new <N>` / `devh new "..."`.
 

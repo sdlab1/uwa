@@ -79,6 +79,45 @@ pub fn agent_prompt(
     )
 }
 
+pub fn red_author_prompt(
+    store: &Store,
+    cfg: &RunConfig,
+    root: &std::path::Path,
+    wt: &std::path::Path,
+    id: &ItemId,
+    agent_cmd: &str,
+) -> String {
+    let red = store.item_dir(id).join("red.cmd");
+    let spec = store.item_dir(id).join("spec.md");
+
+    let ctx = git::log_oneline(root, 3);
+    let ctx: String = ctx.lines().map(|l| format!("  {l}\n")).collect();
+
+    format!(
+        "Ты работаешь в изолированном git-worktree: {wt}. Это ФАЗА RED: твоя ПЕРВАЯ задача — написать RED-ТЕСТ. Саму спеку НЕ реализуй.\n\n\
+         ЗАДАЧА: создай файл {red} — ГОТОВЫЙ К ЗАПУСКУ ТЕСТ, который СЕЙЧАС падает на чистом HEAD и зеленеет после реализации спеки {spec}.\n\n\
+         Что здесь считается тестом:\n\
+         - прогон настоящего тестового входа проекта: той же команды/раннера, что у тебя в VERIFY ({verify}), только под нужный тест или сюит;\n\
+         - запускается как `bash <этот файл>` из корня worktree: exit 0 = тест прошёл, exit ≠ 0 = тест упал;\n\
+         - на чистом HEAD тест ОБЯЗАН упасть (exit ≠ 0), иначе гейт RED ответит «уже зелёный»;\n\
+         - проверяет поведение из спеки и позеленеет ТОЛЬКО после её реализации.\n\n\
+         ЗАПРЕЩЕНО вместо теста: grep/rg по файлам, test -f/-e и прочие проверки существования, «найди строку в файле», одиночные вызовы без тестового раннера. Это не тест — гейт RED такому не обязан верить; настоящий RED — упавший тест.\n\n\
+         Правила фазы:\n\
+         - в worktree ничего не пиши: исходники и git не трогай — можно только читать код, чтобы написать осмысленный тест;\n\
+         - файл ОДИН: {red} (лежит вне worktree, в .harness);\n\
+         - summary в этой фазе не нужен — его напишет фаза реализации.\n\n\
+         Контекст репо (HEAD на момент старта задачи):\n{ctx}\n\
+         Окружение: HARNESS_WORKTREE, HARNESS_SPEC, HARNESS_PLAN, HARNESS_SUMMARY — абсолютные пути.\n\
+         Следуй инструкции строго: агент — {agent_cmd}\n",
+        wt = wt.display(),
+        red = red.display(),
+        spec = spec.display(),
+        verify = cfg.verify,
+        ctx = ctx,
+        agent_cmd = agent_cmd,
+    )
+}
+
 pub fn review_prompt(diff: &str) -> String {
     format!(
         "Ты — независимый ревьюер, отдельный запрос. Ниже дифф сгенерированной работы. \

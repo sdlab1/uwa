@@ -111,7 +111,7 @@ pub fn run(store: &Store, cfg: &RunConfig, id: &ItemId) -> anyhow::Result<()> {
         .map(|s| !s.trim().is_empty())
         .unwrap_or(false);
     let red_file = store.item_dir(id).join("red.cmd");
-    let has_red = red_file.is_file();
+    let mut has_red = red_file.is_file();
 
     if no_red {
         let reason = store.read(item_rel(id, "no-red")).unwrap_or_default();
@@ -121,41 +121,70 @@ pub fn run(store: &Store, cfg: &RunConfig, id: &ItemId) -> anyhow::Result<()> {
             reason.trim(),
             c.z
         );
-    } else if !has_red {
-        eprintln!(
-            "{}FAIL: RED-пруф ОБЯЗАТЕЛЕН (в первую очередь). Напиши {} — команду, падающую на чистом HEAD и зеленеющую после работы; либо записанный обход: echo \"<причина>\" > {}{}",
-            c.r,
-            red_file.display(),
-            store.item_dir(id).join("no-red").display(),
-            c.z
-        );
-        die(store, id, 1);
-    } else if !fresh && git::tree_dirty(&wt) {
-        println!(
-            "{}OK resume: RED pre-check пропущен — дерево уже содержит работу; доказательство RED было на чистом HEAD первой попытки, позеленение проверит пост-гейт{}",
-            c.g, c.z
-        );
     } else {
-        let raw = run_red(&red_file, &wt);
-        let verdict = gates::judge(
-            &Gate::Red {
-                cmd: red_file.display().to_string(),
-                phase: RedPhase::Pre,
-            },
-            &raw,
-            cfg,
-        );
-        if verdict == Verdict::Pass {
+        if !has_red {
             println!(
-                "{}OK red: падает на HEAD (пруф воспроизводится){}",
+                "{}.. red: red.cmd отсутствует — поручаю агенту написать его первой задачей{}",
+                c.y, c.z
+            );
+            let author = prompt::red_author_prompt(store, cfg, &root, &wt, id, &agent);
+            if let Err(e) = run_agent(
+                store,
+                &wt,
+                id,
+                &author,
+                &agent,
+                Duration::from_secs(cfg.agent_timeout as u64),
+                "red-author",
+                &mut timing,
+            ) {
+                eprintln!(
+                    "{}FAIL агент на фазе RED (лог: {}){} ({e})",
+                    c.r,
+                    store.log_file(id, "agent").display(),
+                    c.z
+                );
+                die(store, id, 1);
+            }
+            if !red_file.is_file() {
+                eprintln!(
+                    "{}FAIL: RED-пруф ОБЯЗАТЕЛЕН (в первую очередь). Агент не написал {} — команду, падающую на чистом HEAD и зеленеющую после работы; либо записанный обход: echo \"<причина>\" > {}{}",
+                    c.r,
+                    red_file.display(),
+                    store.item_dir(id).join("no-red").display(),
+                    c.z
+                );
+                die(store, id, 1);
+            }
+            has_red = true;
+        }
+        if !fresh && git::tree_dirty(&wt) {
+            println!(
+                "{}OK resume: RED pre-check пропущен — дерево уже содержит работу; доказательство RED было на чистом HEAD первой попытки, позеленение проверит пост-гейт{}",
                 c.g, c.z
             );
         } else {
-            eprintln!(
-                "{}FAIL: red.cmd уже зелёный на чистом HEAD — это не баг. Почини red.cmd или удали.{}",
-                c.r, c.z
+            let raw = run_red(&red_file, &wt);
+            let verdict = gates::judge(
+                &Gate::Red {
+                    cmd: red_file.display().to_string(),
+                    phase: RedPhase::Pre,
+                },
+                &raw,
+                cfg,
             );
-            die(store, id, 1);
+            if verdict == Verdict::Pass {
+                println!(
+                    "{}OK red: падает на HEAD (пруф воспроизводится){}",
+                    c.g, c.z
+                );
+            } else {
+                eprintln!(
+                    "{}FAIL: red.cmd уже зелёный на чистом HEAD — это не баг. Почини red.cmd или удали.{}",
+                    c.r, c.z
+                );
+                die(store, id, 1);
+            }
         }
     }
 
@@ -184,7 +213,7 @@ pub fn run(store: &Store, cfg: &RunConfig, id: &ItemId) -> anyhow::Result<()> {
             &next_prompt,
             &agent,
             Duration::from_secs(cfg.agent_timeout as u64),
-            round,
+            format!("agent-r{}", round.saturating_add(1)),
             &mut timing,
         ) {
             eprintln!(
@@ -400,7 +429,7 @@ fn run_agent(
     prompt_text: &str,
     agent: &str,
     timeout: Duration,
-    round: u32,
+    stage: impl Into<String>,
     timing: &mut Timing,
 ) -> anyhow::Result<()> {
     let full = format!("{} {}", agent, prompt::shquote(prompt_text));
@@ -414,7 +443,7 @@ fn run_agent(
                 "агент завершился с кодом {:?}",
                 out.exit
             );
-            timing.stage(format!("agent-r{}", round.saturating_add(1)), store, id);
+            timing.stage(stage, store, id);
             Ok(())
         }
         Err(e) => {

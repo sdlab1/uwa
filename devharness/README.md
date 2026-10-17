@@ -18,11 +18,30 @@ State — `.harness/` у целевого репо (flock + atomic writes, бе�
     # → target/x86_64-unknown-linux-musl/release/devh (static-pie)
 
 `devh` в каталоге — обёртка над Rust-бинарём; bash-эталон сохранён как
-`devh-classic`. `test.sh` — 105 ассертов, по умолчанию гоняется против
-Rust-`devh` (CI `devharness-rs.yml`), отдельно — против bash:
+`devh-classic`. `test.sh` — 28 секций / 114 ассертов, по умолчанию
+гоняется против Rust-`devh` (CI `devharness-rs.yml`), отдельно — против
+bash:
 
     bash devharness/test.sh                                    # Rust (по умолчанию)
     DEVH=$PWD/devharness/devh-classic bash devharness/test.sh  # bash-эталон
+
+## Быстрый старт — первая задача
+
+Вход — `devh` из PATH (`cargo install`) либо `./devharness/devh` в чекауте;
+работать из корня репозитория.
+
+    cd <твой-репо>
+    devh init                                  # один раз: VERIFY/RULES/MSG_DENY
+    printf 'Что сделать: …\nRED: cargo test -- <падает сейчас>\n' \
+      | devh new "КРАТКИЙ_ЗАГОЛОВОК"            # item + spec.md + red.cmd (из строки RED:)
+    devh bg 1 && devh ps                        # detached-прогон + статус
+    devh logs 1                                 # хвосты agent/verify
+    devh merge 1                                # rebase → ff-push, когда гейты зелёные
+
+RED-пруф обязателен: строка `RED: …` в спеке пишет `red.cmd` сразу;
+спеки без неё идут в цикл — `red.cmd` пишет агент ПЕРВОЙ задачей
+(фаза red-author, промпт требует настоящий тест, а не grep). Обход —
+`devh new "…" --no-red "причина"`.
 
 ## Дневной цикл
 
@@ -34,10 +53,10 @@ Rust-`devh` (CI `devharness-rs.yml`), отдельно — против bash:
     devh merge                             # rebase → ff-push → лог → next:
 
 Автопилот: `devh auto --from specs/ --max 5` — спеки → items (RED из
-строки `RED:`) → run+merge+tickets; item без RED честно остаётся в
-очереди. Фоном: `devh bg auto --from specs/ --max 5` — detached-автопилот
-(лог `.harness/logs/bg-auto.log`); `devh ps` показывает и живые
-авто-прогоны (`.harness/auto.pid`).
+строки `RED:`, без строки — red-фаза агента) → run+merge+tickets; спека
+без RED не выпадает из цикла. Фоном: `devh bg auto --from specs/ --max 5`
+— detached-автопилот (лог `.harness/logs/bg-auto.log`); `devh ps`
+показывает и живые авто-прогоны (`.harness/auto.pid`).
 
 ## Гейты (обязательны, кроме bench)
 
@@ -51,7 +70,7 @@ RED-пруф первым, MSG_DENY-гигиена последней. Паде�
 | NO-IGNORED | `NO_IGNORED=1`, `IGNORED_ALLOWLIST` | allowlist-семантика: игнор разрешён, если имя теста матчится regex из `IGNORED_ALLOWLIST` (файл, дефолт `scripts/ignored-tests.txt`); незаявленный игнор = скрытый красный |
 | MUTATE | `MUTATE`, `MIN_KILL=90` | kill-rate ≥ MIN_KILL% на изменённых `MUTATE_SCOPE`-файлах (`{module}`/`{file}`); формат вывода `Mutants: N, Killed: M` (muex / cargo-mutants); инструмент не установлен = блокер среды (rc=2), не fix-раунд |
 | CRAP | `CRAP`, `CRAP_MAX=12` | guardrail №2 (Uncle Bob): score = C²·(1−cov)³ + C, нарушение = score > CRAP_MAX; формат вывода `file:line fun C=N cov=N` + итог `CRAP: functions=N`; контракт не распознан = блокер среды; обход только записанный (`--no-crap`) |
-| RED | `items/W-NNN/red.cmd` | в первую очередь: падает на чистом HEAD до работы, зеленеет после; обход только записанный (`--no-red`) |
+| RED | `items/W-NNN/red.cmd` | в первую очередь: падает на чистом HEAD до работы, зеленеет после; источник — строка `RED:` в спеке либо red-фаза агента (первая задача run/auto); обход только записанный (`--no-red`) |
 | LINT | `LINT=1`, `LINT_CMD` | авто-shellcheck изменённых *.sh + проектный линтер |
 | REVIEW | `REVIEW=1` | self-review диффа вторым запросом; `VERDICT: OK` / `VERDICT: ISSUES: …` → fix-раунд |
 | BENCH | `BENCH` | единственный опциональный: перф против baseline |
@@ -64,7 +83,7 @@ RED-пруф первым, MSG_DENY-гигиена последней. Паде�
 | new | `devh new "title" [--no-red "причина"] [--no-crap "причина"]` / `devh new <N>` | item + spec.md; на TTY stdin — редактор (`$EDITOR`, дефолт vi); `<N>` — копия `todo/N.md` → `W-0NN` |
 | list | `devh list` | таблица: ID / STATUS(open→active→done) / WT / TITLE |
 | hint | `devh hint [id]` | спека + план + готовый промпт следующей модели |
-| run | `devh run [id]` | claim (WIP-лимит, flock) → worktree → RED pre → агент → гейт-цикл (падение → fix-раунд с хвостом лога) → RED post → гигиена → commit → push ветки |
+| run | `devh run [id]` | claim (WIP-лимит, flock) → worktree → RED pre (нет `red.cmd` → поручить агенту написать его первой задачей, потом pre-проверка) → агент → гейт-цикл (падение → fix-раунд с хвостом лога) → RED post → гигиена → commit → push ветки |
 | commit | `devh commit [id]` | повторить commit/push по готовой работе; идемпотентен |
 | merge | `devh merge [id]` | guard (дерево чисто, есть коммиты) → rebase → ff-push в MAIN → `## Session N` в RULES_LOG → лог → cleanup → `next:` |
 | abort | `devh abort [id]` | worktree/ветку вон, item → open (работа выброшена) |
@@ -120,7 +139,7 @@ RED-пруф первым, MSG_DENY-гигиена последней. Паде�
 
 ## Self-test — тот же стек, что гейтит чужие проекты
 
-clippy (shellcheck-слой) → сьют 27 секций (порт `test.sh`, 105 ассертов;
+clippy (shellcheck-слой) → сьют 28 секций (порт `test.sh`, 114 ассертов;
 оракул гоняется напрямую: `DEVH=<rust-bin> bash devharness/test.sh`) →
 cargo-mutants на core/ (kill 100%) → llvm-cov ≥80% → oracle на
 musl-статике (flock/fs2/setsid на static-pie).
@@ -133,7 +152,7 @@ shellcheck → test.sh → selfmutate.sh).
 ## Миграция
 
 - Выполнено: bash-`devh` → `devh-classic` (по-прежнему гейтится CI
-  `devharness.yml`: shellcheck + test.sh + selfmutate 18/18); `devh` —
+  `devharness.yml`: shellcheck + test.sh + selfmutate 19/19); `devh` —
   обёртка над Rust, CI `devharness-rs.yml` гоняет оракул через неё.
 - Спеки старых сессий → по одной через `devh new <N>` / `devh new "..."`.
 

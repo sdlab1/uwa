@@ -40,6 +40,27 @@ base_env() {
   unset HARNESS_CRAP HARNESS_CRAP_SCOPE HARNESS_CRAP_MAX
 }
 
+install_tests() { # мини-раннер тестов в текущем temp-репо: RED = прогон тестов, а не grep
+  mkdir -p t scripts
+  cat > scripts/test.sh <<'EOF'
+#!/usr/bin/env bash
+n=0; bad=0
+for f in t/*.sh; do
+  [ -f "$f" ] || continue
+  n=$((n+1))
+  if bash "$f" >/dev/null 2>&1; then echo "ok   $f"; else echo "FAIL $f"; bad=$((bad+1)); fi
+done
+echo "$n tests, $bad failures"
+exit "$bad"
+EOF
+  cat > t/feature_test.sh <<'EOF'
+#!/usr/bin/env bash
+[ -s done.txt ] || { echo "done.txt отсутствует"; exit 1; }
+grep -qx marker done.txt || { echo "маркер не опубликован"; exit 1; }
+EOF
+  git add . >/dev/null 2>&1 && git commit -qm "тесты проекта"
+}
+
 cat > "$T/stub.sh" <<'S'
 #!/usr/bin/env bash
 [ -f "$HARNESS_WORKTREE/done.txt" ] && touch "$T_MUT_GOOD"
@@ -73,6 +94,19 @@ cat > "$T/stub-ign.sh" <<'S'
 [ -f "$HARNESS_WORKTREE/done.txt" ] && touch "$HARNESS_WORKTREE/ign-fix"
 echo marker > "$HARNESS_WORKTREE/done.txt"
 printf 'feat: ignored-тесты разобраны\n\nдетали: стаб\n' > "$HARNESS_SUMMARY"
+S
+cat > "$T/stub-red.sh" <<'S'
+#!/usr/bin/env bash
+red="$(dirname "$HARNESS_SPEC")/red.cmd"
+if [ ! -f "$red" ]; then
+  printf '%s\n' "$1" > "$(dirname "$red")/red-prompt.txt"
+  printf 'bash scripts/test.sh\n' > "$red"
+else
+  [ -f "$HARNESS_WORKTREE/done.txt" ] && touch "$T_MUT_GOOD"
+  echo marker > "$HARNESS_WORKTREE/done.txt"
+  grep -q "done2" "$HARNESS_SPEC" && echo marker > "$HARNESS_WORKTREE/done2.txt"
+  printf 'feat: red.cmd написан и задача сделана\n\nдетали: стаб\n' > "$HARNESS_SUMMARY"
+fi
 S
 cat > "$T/mut-ok.sh" <<'S'
 #!/usr/bin/env bash
@@ -414,20 +448,22 @@ HARNESS_AGENT="$T/stub-rev.sh" "$DEVH" run >"$T/out" 2>&1 && pass "run ок по
 grep -q "гейт REVIEW упал" "$T/out" && pass "REVIEW fix-раунд был" || fail "REVIEW fix-раунд был"
 grep -q "VERDICT: OK" .harness/logs/W-001-review.log && pass "финальный вердикт OK в review-логе" || fail "финальный вердикт OK в review-логе"
 
-echo "== 25. auto: папка спек → всё само (RED из строки спеки) =="
-R="$(fresh r25)"; base_env; cd "$R" || exit 1
+echo "== 25. auto: папка спек → всё само (без RED в спеке его пишет агент) =="
+R="$(fresh r25)"; base_env; export HARNESS_AGENT="$T/stub-red.sh" HARNESS_VERIFY='bash scripts/test.sh'
+cd "$R" || exit 1
+install_tests
 "$DEVH" init >/dev/null
 mkdir -p specs
-printf '# Задача А\nRED: test -f done.txt\nСоздай done.txt.\n' > specs/spec-a.md
-printf '# Задача Б без RED\nСделай что-то.\n' > specs/spec-b.md
+printf '# Задача А без RED\nСоздай done.txt с маркером.\n' > specs/spec-a.md
+printf '# Задача Б\nRED: test -f done2.txt\nСоздай done2.txt с маркером.\n' > specs/spec-b.md
 "$DEVH" auto --from specs >"$T/out" 2>&1 && pass "auto завершился rc=0" || { fail "auto rc"; cat "$T/out"; }
 grep -q "импортировано 2 спек" "$T/out" && pass "импорт обеих спек" || fail "импорт обеих спек"
-grep -q "✓ done" "$T/out" && pass "спека А прошла цикл" || fail "спека А прошла цикл"
-grep -q "нет RED-пруфа" "$T/out" && pass "спека Б честно осталась (нет RED)" || fail "спека Б честно осталась"
-[ "$(cat .harness/items/W-001/status)" = "done" ] && pass "W-001 done" || fail "W-001 done"
-[ -f .harness/items/W-001/red.cmd ] && pass "RED извлечён из строки спеки" || fail "RED извлечён"
-[ "$(cat .harness/items/W-002/status)" = open ] && pass "W-002 осталась в очереди" || fail "W-002 потеряна"
-grep -q "остался: W-002" "$T/out" && pass "итог auto перечисляет остаток" || fail "итог auto"
+grep -q "RED-пруфа нет — его напишет агент" "$T/out" && pass "auto сообщил: red.cmd напишет агент" || fail "auto сообщил про red.cmd"
+[ "$(cat .harness/items/W-001/status)" = "done" ] && pass "спека А без RED прошла цикл" || fail "спека А не прошла"
+grep -qx 'bash scripts/test.sh' .harness/items/W-001/red.cmd && pass "W-001 red.cmd создан агентом: прогон тестов" || fail "W-001 red.cmd не тест"
+grep -qx 'test -f done2.txt' .harness/items/W-002/red.cmd && pass "W-002 RED из строки спеки сохранён" || fail "W-002 RED из спеки"
+[ "$(cat .harness/items/W-002/status)" = "done" ] && pass "спека Б прошла цикл" || fail "спека Б не прошла"
+grep -q "остался:" "$T/out" && fail "остаток должен быть пуст" || pass "остаток пуст (обе спеки закрыты)"
 
 echo "== 26. CRAP-гейт (guardrail №2): score = C²·(1−cov)³ + C, порог 12 =="
 R="$(fresh r26)"; base_env; export HARNESS_CRAP="$T/crap-ok.sh" HARNESS_CRAP_SCOPE='.' HARNESS_MAX_FIX=3
@@ -522,6 +558,22 @@ else
   grep -q "NO-IGNORED" "$T/out" && grep -q "rogue_test" .harness/logs/W-001-verify.log \
     && pass "allowlist: незаявленный игнор красный, имя в verify-логе" || { fail "allowlist: незаявленный игнор красный, имя в verify-логе"; cat "$T/out"; }
 fi
+
+echo "== 28. RED пишет агент: дал только промпт → red-ТЕСТ его первая задача =="
+R="$(fresh r33)"; base_env; export HARNESS_AGENT="$T/stub-red.sh" HARNESS_VERIFY='bash scripts/test.sh'
+cd "$R" || exit 1
+install_tests
+"$DEVH" init >/dev/null
+printf 'спека: опубликуй done.txt с маркером\n' | "$DEVH" new "только промпт" >/dev/null
+[ -f .harness/items/W-001/red.cmd ] && fail "red.cmd не должен быть до запуска" || pass "до запуска red.cmd нет (дал только промпт)"
+"$DEVH" run >"$T/out" 2>&1 && pass "run зелёный без RED в спеке" || { fail "run зелёный без RED в спеке"; cat "$T/out"; }
+grep -q "поручаю агенту написать его первой задачей" "$T/out" && pass "харнесс поручил red.cmd агенту" || fail "харнесс поручил red.cmd агенту"
+grep -q "OK red: падает на HEAD" "$T/out" && pass "RED pre: тест падает на чистом HEAD" || fail "RED pre"
+grep -q "OK red: позеленел" "$T/out" && pass "RED post: тест зелёный после правок" || fail "RED post"
+grep -q "scripts/test.sh" .harness/items/W-001/red.cmd && pass "red.cmd — прогон тестового раннера" || fail "red.cmd не гоняет тесты"
+grep -Eq '(^|[[:space:]])(grep|rg|test)[[:space:]-]' .harness/items/W-001/red.cmd && fail "red.cmd — это grep/проверка, а не тест" || pass "red.cmd — не grep и не проверка существования"
+grep -q "ЗАПРЕЩЕНО вместо теста" .harness/items/W-001/red-prompt.txt && pass "red-author промпт запрещает grep/проверку существования" || fail "red-author промпт не запрещает grep"
+grep -q "red-author" .harness/logs/W-001-timing.log && pass "стадия red-author в тайминге" || fail "стадия red-author"
 
 echo
 echo "ИТОГО: PASS=$PASS FAIL=$FAIL"

@@ -3,7 +3,7 @@
 # Вносим известные баги в ИЗОЛИРОВАННУЮ копию devh-classic и проверяем, что test.sh их убивает.
 # «Тесты на вес золота» — применимо и к тестам самого харнесса.
 # Патчер — чистый awk (ENVIRON, без escape-ловушек -v); python-зависимости нет.
-# Гейт: 18/18. Новые гейты devh должны сопровождаться новым мутантом здесь.
+# Гейт: 19/19. Новые гейты devh должны сопровождаться новым мутантом здесь.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 W="$(mktemp -d /tmp/devh-selfmut-XXXXXX)"
@@ -133,12 +133,14 @@ cat > "$W/m.new" <<'S'
 S
 mutant "M8: kill-rate MIN_KILL не проверяется (per-file)" "$W/m.old" "$W/m.new"
 
-# ─── M9: обязательность RED отключена ───
+# ─── M9: обязательность RED отключена (red-фаза автора не запускается) ───
 cat > "$W/m.old" <<'S'
-  elif [ ! -f "$d/red.cmd" ]; then
+    if [ ! -f "$d/red.cmd" ]; then
+      echo "${C_Y}.. red: red.cmd отсутствует — поручаю агенту написать его первой задачей${C_0}"
 S
 cat > "$W/m.new" <<'S'
-  elif false; then
+    if false; then
+      echo "${C_Y}.. red: red.cmd отсутствует — поручаю агенту написать его первой задачей${C_0}"
 S
 mutant "M9: обязательность RED отключена (нет red.cmd → run идёт)" "$W/m.old" "$W/m.new"
 
@@ -196,14 +198,17 @@ cat > "$W/m.new" <<'S'
 S
 mutant "M15: REVIEW-вердикт ISSUES не матчится (замечания ревьюера игнорируются)" "$W/m.old" "$W/m.new"
 
-# ─── M16: auto игнорирует обязательность RED ───
+# ─── M16: auto скипает спеки без RED (red-фаза не поручается) ───
 cat > "$W/m.old" <<'S'
-    if [ ! -f "$(items_dir)/$item/red.cmd" ] && [ ! -s "$(items_dir)/$item/no-red" ]; then
+      echo "   .. RED-пруфа нет — его напишет агент (первая задача)"
+    fi
 S
 cat > "$W/m.new" <<'S'
-    if false; then
+      echo "   .. RED-пруфа нет — его напишет агент (первая задача)"
+      continue
+    fi
 S
-mutant "M16: auto не требует RED-пруф (спека без RED уезжает в прогон)" "$W/m.old" "$W/m.new"
+mutant "M16: auto скипает спеки без RED (red-фаза не поручается)" "$W/m.old" "$W/m.new"
 
 # ─── M17: CRAP-гейт отключён ───
 cat > "$W/m.old" <<'S'
@@ -224,6 +229,14 @@ cat > "$W/m.new" <<'S'
     if [ "$s_x1000" -le $(( CRAP_MAX * 1000 )) ]; then
 S
 mutant "M18: score > MAX инвертировано (зелёное краснеет, красное зеленеет)" "$W/m.old" "$W/m.new"
+
+# ─── M19: в red-промпте снят запрет на grep/проверку существования ───
+cat > "$W/m.old" <<'S'
+ЗАПРЕЩЕНО вместо теста: grep/rg по файлам, test -f/-e и прочие проверки существования, «найди строку в файле», одиночные вызовы без тестового раннера. Это не тест — гейт RED такому не обязан верить; настоящий RED — упавший тест.
+S
+cat > "$W/m.new" <<'S'
+S
+mutant "M19: red-промпт не запрещает grep/проверку существования" "$W/m.old" "$W/m.new"
 
 echo
 echo "KILL-RATE: $KILLED/$TOTAL (skip=$SKIP)"
