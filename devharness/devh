@@ -4,7 +4,15 @@
 # Свежесть: бинарь моложе src/*.rs, Cargo.toml'ов и Cargo.lock — иначе пересборка.
 # bash-оракул сохранён как devh-classic (см. README §Миграция).
 set -euo pipefail
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SRC="${BASH_SOURCE[0]}"
+while [ -L "$SRC" ]; do
+  LINK="$(readlink "$SRC")"
+  case "$LINK" in
+    /*) SRC="$LINK" ;;
+    *) SRC="$(cd "$(dirname "$SRC")" && pwd)/$LINK" ;;
+  esac
+done
+HERE="$(cd "$(dirname "$SRC")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 TDIR="${CARGO_TARGET_DIR:-$ROOT/target/devh}"
 BIN="$TDIR/debug/devh"
