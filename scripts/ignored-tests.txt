@@ -1,7 +1,5 @@
 # allowlist для гейта NO-IGNORED: regex имён тестов, которым РАЗРЕШЁН игнор.
 # по одному regex на строку; '#' — комментарий; пустые строки игнорируются.
 # Игнор теста, ЧЬЁ имя не матчится ни одному regex, — FAIL (незаявленный игнор).
-# UWA-109: env/registry-gated тесты, игнорируются штатно до фикса оверлея.
-profiles_isolate_tabs_between_contexts
-provider_switch_uses_correct_profile
-closing_profile_doesnt_affect_others
+# Сейчас пуст: ignored-тестов в workspace нет (UWA-109 закрыт, три профильных
+# теста переписаны под текущий контракт profiles и рас-игнорнуты).
