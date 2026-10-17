@@ -113,7 +113,7 @@ async fn sdk_stream_with_usage() {
     let body = r.text();
     let frames: Vec<&str> = body.split("data: ").skip(1).collect();
     // First frame always carries role: assistant.
-    let first: Value = serde_json::from_str(frames.get(0).map(|f| f.trim()).unwrap_or(""))
+    let first: Value = serde_json::from_str(frames.first().map(|f| f.trim()).unwrap_or(""))
         .unwrap_or_else(|e| unreachable!("bad frame: {e}"));
     assert_eq!(
         first

@@ -727,7 +727,7 @@ mod tests {
             Err(_) => unreachable!("converts"),
         };
         assert_eq!(
-            content_of(&c.messages.first().unwrap_or_else(|| unreachable!())),
+            content_of(c.messages.first().unwrap_or_else(|| unreachable!())),
             json!("yo")
         );
     }
@@ -744,7 +744,7 @@ mod tests {
         };
         assert_eq!(c.messages.len(), 2);
         assert_eq!(
-            content_of(&c.messages.get(1).unwrap_or_else(|| unreachable!())),
+            content_of(c.messages.get(1).unwrap_or_else(|| unreachable!())),
             json!("next")
         );
     }

@@ -66,7 +66,7 @@ async fn serve(port: u16) {
                         return;
                     }
                 };
-                let slice: &[u8] = chunk.get(..n).unwrap_or_else(|| &[]);
+                let slice: &[u8] = chunk.get(..n).unwrap_or(&[]);
                 buf.extend_from_slice(slice);
                 if buf.windows(4).any(|w| w == b"\r\n\r\n") {
                     break;
@@ -117,7 +117,7 @@ async fn self_check(port: u16) {
         if n == 0 {
             break;
         }
-        let slice: &[u8] = chunk.get(..n).unwrap_or_else(|| &[]);
+        let slice: &[u8] = chunk.get(..n).unwrap_or(&[]);
         buf.extend_from_slice(slice);
     }
     let s = String::from_utf8_lossy(&buf);
@@ -361,7 +361,7 @@ async fn cdp_http_ready(url: &str) -> bool {
             if n == 0 {
                 break;
             }
-            let slice: &[u8] = chunk.get(..n).unwrap_or_else(|| &[]);
+            let slice: &[u8] = chunk.get(..n).unwrap_or(&[]);
             buf.extend_from_slice(slice);
             if buf.windows(20).any(|w| w == b"webSocketDebuggerUrl") {
                 return Some(());
@@ -859,7 +859,7 @@ async fn serve_oopif_site(port: u16) {
                     Ok(0) | Err(_) => return,
                     Ok(n) => n,
                 };
-                let slice: &[u8] = chunk.get(..n).unwrap_or_else(|| &[]);
+                let slice: &[u8] = chunk.get(..n).unwrap_or(&[]);
                 buf.extend_from_slice(slice);
                 if buf.windows(4).any(|w| w == b"\r\n\r\n") {
                     break;

@@ -295,9 +295,12 @@ so same conversation with different providers shares the same tab.
 Both paths use shared `resolve_tool_calls` for validation/self-heal.
 The deduplication is already implemented via the shared function.
 
-### UWA-139 🟡 clap-derive E0453 in uwa-bin
-Under forbid lints, `clap` derive generates `allow(clippy::restriction)`
-which conflicts with `-F`. 11 E0453 errors.
+### UWA-139 ✅ clap-derive E0453 in uwa-bin
+**Closed.** uwa-bin was ported from clap derive (`Parser`/`Subcommand`/`FromArgMatches`)
+to the manual builder API (`ClapCommand` tree + `clap_args()`/`clap_subcommands()`).
+The generated `#[allow(clippy::restriction)]` no longer conflicts with the
+sandbox `-F` forbid. `cargo clippy -p uwa-bin --all-targets` passes with
+exit code 0, zero warnings.
 
 ### UWA-140 🟡 circuit breaker test under forbid
 Has `% open.len()` and `rotate_left` that may not pass forbid lints.

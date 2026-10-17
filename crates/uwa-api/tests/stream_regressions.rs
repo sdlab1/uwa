@@ -163,7 +163,7 @@ async fn streaming_self_heals_schema_invalid_call() {
     let calls = tool_call_frames(&frames);
     assert_eq!(calls.len(), 1, "frames: {frames:?}");
     let args = calls
-        .get(0)
+        .first()
         .unwrap_or_else(|| unreachable!("expected at least one tool_call frame"))
         .get("choices")
         .and_then(|c| c.get(0))

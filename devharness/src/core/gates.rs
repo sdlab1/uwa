@@ -496,7 +496,7 @@ mod tests {
             "test net::surprise_conn ... ignored\ntest result: ok. 0 passed; 1 ignored";
         match judge(&Gate::NoIgnored, &raw(Some(0), unexpected), &ok_cfg) {
             Verdict::Fail { tail, .. } => assert!(tail.contains("surprise_conn"), "tail={tail}"),
-            v => panic!("ожидали Fail, получили {v:?}"),
+            v => unreachable!("ожидали Fail, получили {v:?}"),
         }
 
         // (c) пустой allowlist + игнор → Fail (сигнал не потерян)

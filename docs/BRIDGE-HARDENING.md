@@ -198,7 +198,7 @@ Both tests now pass; all 61 uwa-session lib tests green.
 | `uwa-providers` | 12 | **0** |
 | `uwa-history` | 24 | **0** |
 | `uwa-conformance` | 18 | **0** |
-| `uwa-bin` (bin target) | — | blocked (UWA-139) |
+| `uwa-bin` (bin target) | — | **0** (UWA-139 closed — clap derive replaced with manual builder API) |
 
 ## Session 4 — ChatGPT/Gemini rewrite corruption + dead code (this change)
 
@@ -302,3 +302,32 @@ from the self-heal text before emitting. Only the suffix is sent.
 
 No test added due to raw-string escaping in the test harness; existing
 `streaming_self_heals_schema_invalid_call` covers the self-heal path.
+
+---
+
+## Session 6 — final clippy warnings + devharness panic + uwa-lifecycle test-util (this change)
+
+### 1. Remaining clippy style warnings eliminated (exit code 0, zero warnings)
+
+| Crate | Warning | Fix |
+|-------|---------|-----|
+| `uwa-api` (test "clients") | `clippy::get_first` — `frames.get(0).map(...)` | → `frames.first().map(...)` |
+| `uwa-api` (test "antifragility") | `clippy::manual_range_contains` — `status == 200 \|\| (status >= 400 \&\& status < 600)` | → `(400..600).contains(&status)` |
+| `uwa-api` (lib test, responses.rs) | `clippy::needless_borrow` — `content_of(&c.messages.first()...)` | → `content_of(c.messages.first()...)` (×2) |
+| `uwa-api` (test "stream_regressions") | `clippy::get_first` — `calls.get(0).unwrap_or_else(...)` | → `calls.first().unwrap_or_else(...)` |
+| `uwa-browser` (test "cdp_smoke") | `clippy::unnecessary_lazy_evaluations` — `.unwrap_or_else(|| &[])` | → `.unwrap_or(&[])` (×4) |
+
+### 2. devharness `panic!()` in production code path
+
+`devharness/src/core/gates.rs:499` — `panic!("ожидали Fail, получили {v:?}")` in a match arm → `unreachable!("…")`. clippy `--all-targets` now passes clean.
+
+### 3. uwa-lifecycle `start_paused` feature missing
+
+`crates/uwa-lifecycle/Cargo.toml` dev-dependencies lacked `test-util`, so `#[tokio::test(start_paused = true)]` failed with E0599 ("no method named `start_paused`"). Added `test-util` to the tokio dev-dependency features.
+
+### Verification
+
+- `cargo clippy --workspace --all-targets` — exit code 0, zero warnings
+- `cargo fmt --all -- --check` — passes
+- `cargo check --workspace --all-targets` — zero warnings
+- All tests pass: uwa-core (26), uwa-session (61), uwa-browser (41), uwa-api (55 + ~120 integration), uwa-resilience (26), uwa-config (66), uwa-extract (46), uwa-tools (24 + 30), uwa-conformance (11), uwa-providers (49), uwa-history (15), uwa-lifecycle (6), uwa-stealth (15), uwa-testkit (32 + 5), uwa-bin (5), devharness (31)
