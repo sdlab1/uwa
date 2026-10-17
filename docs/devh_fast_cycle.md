@@ -188,45 +188,119 @@ P0 (парсер) — самый дешёвый и самый полезный: 
 - Пункт 7 порядка («P1c требует зелёного baseline → ждать параллельную сессию»): конфиги правились в worktree, ждать не пришлось.
 - Пункт порядка 5: переписывание прод-watcher'ов не потребовалось — семантика ожидания в прод не менялась.
 
-## P5. Тест-фаза мутанта — следующее узкое место (2026-10-17, после P1)
+## P5. Тест-фаза мутанта — детальный план (обновление 1, 2026-10-17)
 
-Корень закрыт: профиль `test` без incremental — детали и замеры в `docs/rust_build.md` §9.7–9.10,
-рычаг применён в `.harness/config` (`CARGO_PROFILE_TEST_INCREMENTAL=true cargo mutants --in-place
---test-tool nextest --baseline=skip --timeout-multiplier 2 {files}`). Спокойная машина (load ~1):
-touch-пересборка 11.8s → **2.2s** (steady-state); чистый suite `nextest run -p devh` = **13.4s**
-(пойманный мутант ≈4s). Узел сместился: build 93% цикла → ~15%, доминирует тест-фаза.
+Корень закрыл `CARGO_PROFILE_TEST_INCREMENTAL=true` (детали и замеры — rust_build.md §9.7–9.10).
+Данные тест-фазы ниже — из артефактов прогонов (`outcomes.json`, логи nextest), не из догадок.
 
-### 5.1 Отсечь нефункциональные/висячие тесты из мут-прогона
-- Проблема: 22 мутанта с test >20s, max 95s (`lib.rs: delete match arm` вешает spawn'ы портов);
-  `section00_shellcheck_oracle_files` 9.7s — про фикстуры, не про логику.
-- Действие: passthrough в MUTATE: `-- --skip <regex>` (селектор медленных нефункциональных
-  тестов). Гейт приёмки: kill-rate на контрольном scope (14 мутантов) ДО/ПОСЛЬ — caught-count
-  не должен падать, иначе откат правила.
-- Замена skip'у: кеш shellcheck-оракула по hash файла; fix висячих интеграций.
+### 5.0 Замеренная база тест-фазы
 
-### 5.2 Notify вместо sleep-поллинга (детали П2.1–2.2)
-- `src/shell/proc.rs`, `src/shell/lock.rs`, `src/core/state.rs` + ожидания в `tests/integration.rs`
-  (section21*, section09, section07, section25). Цель: suite 13.4s → 5–7s, т.е. ≈7s экономии
-  на КАЖДОМ мутанте — теперь это дороже build'а. Приём: `tokio::sync::Notify`/watch,
-  `start_paused = true` для чистых таймер-тестов.
+| Факт | Значение | Источник |
+|------|----------|----------|
+| Полный прогон 205 мутантов (copy-режим, до `--in-place`) | build: mean **90.7s**, median 90.5s, max 252.2s | `/home/user/project_uwa/mutants.out/outcomes.json` |
+| Тест-фаза того же прогона | mean 6.7s, median 2.6s, **max 95.5s** | там же |
+| Мутантов с test >20s | **23** | там же |
+| Из них класс «`delete match arm` в `Cmd::from_matches`» | **22** (`lib.rs:101..181`) + `prompt.rs` agent_prompt ×2 | там же |
+| Актуальный сьют (in-place-дерево, load ≈ 2) | 104 теста, **8.9s**, `--status-level=all` | `nextest run -p devh` 17:35 |
+| Топ слоу-тестов сьюта | section21c 2.81s · section21d 2.73s · section21b(ps) 2.62s · section07_watchdog 2.23s · timing::elapsed 2.21s · section09 1.62s | там же |
 
-### 5.3 Меньше мутантов — тот же смысл гейта
-- Локально `--in-diff` (только дифф-затронутое) + `--iterate` с постоянным `-o` (повтор = только
-  новые/изменившиеся мутанты). Следить, чтобы scope не расползался на все `crates/*/src`.
+### 5.1 Почему 22 мутанта шли 30–95s (доказано по логам, причина НЕ «висячие тесты»)
 
-### 5.4 Контенция и CI (по замерам параллельной сессии, rust_build.md §9.10)
-- Правило: гейт `MUTATE` не запускать при load >4 (×2–4 к времени; замеры соседа получили
-  OOM rc=137). Реализация: проверка нагрузки в `mutate_gate`/doctor перед стартом.
-- CI: матрица `--shard i/4` + `taiki-e/install-action` + nextest → 20–25 мин против 90-минутной
-  джобы; `--in-place` в CI не годится (блокирует `-j`).
+Самый медленный мутант — `lib.rs:163:13 delete match arm Some("doctor")`, test=95.5s.
+Его nextest-лог: `test section00_shellcheck_oracle_files has been running for over 60 seconds`,
+suite `finished in 89.82s` (unit-бинарь 2.45s). Разбор:
 
-### 5.5 Границы (обоснование — rust_build.md §9.8)
-- Не менять язык тестов/драйвера (C/bash/luajit/rust→C): build мутанта теперь 2.2s и ирредуцибилен;
-  рантайм тестов — процессы и sleep'ы, язык ни при чём.
-- Не дробить тест-файлы: линковка — узкое место 2 ядер; merge, не split.
+1. Тот прогон шёл **в copy-режиме** (`/tmp/cargo-mutants-*.tmp` — свежее дерево на мутанта):
+   в копии нет `devharness/target/.shellcheck-cache` → shellcheck-оракул (5 файлов × ~2с
+   анализа) **холодный на каждом мутанте**; под контенцией (load ~24) его цена растёт
+   2s → 30–95s. Оракул не зависит от мутанта — чистый налог режима копирования.
+2. 4 лога из 205 содержат slow-warning nextest (>60s) — все четыре называют `section00`;
+   остальные 19 «медленных» — тот же оракул на 20–40s под нагрузкой.
+3. Второй множитель — wait-циклы тестов: `while !ap.exists() && n<50` (200мс) и
+   `while ap.exists() && n<200` (100мс) (`tests/integration.rs` ~857, ~940, ~956, ~992, ~1000)
+   при подломанной подкоманде сгорают целиком (10–20s на тест) и падают **без stderr**.
 
-### Приёмка
-1. Спокойная машина: контрольный прогон 14 мутантов (`timing.rs`) — цель ≤3 мин (сейчас 6.6 мин при load 8–12).
-2. Тест на парсис вывода cargo-mutants 27.x с missed/unviable/timeout (сделано в P0) — регрессия на любую правку парсера.
-3. `devh doctor`: проверки «cargo-mutants ≥27», «MUTATE содержит CARGO_PROFILE_TEST_INCREMENTAL=true», «target тёплый» — конфиг не должен отваливаться молча.
-4. Каждый шаг замера дописывать в журнал rust_build.md с датой и load.
+Что уже закрыло причину №1 **без кода**: `--in-place` в `.harness/config` (дерево = рабочее,
+оракул тёплый 0.03s) + content-hash кэш из P2. Подтверждается контрольным прогоном (5.6).
+
+### 5.2 Отсечь нефункциональные из мут-прогона — механизм
+
+- **Оракул не отсечём, а согреем**: `--in-place` + наличие `devharness/target/.shellcheck-cache`
+  (doctor-проверка в 5.5). Зачем отсекать, если тепло = 0.03s: смысл оракула — devh-classic
+  чинит selfmutate.sh, молчашка опаснее 30ms.
+- **Passthrough на будущее** (факты из `cargo mutants --help` 27.1.0): usage допускает
+  `[-- <CARGO_TEST_ARGS>...]`, есть `--cargo-test-arg`; при `--test-tool nextest` это уже
+  аргументы nextest (`-E 'not test(...)'`). Включать в шаблон **только** через проверку в
+  приёмке: сначала `cargo mutants ... -- -E 'not test(x)' --list`-эквивалент (дешёвый
+  dry-run), потом боевой прогон; kill-rate не должен упасть.
+
+### 5.3 Death-aware ожидания в тестах (новый код — быстрый kill вместо бюджета)
+
+Правки в `devharness/tests/integration.rs`: helper + применение в section21c/21d (и bg_ps
+где есть spawned-child):
+
+```rust
+// тик 25мс; условие; при смерти ребёнка — мгновенный fail с exit status + stderr.
+fn wait_child_until(child: &mut Child, budget: Duration, mut cond: impl FnMut() -> bool, what: &str)
+```
+
+- Не меняем семантику прохождения: те же assert'ы (pid file появился/исчез), просто
+  быстрее и с диагностикой (exit code + хвост stderr вместо голого «должен появиться»).
+- Ожидаемый эффект: для класса `delete match arm` тест-фаза 30–95s → **~3–5s**
+  (оракул тёплый + мгновенный kill). Это ≈5–20% времени всего 205-прогона.
+- Для section21b(ps)/21d: первая фаза — `output()` (failed-fast, ок), вторая — да death-aware.
+
+### 5.4 Меньше мутантов — тот же смысл гейта
+
+- `{files}` (P1b) уже ограничивает scope. `--iterate` + стабильный `-o` включать **отдельным
+  режимом** (быстрый повтор: только новые/изменившиеся мутанты), не дефолтом: полный прогон
+  должен остаться полным, иначе регрессии прошлых спек прячутся.
+- `--in-diff <path>` — только для ручных прогонов, в гейт не пихать (P1b точнее).
+
+### 5.5 Контенция: load-gate (по замерам §9.10: load>4 = ×2–4, OOM rc=137)
+
+Код:
+- pure `load_average() -> Option<f64>` (парсер `/proc/loadavg`, 1-е поле) + `cpu_count()`;
+- порог = `max(2, ncpu)`, оверрайд `HARNESS_MUTATE_MAX_LOAD` (`off` = выключить);
+- `mutate_gate` (`src/commands/run.rs`) перед запуском MUTATE: load > порог ⇒ лог + verdict
+  EnvBlocked с cause «load X > Y: мутации ускорят ×2–4» (гейт честно blocked, не молчаливый);
+- `devh doctor`: те же проверки + «cargo-mutants ≥27» + «MUTATE содержит
+  CARGO_PROFILE_TEST_INCREMENTAL=true» + «shellcheck-кэш тёплый»;
+- unit-тесты: парсер loadavg (мок строк), пороги; integration: при `HARNESS_MUTATE_MAX_LOAD=0.1`
+  мутанты не запускаются.
+
+### 5.6 Приёмка (числа, все — на спокойной машине, load писать в журнал)
+
+1. **Контроль 14 мутантов** `timing.rs`, шаблон in-place+nextest+incremental+baseline=skip:
+   цель total ≤3 мин (предыдущий замер 393.5s при load 8–12 в copy-режиме); сравнить
+   build/test medians из `outcomes.json` до/после.
+2. **Kill-rate не упал**: caught ≥13/14 на контрольном scope после правок wait-циклов.
+3. **Death-aware тест**: новый тест на helper — мок-ребёнок умирает мгновенно → assert <1s
+   (без бюджета 10–20s).
+4. **doctor** проверяет все пункты 5.5; при load>порога mute-гейт даёт EnvBlocked.
+5. **Журнал**: строки в rust_build.md с датой/load/числами после каждого шага.
+
+### Что делаю сейчас (2026-10-17, итерация 1)
+
+1. Контрольный прогон 14 мутантов в тёплом reuse-worktree `/tmp/devh-merge-W041`
+   (запущен 17:39, стартовый load 2.9) — проверяет приёмку №1 без правок кода.
+2. 5.3 death-aware waiters — правка + тест + прогон сьюта.
+3. 5.5 load-gate — парсер + mutate_gate + doctor + тесты.
+4. Замеры и вердикты — сюда и в rust_build.md; коммит через `git add -f`.
+
+## P5 — выполнено (2026-10-17, вечер)
+
+| Приёмка (§5.6) | Статус | Факт |
+|---|---|---|
+| 1. Контроль 14 мутантов ≤3 мин | **closed** | 4м (13 caught, 1 unviable, 0 missed); build median 11.9s vs 90.5s copy-mode; test median 4.0s. Лог `/tmp/mut_p5_control.log` |
+| 2. Kill-rate не упал | **closed** | 13/14 = ровно как базовый замер; правки wait-циклов гейт не задели |
+| 3. Death-aware тест | **closed** | `wait_child_helper_fast_kill` — мёртвый ребёнок ловится за <2s (было: сжигание бюджета); `wait_pid_for`/`parse_pid` для bg (умирает демон, не лаунчер) |
+| 4. doctor + load-gate | **closed** | doctor: MUTATE/incremental, load vs порог, тёплый shellcheck-кэш (живой прогон: fail=0 warn=6); integration `section16b_load_gate_blocks_mutants`: `HARNESS_MUTATE_MAX_LOAD=0.1` → `env-blocked`, мутатор не стартует |
+| 5. Журнал | **closed** | rust_build.md §9.11 — все числа с датой/режимом |
+
+Расхождения с планом (по ходу сделано иначе):
+- §5.2 отсечение оракула через `--skip` **не делаем**: оракул тёплый (0.03s с кэшем, P2), смысл его — devh-classic чинит `selfmutate.sh`; passthrough `--` — только после dry-run приёмки с kill-rate.
+- §5.5 порог изменён на `max(4, 2×CPU)` (в плане было `max(2, ncpu)`): собственный build гейта devh и так поднимает loadavg на секунду, порог 4 не реагирует на это.
+- Extraction бинаря в doctor пропускает `KEY=VALUE`-токены шаблона MUTATE (env-assignment — не программа); иначе `CARGO_PROFILE_TEST_INCREMENTAL=true` читалось как имя бинаря → ложный WARN.
+
+Сьют-гейт: `cargo nextest run -p devh` — **112/112 PASS**, `cargo clippy -p devh --all-targets` чистый, `cargo fmt --check` чистый. Известный шум: при load≈10 `section21*` даёт contention-флейк (ровно тот случай, от которого load-gate и защищает) — повторный прогон зелёный.

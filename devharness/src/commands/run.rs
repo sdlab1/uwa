@@ -1093,6 +1093,13 @@ fn finish(m: &MutateCfg, run: MutRun, label: &str, key: &str) -> MutReport {
         unviable,
     } = run
     else {
+        if let MutRun::Blocked(why) = run {
+            return MutReport {
+                log: format!("{label} env-blocked: {why}\n"),
+                outcome: MutateOutcome::Env,
+                stats: None,
+            };
+        }
         return MutReport {
             log: format!(
                 "{label} env: инструмент не распознан (ни 'N mutants tested in T: C caught, M missed', ни 'Mutants: N, Killed: M'); {key}='{}'\n",
@@ -1190,10 +1197,22 @@ enum MutRun {
         missed: u32,
         unviable: u32,
     },
+    /// P5.5: контенция — нагрузка выше порога, гейт перенесён (не молчаливый Env).
+    Blocked(String),
     Env,
 }
 
 fn run_mut(wt: &Path, cmd: &str) -> MutRun {
+    // P5.5: под контенцией мутации стоят ×2–4 (load 24 в логах; §9.10).
+    // Один замер перед запуском: порог max(4, 2×CPU) либо
+    // HARNESS_MUTATE_MAX_LOAD ("off" — выключить). Неизвестная нагрузка
+    // (нет /proc/loadavg) гейт не блокирует.
+    if let Some(load) = crate::core::load::load_average() {
+        let env = std::env::var("HARNESS_MUTATE_MAX_LOAD").ok();
+        if let Some(why) = crate::core::load::block_reason(env.as_deref(), load) {
+            return MutRun::Blocked(why);
+        }
+    }
     match proc::run_logged(cmd, wt, MUTATE_TIMEOUT, &[]) {
         Ok(out) => {
             let log = proc::combined(&out);

@@ -94,13 +94,13 @@ pub fn doctor(store: &Store, cfg: &RunConfig, root: &Path) -> anyhow::Result<()>
     }
 
     if let Some(m) = &cfg.mutate {
+        // Шаблон может начинаться с env-assignments
+        // (CARGO_PROFILE_TEST_INCREMENTAL=true cargo mutants ...) — берём
+        // первое слово после них, иначе «бинарь» = имя переменной.
         let mbin = m
             .tool
-            .split_once("&& ")
-            .map(|(_, rest)| rest)
-            .unwrap_or(&m.tool)
             .split_whitespace()
-            .next()
+            .find(|w| !w.contains('='))
             .unwrap_or("");
         if crate::commands::run::which(mbin) {
             say(&format!("ok   mutation: {mbin} доступен ({})", m.scope));
@@ -141,7 +141,40 @@ pub fn doctor(store: &Store, cfg: &RunConfig, root: &Path) -> anyhow::Result<()>
                 say("WARN нет .cargo/mutants.toml — параметры только в шаблоне MUTATE");
                 warn = warn.saturating_add(1);
             }
+            // P5.5: корневой рычаг slow-build мутантов — профиль test с
+            // incremental (rust_build.md §9.7). Без env-оверрайда каждый
+            // мутант платит полную сборку: молча терять нельзя.
+            if m.tool.contains("CARGO_PROFILE_TEST_INCREMENTAL=true") {
+                say("ok   MUTATE: CARGO_PROFILE_TEST_INCREMENTAL=true (быстрые мутанты)");
+            } else {
+                say("WARN MUTATE без CARGO_PROFILE_TEST_INCREMENTAL=true — мутанты платят полную сборку профиля test (§9.7)");
+                warn = warn.saturating_add(1);
+            }
         }
+    }
+
+    // P5.5: нагрузка — под контенцией мутанты ×2–4; doctor показывает факт,
+    // решение принимает load-gate в mutate_gate (порог max(4, 2×CPU)).
+    match crate::core::load::load_average() {
+        Some(load) => match crate::core::load::max_load() {
+            Some(max) if load > max => {
+                say(&format!(
+                    "WARN load {load:.1} > порог {max:.1} — мутанты сейчас ×2–4 времени (§9.10)"
+                ));
+                warn = warn.saturating_add(1);
+            }
+            _ => say(&format!("ok   load {load:.1}")),
+        },
+        None => say("ok   load неизвестен (нет /proc/loadavg)"),
+    }
+
+    // P5.5: кэш shellcheck-оракла — без него мут-прогон в копии платит
+    // холодный оракул (~2с на файл; в логах 205-прогона — до 95s тест-фазы).
+    if crate::commands::run::which("shellcheck") && shellcheck_cache(root) > 0 {
+        say("ok   shellcheck-кэш тёплый");
+    } else if crate::commands::run::which("shellcheck") {
+        say("WARN shellcheck-кэш холодный — оракул будет перепроверять файлы (~2с на файл)");
+        warn = warn.saturating_add(1);
     }
 
     // P3: тёплый target главного дерева — иначе первый прогон платит cold-build.
@@ -341,6 +374,17 @@ fn cargo_mutants_version() -> Option<(u64, String)> {
     let ver = txt.split_whitespace().last()?.to_string();
     let major = ver.split('.').next()?.parse::<u64>().ok()?;
     Some((major, ver))
+}
+
+/// Число записей в кэше shellcheck-оракла (devharness/target/.shellcheck-cache).
+fn shellcheck_cache(root: &Path) -> usize {
+    let dir = root
+        .join("devharness")
+        .join("target")
+        .join(".shellcheck-cache");
+    std::fs::read_dir(&dir)
+        .map(|rd| rd.flatten().count())
+        .unwrap_or(0)
 }
 
 /// Инкрементный кеш devh в главном дереве: признак прогретого target.

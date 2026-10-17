@@ -424,6 +424,29 @@ MUTATE='CARGO_PROFILE_TEST_INCREMENTAL=1 cargo mutants --in-place --test-tool ne
 
 Итог CI: sharding×4 + install-action + nextest = ~20–25 мин против одной 90-минутной джобы (`--in-place` в CI не годится из-за блокировки `-j`; локально — наоборот).
 
+---
+
+### 9.11 P5 — тест-фаза мутанта в devh: замеры и код (2026-10-17)
+
+**Что сделано (devharness, коммит-кандидат после `edd9541`):**
+
+| Артефакт | Смысл |
+|---|---|
+| `core/load.rs` (новый, 6 unit-тестов) | load-gate мутаций: `parse_load` (1-е поле `/proc/loadavg`), порог по умолчанию **max(4, 2×CPU)**, override `HARNESS_MUTATE_MAX_LOAD` (`off` — выключить; мусор/отрицательное → дефолт), `block_reason` — текст причины в лог гейта |
+| `commands/run.rs` | `run_mut()` читает нагрузку ДО запуска мутатора (один замер, свой build гейта себя не блокирует); `MutRun::Blocked(why)` → `MutReport{outcome: Env, log: "{label} env-blocked: {why}"}` — гейт **перенесён с честной причиной**, не молчаливый Env |
+| `commands/doctor.rs` | `MUTATE` содержит `CARGO_PROFILE_TEST_INCREMENTAL=true` (иначе WARN §9.7); `load X > порог Y` (WARN, §9.10); тёплый `.shellcheck-cache`; extraction бинаря мутатора пропускает env-assignments (`CARGO_PROFILE_TEST_INCREMENTAL=true` — не программа) |
+| `tests/integration.rs` | §5.3 death-aware: `wait_child_for` (тик 25мс, бюджет 10s, `try_wait` ловит смерть ребёнка мгновенно) — в `section21c`; pid-вариант `wait_pid_for`/`parse_pid`/`assert_pid_file_gone` — в `section21_bg_ps`, `section21d_bg_auto` (у `bg` умирает демон, не лаунчер); §5.5 тест `section16b_load_gate_blocks_mutants`: `HARNESS_MUTATE_MAX_LOAD=0.1` → `env-blocked`, заглушка мутатора **не запускается** |
+
+**Контрольный замер (2026-10-17, тёплое in-place-дерево `/tmp/devh-merge-W041`, reuse-worktree, `MUTATE='CARGO_PROFILE_TEST_INCREMENTAL=true cargo mutants --in-place --test-tool nextest --baseline=skip --timeout-multiplier 2'`, 14 мутантов timing.rs):**
+
+| Метрика | Copy-mode (205-прогон, §9.7) | In-place warm (этот замер) |
+|---|---|---|
+| build mean / median | 90.7s / 90.5s | **12.7s / 11.9s** (max 24.9s) |
+| test mean / median | 6.7s / 2.6s | **3.8s / 4.0s** (max 6.1s) |
+| Итог | 22 мутанта с test 30–95s | 14 мутантов за **4м**: 13 caught, 1 unviable, 0 missed |
+
+Приёмка §5.6 №1 закрыта: тест-фаза перестала быть узким местом — теперь ею снова является build (median ~12s), а он уже инкрементален (§9.7). Сьют: **112/112 PASS**, fmt/clippy чистые (под контенцией load≈10 дал флейк в `section21*` — повторный прогон зелёный; это ровно тот contention, от которого load-gate и защищает).
+
 ### Детали замера линковщика (детализация к §8.5)
 
 Правильная команда установки (флаг `-C link-arg=...` НЕ идёт в apt — отсюда типичная ошибка `apt install lld + -C link-arg=...`; `-C` — опция rustc/cargo, не apt):

@@ -308,6 +308,128 @@ fn assert_skippable(tool: &str) {
     eprintln!("SKIP: {tool} не установлен");
 }
 
+/// Ждём условие тиком 25мс, но возвращаемся сразу, если ребёнок умер:
+/// в логах 205-прогона 22 мутанта класса `delete match arm` роняли CLI
+/// мгновенно, а опросные циклы сжигали полный бюджет (10–20s на тест —
+/// вся «тест-фаза» мутанта должена была быть 4s). Death-aware версия
+/// отличает «ещё живо» от «подкоманду сломали»: kill за ~25мс.
+/// Err(Some(status)) — ребёнок умер раньше условия; Err(None) — бюджет 10s.
+fn wait_child_for(
+    child: &mut std::process::Child,
+    cond: impl Fn() -> bool,
+) -> Result<(), Option<std::process::ExitStatus>> {
+    const TICK: std::time::Duration = std::time::Duration::from_millis(25);
+    const BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
+    let mut spent = std::time::Duration::ZERO;
+    loop {
+        if cond() {
+            return Ok(());
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => return Err(Some(status)),
+            Ok(None) => {}
+            Err(e) => unreachable!("try_wait: {e}"),
+        }
+        if spent >= BUDGET {
+            return Err(None);
+        }
+        std::thread::sleep(TICK);
+        spent = spent.saturating_add(TICK);
+    }
+}
+
+#[test]
+fn wait_child_helper_fast_kill() {
+    // мёртвый ребёнок: Err(Some) за миллисекунды, а не за бюджет 10s
+    let mut dead = std::process::Command::new("false")
+        .spawn()
+        .unwrap_or_else(|_| unreachable!());
+    std::thread::sleep(std::time::Duration::from_millis(150));
+    let t0 = std::time::Instant::now();
+    let r = wait_child_for(&mut dead, || false);
+    assert!(matches!(r, Err(Some(_))), "мёртвый ребёнок: {r:?}");
+    assert!(t0.elapsed() < std::time::Duration::from_secs(2));
+    let _ = dead.wait();
+
+    // живой ребёнок + уже-истинное условие: Ok мгновенно, процесс цел
+    let mut alive = std::process::Command::new("sleep")
+        .arg("5")
+        .spawn()
+        .unwrap_or_else(|_| unreachable!());
+    assert!(wait_child_for(&mut alive, || true).is_ok());
+    let _ = alive.kill();
+    let _ = alive.wait();
+}
+
+const TEN: std::time::Duration = std::time::Duration::from_secs(10);
+const TWENTY: std::time::Duration = std::time::Duration::from_secs(20);
+
+#[derive(Debug)]
+enum WaitPid {
+    /// Условие наступило.
+    Ok,
+    /// Процесс умер раньше условия.
+    Dead,
+    /// Бюджет исчерпан, процесс жив.
+    Timeout,
+}
+
+fn pid_alive(pid: u32) -> bool {
+    pid > 0 && std::path::Path::new(&format!("/proc/{pid}")).exists()
+}
+
+fn parse_pid(out: &str) -> u32 {
+    let tail = out.split("PID ").nth(1).unwrap_or("");
+    let digits: String = tail.chars().take_while(|c| c.is_ascii_digit()).collect();
+    digits.parse().unwrap_or(0)
+}
+
+/// Death-aware ожидание по PID (для `bg`: лаунчер выходит сразу, а живёт
+/// отсоединённый демон — его /proc/<pid> и есть признак смерти). Тик 25мс;
+/// бюджет задаёт вызывающий.
+fn wait_pid_for(pid: u32, cond: impl Fn() -> bool, budget: std::time::Duration) -> WaitPid {
+    const TICK: std::time::Duration = std::time::Duration::from_millis(25);
+    let mut spent = std::time::Duration::ZERO;
+    loop {
+        if cond() {
+            return WaitPid::Ok;
+        }
+        if !pid_alive(pid) {
+            return WaitPid::Dead;
+        }
+        if spent >= budget {
+            return WaitPid::Timeout;
+        }
+        std::thread::sleep(TICK);
+        spent = spent.saturating_add(TICK);
+    }
+}
+
+/// Гонка «демон убирает файл в Drop-guard'е ровно в момент выхода»:
+/// даём тикам 25мс секунду добежать, затем проверяем.
+fn assert_pid_file_gone(path: &Path, what: &str, pid: u32) {
+    let mut n: u32 = 0;
+    while path.exists() && n < 40 {
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        n = n.saturating_add(1);
+    }
+    assert!(
+        !path.exists(),
+        "{what} убирается guard'ом по завершении: демон умер (pid {pid})"
+    );
+}
+
+#[test]
+fn parse_pid_takes_digits_after_marker() {
+    assert_eq!(
+        parse_pid("OK bg: W-001 → \u{1b}[34mPID 4242\u{1b}[0m"),
+        4242
+    );
+    assert_eq!(parse_pid("PID 7; лог: x"), 7);
+    assert_eq!(parse_pid("no marker"), 0);
+    assert!(!pid_alive(0));
+}
+
 #[test]
 fn section01_happy_path() {
     let sb = Sandbox::new("r1");
@@ -719,6 +841,53 @@ fn section16_mutation_env_blocker() {
 }
 
 #[test]
+fn section16b_load_gate_blocks_mutants() {
+    // P5 §5.5: под контенцией мутации стоят ×2–4. Порог по умолчанию
+    // max(4, 2×CPU); HARNESS_MUTATE_MAX_LOAD=0.1 гейтит всегда — гейт
+    // уходит в env-blocked, мутатор не запускается вовсе.
+    let sb = Sandbox::new("r16b");
+    sb.run_ok(&["init"]);
+    sb.new_item("load item", "спека\n", Some("x"));
+    write_exec(
+        &sb.stubs.join("mut-marker.sh"),
+        "#!/usr/bin/env bash\necho marker > \"$T_MUT_MARKER\"\necho \"Mutants: 10, Killed: 10 (100%)\"\n",
+    );
+    let marker = sb.repo.join(".harness/mut-marker.txt");
+    let mut c = sb.devh(&["run"]);
+    c.env(
+        "HARNESS_MUTATE",
+        format!("{} {{module}}", sb.stubs.join("mut-marker.sh").display()),
+    )
+    .env("T_MUT_MARKER", &marker)
+    .env("HARNESS_MUTATE_MAX_LOAD", "0.1");
+    let out = c.output().unwrap_or_else(|_| unreachable!());
+    assert!(
+        !out.status.success(),
+        "load-gate должен блокировать run, а не гонять мутанты"
+    );
+    let all = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        contains(&all, "мутанты стоит гонять под нагрузкой") || contains(&all, "load"),
+        "причина load-блокировки должна быть названа: {all}"
+    );
+    let mlog =
+        fs::read_to_string(sb.log_file("W-001-mutate.log")).unwrap_or_else(|_| unreachable!());
+    assert!(
+        mlog.contains("env-blocked") && mlog.contains("порог 0.1") && mlog.contains("load"),
+        "лог мутационного гейта должен объяснить блокировку: {mlog}"
+    );
+    assert!(
+        !marker.exists(),
+        "мутатор не должен был запускаться под блокировкой"
+    );
+    sb.run_ok(&["abort"]);
+}
+
+#[test]
 fn section17_no_ignored() {
     let sb = Sandbox::new("r17");
     sb.run_ok(&["init"]);
@@ -849,14 +1018,20 @@ fn section21_bg_ps() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(contains(&all, "PID"), "{all}");
+    let pid = parse_pid(&all);
+    assert!(pid > 0, "PID не распарсен из вывода bg: {all}");
 
-    // Ждём фактический старт полёта (run.pid), а не фиксированную секунду:
-    // прогон начинается за десятки мс, секунда простоя была чистым налогом.
+    // Ждём фактический старт полёта (run.pid), а не фиксированную секунду;
+    // P5 §5.3: смерть демона (/proc/<pid>) детектируем мгновенно, а не
+    // сжигаем бюджет опроса.
     let pid_file = sb.item_dir("W-001").join("run.pid");
-    let mut n = 0;
-    while !pid_file.exists() && n < 200 {
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        n += 1;
+    match wait_pid_for(pid, || pid_file.exists(), TEN) {
+        WaitPid::Ok => {}
+        WaitPid::Dead => assert!(
+            pid_file.exists(),
+            "bg-прогон должен стартовать (run.pid): демон умер (pid {pid})"
+        ),
+        WaitPid::Timeout => assert!(pid_file.exists(), "bg-прогон должен стартовать (run.pid)"),
     }
     assert!(pid_file.exists(), "bg-прогон должен стартовать (run.pid)");
     let (ok, ps_out) = sb.run_capture(&["ps"]);
@@ -866,10 +1041,10 @@ fn section21_bg_ps() {
         contains(&ps_out, "PID"),
         "ps показывает живой PID: {ps_out}"
     );
-    let mut n = 0;
-    while pid_file.exists() && n < 200 {
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        n += 1;
+    match wait_pid_for(pid, || !pid_file.exists(), TWENTY) {
+        WaitPid::Ok => {}
+        WaitPid::Dead => assert_pid_file_gone(&pid_file, "run.pid", pid),
+        WaitPid::Timeout => assert!(!pid_file.exists(), "pid file should be removed"),
     }
     assert!(!pid_file.exists(), "pid file should be removed");
     assert_eq!(sb.status("W-001"), "active", "bg run completed");
@@ -936,10 +1111,13 @@ fn section21c_auto_pid_ps() {
     c.env("HARNESS_VERIFY", "sleep 2; test -f done.txt");
     let mut child = c.spawn().unwrap_or_else(|_| unreachable!());
     let ap = sb.harness_file("auto.pid");
-    let mut n = 0;
-    while !ap.exists() && n < 50 {
-        std::thread::sleep(std::time::Duration::from_millis(200));
-        n += 1;
+    match wait_child_for(&mut child, || ap.exists()) {
+        Ok(()) => {}
+        Err(Some(status)) => assert!(
+            ap.exists(),
+            "auto.pid должен появиться: devh auto умер ({status}) — подкоманда сломана?"
+        ),
+        Err(None) => assert!(ap.exists(), "auto.pid должен появиться за 10s"),
     }
     assert!(
         ap.exists(),
@@ -952,12 +1130,22 @@ fn section21c_auto_pid_ps() {
         "ps показывает авто-прогон: {ps_out}"
     );
     assert!(contains(&ps_out, "PID"), "{ps_out}");
-    let mut n = 0;
-    while ap.exists() && n < 200 {
-        std::thread::sleep(std::time::Duration::from_millis(100));
-        n += 1;
+    match wait_child_for(&mut child, || !ap.exists()) {
+        Ok(()) => {}
+        Err(Some(status)) => {
+            // devh auto вышел раньше демона: guard'у даём секунду добежать
+            let mut n: u32 = 0;
+            while ap.exists() && n < 40 {
+                std::thread::sleep(std::time::Duration::from_millis(25));
+                n = n.saturating_add(1);
+            }
+            assert!(
+                !ap.exists(),
+                "auto.pid убирается guard'ом по завершении: devh auto умер ({status})"
+            );
+        }
+        Err(None) => assert!(!ap.exists(), "auto.pid убирается guard'ом по завершении"),
     }
-    assert!(!ap.exists(), "auto.pid убирается guard'ом по завершении");
     let _ = child.wait();
     assert_eq!(sb.status("W-001"), "done");
 }
@@ -987,19 +1175,28 @@ fn section21d_bg_auto() {
     );
     assert!(contains(&all, "PID"), "{all}");
     assert!(contains(&all, "bg-auto.log"), "{all}");
+    let pid = parse_pid(&all);
+    assert!(pid > 0, "PID не распарсен из вывода bg auto: {all}");
     let ap = sb.harness_file("auto.pid");
-    let mut n = 0;
-    while !ap.exists() && n < 50 {
-        std::thread::sleep(std::time::Duration::from_millis(200));
-        n += 1;
+    match wait_pid_for(pid, || ap.exists(), TEN) {
+        WaitPid::Ok => {}
+        WaitPid::Dead => assert!(
+            ap.exists(),
+            "auto.pid должен появиться: демон bg-auto умер (pid {pid})"
+        ),
+        WaitPid::Timeout => assert!(ap.exists(), "auto.pid должен появиться за 10s"),
     }
+    assert!(
+        ap.exists(),
+        "auto.pid должен появиться во время bg-auto-прогона"
+    );
     let (ok, ps_out) = sb.run_capture(&["ps"]);
     assert!(ok);
     assert!(contains(&ps_out, "auto"), "ps видит bg-auto: {ps_out}");
-    let mut n = 0;
-    while ap.exists() && n < 200 {
-        std::thread::sleep(std::time::Duration::from_millis(100));
-        n += 1;
+    match wait_pid_for(pid, || !ap.exists(), TWENTY) {
+        WaitPid::Ok => {}
+        WaitPid::Dead => assert_pid_file_gone(&ap, "auto.pid", pid),
+        WaitPid::Timeout => assert!(!ap.exists(), "auto.pid убран по завершении bg-auto"),
     }
     assert!(!ap.exists(), "auto.pid убран по завершении bg-auto");
     assert_eq!(sb.status("W-001"), "done");
