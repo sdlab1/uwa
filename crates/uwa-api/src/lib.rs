@@ -36,7 +36,6 @@
 //! multi-line JSON, dead code, lone `\r` SSE terminator, `finish_reason`
 //! enum compliance, and the broken-HEAD repair — lives in git history.
 //!
-//! ```
 //! UWA-102 ✅ http_ok now performs real TLS via ureq
 //! ---------------------------------------------------
 //! https:// URLs are now probed with a real TLS handshake + GET /healthz
@@ -75,7 +74,6 @@
 //! content-derived hash in both buffered and streaming pipeline paths.
 //! Location: crates/uwa-api/src/routing.rs,
 //!           crates/uwa-api/src/routes/chat/pipeline.rs
-//! ```
 //!
 //! Open: None.
 //!
