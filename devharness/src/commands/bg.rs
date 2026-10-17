@@ -22,7 +22,10 @@ pub fn bg(store: &Store, id: &ItemId) -> anyhow::Result<()> {
     let out = std::fs::File::create(&bglog)?;
     let err = out.try_clone()?;
     let mut cmd = Command::new(&exe);
-    cmd.arg("run")
+    // bg-параллель: per-id путь, потому что запусков может быть несколько и
+    // общий reuse-worktree они стали бы перезаписывать друг другу (P1a).
+    cmd.env("HARNESS_WT_REUSE", "0")
+        .arg("run")
         .arg(id.dir_name())
         .current_dir(store.root())
         .stdin(Stdio::null())
@@ -60,7 +63,9 @@ pub fn bg_auto(store: &Store, from: &str, max: u32) -> anyhow::Result<()> {
     let out = std::fs::File::create(&bglog)?;
     let err = out.try_clone()?;
     let mut cmd = Command::new(&exe);
-    cmd.arg("auto")
+    // bg auto — параллельный диспетчер: его `devh run`-дети тоже per-id.
+    cmd.env("HARNESS_WT_REUSE", "0")
+        .arg("auto")
         .arg("--from")
         .arg(from)
         .arg("--max")

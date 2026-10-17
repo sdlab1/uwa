@@ -49,7 +49,7 @@ pub fn hint(store: &Store, cfg: &RunConfig, id: &ItemId) -> anyhow::Result<()> {
     println!();
     println!("## Контекст для следующей модели:");
     let root = store.root();
-    let wt = worktree::path_of(cfg, root, id);
+    let wt = worktree::path_for(cfg, root, id);
     let agent = store
         .read(item_rel(id, "agent"))
         .filter(|a| !a.trim().is_empty())
@@ -187,12 +187,22 @@ pub fn abort(store: &Store, cfg: &RunConfig, id: &ItemId) -> anyhow::Result<()> 
             id.dir_name()
         )
     })?;
-    let wt = worktree::path_of(cfg, &root, id);
+    let wt = worktree::path_for(cfg, &root, id);
     let br = id.branch();
     store.remove_pid(id);
     if wt.is_dir() {
-        git::worktree_remove(&root, &wt)?;
-        println!("{}OK worktree убран{}", c.g, c.z);
+        if worktree::is_active_path(cfg, &root, &wt) {
+            // Общий reuse-путь удалять нельзя: он тёплый и общий. Сброс на
+            // main освобождает ветку задачи и сохраняет target/.
+            git::release_active(&wt, &cfg.main_branch)?;
+            println!(
+                "{}OK reuse-путь возвращён на {} (target сохранён){}",
+                c.g, cfg.main_branch, c.z
+            );
+        } else {
+            git::worktree_remove(&root, &wt)?;
+            println!("{}OK worktree убран{}", c.g, c.z);
+        }
     }
     let _ = git::branch_delete(&root, &br);
     if git::has_remote(&root) {
@@ -211,11 +221,17 @@ pub fn clean(store: &Store, cfg: &RunConfig) -> anyhow::Result<()> {
         if it.status != Status::Done {
             continue;
         }
-        let wt = worktree::path_of(cfg, &root, &it.id);
+        let wt = worktree::path_for(cfg, &root, &it.id);
         let br = it.id.branch();
         if wt.is_dir() || git::show_ref(&root, &br) {
             store.remove_pid(&it.id);
-            let _ = git::worktree_remove(&root, &wt);
+            if wt.is_dir() && worktree::is_active_path(cfg, &root, &wt) {
+                // Готовую задачу из общего пути не выпиливаем вместе с target —
+                // только возвращаем путь на main, чтобы ветку можно было удалить.
+                let _ = git::release_active(&wt, &cfg.main_branch);
+            } else {
+                let _ = git::worktree_remove(&root, &wt);
+            }
             let _ = git::branch_delete(&root, &br);
             n = n.saturating_add(1);
             println!("clean: {}", it.id);

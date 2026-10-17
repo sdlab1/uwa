@@ -158,7 +158,7 @@ fn orphan_checks(
     say: &mut dyn FnMut(&str),
     warn: &mut u32,
 ) {
-    let wt = worktree::path_of(cfg, store.root(), &it.id);
+    let wt = worktree::path_for(cfg, store.root(), &it.id);
     if it.status == crate::core::state::Status::Active && !wt.is_dir() {
         say(&format!(
             "WARN {} active без worktree (прерванный run?) — devh run {} продолжит или devh abort {}",

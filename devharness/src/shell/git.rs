@@ -115,6 +115,16 @@ pub fn reuse_checkout(wt: &Path, branch: &str, base: &str) -> anyhow::Result<()>
     Ok(())
 }
 
+/// Вернуть общий reuse-путь в нейтральное состояние (abort/clean завершённой
+/// задачи): отсоединённый HEAD на base + сброс мусора. target/ цел — он и есть
+/// смысл общего пути. Ветку base чекаутить нельзя (её держит главное дерево).
+pub fn release_active(wt: &Path, base: &str) -> anyhow::Result<()> {
+    git(wt, &["checkout", "--detach", base])?;
+    git(wt, &["reset", "--hard"])?;
+    let _ = git(wt, &["clean", "-fd"]);
+    Ok(())
+}
+
 pub fn add_all(wt: &Path) -> anyhow::Result<()> {
     git(wt, &["add", "-A"]).map(|_| ())
 }
@@ -225,15 +235,35 @@ fn names_scoped(wt: &Path, kind: &str, scope: &str) -> Vec<String> {
         .collect()
 }
 
+/// Изменённые файлы, ограниченные scope (список git-pathspec через пробел).
+/// Всегда объединение diff+status: `git diff HEAD` не видит неотслеживаемые
+/// файлы, поэтому «status только если diff пуст» терял новые файлы агента
+/// (мутанты для них не генерировались — гейт молча слабел).
+/// Изменённые файлы в scope, СУЩЕСТВУЮЩИЕ на диске (delete/drop и т.п. отбрасываются).
 pub fn changed_files_scoped(wt: &Path, scope: &str) -> Vec<String> {
+    scoped_names(wt, scope)
+        .into_iter()
+        .filter(|f| wt.join(f).is_file())
+        .collect()
+}
+
+/// То же, но БЕЗ отбрасывания удалённых: mutate-гейт должен сказать
+/// «удалён агентом — мутации не требуется», а не делать вид, что файла нет.
+pub fn changed_files_scoped_all(wt: &Path, scope: &str) -> Vec<String> {
+    scoped_names(wt, scope)
+}
+
+fn scoped_names(wt: &Path, scope: &str) -> Vec<String> {
     let mut files = names_scoped(wt, "diff", scope);
-    if files.is_empty() {
-        files = names_scoped(wt, "status", scope);
-    }
-    files.retain(|f| wt.join(f).is_file());
+    files.extend(names_scoped(wt, "status", scope));
     files.sort();
     files.dedup();
     files
+}
+
+pub fn current_branch(wt: &Path) -> Option<String> {
+    let b = git_out(wt, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    (!b.trim().is_empty()).then(|| b.trim().to_string())
 }
 
 pub fn review_diff(wt: &Path) -> String {
@@ -265,4 +295,146 @@ pub fn log_oneline(root: &Path, n: usize) -> String {
 
 pub fn ls_remote_ok(root: &Path, remote: &str) -> bool {
     git_ok(root, &["ls-remote", "-q", remote, "HEAD"])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn repo() -> tempfile::TempDir {
+        let d = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let git_ = |args: &[&str]| {
+            let _ = git(d.path(), args);
+        };
+        git_(&["init", "-q"]);
+        git_(&["config", "user.email", "t@example.com"]);
+        git_(&["config", "user.name", "T"]);
+        d
+    }
+
+    fn commit_all(d: &tempfile::TempDir) {
+        let _ = git(d.path(), &["add", "-A"]);
+        let _ = git(d.path(), &["commit", "-qm", "base"]);
+    }
+
+    #[test]
+    fn scoped_glob_matches_files_inside_src() {
+        let d = repo();
+        let _ = std::fs::create_dir_all(d.path().join("crates/uwa-api/src/routes"));
+        let _ = std::fs::create_dir_all(d.path().join("crates/uwa-api/tests"));
+        let _ = std::fs::write(d.path().join("crates/uwa-api/src/routes/m.rs"), "1\n");
+        let _ = std::fs::write(d.path().join("crates/uwa-api/tests/e2e.rs"), "1\n");
+        commit_all(&d);
+        let _ = std::fs::write(d.path().join("crates/uwa-api/src/routes/m.rs"), "2\n");
+        let _ = std::fs::write(d.path().join("crates/uwa-api/tests/e2e.rs"), "2\n");
+        let got = changed_files_scoped(d.path(), "crates/*/src/*");
+        assert_eq!(
+            got,
+            vec!["crates/uwa-api/src/routes/m.rs".to_string()],
+            "{got:?}"
+        );
+    }
+
+    #[test]
+    fn scoped_bare_dir_glob_matches_nothing() {
+        // git-fnmatch без FNM_PATHNAME требует совпадения ДО КОНЦА строки,
+        // поэтому `crates/*/src` (без /*) не ловит файлы внутри src —
+        // ровно этой ловушкой был сломан прежний MUTATE_SCOPE.
+        let d = repo();
+        let _ = std::fs::create_dir_all(d.path().join("crates/uwa-api/src"));
+        let _ = std::fs::write(d.path().join("crates/uwa-api/src/lib.rs"), "1\n");
+        commit_all(&d);
+        let _ = std::fs::write(d.path().join("crates/uwa-api/src/lib.rs"), "2\n");
+        assert!(changed_files_scoped(d.path(), "crates/*/src").is_empty());
+        assert_eq!(
+            changed_files_scoped(d.path(), "crates/*/src/*"),
+            vec!["crates/uwa-api/src/lib.rs".to_string()]
+        );
+    }
+
+    #[test]
+    fn scoped_sees_untracked_new_files() {
+        let d = repo();
+        let _ = std::fs::create_dir_all(d.path().join("uwa-core/src"));
+        let _ = std::fs::write(d.path().join("uwa-core/src/a.rs"), "1\n");
+        commit_all(&d);
+        // агент создал новый файл и НЕ staged его: только status его видит
+        let _ = std::fs::write(d.path().join("uwa-core/src/new.rs"), "1\n");
+        let got = changed_files_scoped(d.path(), "uwa-core/src/*");
+        assert_eq!(got, vec!["uwa-core/src/new.rs".to_string()], "{got:?}");
+    }
+
+    #[test]
+    fn scoped_empty_and_dot_match_all() {
+        let d = repo();
+        let _ = std::fs::write(d.path().join("a.txt"), "1\n");
+        let _ = std::fs::write(d.path().join("b.txt"), "1\n");
+        commit_all(&d);
+        let _ = std::fs::write(d.path().join("a.txt"), "2\n");
+        let _ = std::fs::write(d.path().join("b.txt"), "2\n");
+        assert_eq!(changed_files_scoped(d.path(), "").len(), 2);
+        assert_eq!(changed_files_scoped(d.path(), ".").len(), 2);
+    }
+
+    #[test]
+    fn scoped_multiple_pathspecs_are_any_of() {
+        let d = repo();
+        for p in [
+            "crates/uwa-api/src/a.rs",
+            "crates/uwa-core/src/b.rs",
+            "devharness/src/c.rs",
+            "docs/d.md",
+        ] {
+            let path = d.path().join(p);
+            let _ = std::fs::create_dir_all(path.parent().unwrap_or(&path));
+            let _ = std::fs::write(&path, "1\n");
+        }
+        commit_all(&d);
+        for p in [
+            "crates/uwa-api/src/a.rs",
+            "crates/uwa-core/src/b.rs",
+            "devharness/src/c.rs",
+            "docs/d.md",
+        ] {
+            let _ = std::fs::write(d.path().join(p), "2\n");
+        }
+        let got = changed_files_scoped(d.path(), "crates/*/src/* crates/uwa-core/src/*");
+        assert_eq!(
+            got,
+            vec![
+                "crates/uwa-api/src/a.rs".to_string(),
+                "crates/uwa-core/src/b.rs".to_string()
+            ],
+            "{got:?}"
+        );
+    }
+
+    #[test]
+    fn scoped_all_keeps_deleted_files_for_mutate_gate() {
+        // mutate-гейт обязан сказать «удалён агентом — мутации не требуется»,
+        // а не делать вид, что файла нет в изменённых (регрессия section18).
+        let d = repo();
+        let _ = std::fs::create_dir_all(d.path().join("uwa-core/src"));
+        let _ = std::fs::write(d.path().join("uwa-core/src/a.rs"), "1\n");
+        let _ = std::fs::write(d.path().join("uwa-core/src/b.rs"), "1\n");
+        commit_all(&d);
+        let _ = std::fs::remove_file(d.path().join("uwa-core/src/b.rs"));
+        assert!(changed_files_scoped(d.path(), "uwa-core/src/*").is_empty());
+        assert_eq!(
+            changed_files_scoped_all(d.path(), "uwa-core/src/*"),
+            vec!["uwa-core/src/b.rs".to_string()]
+        );
+    }
+
+    #[test]
+    fn current_branch_reports_head() {
+        let d = repo();
+        // файл обязателен: иначе commit_all падает («нечего коммитить») и
+        // репо остаётся с unborn HEAD — rev-parse отдаёт «HEAD»
+        let _ = std::fs::write(d.path().join("a.txt"), "1\n");
+        commit_all(&d);
+        let b = current_branch(d.path()).unwrap_or_default();
+        assert!(!b.is_empty(), "ветка HEAD должна читаться");
+        assert_ne!(b, "HEAD", "unborn/detached HEAD не есть ветка задачи");
+    }
 }

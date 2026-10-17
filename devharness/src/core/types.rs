@@ -20,6 +20,11 @@ impl ItemId {
         }
         digits.parse().ok().map(ItemId)
     }
+
+    /// Ветка задачи → id (`devh/W-007` → W-007); чужая/не наша ветка → None.
+    pub fn from_branch(b: &str) -> Option<Self> {
+        Self::resolve(b.strip_prefix("devh/")?)
+    }
 }
 
 impl std::fmt::Display for ItemId {

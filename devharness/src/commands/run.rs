@@ -36,9 +36,29 @@ fn die(store: &Store, id: &ItemId, code: i32) -> ! {
     crate::commands::die(code)
 }
 
+/// Конфиг для `devh run`: последовательный прогон включает стабильный
+/// reuse-путь (P1a — тёплый инкремент вместо 19-мин cold-build'а).
+/// Явный `HARNESS_WT_REUSE=0` остаётся аварийным люком: значение «выключено»
+/// пользователем не переопределяем силой.
+fn cfg_for_run(cfg: &RunConfig) -> RunConfig {
+    let explicit_off = std::env::var("HARNESS_WT_REUSE")
+        .map(|v| matches!(v.trim(), "0" | "false" | "no" | "off"))
+        .unwrap_or(false);
+    if cfg.wt_reuse || !explicit_off {
+        RunConfig {
+            wt_reuse: true,
+            ..cfg.clone()
+        }
+    } else {
+        cfg.clone()
+    }
+}
+
 pub fn run(store: &Store, cfg: &RunConfig, id: &ItemId) -> anyhow::Result<()> {
     let c = colors();
     let root = store.root().to_path_buf();
+    let cfg = cfg_for_run(cfg);
+    let cfg = &cfg;
 
     if cfg.verify.is_empty() {
         anyhow::bail!("devh: VERIFY не задан (.harness/config)");
@@ -578,14 +598,15 @@ fn gate_ladder(
     }
 
     if let Some(m) = &cfg.mutate {
-        let (mlog, mres) = mutate_gate(m, wt);
+        let rep = mutate_gate(m, wt);
         let mpath = store.log_file(id, "mutate");
-        std::fs::write(&mpath, &mlog).ok();
+        std::fs::write(&mpath, &rep.log).ok();
         timing.stage(format!("mutate-r{}", round.saturating_add(1)), store, id);
-        match mres {
+        perf_mutate(store, id, &rep, &timing);
+        match rep.outcome {
             MutateOutcome::Env => {
                 return Err(GateFail::Env {
-                    log: mlog,
+                    log: rep.log,
                     message: format!(
                         "{}FAIL: mutation env-блокер — инструмент не распознан. Блокер СРЕДЫ, не работа агента: установи (gobot: muex; rust: cargo-mutants) или исправь MUTATE в .harness/config. Детали: {}{}",
                         c.r,
@@ -597,7 +618,7 @@ fn gate_ladder(
             MutateOutcome::Fail => {
                 return Err(GateFail::Red {
                     gate: Gate::Mutate,
-                    tail: tail_of(&mlog, 40),
+                    tail: tail_of(&rep.log, 40),
                 })
             }
             MutateOutcome::Ok => {}
@@ -828,125 +849,229 @@ fn crap_gate(wt: &Path, cr: &CrapCfg) -> (String, Verdict) {
     }
 }
 
-fn mutate_gate(m: &MutateCfg, wt: &Path) -> (String, MutateOutcome) {
-    let mut log = String::new();
-    let mut fail = false;
-    let files = git::changed_files(wt);
-    let scoped: Vec<String> = files
-        .into_iter()
-        .filter(|f| m.scope.is_empty() || m.scope == "." || f.starts_with(&m.scope))
-        .collect();
+/// Статистика мутационного прогона (P4: из неё пишется perf.log).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MutStats {
+    total: u32,
+    killed: u32,
+    missed: u32,
+    unviable: u32,
+}
 
-    if !m.tool.contains('{') {
-        match run_mut(wt, &m.tool) {
-            MutRun::Env => {
-                log += &format!(
-                    "mutation env: вывод не распознан (ни 'N mutants tested in T: C caught, M missed', ни 'Mutants: N, Killed: M'); MUTATE='{}'\n",
-                    m.tool
-                );
-                return (log, MutateOutcome::Env);
-            }
-            MutRun::Stats {
-                total,
-                killed,
-                missed,
-                unviable,
-            } => {
-                let testable = total.saturating_sub(unviable);
-                if let Some(pct) = killed
-                    .checked_mul(100)
-                    .and_then(|n| n.checked_div(testable))
-                {
-                    log += &format!(
-                        "mutation: {total} mutants tested, killed {killed} ({pct}%) [caught+timeout, testable {testable}], missed {missed}, unviable {unviable}\n"
-                    );
-                    if pct < m.min_kill {
-                        log += &format!(
-                            "mutation FAIL: kill-rate {pct}% < {}% (testable {testable}: missed {missed}, unviable {unviable})\n",
-                            m.min_kill
-                        );
-                        fail = true;
-                    }
-                } else if total == 0 {
-                    log += "mutation: 0 мутантов — нечего убивать, пропуск\n";
-                } else {
-                    log += &format!(
-                        "mutation: все {total} мутантов unviable (не собираются) — тесты не при чём, пропуск\n"
-                    );
-                }
-            }
+/// Итог мутационного гейта: лог, вердикт и (если вывод распарсился) статы.
+struct MutReport {
+    log: String,
+    outcome: MutateOutcome,
+    stats: Option<MutStats>,
+}
+
+/// Гейт мутаций. scope — список git-pathspec через пробел; git сам матчит
+/// глобы (`crates/*/src/*`) и выкидывает удалённые файлы.
+///
+/// Два режима по шаблону `m.tool`:
+/// - `{files}` — ОДИН запуск на все изменённые файлы (cargo-mutants принимает
+///   несколько `-f`): один baseline и один тёплый target вместо N холодных;
+/// - `{file}`/`{module}` — по файлу на запуск (обратная совместимость);
+/// - без плейсхолдеров — запуск как задан, без scope-фильтра.
+fn mutate_gate(m: &MutateCfg, wt: &Path) -> MutReport {
+    let batch = m.tool.contains("{files}");
+    let per_file = m.tool.contains("{file}") || m.tool.contains("{module}");
+
+    if !batch && !per_file {
+        return finish(m, run_mut(wt, &m.tool), "");
+    }
+
+    // Удалённые файлы НЕ отбрасываем: за них отвечает ветка «удалён агентом».
+    let files = git::changed_files_scoped_all(wt, &m.scope);
+
+    if batch {
+        // cargo-mutants мутирует то, что лежит на диске: удалённое ему не даём.
+        let live: Vec<&String> = files.iter().filter(|f| wt.join(f).is_file()).collect();
+        if live.is_empty() {
+            return MutReport {
+                log: mutate_skip_log(m, &files),
+                outcome: MutateOutcome::Ok,
+                stats: None,
+            };
         }
-        return (
-            log,
-            if fail {
-                MutateOutcome::Fail
-            } else {
-                MutateOutcome::Ok
-            },
+        let flags = live
+            .iter()
+            .map(|f| format!("-f \"{f}\""))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let cmd = m.tool.replace("{files}", &flags);
+        let head = format!(
+            "mutation: один прогон на {} файл(ов): {}\n",
+            live.len(),
+            live.iter()
+                .map(|f| f.as_str())
+                .collect::<Vec<_>>()
+                .join(" ")
         );
+        let rep = finish(m, run_mut(wt, &cmd), "");
+        return MutReport {
+            log: format!("{head}{}", rep.log),
+            outcome: rep.outcome,
+            stats: rep.stats,
+        };
     }
 
-    if scoped.is_empty() {
-        log += &format!(
-            "mutation: нет изменённых файлов в {} — гейт пропущен\n",
-            m.scope
-        );
-        return (log, MutateOutcome::Ok);
-    }
-    for f in &scoped {
+    let mut acc = MutReport {
+        log: String::new(),
+        outcome: MutateOutcome::Ok,
+        stats: Some(MutStats {
+            total: 0,
+            killed: 0,
+            missed: 0,
+            unviable: 0,
+        }),
+    };
+    for f in &files {
         if !wt.join(f).is_file() {
-            log += &format!("mutation: {f} удалён агентом — мутации не требуется\n");
+            acc.log += &format!("mutation: {f} удалён агентом — мутации не требуется\n");
             continue;
         }
         let module = mod_of(f, &m.scope);
         let cmd = m.tool.replace("{module}", &module).replace("{file}", f);
-        match run_mut(wt, &cmd) {
-            MutRun::Env => {
-                log += &format!(
-                    "mutation env: вывод не распознан для {f} (ни 'N mutants tested in T: C caught, M missed', ни 'Mutants: N, Killed: M'); MUTATE='{}'\n",
-                    m.tool
-                );
-                return (log, MutateOutcome::Env);
+        let rep = finish(m, run_mut(wt, &cmd), &format!(" {f}"));
+        acc.log += &rep.log;
+        match rep.outcome {
+            // Инструмент не распознан — смысла продолжать цикл нет (как и раньше).
+            MutateOutcome::Env => {
+                return MutReport {
+                    log: acc.log,
+                    outcome: MutateOutcome::Env,
+                    stats: None,
+                };
             }
-            MutRun::Stats {
-                total,
-                killed,
-                missed,
-                unviable,
-            } => {
-                let testable = total.saturating_sub(unviable);
-                if let Some(pct) = killed
-                    .checked_mul(100)
-                    .and_then(|n| n.checked_div(testable))
-                {
-                    log += &format!(
-                        "mutation {f}: {total} mutants tested, killed {killed} ({pct}%) [caught+timeout, testable {testable}], missed {missed}, unviable {unviable}\n"
-                    );
-                    if pct < m.min_kill {
-                        log += &format!(
-                            "mutation FAIL {f}: kill-rate {pct}% < {}% (testable {testable}: missed {missed}, unviable {unviable}) — тесты не ловят мутантов\n",
-                            m.min_kill
-                        );
-                        fail = true;
-                    }
-                } else if total == 0 {
-                    log += &format!("mutation {f}: 0 мутантов — пропуск\n");
-                } else {
-                    log += &format!(
-                        "mutation {f}: все {total} мутантов unviable (не собираются) — тесты не при чём, пропуск\n"
-                    );
-                }
+            MutateOutcome::Fail => acc.outcome = MutateOutcome::Fail,
+            MutateOutcome::Ok => {}
+        }
+        // perf.log хочет ИТОГ по гейту, поэтому per-file статы суммируем.
+        if let Some(s) = rep.stats {
+            if let Some(a) = acc.stats.as_mut() {
+                a.total = a.total.saturating_add(s.total);
+                a.killed = a.killed.saturating_add(s.killed);
+                a.missed = a.missed.saturating_add(s.missed);
+                a.unviable = a.unviable.saturating_add(s.unviable);
             }
         }
     }
-    (
-        log,
-        if fail {
+    acc
+}
+
+/// Мутировать нечего: либо в scope нет изменений, либо агент всё удалил.
+fn mutate_skip_log(m: &MutateCfg, files: &[String]) -> String {
+    if files.is_empty() {
+        return format!(
+            "mutation: нет изменённых файлов в {} — гейт пропущен\n",
+            m.scope
+        );
+    }
+    files
+        .iter()
+        .map(|f| format!("mutation: {f} удалён агентом — мутации не требуется\n"))
+        .collect()
+}
+
+/// Один прогон → лог + вердикт + статы. `tag` = "" для общего прогона или
+/// " <файл>" для per-file (сообщения были раздельными — остаются раздельными).
+fn finish(m: &MutateCfg, run: MutRun, tag: &str) -> MutReport {
+    let MutRun::Stats {
+        total,
+        killed,
+        missed,
+        unviable,
+    } = run
+    else {
+        return MutReport {
+            log: format!(
+                "mutation env: вывод не распознан{tag} (ни 'N mutants tested in T: C caught, M missed', ни 'Mutants: N, Killed: M'); MUTATE='{}'\n",
+                m.tool
+            ),
+            outcome: MutateOutcome::Env,
+            stats: None,
+        };
+    };
+    let stats = MutStats {
+        total,
+        killed,
+        missed,
+        unviable,
+    };
+    let testable = total.saturating_sub(unviable);
+    if let Some(pct) = killed
+        .checked_mul(100)
+        .and_then(|n| n.checked_div(testable))
+    {
+        let mut log = format!(
+            "mutation{tag}: {total} mutants tested, killed {killed} ({pct}%) [caught+timeout, testable {testable}], missed {missed}, unviable {unviable}\n"
+        );
+        let outcome = if pct < m.min_kill {
+            log += &format!(
+                "mutation FAIL{tag}: kill-rate {pct}% < {}% (testable {testable}: missed {missed}, unviable {unviable}) — тесты не ловят мутантов\n",
+                m.min_kill
+            );
             MutateOutcome::Fail
         } else {
             MutateOutcome::Ok
-        },
-    )
+        };
+        MutReport {
+            log,
+            outcome,
+            stats: Some(stats),
+        }
+    } else if total == 0 {
+        MutReport {
+            log: format!("mutation{tag}: 0 мутантов — нечего убивать, пропуск\n"),
+            outcome: MutateOutcome::Ok,
+            stats: Some(stats),
+        }
+    } else {
+        MutReport {
+            log: format!(
+                "mutation{tag}: все {total} мутантов unviable (не собираются) — тесты не при чём, пропуск\n"
+            ),
+            outcome: MutateOutcome::Ok,
+            stats: Some(stats),
+        }
+    }
+}
+
+/// P4: строка perf.log на каждый мутационный прогон — регрессии ловим числами.
+/// build_s/test_s поезда не разделяет: cargo-mutants печатает только общий
+/// итог «N mutants tested in T», фазы не отдаёт — выдумывать их не будем.
+fn perf_mutate(store: &Store, id: &ItemId, rep: &MutReport, timing: &Timing) {
+    let Some(s) = rep.stats else {
+        return;
+    };
+    let testable = s.total.saturating_sub(s.unviable);
+    let kill_pct = s
+        .killed
+        .checked_mul(100)
+        .and_then(|n| n.checked_div(testable))
+        .map(|p| p.to_string())
+        .unwrap_or_else(|| "-".into());
+    let secs = timing.stages().last().map(|(_, s)| *s).unwrap_or(0);
+    let header = "task,mutants,killed,missed,unviable,kill_pct,mutate_s\n";
+    if !store.dir.join("logs").join("perf.log").exists() {
+        store.append_raw("logs/perf.log", header).ok();
+    }
+    store
+        .append_raw(
+            "logs/perf.log",
+            &format!(
+                "{},{},{},{},{},{},{}\n",
+                id.dir_name(),
+                s.total,
+                s.killed,
+                s.missed,
+                s.unviable,
+                kill_pct,
+                secs
+            ),
+        )
+        .ok();
 }
 
 enum MutRun {
