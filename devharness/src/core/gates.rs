@@ -562,6 +562,15 @@ mod tests {
             judge(&Gate::NoIgnored, &raw(Some(0), "2 passed; 2 ignored"), &off),
             Verdict::Pass
         );
+        // выключенный гейт молчит даже при незаявленном именованном игноре
+        assert_eq!(
+            judge(
+                &Gate::NoIgnored,
+                &raw(Some(0), "test foo::bar ... ignored\ntest result: ok. 2 passed; 1 ignored"),
+                &off
+            ),
+            Verdict::Pass
+        );
         assert!(matches!(
             judge(
                 &Gate::NoIgnored,
