@@ -356,14 +356,18 @@ points:
 
 ## Maintenance & known issues
 
-Hardening history (wire-fidelity fixes in the streaming adapters, the
-daemon probe and log follower, and the forbid-level clippy campaign) is
-written up in [BRIDGE-HARDENING](docs/BRIDGE-HARDENING.md), and the live
-issue tracker — closed items with their root causes, open ones with
-repro and suggested fixes — is [ISSUES](docs/ISSUES.md). Known-open
-highlights: 88 lint violations left in six crates' lib code
-(UWA-101), `https://` health probes are connect-only (UWA-102), and the
-registry overlay does not fill `capabilities` yet (UWA-109).
+One document covers both the hardening history (wire-fidelity fixes in
+the streaming adapters, the daemon probe and log follower, and the
+forbid-level clippy campaign) and the live issue tracker — closed items
+with their root causes, open ones with repro and suggested fixes:
+[docs/ISSUES_AND_BRIDGE.md](docs/ISSUES_AND_BRIDGE.md). Nothing is
+scattered across several docs anymore.
+
+Known-open highlights: `https://` health probes are connect-only
+(UWA-102), `uwa-config` registry.rs is occasionally edited mid-run by a
+parallel agent session (UWA-134), and `uwa-bin` providers.rs is
+in-flight / untracked in the sandbox (UWA-135). All forbid-lint debt is
+closed (UWA-101, UWA-108).
 
 ## License
 

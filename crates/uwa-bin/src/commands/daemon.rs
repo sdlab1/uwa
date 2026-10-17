@@ -540,7 +540,7 @@ fn http_ok(url: &str) -> bool {
 
         // std has no TLS: for https URLs the completed TCP handshake is
         // the strongest signal available (the daemon URL is always
-        // http:// — tracked in docs/ISSUES.md).
+        // http:// — tracked in docs/ISSUES_AND_BRIDGE.md UWA-102).
         if https {
             return true;
         }
