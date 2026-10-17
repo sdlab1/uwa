@@ -304,3 +304,17 @@ fn wait_child_until(child: &mut Child, budget: Duration, mut cond: impl FnMut() 
 - Extraction бинаря в doctor пропускает `KEY=VALUE`-токены шаблона MUTATE (env-assignment — не программа); иначе `CARGO_PROFILE_TEST_INCREMENTAL=true` читалось как имя бинаря → ложный WARN.
 
 Сьют-гейт: `cargo nextest run -p devh` — **112/112 PASS**, `cargo clippy -p devh --all-targets` чистый, `cargo fmt --check` чистый. Известный шум: при load≈10 `section21*` даёт contention-флейк (ровно тот случай, от которого load-gate и защищает) — повторный прогон зелёный.
+
+---
+
+## P6 — выполняется (2026-10-17, вечер): быстрый шаблон в committed defaults + полная приёмка
+
+**1. Дефолты.** Быстрый `MUTATE` (§9.7–9.11) жил только в локальном `.harness/config` (gitignored) — новые проекты получали медленный дефолт. Продвинут в tracked-код:
+- `devharness/src/commands/init.rs` (шаблон при `devh init`) и `devharness/devh-classic` (bash-оракул) — коммит `6a492b0`;
+- корневой `./devh` — локальный launcher (gitignored), правка только локально.
+
+**2. Полная приёмка гейта.** Прогон `cargo mutants --in-place --test-tool nextest --baseline=skip --timeout-multiplier 2 -p devh --config devharness/cargo-mutants.toml` с `CARGO_PROFILE_TEST_INCREMENTAL=true` (255 мутантов, канонический scope ядра — не tests/) — лог `/tmp/uwa-p5-gate.log`. SLO: median по мутанту ≤30s (P5-замер: build 12.7s + test 3.8s), суммарно ≈1.5ч. Цифры — в журнал после завершения.
+
+**3. Найденный блокер (чужой файл, отдан параллельной сессии).** `verify.sh` падает на шаге 1/10 `cargo fmt`: `crates/uwa-api/src/routes/profiles.rs` не отформатирован (длинные `saturating_*`-цепочки) — из коммита `5258d15` «feat(profile): cookie export/import + login health». Локально исправлено `cargo fmt -p uwa-api`, **не закоммичено** (зона параллельной сессии). Гейт VERIFY блокируется полностью — чинить в их ветке.
+
+**Грабля (для протокола).** `pkill -f "cargo mutants"` НЕ матчит процесс `cargo-mutants` (дефис vs пробел) — два in-place прогона живут на одном дереве,взаимные мутации + lock. Убитый `--in-place` оставляет в дереве маркеры `/* ~ changed by cargo-mutants ~ */` — лечится `git checkout -- <файлы>`. Guard запуска: `pgrep -x cargo-mutants` (точное имя, без self-match).
