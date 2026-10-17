@@ -494,3 +494,22 @@ which ld.lld && ld.lld --version # проверка
 | first-tick / `start_paused` / poll-loop | −секунды слепых sleep |
 | nextest + конфиг | стабильность, slow-timeout, retries, удобные фильтры |
 | Багфиксы (clap ID, panic-хук, pid-файл, smoke-config) | suite зелёный: **875 passed / 3 skipped** |
+
+## 9.12. Полная приёмка P5/P6: канонический гейт крейта (2026-10-18, ночь)
+
+Прогон (лог `/tmp/uwa-p5-gate.log`): `CARGO_PROFILE_TEST_INCREMENTAL=true cargo mutants --in-place --test-tool nextest --baseline=skip --timeout-multiplier 2 -p devh --config devharness/cargo-mutants.toml` — 255 мутантов, scope ядра (config excludes tests/**, shell/**, commands/**).
+
+**Итог: 255 мутантов за 51 мин — 226 caught, 2 missed, 27 unviable, 0 timeout. Kill-rate 226/228 testable = 99.1% (гейт MIN_KILL=90 — pass).**
+
+| Фаза | До (copy-mode, §9.7) | Сейчас (in-place+incremental, приёмка) |
+|------|--------------------|----------------------------------------|
+| build/мутант | mean 90.7s, median 90.5s | ~7.5s (первый cold-ребuild графа ~200s под контенцией — единоразово) |
+| test/мутант | 6.7s | ~11-16s при load≈11 ( contention с параллельной сессией uwa-api; на спокойной машине ~9s) |
+| на мутанта суммарно | ~97s | **~12s** (×8), весь гейт 51 мин вместо ~4.3ч |
+
+**Два MISSED — в `core/load.rs` P5 (мой код): `load_average -> Some(1.0)` и `max_load -> Some(-1.0)` — чистые обёртки без прямых тестов. Гейт поймал дырку в P5-коде; лечение — unit-тесты (load_average сверять с parse_load(/proc/loadavg), max_load с фиксированным env). После фикса — точечный перепрогон load.rs.**
+
+Замечания по эксплуатации:
+- `mutants.out/` — живые артефакты (caught/missed/unviable.txt пополняются по ходу; debug.log с elapsed по фазам) — годятся для раннего выхода (идея 2.3, беклог P7 в devh_fast_cycle.md).
+- Параллельный прогон на том же дереве = порча (pkill -f "cargo mutants" не матчит `cargo-mutants`; guard — `pgrep -x cargo-mutants`); убитый in-place оставляет `/* ~ changed by cargo-mutants ~ */` → `git checkout --`.
+- `--iterate` (пропуск пойманных ранее) и `--in-diff REF` (только строки диффа) есть в 27.1.0, но НЕ подключены к шаблону — кандидаты очередного рычага (беклог P7).
