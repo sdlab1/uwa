@@ -56,7 +56,14 @@ pub fn init(root: &Path) -> anyhow::Result<()> {
         // вместо N холодных прогонов. --in-place: без него mutants копирует
         // дерево в новый путь и платит cold-build; в devh-worktree дерево и
         // так чистое. --baseline=skip: devh уже прогнал VERIFY в этом дереве.
-        mutate = "cargo mutants --in-place --baseline=skip {files}".into();
+        // CARGO_PROFILE_TEST_INCREMENTAL=true — корневой рычаг муть-сборки
+        // (замер docs/rust_build.md §9.7: профиль test по умолчанию
+        // incremental=false → каждый мутант платил полную пересборку 90s;
+        // с true — 4-12s). --test-tool nextest — process-per-test: точные
+        // таймауты, дешевле cargo test на каждый мутант.
+        // --timeout-multiplier 2 — мутант иногда медленнее baseline'а, не
+        // плодить TIMEOUT'ы (docs/rust_build.md §9.7-9.11).
+        mutate = "CARGO_PROFILE_TEST_INCREMENTAL=true cargo mutants --in-place --test-tool nextest --baseline=skip --timeout-multiplier 2 {files}".into();
         mutate_scope = rust_mutate_scope(root);
     }
     if mutate_scope.is_empty() {

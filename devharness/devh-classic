@@ -266,7 +266,7 @@ cmd_init() {
     MUTATE_SCOPE='gobot/lib'
   fi
   if [ -f "$ROOT/Cargo.toml" ] && [ -z "$MUTATE" ]; then
-    MUTATE='cargo mutants -f {file}'   # cargo-mutants; установи: cargo install cargo-mutants
+    MUTATE='CARGO_PROFILE_TEST_INCREMENTAL=true cargo mutants --in-place --test-tool nextest --baseline=skip --timeout-multiplier 2 -f "{file}"'   # cargo-mutants; установи: cargo install cargo-mutants. Флаги — замер docs/rust_build.md §9.7-9.11: incremental (90s→4-12s build/мутант), in-place (теплый target вместо cold-copy), nextest (точные таймауты), ×2 timeout, VERIFY уже прогнан в этом дереве
     MUTATE_SCOPE='src'
   fi
   [ -n "$MUTATE_SCOPE" ] || MUTATE_SCOPE='lib'
