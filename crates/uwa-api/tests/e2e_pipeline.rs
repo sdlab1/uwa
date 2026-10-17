@@ -439,7 +439,7 @@ async fn buffered_and_streaming_produce_identical_tool_calls() {
         }]
     });
 
-    // Buffered path.
+    // Buffered path — exact tool calls.
     let rb = app
         .server
         .post("/v1/chat/completions")
@@ -456,34 +456,6 @@ async fn buffered_and_streaming_produce_identical_tool_calls() {
         .and_then(|c| c.as_array())
         .unwrap_or_else(|| unreachable!("buffered: missing tool_calls array"));
 
-    // Streaming path.
-    let rs = app
-        .server
-        .post("/v1/chat/completions")
-        .add_header("Authorization", TEST_AUTH_HEADER)
-        .json(&json!({
-            "model": "gpt-4o",
-            "stream": true,
-            "messages": [{"role": "user", "content": "weather in Kyiv?"}],
-            "tools": req.get("tools").cloned().unwrap_or(serde_json::json!([]))
-        }))
-        .await;
-    rs.assert_status_ok();
-    let body = rs.text();
-    assert!(
-        body.contains("data: [DONE]"),
-        "stream missing [DONE]: {body}"
-    );
-
-    // Extract tool calls from the completed streaming response by
-    // replaying the final Done event through the SSE frames.
-    // The stream emits content_block_start/delta/stop per tool call;
-    // collect the call ids from output_item.added-style frames is not
-    // available for the OpenAI chat stream, so instead we verify via
-    // the buffered result that both paths agree on the tool call set.
-    // The key assertion: both paths return exactly 2 tool calls (the
-    // model emitted two identical ones; neither path deduplicates them
-    // away, but neither path *adds* extra duplicates either).
     assert_eq!(
         tb.len(),
         2,
@@ -507,18 +479,100 @@ async fn buffered_and_streaming_produce_identical_tool_calls() {
         );
     }
 
-    // The streaming path must produce the same two calls (verified by
-    // checking the final accumulated output through SSE deltas — the
-    // streamed text contains both JSON blocks).
+    // Streaming path — parse SSE frames and extract tool_calls delta.
+    // OpenAI chat stream emits a chunk with `choices[0].delta.tool_calls`
+    // containing the aggregated tool call list.
+    let rs = app
+        .server
+        .post("/v1/chat/completions")
+        .add_header("Authorization", TEST_AUTH_HEADER)
+        .json(&json!({
+            "model": "gpt-4o",
+            "stream": true,
+            "messages": [{"role": "user", "content": "weather in Kyiv?"}],
+            "tools": req.get("tools").cloned().unwrap_or(serde_json::json!([]))
+        }))
+        .await;
+    rs.assert_status_ok();
+    let body = rs.text();
     assert!(
-        body.contains(r#"\"city\":\"Kyiv\""#),
-        "stream should carry both tool-call JSON blocks: {body}"
+        body.contains("data: [DONE]"),
+        "stream missing [DONE]: {body}"
     );
-    let kv_count = body.matches(r#"\"city\":\"Kyiv\""#).count();
+
+    // Collect tool_calls from every SSE data frame.
+    let mut stream_tool_calls: Vec<serde_json::Value> = Vec::new();
+    for block in body.split("\n\n") {
+        let Some(data) = block.strip_prefix("data: ") else {
+            continue;
+        };
+        if data == "[DONE]" {
+            continue;
+        }
+        let Ok(chunk) = serde_json::from_str::<serde_json::Value>(data) else {
+            continue;
+        };
+        let Some(calls) = chunk
+            .get("choices")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("delta"))
+            .and_then(|d| d.get("tool_calls"))
+            .and_then(|tc| tc.as_array())
+        else {
+            continue;
+        };
+        stream_tool_calls.extend(calls.iter().cloned());
+    }
+
     assert_eq!(
-        kv_count, 2,
-        "stream should contain exactly 2 Kyiv references (no duplication), got {kv_count}: {body}"
+        stream_tool_calls.len(),
+        2,
+        "streaming path should emit exactly 2 tool calls, got {}: {body}",
+        stream_tool_calls.len()
     );
+    for (i, tc) in stream_tool_calls.iter().enumerate() {
+        assert_eq!(
+            tc.get("function")
+                .and_then(|f| f.get("name"))
+                .and_then(|n| n.as_str()),
+            Some("get_weather"),
+            "streaming tool_call[{i}] wrong name: {body}"
+        );
+        assert_eq!(
+            tc.get("function")
+                .and_then(|f| f.get("arguments"))
+                .and_then(|a| a.as_str()),
+            Some(r#"{"city":"Kyiv"}"#),
+            "streaming tool_call[{i}] wrong args: {body}"
+        );
+        assert_eq!(
+            tc.get("index").and_then(|idx| idx.as_u64()),
+            Some(i as u64),
+            "streaming tool_call[{i}] wrong index: {body}"
+        );
+    }
+
+    // Cross-mode equivalence: buffered and streaming must agree on the
+    // tool call set (no duplication across modes).
+    assert_eq!(
+        tb.len(),
+        stream_tool_calls.len(),
+        "buffered ({}) and streaming ({}) tool call counts differ",
+        tb.len(),
+        stream_tool_calls.len()
+    );
+    for (i, (btc, stc)) in tb.iter().zip(stream_tool_calls.iter()).enumerate() {
+        assert_eq!(
+            btc.get("function").and_then(|f| f.get("name")),
+            stc.get("function").and_then(|f| f.get("name")),
+            "buffered vs streaming tool_call[{i}] name mismatch"
+        );
+        assert_eq!(
+            btc.get("function").and_then(|f| f.get("arguments")),
+            stc.get("function").and_then(|f| f.get("arguments")),
+            "buffered vs streaming tool_call[{i}] arguments mismatch"
+        );
+    }
 }
 
 #[tokio::test]
