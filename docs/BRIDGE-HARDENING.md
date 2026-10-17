@@ -352,3 +352,22 @@ honored the hint; `/v1/responses` had the same hole.
   hinted provider.
 
 All `uwa-api` tests pass (55 lib + integration suites).
+
+---
+
+## Session 8 — X-UWA-Session profile honored in `/v1/messages` (this change)
+
+`POST /v1/messages` (Anthropic Messages API) passed
+`ProfileName::default_name()` to `run_pipeline` /
+`run_pipeline_streaming` on both streaming and buffered paths, ignoring
+the `X-UWA-Session` header (`hint.profile`). `chat/mod.rs`
+(`run_pipeline_with_hint`) and `responses.rs` already derived the
+profile from `hint.profile`; `messages.rs` had the same hole.
+
+**Fix:** `crates/uwa-api/src/routes/messages.rs`:
+- Compute the profile from `hint.profile` once before the
+  streaming/buffered split.
+- Pass the derived profile (not `default_name()`) to both
+  `run_pipeline_streaming` and `run_pipeline`.
+
+All `uwa-api` tests pass (55 lib + integration suites).
