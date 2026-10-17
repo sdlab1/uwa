@@ -132,7 +132,8 @@ mod tests {
             </body></html>
         "#;
         assert_eq!(
-            mk().extract_from_html(html).unwrap_or_else(|_| unreachable!()),
+            mk().extract_from_html(html)
+                .unwrap_or_else(|_| unreachable!()),
             "second"
         );
     }

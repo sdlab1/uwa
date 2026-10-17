@@ -278,23 +278,52 @@ mod tests {
     async fn eval_matches_substring_once() {
         let p = MockPage::new().expect("querySelector(\"#x\")", json!(true));
         let js = "!!document.querySelector(\"#x\")";
-        assert_eq!(p.eval(js).await.unwrap_or_else(|_| unreachable!("first hit")), json!(true));
-        assert_eq!(p.eval(js).await.unwrap_or_else(|_| unreachable!("fallback")), json!(false));
+        assert_eq!(
+            p.eval(js)
+                .await
+                .unwrap_or_else(|_| unreachable!("first hit")),
+            json!(true)
+        );
+        assert_eq!(
+            p.eval(js)
+                .await
+                .unwrap_or_else(|_| unreachable!("fallback")),
+            json!(false)
+        );
     }
 
     #[tokio::test]
     async fn expect_seq_repeats_the_last_value() {
         let p = MockPage::new().expect_seq("query", vec![json!(true), json!(false)]);
-        assert_eq!(p.eval("query here").await.unwrap_or_else(|_| unreachable!("first")), json!(true));
-        assert_eq!(p.eval("query here").await.unwrap_or_else(|_| unreachable!("second")), json!(false));
-        assert_eq!(p.eval("query here").await.unwrap_or_else(|_| unreachable!("repeats")), json!(false));
+        assert_eq!(
+            p.eval("query here")
+                .await
+                .unwrap_or_else(|_| unreachable!("first")),
+            json!(true)
+        );
+        assert_eq!(
+            p.eval("query here")
+                .await
+                .unwrap_or_else(|_| unreachable!("second")),
+            json!(false)
+        );
+        assert_eq!(
+            p.eval("query here")
+                .await
+                .unwrap_or_else(|_| unreachable!("repeats")),
+            json!(false)
+        );
     }
 
     #[tokio::test]
     async fn eval_early_is_recorded_separately() {
         let p = MockPage::new();
-        p.eval_early("stealth-a").await.unwrap_or_else(|_| unreachable!("early"));
-        p.eval("live-a").await.unwrap_or_else(|_| unreachable!("live"));
+        p.eval_early("stealth-a")
+            .await
+            .unwrap_or_else(|_| unreachable!("early"));
+        p.eval("live-a")
+            .await
+            .unwrap_or_else(|_| unreachable!("live"));
         assert_eq!(
             p.log(),
             vec!["early:stealth-a".to_string(), "live-a".to_string()]
@@ -305,7 +334,9 @@ mod tests {
     async fn eval_falls_back_to_default() {
         let p = MockPage::new().expect_default(json!({"ok": true}));
         assert_eq!(
-            p.eval("anything").await.unwrap_or_else(|_| unreachable!("default")),
+            p.eval("anything")
+                .await
+                .unwrap_or_else(|_| unreachable!("default")),
             json!({"ok": true})
         );
     }
@@ -315,7 +346,10 @@ mod tests {
         let p = MockPage::new().with_html_seq(vec!["a", "b"]);
         assert_eq!(p.html().await.unwrap_or_else(|_| unreachable!("a")), "a");
         assert_eq!(p.html().await.unwrap_or_else(|_| unreachable!("b")), "b");
-        assert_eq!(p.html().await.unwrap_or_else(|_| unreachable!("again")), "b");
+        assert_eq!(
+            p.html().await.unwrap_or_else(|_| unreachable!("again")),
+            "b"
+        );
     }
 
     #[tokio::test]
@@ -341,7 +375,10 @@ mod tests {
         assert_eq!(l.len(), 3);
         assert_eq!(l.first(), Some(&"1".to_string()));
         assert!(l.get(1).is_some_and(|s| s.starts_with("click:")), "{l:?}");
-        assert!(l.get(2).is_some_and(|s| s.starts_with("type:#in=hi")), "{l:?}");
+        assert!(
+            l.get(2).is_some_and(|s| s.starts_with("type:#in=hi")),
+            "{l:?}"
+        );
     }
 
     #[tokio::test]
@@ -353,7 +390,10 @@ mod tests {
             mime: "text/event-stream".into(),
             cf_mitigated_challenge: false,
         }]);
-        let mut rx = p.network_events().await.unwrap_or_else(|_| unreachable!("subscribed"));
+        let mut rx = p
+            .network_events()
+            .await
+            .unwrap_or_else(|_| unreachable!("subscribed"));
         let ev = tokio::time::timeout(Duration::from_secs(1), rx.recv())
             .await
             .unwrap_or_else(|_| unreachable!("event must arrive within 1s"))
@@ -371,7 +411,12 @@ mod tests {
     async fn goto_moves_the_url() {
         let p = MockPage::new();
         let target = Url::parse("https://chatgpt.com/c/1").unwrap_or_else(|_| unreachable!("url"));
-        p.goto(&target).await.unwrap_or_else(|_| unreachable!("goto"));
-        assert_eq!(p.url().await.unwrap_or_else(|_| unreachable!("url")), target);
+        p.goto(&target)
+            .await
+            .unwrap_or_else(|_| unreachable!("goto"));
+        assert_eq!(
+            p.url().await.unwrap_or_else(|_| unreachable!("url")),
+            target
+        );
     }
 }

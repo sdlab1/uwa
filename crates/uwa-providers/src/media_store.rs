@@ -262,12 +262,27 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let z = z.wrapping_add(719_468);
     let era = z.div_euclid(146_097);
     let doe = z.rem_euclid(146_097);
-    let yoe = (doe.wrapping_sub(doe / 1460).wrapping_add(doe / 36_524).wrapping_sub(doe / 146_096)) / 365;
+    let yoe = (doe
+        .wrapping_sub(doe / 1460)
+        .wrapping_add(doe / 36_524)
+        .wrapping_sub(doe / 146_096))
+        / 365;
     let y = yoe.wrapping_add(era.wrapping_mul(400));
-    let doy = doe.wrapping_sub(365_i64.wrapping_mul(yoe).wrapping_add(yoe / 4).wrapping_sub(yoe / 100));
+    let doy = doe.wrapping_sub(
+        365_i64
+            .wrapping_mul(yoe)
+            .wrapping_add(yoe / 4)
+            .wrapping_sub(yoe / 100),
+    );
     let mp = (5_i64.wrapping_mul(doy).wrapping_add(2)) / 153;
-    let d = (doy.wrapping_sub(153_i64.wrapping_mul(mp).wrapping_add(2) / 5).wrapping_add(1)) as u32;
-    let m = if mp < 10 { mp.wrapping_add(3) } else { mp.wrapping_sub(9) } as u32;
+    let d = (doy
+        .wrapping_sub(153_i64.wrapping_mul(mp).wrapping_add(2) / 5)
+        .wrapping_add(1)) as u32;
+    let m = if mp < 10 {
+        mp.wrapping_add(3)
+    } else {
+        mp.wrapping_sub(9)
+    } as u32;
     let y = if m <= 2 { y.wrapping_add(1) } else { y };
     (y, m, d)
 }

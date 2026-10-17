@@ -164,7 +164,9 @@ mod tests {
             "querySelectorAll",
             json!({"ok": true, "n": 3, "text": "hello"}),
         )]);
-        let (n, t) = probe_selector(&p, "#x").await.unwrap_or_else(|_| unreachable!());
+        let (n, t) = probe_selector(&p, "#x")
+            .await
+            .unwrap_or_else(|_| unreachable!());
         assert_eq!(n, 3);
         assert_eq!(t.as_deref(), Some("hello"));
     }

@@ -60,13 +60,19 @@ mod tests {
     async fn default_limit_creates_semaphore_on_demand() {
         let sems = ProviderSemaphores::new(1);
         assert_eq!(sems.default_limit(), 1);
-        let a = sems.acquire("chatgpt").await.unwrap_or_else(|_| unreachable!());
+        let a = sems
+            .acquire("chatgpt")
+            .await
+            .unwrap_or_else(|_| unreachable!());
         assert_eq!(
             sems.map.get("chatgpt").map(|e| e.available_permits()),
             Some(0)
         );
         drop(a);
-        let b = sems.acquire("chatgpt").await.unwrap_or_else(|_| unreachable!());
+        let b = sems
+            .acquire("chatgpt")
+            .await
+            .unwrap_or_else(|_| unreachable!());
         drop(b);
     }
 
@@ -81,7 +87,9 @@ mod tests {
         for i in 0..limit {
             let permit = tokio::time::timeout(Duration::from_millis(200), sems.acquire(provider))
                 .await
-                .unwrap_or_else(|_| unreachable!("acquire #{i} for `{provider}` blocked past the limit"))
+                .unwrap_or_else(|_| {
+                    unreachable!("acquire #{i} for `{provider}` blocked past the limit")
+                })
                 .unwrap_or_else(|_| unreachable!("acquire succeeds"));
             held.push(permit);
         }

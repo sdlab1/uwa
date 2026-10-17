@@ -18,7 +18,7 @@ State — `.harness/` у целевого репо (flock + atomic writes, бе�
     # → target/x86_64-unknown-linux-musl/release/devh (static-pie)
 
 `devh` в каталоге — обёртка над Rust-бинарём; bash-эталон сохранён как
-`devh-classic`. `test.sh` — 95 ассертов, по умолчанию гоняется против
+`devh-classic`. `test.sh` — 105 ассертов, по умолчанию гоняется против
 Rust-`devh` (CI `devharness-rs.yml`), отдельно — против bash:
 
     bash devharness/test.sh                                    # Rust (по умолчанию)
@@ -48,7 +48,7 @@ RED-пруф первым, MSG_DENY-гигиена последней. Паде�
 | Гейт | Конфиг | Смысл |
 |---|---|---|
 | VERIFY | `VERIFY` | тесты/сборка до коммита |
-| NO-IGNORED | `NO_IGNORED=1` | `N ignored > 0` = скрытый красный |
+| NO-IGNORED | `NO_IGNORED=1`, `IGNORED_ALLOWLIST` | allowlist-семантика: игнор разрешён, если имя теста матчится regex из `IGNORED_ALLOWLIST` (файл, дефолт `scripts/ignored-tests.txt`); незаявленный игнор = скрытый красный |
 | MUTATE | `MUTATE`, `MIN_KILL=90` | kill-rate ≥ MIN_KILL% на изменённых `MUTATE_SCOPE`-файлах (`{module}`/`{file}`); формат вывода `Mutants: N, Killed: M` (muex / cargo-mutants); инструмент не установлен = блокер среды (rc=2), не fix-раунд |
 | CRAP | `CRAP`, `CRAP_MAX=12` | guardrail №2 (Uncle Bob): score = C²·(1−cov)³ + C, нарушение = score > CRAP_MAX; формат вывода `file:line fun C=N cov=N` + итог `CRAP: functions=N`; контракт не распознан = блокер среды; обход только записанный (`--no-crap`) |
 | RED | `items/W-NNN/red.cmd` | в первую очередь: падает на чистом HEAD до работы, зеленеет после; обход только записанный (`--no-red`) |
@@ -113,14 +113,14 @@ RED-пруф первым, MSG_DENY-гигиена последней. Паде�
 | BENCH | '' | перф-гейт (опционален) |
 | RULES / RULES_LOG | todo/report.md | справочник граблей в промпте / куда дописывать «## Session N» |
 | MSG_DENY | `todo/\|report\.md\|Session [0-9]+` | гигиена сообщения коммита |
-| NO_IGNORED | 1 | гейт ignored-тестов |
+| NO_IGNORED / IGNORED_ALLOWLIST | 1 / scripts/ignored-tests.txt | allowlist-гейт ignored-тестов: незаявленный игнор = fail; allowlist = файл regex имён (нет файла = пустой) |
 | LINT / LINT_CMD | 1 / '' | авто-shellcheck *.sh / проектный линтер |
 | REVIEW | 1 | self-review диффа вторым запросом агенту |
 | HARNESS_COLOR / NO_COLOR | auto / — | always/never/auto — цветной вывод в стиле cargo; NO_COLOR уважается |
 
 ## Self-test — тот же стек, что гейтит чужие проекты
 
-clippy (shellcheck-слой) → сьют 26 секций (порт `test.sh`, 103 ассерта;
+clippy (shellcheck-слой) → сьют 27 секций (порт `test.sh`, 105 ассертов;
 оракул гоняется напрямую: `DEVH=<rust-bin> bash devharness/test.sh`) →
 cargo-mutants на core/ (kill 100%) → llvm-cov ≥80% → oracle на
 musl-статике (flock/fs2/setsid на static-pie).

@@ -54,7 +54,10 @@ async fn unrelated_finished_does_not_end_the_stream() {
     ]);
 
     let net = DefaultNetExtractor;
-    let mut stream = net.deltas(&page, &rules()).await.unwrap_or_else(|_| unreachable!("deltas"));
+    let mut stream = net
+        .deltas(&page, &rules())
+        .await
+        .unwrap_or_else(|_| unreachable!("deltas"));
 
     let mut got: Vec<String> = Vec::new();
     while let Some(d) = tokio::time::timeout(Duration::from_secs(5), stream.next())

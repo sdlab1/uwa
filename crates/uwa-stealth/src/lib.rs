@@ -115,8 +115,14 @@ mod tests {
             .add(StealthScript::new("a", "1"))
             .add(StealthScript::new("b", "2"));
         assert_eq!(p.len(), 2);
-        assert_eq!(p.scripts().first().unwrap_or_else(|| unreachable!()).name, "a");
-        assert_eq!(p.scripts().get(1).unwrap_or_else(|| unreachable!()).name, "b");
+        assert_eq!(
+            p.scripts().first().unwrap_or_else(|| unreachable!()).name,
+            "a"
+        );
+        assert_eq!(
+            p.scripts().get(1).unwrap_or_else(|| unreachable!()).name,
+            "b"
+        );
     }
 
     #[test]

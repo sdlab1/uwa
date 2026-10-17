@@ -23,7 +23,9 @@ impl ClientsArgs {
 
     pub fn from_matches(matches: &clap::ArgMatches) -> Result<Self, String> {
         let name = matches.subcommand_name().unwrap_or("");
-        let sub_matches = matches.subcommand_matches(name).ok_or_else(|| format!("missing subcommand matches for '{name}'"))?;
+        let sub_matches = matches
+            .subcommand_matches(name)
+            .ok_or_else(|| format!("missing subcommand matches for '{name}'"))?;
         let action = ClientsAction::from_matches(name, sub_matches)?;
         Ok(ClientsArgs { action })
     }
@@ -67,9 +69,7 @@ pub(crate) enum ClientsAction {
     Env,
     /// Watch patched files and re-apply the uwa block if an app
     /// overwrites it. Foreground task.
-    Watch {
-        interval_secs: u64,
-    },
+    Watch { interval_secs: u64 },
 }
 
 impl ClientsAction {
@@ -140,19 +140,28 @@ impl ClientsAction {
                 json: matches.get_flag("json"),
             }),
             "install" => Ok(ClientsAction::Install {
-                id: matches.get_one::<String>("id").ok_or_else(|| "missing required argument 'id'".to_string())?.clone(),
+                id: matches
+                    .get_one::<String>("id")
+                    .ok_or_else(|| "missing required argument 'id'".to_string())?
+                    .clone(),
                 path: matches.get_one::<PathBuf>("path").cloned(),
                 base_url: matches.get_one::<String>("base_url").cloned(),
                 api_key: matches.get_one::<String>("api_key").cloned(),
                 model: matches.get_one::<String>("model").cloned(),
             }),
             "uninstall" => Ok(ClientsAction::Uninstall {
-                id: matches.get_one::<String>("id").ok_or_else(|| "missing required argument 'id'".to_string())?.clone(),
+                id: matches
+                    .get_one::<String>("id")
+                    .ok_or_else(|| "missing required argument 'id'".to_string())?
+                    .clone(),
                 path: matches.get_one::<PathBuf>("path").cloned(),
                 from_backup: matches.get_flag("from_backup"),
             }),
             "status" => Ok(ClientsAction::Status {
-                id: matches.get_one::<String>("id").ok_or_else(|| "missing required argument 'id'".to_string())?.clone(),
+                id: matches
+                    .get_one::<String>("id")
+                    .ok_or_else(|| "missing required argument 'id'".to_string())?
+                    .clone(),
             }),
             "env" => Ok(ClientsAction::Env),
             "watch" => Ok(ClientsAction::Watch {

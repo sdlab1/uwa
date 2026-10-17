@@ -63,9 +63,7 @@ async fn stream_frames(s: &TestServer) -> Vec<Value> {
         .skip(1)
         .map(str::trim)
         .filter(|f| *f != "[DONE]" && !f.is_empty())
-        .map(|f| {
-            serde_json::from_str(f).unwrap_or_else(|e| unreachable!("bad frame {f:?}: {e}"))
-        })
+        .map(|f| serde_json::from_str(f).unwrap_or_else(|e| unreachable!("bad frame {f:?}: {e}")))
         .collect()
 }
 
@@ -177,8 +175,7 @@ async fn streaming_self_heals_schema_invalid_call() {
         .and_then(|a| a.as_str())
         .unwrap_or_default();
     assert_eq!(
-        serde_json::from_str::<Value>(args)
-            .unwrap_or_else(|e| unreachable!("bad JSON: {e}")),
+        serde_json::from_str::<Value>(args).unwrap_or_else(|e| unreachable!("bad JSON: {e}")),
         json!({"city": "NYC"})
     );
     assert_eq!(p.sent().len(), 2, "a correction turn must be sent");
@@ -208,13 +205,12 @@ async fn streaming_reports_error_when_validation_never_passes() {
             .unwrap_or(true),
         "finish_reason must be null or absent on error: {last:?}"
     );
-    assert!(
-        last.get("error")
-            .and_then(|e| e.get("message"))
-            .and_then(|m| m.as_str())
-            .unwrap_or("")
-            .contains("schema validation")
-    );
+    assert!(last
+        .get("error")
+        .and_then(|e| e.get("message"))
+        .and_then(|m| m.as_str())
+        .unwrap_or("")
+        .contains("schema validation"));
 }
 
 // ---------- client disconnect ----------

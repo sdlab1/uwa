@@ -45,16 +45,12 @@ async fn start_status_stop_round_trip() {
         .await;
     start.assert_status_ok();
     let v: serde_json::Value = start.json();
-    assert_eq!(
-        v.get("provider").and_then(|v| v.as_str()),
-        Some("chatgpt")
-    );
-    assert!(
-        v.get("id")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .starts_with("rec_")
-    );
+    assert_eq!(v.get("provider").and_then(|v| v.as_str()), Some("chatgpt"));
+    assert!(v
+        .get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .starts_with("rec_"));
 
     // The poller emits its first batch at t≈0 (it polls once before
     // settling into the interval; see `recorder.rs`). Wait for that batch
@@ -85,9 +81,7 @@ async fn start_status_stop_round_trip() {
     status.assert_status_ok();
     let sv: serde_json::Value = status.json();
     assert_eq!(sv.get("active").and_then(|v| v.as_bool()), Some(true));
-    assert!(
-        sv.get("events").and_then(|v| v.as_u64()).unwrap_or(0) >= 1
-    );
+    assert!(sv.get("events").and_then(|v| v.as_u64()).unwrap_or(0) >= 1);
 
     // Stop, get the proposal.
     let stop = s
@@ -100,17 +94,12 @@ async fn start_status_stop_round_trip() {
         stv.get("provider").and_then(|v| v.as_str()),
         Some("chatgpt")
     );
-    assert!(
-        stv.get("event_count")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) >= 1
-    );
-    assert!(
-        stv.get("toml_snippet")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .contains("[[providers.chatgpt.workflow]]")
-    );
+    assert!(stv.get("event_count").and_then(|v| v.as_u64()).unwrap_or(0) >= 1);
+    assert!(stv
+        .get("toml_snippet")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .contains("[[providers.chatgpt.workflow]]"));
 
     // Status is now inactive.
     let status = s
@@ -137,13 +126,12 @@ async fn second_start_is_rejected_while_active() {
         .await;
     second.assert_status_bad_request();
     let v: serde_json::Value = second.json();
-    assert!(
-        v.get("error")
-            .and_then(|e| e.get("message"))
-            .and_then(|m| m.as_str())
-            .unwrap_or_default()
-            .contains("already in progress")
-    );
+    assert!(v
+        .get("error")
+        .and_then(|e| e.get("message"))
+        .and_then(|m| m.as_str())
+        .unwrap_or_default()
+        .contains("already in progress"));
 
     // Clean up so other tests don't see a leaked recorder.
     s.post("/admin/recorder/stop")

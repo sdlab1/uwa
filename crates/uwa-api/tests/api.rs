@@ -130,7 +130,9 @@ async fn chat_unknown_model_400() {
     r.assert_status_not_found();
     let v: serde_json::Value = r.json();
     assert_eq!(
-        v.get("error").and_then(|e| e.get("code")).and_then(|c| c.as_str()),
+        v.get("error")
+            .and_then(|e| e.get("code"))
+            .and_then(|c| c.as_str()),
         Some("model_not_found")
     );
 }
@@ -160,13 +162,12 @@ async fn chat_plain_text_stop() {
             .and_then(|f| f.as_str()),
         Some("stop")
     );
-    assert!(
-        v.get("choices")
-            .and_then(|c| c.get(0))
-            .and_then(|c| c.get("message"))
-            .and_then(|m| m.get("tool_calls"))
-            .is_none()
-    );
+    assert!(v
+        .get("choices")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("message"))
+        .and_then(|m| m.get("tool_calls"))
+        .is_none());
 }
 
 #[tokio::test]
@@ -260,10 +261,7 @@ async fn streaming_ends_with_done_and_finish_reason() {
     let frames: Vec<&str> = body.split("data: ").skip(1).collect();
 
     assert!(frames.len() > 2, "too few chunks: {body}");
-    assert_eq!(
-        frames.last().copied().unwrap_or_default().trim(),
-        "[DONE]"
-    );
+    assert_eq!(frames.last().copied().unwrap_or_default().trim(), "[DONE]");
 
     // The frame before [DONE] carries the finish reason.
     let last: serde_json::Value = frames
@@ -283,8 +281,8 @@ async fn streaming_ends_with_done_and_finish_reason() {
     let mut args = String::new();
     let end = frames.len().saturating_sub(2);
     for frame in frames.get(..end).unwrap_or(&[]) {
-        let ev: serde_json::Value =
-            serde_json::from_str(frame.trim()).unwrap_or_else(|e| unreachable!("bad chunk frame: {e}"));
+        let ev: serde_json::Value = serde_json::from_str(frame.trim())
+            .unwrap_or_else(|e| unreachable!("bad chunk frame: {e}"));
         if let Some(calls) = ev
             .get("choices")
             .and_then(|c| c.get(0))
@@ -292,7 +290,9 @@ async fn streaming_ends_with_done_and_finish_reason() {
             .and_then(|d| d.get("tool_calls"))
             .and_then(|t| t.as_array())
         {
-            let call = calls.first().unwrap_or_else(|| unreachable!("empty tool_calls array"));
+            let call = calls
+                .first()
+                .unwrap_or_else(|| unreachable!("empty tool_calls array"));
             args.push_str(
                 call.get("function")
                     .and_then(|f| f.get("name"))
@@ -308,8 +308,8 @@ async fn streaming_ends_with_done_and_finish_reason() {
         }
     }
     assert_eq!(&args[..11], "get_weather");
-    let parsed: serde_json::Value =
-        serde_json::from_str(&args[11..]).unwrap_or_else(|e| unreachable!("bad arguments json: {e}"));
+    let parsed: serde_json::Value = serde_json::from_str(&args[11..])
+        .unwrap_or_else(|e| unreachable!("bad arguments json: {e}"));
     assert_eq!(parsed, json!({"city": "X"}));
 }
 
@@ -342,9 +342,11 @@ async fn messages_returns_anthropic_shape() {
         v.get("model").and_then(|v| v.as_str()).unwrap_or(""),
         "gpt-4o"
     );
-    assert!(
-        v.get("id").and_then(|v| v.as_str()).unwrap_or("").starts_with("msg_")
-    );
+    assert!(v
+        .get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .starts_with("msg_"));
     assert_eq!(
         v.get("content")
             .and_then(|c| c.get(0))
@@ -523,7 +525,10 @@ async fn messages_stream_emits_real_deltas() {
             let ev: Value =
                 serde_json::from_str(data).unwrap_or_else(|e| unreachable!("bad event json: {e}"));
             if ev.get("type").and_then(|t| t.as_str()) == Some("content_block_delta")
-                && ev.get("delta").and_then(|d| d.get("type")).and_then(|t| t.as_str())
+                && ev
+                    .get("delta")
+                    .and_then(|d| d.get("type"))
+                    .and_then(|t| t.as_str())
                     == Some("text_delta")
             {
                 delta_count += 1;

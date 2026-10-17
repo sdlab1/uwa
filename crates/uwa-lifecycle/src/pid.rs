@@ -87,7 +87,9 @@ mod tests {
             let pid = PidFile::acquire(&path).unwrap_or_else(|_| unreachable!());
             assert!(path.exists());
             assert_eq!(
-                std::fs::read_to_string(&path).unwrap_or_else(|_| unreachable!()).trim(),
+                std::fs::read_to_string(&path)
+                    .unwrap_or_else(|_| unreachable!())
+                    .trim(),
                 std::process::id().to_string()
             );
             drop(pid);

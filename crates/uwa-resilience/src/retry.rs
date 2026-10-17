@@ -117,7 +117,9 @@ mod tests {
                 n.fetch_add(1, Ordering::SeqCst);
                 Err::<(), _>(uwa_core::UwaError::Unavailable("nope".into()))
             }
-        }).await {
+        })
+        .await
+        {
             Err(err) => err,
             Ok(_) => unreachable!(),
         };
@@ -160,7 +162,9 @@ mod tests {
         let start = tokio::time::Instant::now();
         let err = match retry(&cfg, || async {
             Err::<(), _>(uwa_core::UwaError::Unavailable("x".into()))
-        }).await {
+        })
+        .await
+        {
             Err(err) => err,
             Ok(_) => unreachable!(),
         };
@@ -192,8 +196,9 @@ mod tests {
         match retry(&cfg, || async {
             Err::<(), _>(uwa_core::UwaError::Unavailable("x".into()))
         })
-        .await {
-            Err(_) => {},
+        .await
+        {
+            Err(_) => {}
             Ok(_) => unreachable!("retry should have exhausted all attempts"),
         }
         // 50 + 100 + 200, each plus up to 30% jitter: [350ms, 455ms).
@@ -241,8 +246,9 @@ mod tests {
         match retry(&cfg, || async {
             Err::<(), _>(uwa_core::UwaError::Unavailable("x".into()))
         })
-        .await {
-            Err(_) => {},
+        .await
+        {
+            Err(_) => {}
             Ok(_) => unreachable!("retry should have exhausted all attempts"),
         }
         let elapsed = start.elapsed();

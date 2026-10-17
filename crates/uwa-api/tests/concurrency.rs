@@ -302,15 +302,14 @@ async fn tool_call_then_text_response() {
             .and_then(|f| f.as_str()),
         Some("stop")
     );
-    assert!(
-        v2.get("choices")
-            .and_then(|c| c.get(0))
-            .and_then(|c| c.get("message"))
-            .and_then(|m| m.get("content"))
-            .and_then(|c| c.as_str())
-            .unwrap_or("")
-            .contains("22")
-    );
+    assert!(v2
+        .get("choices")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("message"))
+        .and_then(|m| m.get("content"))
+        .and_then(|c| c.as_str())
+        .unwrap_or("")
+        .contains("22"));
 }
 
 #[tokio::test]

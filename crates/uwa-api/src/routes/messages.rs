@@ -738,21 +738,17 @@ mod tests {
         let cms = convert_message(&m);
         let oa = cms.first().unwrap_or_else(|| unreachable!());
         assert_eq!(oa.role, Role::Assistant);
-        let tc = oa
-            .tool_calls
-            .clone()
-            .unwrap_or_else(|| unreachable!());
+        let tc = oa.tool_calls.clone().unwrap_or_else(|| unreachable!());
         assert_eq!(
             tc.first().unwrap_or_else(|| unreachable!()).function.name,
             "w"
         );
-        assert!(
-            tc.first()
-                .unwrap_or_else(|| unreachable!())
-                .function
-                .arguments
-                .contains("NYC")
-        );
+        assert!(tc
+            .first()
+            .unwrap_or_else(|| unreachable!())
+            .function
+            .arguments
+            .contains("NYC"));
     }
 
     #[test]
@@ -836,10 +832,7 @@ mod tests {
         // Regression: /v1/messages used to answer with the OpenAI envelope.
         let e = UwaError::UnknownModel(uwa_core::ModelNotFound::new("nope", vec![]));
         let body = anthropic_error_body(&e);
-        assert_eq!(
-            body.get("type").unwrap_or_else(|| unreachable!()),
-            "error"
-        );
+        assert_eq!(body.get("type").unwrap_or_else(|| unreachable!()), "error");
         assert_eq!(
             body.get("error")
                 .unwrap_or_else(|| unreachable!())
@@ -847,21 +840,19 @@ mod tests {
                 .unwrap_or_else(|| unreachable!()),
             "invalid_request_error"
         );
-        assert!(
-            body.get("error")
-                .unwrap_or_else(|| unreachable!())
-                .get("message")
-                .unwrap_or_else(|| unreachable!())
-                .as_str()
-                .unwrap_or_else(|| unreachable!())
-                .contains("nope")
-        );
-        assert!(
-            body.get("error")
-                .unwrap_or_else(|| unreachable!())
-                .get("code")
-                .is_none()
-        );
+        assert!(body
+            .get("error")
+            .unwrap_or_else(|| unreachable!())
+            .get("message")
+            .unwrap_or_else(|| unreachable!())
+            .as_str()
+            .unwrap_or_else(|| unreachable!())
+            .contains("nope"));
+        assert!(body
+            .get("error")
+            .unwrap_or_else(|| unreachable!())
+            .get("code")
+            .is_none());
 
         // The HTTP wrapper carries the mapped status.
         let resp = anthropic_error_response(&e);
@@ -1001,11 +992,17 @@ mod tests {
             .clone()
             .unwrap_or_else(|| unreachable!());
         assert_eq!(
-            tc.first().unwrap_or_else(|| unreachable!()).function.arguments,
+            tc.first()
+                .unwrap_or_else(|| unreachable!())
+                .function
+                .arguments,
             "{}"
         );
         assert_eq!(
-            tc.get(1).unwrap_or_else(|| unreachable!()).function.arguments,
+            tc.get(1)
+                .unwrap_or_else(|| unreachable!())
+                .function
+                .arguments,
             "{}"
         );
 
@@ -1021,7 +1018,10 @@ mod tests {
             .clone()
             .unwrap_or_else(|| unreachable!());
         assert_eq!(
-            tc.first().unwrap_or_else(|| unreachable!()).function.arguments,
+            tc.first()
+                .unwrap_or_else(|| unreachable!())
+                .function
+                .arguments,
             r#"{"a":1}"#
         );
     }
@@ -1198,10 +1198,7 @@ mod tests {
                 "message_stop",
             ]
         );
-        let err = frames
-            .get(4)
-            .unwrap_or_else(|| unreachable!())
-            .json();
+        let err = frames.get(4).unwrap_or_else(|| unreachable!()).json();
         assert_eq!(
             err.get("error")
                 .unwrap_or_else(|| unreachable!())
@@ -1209,15 +1206,14 @@ mod tests {
                 .unwrap_or_else(|| unreachable!()),
             "invalid_request_error"
         );
-        assert!(
-            err.get("error")
-                .unwrap_or_else(|| unreachable!())
-                .get("message")
-                .unwrap_or_else(|| unreachable!())
-                .as_str()
-                .unwrap_or_else(|| unreachable!())
-                .contains("boom")
-        );
+        assert!(err
+            .get("error")
+            .unwrap_or_else(|| unreachable!())
+            .get("message")
+            .unwrap_or_else(|| unreachable!())
+            .as_str()
+            .unwrap_or_else(|| unreachable!())
+            .contains("boom"));
     }
 
     #[tokio::test]
@@ -1242,10 +1238,7 @@ mod tests {
                 "message_stop",
             ]
         );
-        let err = frames
-            .get(4)
-            .unwrap_or_else(|| unreachable!())
-            .json();
+        let err = frames.get(4).unwrap_or_else(|| unreachable!()).json();
         assert_eq!(
             err.get("error")
                 .unwrap_or_else(|| unreachable!())
@@ -1253,26 +1246,23 @@ mod tests {
                 .unwrap_or_else(|| unreachable!()),
             "api_error"
         );
-        assert!(
-            err.get("error")
-                .unwrap_or_else(|| unreachable!())
-                .get("message")
-                .unwrap_or_else(|| unreachable!())
-                .as_str()
-                .unwrap_or_else(|| unreachable!())
-                .contains("dropped")
-        );
+        assert!(err
+            .get("error")
+            .unwrap_or_else(|| unreachable!())
+            .get("message")
+            .unwrap_or_else(|| unreachable!())
+            .as_str()
+            .unwrap_or_else(|| unreachable!())
+            .contains("dropped"));
         // No message_delta with stop_reason end_turn anywhere.
-        assert!(frames
-            .iter()
-            .all(|f| {
-                f.json()
-                    .get("delta")
-                    .unwrap_or(&serde_json::Value::Null)
-                    .get("stop_reason")
-                    .unwrap_or(&serde_json::Value::Null)
-                    != "end_turn"
-            }));
+        assert!(frames.iter().all(|f| {
+            f.json()
+                .get("delta")
+                .unwrap_or(&serde_json::Value::Null)
+                .get("stop_reason")
+                .unwrap_or(&serde_json::Value::Null)
+                != "end_turn"
+        }));
     }
 
     #[test]

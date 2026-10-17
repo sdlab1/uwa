@@ -425,7 +425,10 @@ mod tests {
         // Get all sessions
         let all = registry.all_sessions().await;
         assert_eq!(all.len(), 1);
-        assert_eq!(all.first().unwrap_or_else(|| unreachable!()).session_id, session.session_id);
+        assert_eq!(
+            all.first().unwrap_or_else(|| unreachable!()).session_id,
+            session.session_id
+        );
     }
 
     #[tokio::test]
@@ -468,7 +471,10 @@ mod tests {
         // Remove by target ID
         let removed = registry.remove_by_target(&session.target_id).await;
         assert!(removed.is_some());
-        assert_eq!(removed.unwrap_or_else(|| unreachable!()), session.session_id);
+        assert_eq!(
+            removed.unwrap_or_else(|| unreachable!()),
+            session.session_id
+        );
         assert_eq!(registry.len().await, 0);
 
         // Verify it's gone
@@ -501,7 +507,10 @@ mod tests {
         // Verify first session is present
         let found = registry.session_for_frame("frame1").await;
         assert!(found.is_some());
-        assert_eq!(found.unwrap_or_else(|| unreachable!()).session_id, session1.session_id);
+        assert_eq!(
+            found.unwrap_or_else(|| unreachable!()).session_id,
+            session1.session_id
+        );
 
         // Rebind the frame to the second session
         registry.rebind("frame1", session2.clone()).await;

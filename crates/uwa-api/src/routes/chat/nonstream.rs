@@ -97,14 +97,13 @@ mod tests {
                 .finish_reason,
             Some(FinishReason::Stop)
         );
-        assert!(
-            r.choices
-                .first()
-                .unwrap_or_else(|| unreachable!())
-                .message
-                .tool_calls
-                .is_none()
-        );
+        assert!(r
+            .choices
+            .first()
+            .unwrap_or_else(|| unreachable!())
+            .message
+            .tool_calls
+            .is_none());
     }
 
     #[test]
@@ -124,7 +123,8 @@ mod tests {
             Usage::default(),
             vec![],
         );
-        let tc = r.choices
+        let tc = r
+            .choices
             .first()
             .unwrap_or_else(|| unreachable!())
             .message

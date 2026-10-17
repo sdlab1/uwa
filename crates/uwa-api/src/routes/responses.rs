@@ -684,8 +684,8 @@ mod tests {
 
     #[test]
     fn string_input_becomes_user_message() {
-        let c = to_chat_request(&req(json!("hello")))
-            .unwrap_or_else(|e| unreachable!("converts: {e}"));
+        let c =
+            to_chat_request(&req(json!("hello"))).unwrap_or_else(|e| unreachable!("converts: {e}"));
         assert_eq!(c.messages.len(), 1);
         assert_eq!(
             c.messages.first().map(|m| m.role),
@@ -693,7 +693,11 @@ mod tests {
             "messages[0].role wrong"
         );
         assert_eq!(
-            content_of(c.messages.first().unwrap_or_else(|| unreachable!("messages[0] missing"))),
+            content_of(
+                c.messages
+                    .first()
+                    .unwrap_or_else(|| unreachable!("messages[0] missing"))
+            ),
             json!("hello")
         );
     }
@@ -824,30 +828,21 @@ mod tests {
         .unwrap_or_else(|_| unreachable!("converts"));
         assert_eq!(c.messages.len(), 3);
         assert_eq!(
-            c.messages
-                .first()
-                .unwrap_or_else(|| unreachable!())
-                .role,
+            c.messages.first().unwrap_or_else(|| unreachable!()).role,
             Role::User
         );
 
-        let assistant = c.messages
-            .get(1)
-            .unwrap_or_else(|| unreachable!());
+        let assistant = c.messages.get(1).unwrap_or_else(|| unreachable!());
         assert_eq!(assistant.role, Role::Assistant);
         let tc = assistant
             .tool_calls
             .as_ref()
             .unwrap_or_else(|| unreachable!("tool_calls"));
-        let tc0 = tc
-            .first()
-            .unwrap_or_else(|| unreachable!());
+        let tc0 = tc.first().unwrap_or_else(|| unreachable!());
         assert_eq!(tc0.id, "call_1");
         assert_eq!(tc0.function.name, "get_weather");
 
-        let tool = c.messages
-            .get(2)
-            .unwrap_or_else(|| unreachable!());
+        let tool = c.messages.get(2).unwrap_or_else(|| unreachable!());
         assert_eq!(tool.role, Role::Tool);
         assert_eq!(tool.tool_call_id.as_deref(), Some("call_1"));
         assert!(matches!(&tool.content, Some(MessageContent::Text(s)) if s == "22C"));
@@ -864,13 +859,13 @@ mod tests {
             "parameters": {"type": "object"},
         })]);
         let c = match to_chat_request(&r) {
-    Ok(c) => c,
-    Err(_) => unreachable!("converts"),
-};
+            Ok(c) => c,
+            Err(_) => unreachable!("converts"),
+        };
         let tools = match c.tools.clone() {
-    Some(tools) => tools,
-    None => unreachable!("tools"),
-};
+            Some(tools) => tools,
+            None => unreachable!("tools"),
+        };
         assert_eq!(
             tools
                 .first()
@@ -893,9 +888,7 @@ mod tests {
             {"type": "function_call_output", "call_id": "c1", "output": {"ok": true}}
         ])))
         .unwrap_or_else(|_| unreachable!("converts"));
-        let tool = c.messages
-            .first()
-            .unwrap_or_else(|| unreachable!());
+        let tool = c.messages.first().unwrap_or_else(|| unreachable!());
         assert_eq!(tool.role, Role::Tool);
         assert!(matches!(&tool.content, Some(MessageContent::Text(s)) if s.contains("ok")));
     }
@@ -907,8 +900,13 @@ mod tests {
             "created": 7,
             "choices": [{"message": {"role": "assistant", "content": "hi"}}]
         });
-        let v = serde_json::to_value(reshape("gpt-4o", &chat)).unwrap_or_else(|e| unreachable!("serializes: {e}"));
-        assert_eq!(v.get("object").and_then(|o| o.as_str()), Some("response"), "object wrong: {v}");
+        let v = serde_json::to_value(reshape("gpt-4o", &chat))
+            .unwrap_or_else(|e| unreachable!("serializes: {e}"));
+        assert_eq!(
+            v.get("object").and_then(|o| o.as_str()),
+            Some("response"),
+            "object wrong: {v}"
+        );
         assert_eq!(
             v.get("output")
                 .and_then(|o| o.get(0))
@@ -1047,12 +1045,18 @@ mod tests {
             .and_then(|o| o.as_array())
             .unwrap_or_else(|| unreachable!("response.output array missing"));
         assert_eq!(
-            output.first().and_then(|o| o.get("type")).and_then(|t| t.as_str()),
+            output
+                .first()
+                .and_then(|o| o.get("type"))
+                .and_then(|t| t.as_str()),
             Some("message"),
             "output[0].type wrong"
         );
         assert_eq!(
-            output.get(1).and_then(|o| o.get("type")).and_then(|t| t.as_str()),
+            output
+                .get(1)
+                .and_then(|o| o.get("type"))
+                .and_then(|t| t.as_str()),
             Some("function_call"),
             "output[1].type wrong"
         );

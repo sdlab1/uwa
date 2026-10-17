@@ -83,11 +83,17 @@ mod tests {
             Ok("https://x/".parse().unwrap_or_else(|_| unreachable!()))
         }
         async fn eval(&self, js: &str) -> Result<Value> {
-            self.immediate.lock().unwrap_or_else(|_| unreachable!()).push(js.into());
+            self.immediate
+                .lock()
+                .unwrap_or_else(|_| unreachable!())
+                .push(js.into());
             Ok(Value::Null)
         }
         async fn eval_early(&self, js: &str) -> Result<()> {
-            self.early.lock().unwrap_or_else(|_| unreachable!()).push(js.into());
+            self.early
+                .lock()
+                .unwrap_or_else(|_| unreachable!())
+                .push(js.into());
             Ok(())
         }
         async fn wait_for_selector(&self, _: &str, _: Duration) -> Result<()> {
@@ -116,23 +122,34 @@ mod tests {
             .await
             .unwrap_or_else(|_| unreachable!());
         assert_eq!(p.early.lock().unwrap_or_else(|_| unreachable!()).len(), 3);
-        assert!(p.immediate.lock().unwrap_or_else(|_| unreachable!()).is_empty());
+        assert!(p
+            .immediate
+            .lock()
+            .unwrap_or_else(|_| unreachable!())
+            .is_empty());
     }
 
     #[tokio::test]
     async fn current_document_uses_eval() {
         let p = RecordingPage::new();
         let pack = StealthPack::new().add(StealthScript::current_document("x", "1"));
-        apply_pack(&p, &pack).await.unwrap_or_else(|_| unreachable!());
+        apply_pack(&p, &pack)
+            .await
+            .unwrap_or_else(|_| unreachable!());
         assert!(p.early.lock().unwrap_or_else(|_| unreachable!()).is_empty());
-        assert_eq!(p.immediate.lock().unwrap_or_else(|_| unreachable!()).len(), 1);
+        assert_eq!(
+            p.immediate.lock().unwrap_or_else(|_| unreachable!()).len(),
+            1
+        );
     }
 
     #[tokio::test]
     async fn wrapping_adds_try_catch_and_iife() {
         let p = RecordingPage::new();
         let pack = StealthPack::new().add(StealthScript::new("x", "let a = 1;"));
-        apply_pack(&p, &pack).await.unwrap_or_else(|_| unreachable!());
+        apply_pack(&p, &pack)
+            .await
+            .unwrap_or_else(|_| unreachable!());
         let early = p.early.lock().unwrap_or_else(|_| unreachable!());
         let js = early.first().unwrap_or_else(|| unreachable!());
         assert!(js.starts_with("(function(){try{"));
@@ -178,7 +195,10 @@ mod tests {
 
         let p = FailPage;
         let pack = StealthPack::new().add(StealthScript::new("my-script", "1"));
-        let err = match apply_pack(&p, &pack).await { Err(e) => e, Ok(_) => unreachable!() };
+        let err = match apply_pack(&p, &pack).await {
+            Err(e) => e,
+            Ok(_) => unreachable!(),
+        };
         let msg = err.to_string();
         assert!(msg.contains("my-script"), "got: {msg}");
     }
@@ -186,8 +206,14 @@ mod tests {
     #[tokio::test]
     async fn empty_pack_is_noop() {
         let p = RecordingPage::new();
-        apply_pack(&p, &StealthPack::new()).await.unwrap_or_else(|_| unreachable!());
+        apply_pack(&p, &StealthPack::new())
+            .await
+            .unwrap_or_else(|_| unreachable!());
         assert!(p.early.lock().unwrap_or_else(|_| unreachable!()).is_empty());
-        assert!(p.immediate.lock().unwrap_or_else(|_| unreachable!()).is_empty());
+        assert!(p
+            .immediate
+            .lock()
+            .unwrap_or_else(|_| unreachable!())
+            .is_empty());
     }
 }

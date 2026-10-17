@@ -411,7 +411,10 @@ mod tests {
         };
         runner.run(&p, &wf).await.unwrap_or_else(|_| unreachable!());
         let logs = p.log();
-        let inject = logs.iter().find(|s| s.contains("setter.call")).unwrap_or_else(|| unreachable!());
+        let inject = logs
+            .iter()
+            .find(|s| s.contains("setter.call"))
+            .unwrap_or_else(|| unreachable!());
         assert!(inject.contains("literal value"));
         assert!(!inject.contains("ignored"));
     }

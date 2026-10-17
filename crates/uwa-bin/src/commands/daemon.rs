@@ -43,8 +43,10 @@ impl DaemonAction {
                 .about("Fork the daemon into the background.")
                 .arg(Arg::new("cdp").long("cdp").action(ArgAction::Set))
                 .arg(Arg::new("force").long("force").action(ArgAction::SetTrue)),
-            Command::new("stop").about("Signal the daemon to stop (SIGTERM, then SIGKILL after 15 s)."),
-            Command::new("status").about("Print pid, config path, dashboard URL, and whether the port answers."),
+            Command::new("stop")
+                .about("Signal the daemon to stop (SIGTERM, then SIGKILL after 15 s)."),
+            Command::new("status")
+                .about("Print pid, config path, dashboard URL, and whether the port answers."),
             Command::new("logs")
                 .about("Tail ~/.uwa/daemon.log")
                 .arg(
@@ -603,7 +605,8 @@ mod tests {
         use tempfile::NamedTempFile;
 
         let mut f = NamedTempFile::new().unwrap_or_else(|_| unreachable!());
-        f.write_all(b"hello world").unwrap_or_else(|_| unreachable!());
+        f.write_all(b"hello world")
+            .unwrap_or_else(|_| unreachable!());
         f.flush().unwrap_or_else(|_| unreachable!());
         let meta = f.as_file().metadata().unwrap_or_else(|_| unreachable!());
         let pos = LogPosition {
@@ -646,7 +649,8 @@ mod tests {
         use tempfile::NamedTempFile;
 
         let mut f = NamedTempFile::new().unwrap_or_else(|_| unreachable!());
-        f.write_all("ёжик".as_bytes()).unwrap_or_else(|_| unreachable!());
+        f.write_all("ёжик".as_bytes())
+            .unwrap_or_else(|_| unreachable!());
         f.flush().unwrap_or_else(|_| unreachable!());
         let meta = f.as_file().metadata().unwrap_or_else(|_| unreachable!());
         let pos = LogPosition {
@@ -668,7 +672,8 @@ mod tests {
         use tempfile::NamedTempFile;
 
         let mut f = NamedTempFile::new().unwrap_or_else(|_| unreachable!());
-        f.write_all("привет мир".as_bytes()).unwrap_or_else(|_| unreachable!());
+        f.write_all("привет мир".as_bytes())
+            .unwrap_or_else(|_| unreachable!());
         f.flush().unwrap_or_else(|_| unreachable!());
         let meta = f.as_file().metadata().unwrap_or_else(|_| unreachable!());
         let pos = LogPosition {
@@ -691,7 +696,8 @@ mod tests {
         use tempfile::NamedTempFile;
 
         let mut f = NamedTempFile::new().unwrap_or_else(|_| unreachable!());
-        f.write_all(b"old content").unwrap_or_else(|_| unreachable!());
+        f.write_all(b"old content")
+            .unwrap_or_else(|_| unreachable!());
         f.flush().unwrap_or_else(|_| unreachable!());
         let meta = f.as_file().metadata().unwrap_or_else(|_| unreachable!());
         let pos = LogPosition {
@@ -776,8 +782,12 @@ mod tests {
     /// Spawn a responder thread: accept `n` connections, drain the request,
     /// answer with `reply` (or stay silent when `reply` is empty).
     fn spawn_responder(n: usize, reply: &'static [u8]) -> (u16, std::thread::JoinHandle<()>) {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap_or_else(|_| unreachable!());
-        let port = listener.local_addr().unwrap_or_else(|_| unreachable!()).port();
+        let listener =
+            std::net::TcpListener::bind("127.0.0.1:0").unwrap_or_else(|_| unreachable!());
+        let port = listener
+            .local_addr()
+            .unwrap_or_else(|_| unreachable!())
+            .port();
         let handle = std::thread::spawn(move || {
             for _ in 0..n {
                 let Ok((mut sock, _)) = listener.accept() else {
@@ -832,8 +842,12 @@ mod tests {
     fn http_ok_silent_socket_times_out_as_down() {
         // A bound-but-never-accepting listener: connect succeeds, the write
         // succeeds, the read hits the 300 ms timeout → down.
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap_or_else(|_| unreachable!());
-        let port = listener.local_addr().unwrap_or_else(|_| unreachable!()).port();
+        let listener =
+            std::net::TcpListener::bind("127.0.0.1:0").unwrap_or_else(|_| unreachable!());
+        let port = listener
+            .local_addr()
+            .unwrap_or_else(|_| unreachable!())
+            .port();
         let started = std::time::Instant::now();
         assert!(!http_ok(&format!("http://127.0.0.1:{port}/healthz")));
         assert!(
@@ -846,8 +860,12 @@ mod tests {
     #[test]
     fn http_ok_https_falls_back_to_tcp_handshake() {
         // std has no TLS: https URLs are probed by TCP connect only.
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap_or_else(|_| unreachable!());
-        let port = listener.local_addr().unwrap_or_else(|_| unreachable!()).port();
+        let listener =
+            std::net::TcpListener::bind("127.0.0.1:0").unwrap_or_else(|_| unreachable!());
+        let port = listener
+            .local_addr()
+            .unwrap_or_else(|_| unreachable!())
+            .port();
         assert!(http_ok(&format!("https://127.0.0.1:{port}/healthz")));
         drop(listener);
         assert!(!http_ok(&format!("https://127.0.0.1:{port}/healthz")));

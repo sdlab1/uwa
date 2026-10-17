@@ -36,11 +36,17 @@ async fn failing_provider_produces_503_with_openai_error_shape() {
     let v: serde_json::Value = r.json();
 
     assert!(
-        v.get("error").and_then(|e| e.get("message")).map(|m| m.is_string()).unwrap_or(false),
+        v.get("error")
+            .and_then(|e| e.get("message"))
+            .map(|m| m.is_string())
+            .unwrap_or(false),
         "missing error.message: {v}"
     );
     assert!(
-        v.get("error").and_then(|e| e.get("type")).map(|t| t.is_string()).unwrap_or(false),
+        v.get("error")
+            .and_then(|e| e.get("type"))
+            .map(|t| t.is_string())
+            .unwrap_or(false),
         "missing error.type: {v}"
     );
 
@@ -84,7 +90,10 @@ async fn provider_timeout_produces_graceful_error() {
     if status != 200 {
         let v: serde_json::Value = r.json();
         assert!(
-            v.get("error").and_then(|e| e.get("message")).map(|m| m.is_string()).unwrap_or(false),
+            v.get("error")
+                .and_then(|e| e.get("message"))
+                .map(|m| m.is_string())
+                .unwrap_or(false),
             "missing error.message on timeout: {v}"
         );
     }
@@ -400,9 +409,11 @@ async fn circuit_breaker_opens_after_repeated_failures() {
         "circuit breaker should keep failing: {status}"
     );
     let v: serde_json::Value = r.json();
-    assert!(
-        v.get("error").and_then(|e| e.get("message")).map(|m| m.is_string()).unwrap_or(false)
-    );
+    assert!(v
+        .get("error")
+        .and_then(|e| e.get("message"))
+        .map(|m| m.is_string())
+        .unwrap_or(false));
 }
 
 #[tokio::test]

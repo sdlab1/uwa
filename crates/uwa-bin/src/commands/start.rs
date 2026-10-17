@@ -30,9 +30,7 @@ impl StartArgs {
                 .long("cdp")
                 .env("UWA_CHROMIUM_WS")
                 .action(ArgAction::Set),
-            Arg::new("quiet")
-                .long("quiet")
-                .action(ArgAction::SetTrue),
+            Arg::new("quiet").long("quiet").action(ArgAction::SetTrue),
         ]
     }
 

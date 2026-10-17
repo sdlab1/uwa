@@ -157,11 +157,10 @@ async fn no_tools_no_tool_calls() {
             .and_then(|c| c.as_str()),
         Some("plain answer")
     );
-    assert!(
-        v.get("choices")
-            .and_then(|c| c.get(0))
-            .and_then(|c| c.get("message"))
-            .and_then(|m| m.get("tool_calls"))
-            .is_none()
-    );
+    assert!(v
+        .get("choices")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("message"))
+        .and_then(|m| m.get("tool_calls"))
+        .is_none());
 }

@@ -75,17 +75,26 @@ async fn list_returns_recent_events_newest_first() {
     assert_eq!(events.len(), 3);
     // Newest first: claude.
     assert_eq!(
-        events.first().and_then(|e| e.get("target")).and_then(|t| t.as_str()),
+        events
+            .first()
+            .and_then(|e| e.get("target"))
+            .and_then(|t| t.as_str()),
         Some("tab_b"),
         "first target wrong: {v}"
     );
     assert_eq!(
-        events.get(2).and_then(|e| e.get("target")).and_then(|t| t.as_str()),
+        events
+            .get(2)
+            .and_then(|e| e.get("target"))
+            .and_then(|t| t.as_str()),
         Some("tab_a"),
         "third target wrong: {v}"
     );
     assert_eq!(
-        events.get(2).and_then(|e| e.get("kind")).and_then(|k| k.as_str()),
+        events
+            .get(2)
+            .and_then(|e| e.get("kind"))
+            .and_then(|k| k.as_str()),
         Some("response_body"),
         "third kind wrong: {v}"
     );
@@ -171,7 +180,11 @@ async fn summary_reports_targets() {
         .unwrap_or_else(|| unreachable!("targets array missing: {v}"));
     let names: Vec<&str> = targets
         .iter()
-        .map(|t| t.get("target").and_then(|t| t.as_str()).unwrap_or_else(|| unreachable!("target missing")))
+        .map(|t| {
+            t.get("target")
+                .and_then(|t| t.as_str())
+                .unwrap_or_else(|| unreachable!("target missing"))
+        })
         .collect();
     assert!(names.contains(&"tab_a"));
     assert!(names.contains(&"tab_b"));

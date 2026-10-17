@@ -68,8 +68,7 @@ fn chromium_gated() -> bool {
 fn spawn_uwa(port: u16) -> std::process::Child {
     let home = tmp_home(port);
     let _ = std::fs::remove_dir_all(&home); // clean start
-    std::fs::create_dir_all(&home)
-        .unwrap_or_else(|_| unreachable!("smoke home must be creatable"));
+    std::fs::create_dir_all(&home).unwrap_or_else(|_| unreachable!("smoke home must be creatable"));
     let cfg = home.join("uwa.toml");
     std::fs::write(&cfg, smoke_config(port))
         .unwrap_or_else(|_| unreachable!("smoke config must be writable"));
@@ -183,10 +182,7 @@ fn binary_healthz_reports_ok_before_readyz() {
     );
 
     stop_uwa(&mut child);
-    assert!(
-        !chromium_leaked(&home),
-        "Chromium leaked on healthz test"
-    );
+    assert!(!chromium_leaked(&home), "Chromium leaked on healthz test");
     let _ = std::fs::remove_dir_all(&home);
 }
 
@@ -260,9 +256,6 @@ fn binary_restart_is_idempotent() {
     assert!(readyz_ok2, "restart on same home failed");
     stop_uwa(&mut child2);
 
-    assert!(
-        !chromium_leaked(&home),
-        "Chromium leaked on restart test"
-    );
+    assert!(!chromium_leaked(&home), "Chromium leaked on restart test");
     let _ = std::fs::remove_dir_all(&home);
 }

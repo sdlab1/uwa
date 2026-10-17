@@ -26,7 +26,9 @@ impl ProvidersArgs {
 
     pub fn from_matches(matches: &clap::ArgMatches) -> Result<Self, String> {
         let name = matches.subcommand_name().unwrap_or("");
-        let sub_matches = matches.subcommand_matches(name).ok_or_else(|| format!("missing subcommand matches for '{name}'"))?;
+        let sub_matches = matches
+            .subcommand_matches(name)
+            .ok_or_else(|| format!("missing subcommand matches for '{name}'"))?;
         let action = ProvidersAction::from_matches(name, sub_matches)?;
         Ok(ProvidersArgs { action })
     }
@@ -36,23 +38,15 @@ impl ProvidersArgs {
 pub(crate) enum ProvidersAction {
     /// List registry entries and, for each, whether the user config
     /// overrides them.
-    List {
-        config: PathBuf,
-    },
+    List { config: PathBuf },
 
     /// Show the merged view of one provider: registry entry + every
     /// user override, with the source of each field labelled.
-    Show {
-        name: String,
-        config: PathBuf,
-    },
+    Show { name: String, config: PathBuf },
 
     /// Print the fields the user config overrides for a provider, and
     /// nothing else. Answers "why did the registry update not affect me?".
-    Diff {
-        name: String,
-        config: PathBuf,
-    },
+    Diff { name: String, config: PathBuf },
 
     /// Fetch the latest registry from GitHub, verify each entry against
     /// the manifest's SHA256, and write to `~/.uwa/providers/`.
@@ -153,34 +147,46 @@ impl ProvidersAction {
     pub fn from_matches(name: &str, matches: &clap::ArgMatches) -> Result<Self, String> {
         match name {
             "list" => Ok(ProvidersAction::List {
-                config: matches.get_one::<PathBuf>("config")
+                config: matches
+                    .get_one::<PathBuf>("config")
                     .cloned()
                     .unwrap_or_else(|| PathBuf::from("uwa.toml")),
             }),
             "show" => Ok(ProvidersAction::Show {
-                name: matches.get_one::<String>("name").ok_or_else(|| "missing required argument 'name'".to_string())?.clone(),
-                config: matches.get_one::<PathBuf>("config")
+                name: matches
+                    .get_one::<String>("name")
+                    .ok_or_else(|| "missing required argument 'name'".to_string())?
+                    .clone(),
+                config: matches
+                    .get_one::<PathBuf>("config")
                     .cloned()
                     .unwrap_or_else(|| PathBuf::from("uwa.toml")),
             }),
             "diff" => Ok(ProvidersAction::Diff {
-                name: matches.get_one::<String>("name").ok_or_else(|| "missing required argument 'name'".to_string())?.clone(),
-                config: matches.get_one::<PathBuf>("config")
+                name: matches
+                    .get_one::<String>("name")
+                    .ok_or_else(|| "missing required argument 'name'".to_string())?
+                    .clone(),
+                config: matches
+                    .get_one::<PathBuf>("config")
                     .cloned()
                     .unwrap_or_else(|| PathBuf::from("uwa.toml")),
             }),
             "update" => Ok(ProvidersAction::Update {
-                config: matches.get_one::<PathBuf>("config")
+                config: matches
+                    .get_one::<PathBuf>("config")
                     .cloned()
                     .unwrap_or_else(|| PathBuf::from("uwa.toml")),
                 no_verify: matches.get_flag("no_verify"),
                 dry_run: matches.get_flag("dry_run"),
             }),
             "canary" => Ok(ProvidersAction::Canary {
-                config: matches.get_one::<PathBuf>("config")
+                config: matches
+                    .get_one::<PathBuf>("config")
                     .cloned()
                     .unwrap_or_else(|| PathBuf::from("uwa.toml")),
-                out: matches.get_one::<PathBuf>("out")
+                out: matches
+                    .get_one::<PathBuf>("out")
                     .cloned()
                     .unwrap_or_else(default_canary_path),
                 markdown: matches.get_flag("markdown"),

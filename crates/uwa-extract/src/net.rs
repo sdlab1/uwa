@@ -754,8 +754,8 @@ mod tests {
 
     #[test]
     fn json_body_extraction() {
-        let body =
-            serde_json::to_string(&json!({"answer":{"text":"42"}})).unwrap_or_else(|_| unreachable!());
+        let body = serde_json::to_string(&json!({"answer":{"text":"42"}}))
+            .unwrap_or_else(|_| unreachable!());
         let d = NetDecoder::Json {
             json_path: "answer.text".into(),
         };

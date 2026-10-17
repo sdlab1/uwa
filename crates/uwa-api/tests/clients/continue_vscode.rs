@@ -50,11 +50,12 @@ async fn continue_usage_chunk_in_stream() {
             .unwrap_or(false)
         {
             if let Some(u) = v.get("usage") {
+                assert!(u.get("prompt_tokens").and_then(|t| t.as_u64()).unwrap_or(0) > 0);
                 assert!(
-                    u.get("prompt_tokens").and_then(|t| t.as_u64()).unwrap_or(0) > 0
-                );
-                assert!(
-                    u.get("completion_tokens").and_then(|t| t.as_u64()).unwrap_or(0) > 0
+                    u.get("completion_tokens")
+                        .and_then(|t| t.as_u64())
+                        .unwrap_or(0)
+                        > 0
                 );
                 assert!(
                     u.get("total_tokens").and_then(|t| t.as_u64()).unwrap_or(0)

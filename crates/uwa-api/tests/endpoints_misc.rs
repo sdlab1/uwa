@@ -60,9 +60,7 @@ async fn count(s: &TestServer, body: Value) -> u32 {
         .await;
     r.assert_status_ok();
     let v: Value = r.json();
-    v.get("input_tokens")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0) as u32
+    v.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32
 }
 
 // === routing ===
@@ -497,11 +495,17 @@ async fn pool_status_has_urls() {
     assert_eq!(tabs.len(), 1);
     // MockTab reports a URL (about:blank default); the shape is what matters.
     assert!(
-        tabs.first().and_then(|t| t.get("id")).map(|v| v.is_string()).unwrap_or(false),
+        tabs.first()
+            .and_then(|t| t.get("id"))
+            .map(|v| v.is_string())
+            .unwrap_or(false),
         "tab entry has id"
     );
     assert!(
-        tabs.first().and_then(|t| t.get("url")).map(|v| v.is_string()).unwrap_or(false),
+        tabs.first()
+            .and_then(|t| t.get("url"))
+            .map(|v| v.is_string())
+            .unwrap_or(false),
         "tab entry has url"
     );
 }
@@ -515,23 +519,24 @@ async fn provider_status_has_selectors_and_caps() {
         .await;
     assert_eq!(r.status_code(), 200);
     let v: serde_json::Value = r.json();
-    let p = v.get("chatgpt").unwrap_or_else(|| unreachable!("chatgpt provider present"));
+    let p = v
+        .get("chatgpt")
+        .unwrap_or_else(|| unreachable!("chatgpt provider present"));
     assert!(p.is_object(), "chatgpt provider present");
-    assert!(
-        p.get("url_patterns").map(|v| v.is_array()).unwrap_or(false)
-    );
+    assert!(p.get("url_patterns").map(|v| v.is_array()).unwrap_or(false));
     assert!(
         p.get("selectors").map(|v| v.is_object()).unwrap_or(false),
         "selectors block for the wizard"
     );
+    assert!(p
+        .get("selectors")
+        .and_then(|s| s.get("input"))
+        .map(|v| v.is_null() || v.is_string())
+        .unwrap_or(false));
     assert!(
-        p.get("selectors")
-            .and_then(|s| s.get("input"))
-            .map(|v| v.is_null() || v.is_string())
-            .unwrap_or(false)
-    );
-    assert!(
-        p.get("capabilities").map(|v| v.is_object()).unwrap_or(false),
+        p.get("capabilities")
+            .map(|v| v.is_object())
+            .unwrap_or(false),
         "capabilities block"
     );
 }
@@ -612,7 +617,10 @@ async fn generate_returns_candidates() {
     r.assert_status_ok();
     let v: serde_json::Value = r.json();
     assert_eq!(
-        v.get("inputs").and_then(|i| i.get(0)).and_then(|i| i.get("selector")).and_then(|s| s.as_str()),
+        v.get("inputs")
+            .and_then(|i| i.get(0))
+            .and_then(|i| i.get("selector"))
+            .and_then(|s| s.as_str()),
         Some("#p")
     );
     assert_eq!(

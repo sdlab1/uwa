@@ -12,7 +12,8 @@ async fn scan_media_detects_video_tag() {
 
     use uwa_core::Transport;
     let tabs = t.list_tabs().await.unwrap_or_else(|_| unreachable!());
-    let page = t.page(tabs.first().unwrap_or_else(|| unreachable!()))
+    let page = t
+        .page(tabs.first().unwrap_or_else(|| unreachable!()))
         .await
         .unwrap_or_else(|_| unreachable!());
     page.goto(
@@ -43,20 +44,32 @@ async fn audio_capture_roundtrip_on_local_page() {
 
     use uwa_core::Transport;
     let tabs = t.list_tabs().await.unwrap_or_else(|_| unreachable!());
-    let page = t.page(tabs.first().unwrap_or_else(|| unreachable!()))
+    let page = t
+        .page(tabs.first().unwrap_or_else(|| unreachable!()))
         .await
         .unwrap_or_else(|_| unreachable!());
-    page.goto(&"http://127.0.0.1:1/".parse().unwrap_or_else(|_| unreachable!()))
-        .await
-        .ok();
+    page.goto(
+        &"http://127.0.0.1:1/"
+            .parse()
+            .unwrap_or_else(|_| unreachable!()),
+    )
+    .await
+    .ok();
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
     // Start must succeed and be idempotent; stop with nothing played
     // returns None (empty chunks).
-    page.start_audio_capture().await.unwrap_or_else(|_| unreachable!());
-    page.start_audio_capture().await.unwrap_or_else(|_| unreachable!()); // already_running
+    page.start_audio_capture()
+        .await
+        .unwrap_or_else(|_| unreachable!());
+    page.start_audio_capture()
+        .await
+        .unwrap_or_else(|_| unreachable!()); // already_running
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    let blob = page.stop_audio_capture().await.unwrap_or_else(|_| unreachable!());
+    let blob = page
+        .stop_audio_capture()
+        .await
+        .unwrap_or_else(|_| unreachable!());
     assert!(
         blob.is_none(),
         "no playback happened, expect no bytes: {blob:?}"

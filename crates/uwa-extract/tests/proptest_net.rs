@@ -23,8 +23,7 @@ fn cases(default: u32) -> ProptestConfig {
 
 /// One line of data that can't contain `\n` (so it won't split the frame).
 fn data_line() -> impl Strategy<Value = String> {
-    proptest::string::string_regex("[a-zA-Z0-9 ,.!?-]{0,80}")
-        .unwrap_or_else(|_| unreachable!())
+    proptest::string::string_regex("[a-zA-Z0-9 ,.!?-]{0,80}").unwrap_or_else(|_| unreachable!())
 }
 
 /// Encodes an SSE frame the way servers do.

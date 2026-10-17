@@ -92,7 +92,7 @@ fn content_text_joins_text_parts_with_newline() {
         name: None,
         tool_call_id: None,
         tool_calls: None,
-        uwa_media: vec![]
+        uwa_media: vec![],
     };
     assert_eq!(m.content_text(), "one");
     assert_eq!(with_parts.content_text(), "alpha\nbeta");

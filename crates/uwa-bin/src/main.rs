@@ -132,9 +132,9 @@ fn parse_cli() -> Cli {
         .into();
 
     let command = match matches.subcommand() {
-        Some(("start", sub)) => Some(CliCommand::Start(
-            commands::start::StartArgs::from_matches(sub),
-        )),
+        Some(("start", sub)) => Some(CliCommand::Start(commands::start::StartArgs::from_matches(
+            sub,
+        ))),
         Some(("daemon", sub)) => {
             let name = sub.subcommand_name().unwrap_or_else(|| unreachable!());
             let sub_sub = sub
@@ -164,36 +164,33 @@ fn parse_cli() -> Cli {
             force: sub.get_flag("force"),
         }),
         Some(("conformance", sub)) => {
-            let args = commands::conformance::ConformanceArgs::from_matches(sub)
-                .unwrap_or_else(|e| {
+            let args =
+                commands::conformance::ConformanceArgs::from_matches(sub).unwrap_or_else(|e| {
                     eprintln!("{e}");
                     std::process::exit(2);
                 });
             Some(CliCommand::Conformance(args))
         }
         Some(("providers", sub)) => {
-            let args = commands::providers::ProvidersArgs::from_matches(sub)
-                .unwrap_or_else(|e| {
-                    eprintln!("{e}");
-                    std::process::exit(2);
-                });
+            let args = commands::providers::ProvidersArgs::from_matches(sub).unwrap_or_else(|e| {
+                eprintln!("{e}");
+                std::process::exit(2);
+            });
             Some(CliCommand::Providers(args))
         }
         Some(("clients", sub)) => {
-            let args = commands::clients::ClientsArgs::from_matches(sub)
-                .unwrap_or_else(|e| {
-                    eprintln!("{e}");
-                    std::process::exit(2);
-                });
+            let args = commands::clients::ClientsArgs::from_matches(sub).unwrap_or_else(|e| {
+                eprintln!("{e}");
+                std::process::exit(2);
+            });
             Some(CliCommand::Clients(args))
         }
         Some(("doctor", _)) => Some(CliCommand::Doctor),
         _ => None,
     };
 
-    let command = Some(command.unwrap_or_else(|| {
-        CliCommand::Start(commands::start::StartArgs::default())
-    }));
+    let command =
+        Some(command.unwrap_or_else(|| CliCommand::Start(commands::start::StartArgs::default())));
 
     Cli { config, command }
 }

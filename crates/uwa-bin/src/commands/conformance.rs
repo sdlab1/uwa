@@ -33,7 +33,9 @@ impl ConformanceArgs {
 
     pub fn from_matches(matches: &clap::ArgMatches) -> Result<Self, String> {
         let name = matches.subcommand_name().unwrap_or("");
-        let sub_matches = matches.subcommand_matches(name).ok_or_else(|| format!("missing subcommand matches for '{name}'"))?;
+        let sub_matches = matches
+            .subcommand_matches(name)
+            .ok_or_else(|| format!("missing subcommand matches for '{name}'"))?;
         let action = ConformanceAction::from_matches(name, sub_matches)?;
         Ok(ConformanceArgs { action })
     }
@@ -60,11 +62,7 @@ impl ConformanceAction {
                 .args(RunArgs::clap_args()),
             Command::new("report")
                 .about("Regenerate `docs/CONFORMANCE.md` from a JSON report.")
-                .arg(
-                    Arg::new("input")
-                        .long("input")
-                        .action(ArgAction::Set),
-                )
+                .arg(Arg::new("input").long("input").action(ArgAction::Set))
                 .arg(
                     Arg::new("out")
                         .long("out")
@@ -78,10 +76,12 @@ impl ConformanceAction {
         match name {
             "run" => Ok(ConformanceAction::Run(RunArgs::from_matches(matches))),
             "report" => Ok(ConformanceAction::Report {
-                input: matches.get_one::<PathBuf>("input")
+                input: matches
+                    .get_one::<PathBuf>("input")
                     .cloned()
                     .unwrap_or_else(default_report_path),
-                out: matches.get_one::<PathBuf>("out")
+                out: matches
+                    .get_one::<PathBuf>("out")
                     .cloned()
                     .unwrap_or_else(|| PathBuf::from("docs/CONFORMANCE.md")),
             }),
@@ -115,9 +115,7 @@ impl RunArgs {
                 .env("UWA_CONFIG")
                 .default_value("uwa.toml")
                 .action(ArgAction::Set),
-            Arg::new("out")
-                .long("out")
-                .action(ArgAction::Set),
+            Arg::new("out").long("out").action(ArgAction::Set),
             Arg::new("markdown")
                 .long("markdown")
                 .action(ArgAction::SetTrue),

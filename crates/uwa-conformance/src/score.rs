@@ -276,10 +276,38 @@ mod tests {
         assert_eq!(score.passed, 2);
         assert_eq!(score.failed, 1);
         assert!((score.success_rate - 0.6667).abs() < 0.01);
-        assert_eq!(score.by_tag.get("basic").unwrap_or_else(|| unreachable!()).total, 2);
-        assert_eq!(score.by_tag.get("basic").unwrap_or_else(|| unreachable!()).passed, 1);
-        assert_eq!(score.by_tag.get("schema").unwrap_or_else(|| unreachable!()).total, 2);
-        assert_eq!(score.by_tag.get("schema").unwrap_or_else(|| unreachable!()).passed, 1);
+        assert_eq!(
+            score
+                .by_tag
+                .get("basic")
+                .unwrap_or_else(|| unreachable!())
+                .total,
+            2
+        );
+        assert_eq!(
+            score
+                .by_tag
+                .get("basic")
+                .unwrap_or_else(|| unreachable!())
+                .passed,
+            1
+        );
+        assert_eq!(
+            score
+                .by_tag
+                .get("schema")
+                .unwrap_or_else(|| unreachable!())
+                .total,
+            2
+        );
+        assert_eq!(
+            score
+                .by_tag
+                .get("schema")
+                .unwrap_or_else(|| unreachable!())
+                .passed,
+            1
+        );
         assert_eq!(score.failures.len(), 1);
     }
 

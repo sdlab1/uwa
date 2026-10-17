@@ -39,10 +39,7 @@ async fn plain_text_becomes_a_message_item() {
     r.assert_status_ok();
     let v: Value = r.json();
     assert_eq!(v.get("object").and_then(|v| v.as_str()), Some("response"));
-    assert_eq!(
-        v.get("status").and_then(|v| v.as_str()),
-        Some("completed")
-    );
+    assert_eq!(v.get("status").and_then(|v| v.as_str()), Some("completed"));
     assert_eq!(v.get("model").and_then(|v| v.as_str()), Some("gpt-4o"));
     assert_eq!(
         v.get("output_text").and_then(|v| v.as_str()),
@@ -80,17 +77,12 @@ async fn plain_text_becomes_a_message_item() {
             .and_then(|t| t.as_str()),
         Some("Hello from the site.")
     );
-    assert!(
-        v.get("id")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .starts_with("resp_")
-    );
-    assert!(
-        v.get("created_at")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) > 0
-    );
+    assert!(v
+        .get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .starts_with("resp_"));
+    assert!(v.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0) > 0);
 }
 
 #[tokio::test]
@@ -118,7 +110,9 @@ async fn empty_input_is_a_bad_request() {
     r.assert_status_bad_request();
     let v: Value = r.json();
     assert_eq!(
-        v.get("error").and_then(|e| e.get("code")).and_then(|c| c.as_str()),
+        v.get("error")
+            .and_then(|e| e.get("code"))
+            .and_then(|c| c.as_str()),
         Some("bad_request")
     );
 }
@@ -129,7 +123,9 @@ async fn unknown_model_is_a_404() {
     r.assert_status_not_found();
     let v: Value = r.json();
     assert_eq!(
-        v.get("error").and_then(|e| e.get("code")).and_then(|c| c.as_str()),
+        v.get("error")
+            .and_then(|e| e.get("code"))
+            .and_then(|c| c.as_str()),
         Some("model_not_found")
     );
 }
@@ -150,7 +146,10 @@ async fn stream_true_answers_with_responses_sse() {
         .get("content-type")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    assert!(ct.starts_with("text/event-stream"), "wrong content type: {ct}");
+    assert!(
+        ct.starts_with("text/event-stream"),
+        "wrong content type: {ct}"
+    );
 
     let body = r.text();
     assert!(

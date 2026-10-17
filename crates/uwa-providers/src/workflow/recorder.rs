@@ -428,12 +428,12 @@ mod tests {
         let p = propose_workflow(&t, &sels());
         assert_eq!(p.workflow.steps.len(), 3);
         let step = p.workflow.steps.first().unwrap_or_else(|| unreachable!());
+        assert!(matches!(step, Action::FillInput { target, value }
+            if target == "input_box" && value.is_none()));
         assert!(
-            matches!(step, Action::FillInput { target, value }
-            if target == "input_box" && value.is_none())
+            matches!(p.workflow.steps.get(1).unwrap_or_else(|| unreachable!()), Action::Click { target, .. }
+            if target == "send_btn")
         );
-        assert!(matches!(p.workflow.steps.get(1).unwrap_or_else(|| unreachable!()), Action::Click { target, .. }
-            if target == "send_btn"));
         assert!(
             matches!(p.workflow.steps.get(2).unwrap_or_else(|| unreachable!()), Action::StreamWait { target, .. }
             if target == "assistant_message")
@@ -496,10 +496,8 @@ mod tests {
         }]);
         let p = propose_workflow(&t, &sels());
         let step = p.workflow.steps.first().unwrap_or_else(|| unreachable!());
-        assert!(
-            matches!(step, Action::Click { target, optional }
-            if target == "#new-chat-button" && *optional)
-        );
+        assert!(matches!(step, Action::Click { target, optional }
+            if target == "#new-chat-button" && *optional));
     }
 
     #[test]
@@ -512,10 +510,8 @@ mod tests {
         }]);
         let p = propose_workflow(&t, &sels());
         let step = p.workflow.steps.first().unwrap_or_else(|| unreachable!());
-        assert!(
-            matches!(step, Action::Click { target, optional }
-            if target == "send_btn" && !*optional)
-        );
+        assert!(matches!(step, Action::Click { target, optional }
+            if target == "send_btn" && !*optional));
     }
 
     #[test]
@@ -529,10 +525,8 @@ mod tests {
         }]);
         let p = propose_workflow(&t, &sels());
         let step = p.workflow.steps.first().unwrap_or_else(|| unreachable!());
-        assert!(
-            matches!(step, Action::FillInput { value, .. }
-            if value.is_none())
-        );
+        assert!(matches!(step, Action::FillInput { value, .. }
+            if value.is_none()));
     }
 
     #[test]
@@ -546,10 +540,8 @@ mod tests {
         }]);
         let p = propose_workflow(&t, &sels());
         let step = p.workflow.steps.first().unwrap_or_else(|| unreachable!());
-        assert!(
-            matches!(step, Action::FillInput { value, .. }
-            if value.as_deref() == Some("3"))
-        );
+        assert!(matches!(step, Action::FillInput { value, .. }
+            if value.as_deref() == Some("3")));
     }
 
     #[test]

@@ -18,7 +18,7 @@ Static binary for distribution (flock/fs2/setsid verified by the full oracle —
     # → target/x86_64-unknown-linux-musl/release/devh (static-pie)
 
 `devh` in the checkout is a wrapper over the Rust binary; the bash
-reference is kept as `devh-classic`. `test.sh` — 103 asserts, by default it
+reference is kept as `devh-classic`. `test.sh` — 105 asserts, by default it
 runs against the Rust `devh` (CI `devharness-rs.yml`), separately — against
 bash:
 
@@ -49,7 +49,7 @@ of the log (≤ MAX_FIX); a missing tool = an ENV blocker, not a fix-round.
 | Gate | Config | Meaning |
 |---|---|---|
 | VERIFY | `VERIFY` | tests/build before commit |
-| NO-IGNORED | `NO_IGNORED=1` | `N ignored > 0` = hidden red |
+| NO-IGNORED | `NO_IGNORED=1`, `IGNORED_ALLOWLIST` | allowlist semantics: an ignore is allowed if the test name matches a regex in `IGNORED_ALLOWLIST` (file, default `scripts/ignored-tests.txt`); an undeclared ignore = hidden red |
 | MUTATE | `MUTATE`, `MIN_KILL=90` | kill-rate ≥ MIN_KILL% on changed `MUTATE_SCOPE` files (`{module}`/`{file}`); output format `Mutants: N, Killed: M` (muex / cargo-mutants); missing tool = env blocker (rc=2), not a fix-round |
 | CRAP | `CRAP`, `CRAP_MAX=12` | guardrail #2 (Uncle Bob): score = C²·(1−cov)³ + C, violation = score > CRAP_MAX; output format `file:line fun C=N cov=N` + summary `CRAP: functions=N`; unrecognized contract = env blocker; bypass only recorded (`--no-crap`) |
 | RED | `items/W-NNN/red.cmd` | first of all: fails on a clean HEAD before the work, goes green after; only recorded bypass (`--no-red`) |
@@ -114,14 +114,14 @@ All state and logs live in the target repo under `.harness/` (never committed):
 | BENCH | '' | perf gate (optional) |
 | RULES / RULES_LOG | todo/report.md | gotchas reference for the prompt / where «## Session N» is appended |
 | MSG_DENY | `todo/\|report\.md\|Session [0-9]+` | commit-message hygiene |
-| NO_IGNORED | 1 | ignored-tests gate |
+| NO_IGNORED / IGNORED_ALLOWLIST | 1 / scripts/ignored-tests.txt | allowlist gate for ignored tests: undeclared ignore = fail; allowlist = file of name regexes (missing file = empty) |
 | LINT / LINT_CMD | 1 / '' | auto-shellcheck *.sh / project linter |
 | REVIEW | 1 | self-review of the diff with a second agent request |
 | HARNESS_COLOR / NO_COLOR | auto / — | always/never/auto — cargo-style colored output; NO_COLOR respected |
 
 ## Self-test — the same stack that gates other projects
 
-clippy (the shellcheck layer) → 26-section suite (port of `test.sh`, 103
+clippy (the shellcheck layer) → 27-section suite (port of `test.sh`, 105
 asserts; the oracle is run directly: `DEVH=<rust-bin> bash
 devharness/test.sh`) → cargo-mutants on core/ (100% kill) → llvm-cov ≥80%
 → oracle on the musl static binary (flock/fs2/setsid on static-pie).

@@ -110,7 +110,10 @@ async fn self_check(port: u16) {
     let mut buf = Vec::new();
     let mut chunk = [0u8; 1024];
     loop {
-        let n = sock.read(&mut chunk).await.unwrap_or_else(|_| unreachable!("self check: read"));
+        let n = sock
+            .read(&mut chunk)
+            .await
+            .unwrap_or_else(|_| unreachable!("self check: read"));
         if n == 0 {
             break;
         }
@@ -422,7 +425,8 @@ async fn live_cdp_navigation_and_network_events() {
     let (debug_url, chrome) = if let Ok(u) = std::env::var("UWA_CDP_URL") {
         (u, None)
     } else {
-        let guard = ChromeGuard::spawn(chrome_port).unwrap_or_else(|| unreachable!("no chromium found; set UWA_CHROME_BIN"));
+        let guard = ChromeGuard::spawn(chrome_port)
+            .unwrap_or_else(|| unreachable!("no chromium found; set UWA_CHROME_BIN"));
         let url = guard.debug_url(chrome_port);
         (url, Some(guard))
     };
@@ -445,21 +449,37 @@ async fn live_cdp_navigation_and_network_events() {
         .unwrap_or_else(|_| unreachable!("connect"));
         eprintln!("[smoke] connected");
 
-        let tabs = transport.list_tabs().await.unwrap_or_else(|_| unreachable!("list_tabs"));
+        let tabs = transport
+            .list_tabs()
+            .await
+            .unwrap_or_else(|_| unreachable!("list_tabs"));
         eprintln!("[smoke] tabs={tabs:?}");
-        let tab = tabs.first().unwrap_or_else(|| unreachable!("at least one tab")).clone();
+        let tab = tabs
+            .first()
+            .unwrap_or_else(|| unreachable!("at least one tab"))
+            .clone();
 
-        let page = transport.page(&tab).await.unwrap_or_else(|_| unreachable!("acquire page"));
-        let probe = url::Url::parse("data:text/html,<title>probe</title>").unwrap_or_else(|_| unreachable!());
+        let page = transport
+            .page(&tab)
+            .await
+            .unwrap_or_else(|_| unreachable!("acquire page"));
+        let probe = url::Url::parse("data:text/html,<title>probe</title>")
+            .unwrap_or_else(|_| unreachable!());
         match page.goto(&probe).await {
             Ok(_) => eprintln!("[smoke] data-url goto OK"),
             Err(e) => eprintln!("[smoke] data-url goto FAILED: {e}"),
         }
         // Subscribe before navigating: the page fetches data.json during load.
-        let target_id = transport.target_id(&tab).await.unwrap_or_else(|_| unreachable!("target id"));
+        let target_id = transport
+            .target_id(&tab)
+            .await
+            .unwrap_or_else(|_| unreachable!("target id"));
         let mut rx = transport.bus().subscribe(&target_id).await;
-        let site = url::Url::parse(&format!("http://127.0.0.1:{site_port}/index.html")).unwrap_or_else(|_| unreachable!());
-        page.goto(&site).await.unwrap_or_else(|_| unreachable!("goto"));
+        let site = url::Url::parse(&format!("http://127.0.0.1:{site_port}/index.html"))
+            .unwrap_or_else(|_| unreachable!());
+        page.goto(&site)
+            .await
+            .unwrap_or_else(|_| unreachable!("goto"));
         eprintln!("[smoke] navigated");
 
         let deadline = Instant::now() + Duration::from_secs(20);
@@ -524,7 +544,13 @@ async fn live_cdp_navigation_and_network_events() {
         );
 
         drop(page);
-        assert_eq!(transport.list_tabs().await.unwrap_or_else(|_| unreachable!()), vec![tab]);
+        assert_eq!(
+            transport
+                .list_tabs()
+                .await
+                .unwrap_or_else(|_| unreachable!()),
+            vec![tab]
+        );
     };
 
     tokio::time::timeout(SCENARIO_BUDGET, scenario)
@@ -557,7 +583,9 @@ fn default_keyring_locked() -> Option<bool> {
             .stderr(Stdio::null())
             .spawn()
             .ok()?;
-        let deadline = Instant::now().checked_add(Duration::from_secs(3)).unwrap_or_else(|| unreachable!());
+        let deadline = Instant::now()
+            .checked_add(Duration::from_secs(3))
+            .unwrap_or_else(|| unreachable!());
         loop {
             match child.try_wait() {
                 Ok(Some(status)) => {
@@ -673,8 +701,11 @@ async fn guard_leaves_no_browser_profile_or_port() {
         return;
     }
     let port = 38212u16;
-    let guard = ChromeGuard::spawn(port).unwrap_or_else(|| unreachable!("no chromium found; set UWA_CHROME_BIN"));
-    let pid = guard.pid().unwrap_or_else(|| unreachable!("spawned child has a pid"));
+    let guard = ChromeGuard::spawn(port)
+        .unwrap_or_else(|| unreachable!("no chromium found; set UWA_CHROME_BIN"));
+    let pid = guard
+        .pid()
+        .unwrap_or_else(|| unreachable!("spawned child has a pid"));
     let profile = guard.profile().to_path_buf();
     assert!(
         wait_for_ws(&guard.debug_url(port), Duration::from_secs(30)).await,
@@ -883,7 +914,8 @@ async fn live_frames_eval_and_oopif_tracking() {
     tokio::spawn(serve_oopif_site(site_port));
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let guard = ChromeGuard::spawn(chrome_port).unwrap_or_else(|| unreachable!("no chromium found; set UWA_CHROME_BIN"));
+    let guard = ChromeGuard::spawn(chrome_port)
+        .unwrap_or_else(|| unreachable!("no chromium found; set UWA_CHROME_BIN"));
     let debug_url = guard.debug_url(chrome_port);
     assert!(
         wait_for_ws(&debug_url, Duration::from_secs(20)).await,
@@ -900,19 +932,34 @@ async fn live_frames_eval_and_oopif_tracking() {
         .unwrap_or_else(|_| unreachable!("connect"));
         eprintln!("[frames] connected");
 
-        let tabs = transport.list_tabs().await.unwrap_or_else(|_| unreachable!("list_tabs"));
-        let tab = tabs.first().unwrap_or_else(|| unreachable!("at least one tab")).clone();
-        let page = transport.page(&tab).await.unwrap_or_else(|_| unreachable!("acquire page"));
+        let tabs = transport
+            .list_tabs()
+            .await
+            .unwrap_or_else(|_| unreachable!("list_tabs"));
+        let tab = tabs
+            .first()
+            .unwrap_or_else(|| unreachable!("at least one tab"))
+            .clone();
+        let page = transport
+            .page(&tab)
+            .await
+            .unwrap_or_else(|_| unreachable!("acquire page"));
 
-        let parent = url::Url::parse(&format!("http://127.0.0.1:{site_port}/")).unwrap_or_else(|_| unreachable!());
-        page.goto(&parent).await.unwrap_or_else(|_| unreachable!("goto parent"));
+        let parent = url::Url::parse(&format!("http://127.0.0.1:{site_port}/"))
+            .unwrap_or_else(|_| unreachable!());
+        page.goto(&parent)
+            .await
+            .unwrap_or_else(|_| unreachable!("goto parent"));
         eprintln!("[frames] navigated to parent");
 
         // Give both iframes a moment to load.
         tokio::time::sleep(Duration::from_secs(2)).await;
 
         // --- Part 1: eval_in_frame in a same-origin (same-process) iframe ---
-        let frames = page.frame_tree().await.unwrap_or_else(|_| unreachable!("frame_tree"));
+        let frames = page
+            .frame_tree()
+            .await
+            .unwrap_or_else(|_| unreachable!("frame_tree"));
         let same_origin_url = format!("http://127.0.0.1:{site_port}/iframe.html");
         let mut same_frame_id: Option<String> = None;
         for (fid, url) in &frames {
@@ -922,7 +969,8 @@ async fn live_frames_eval_and_oopif_tracking() {
                 break;
             }
         }
-        let same_frame_id = same_frame_id.unwrap_or_else(|| unreachable!("same-origin iframe not found in frame tree"));
+        let same_frame_id = same_frame_id
+            .unwrap_or_else(|| unreachable!("same-origin iframe not found in frame tree"));
         eprintln!("[frames] same-origin frame_id={same_frame_id}");
 
         // Evaluate in the same-origin iframe — must read its own document.
@@ -1018,7 +1066,8 @@ async fn live_oopif_eval_and_stealth() {
     tokio::spawn(serve_oopif_site(site_port));
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let guard = ChromeGuard::spawn(chrome_port).unwrap_or_else(|| unreachable!("no chromium found; set UWA_CHROME_BIN"));
+    let guard = ChromeGuard::spawn(chrome_port)
+        .unwrap_or_else(|| unreachable!("no chromium found; set UWA_CHROME_BIN"));
     let debug_url = guard.debug_url(chrome_port);
     assert!(
         wait_for_ws(&debug_url, Duration::from_secs(20)).await,
@@ -1037,12 +1086,24 @@ async fn live_oopif_eval_and_stealth() {
         .unwrap_or_else(|_| unreachable!("connect"));
         eprintln!("[oopif-eval] connected with stealth");
 
-        let tabs = transport.list_tabs().await.unwrap_or_else(|_| unreachable!("list_tabs"));
-        let tab = tabs.first().unwrap_or_else(|| unreachable!("at least one tab")).clone();
-        let page = transport.page(&tab).await.unwrap_or_else(|_| unreachable!("acquire page"));
+        let tabs = transport
+            .list_tabs()
+            .await
+            .unwrap_or_else(|_| unreachable!("list_tabs"));
+        let tab = tabs
+            .first()
+            .unwrap_or_else(|| unreachable!("at least one tab"))
+            .clone();
+        let page = transport
+            .page(&tab)
+            .await
+            .unwrap_or_else(|_| unreachable!("acquire page"));
 
-        let parent = url::Url::parse(&format!("http://127.0.0.1:{site_port}/")).unwrap_or_else(|_| unreachable!());
-        page.goto(&parent).await.unwrap_or_else(|_| unreachable!("goto parent"));
+        let parent = url::Url::parse(&format!("http://127.0.0.1:{site_port}/"))
+            .unwrap_or_else(|_| unreachable!());
+        page.goto(&parent)
+            .await
+            .unwrap_or_else(|_| unreachable!("goto parent"));
         eprintln!("[oopif-eval] navigated to parent");
         tokio::time::sleep(Duration::from_secs(3)).await;
 

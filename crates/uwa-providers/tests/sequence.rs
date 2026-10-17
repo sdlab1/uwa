@@ -95,10 +95,7 @@ async fn send_message_fails_when_the_composer_is_gone() {
             "el.focus()",
             vec![json!({ "ok": false, "reason": "no-element" })],
         );
-    let err = match provider(provider_cfg())
-        .send_message(&page, "hi")
-        .await
-    {
+    let err = match provider(provider_cfg()).send_message(&page, "hi").await {
         Err(err) => err,
         Ok(_) => unreachable!(),
     };
@@ -129,10 +126,7 @@ async fn send_message_requires_the_configured_selectors() {
     let mut cfg = provider_cfg();
     cfg.selectors.input = None;
     let page = MockPage::new();
-    let err = match provider(cfg)
-        .send_message(&page, "hi")
-        .await
-    {
+    let err = match provider(cfg).send_message(&page, "hi").await {
         Err(err) => err,
         Ok(_) => unreachable!(),
     };

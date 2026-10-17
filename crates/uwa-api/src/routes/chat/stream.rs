@@ -383,15 +383,14 @@ mod tests {
                 .is_null(),
             "finish_reason must be null on error: {j:?}"
         );
-        assert!(
-            j.get("error")
-                .unwrap_or(&serde_json::Value::Null)
-                .get("message")
-                .unwrap_or(&serde_json::Value::Null)
-                .as_str()
-                .unwrap_or("")
-                .contains("dropped")
-        );
+        assert!(j
+            .get("error")
+            .unwrap_or(&serde_json::Value::Null)
+            .get("message")
+            .unwrap_or(&serde_json::Value::Null)
+            .as_str()
+            .unwrap_or("")
+            .contains("dropped"));
         // ...and no clean `stop` finish chunk anywhere.
         assert!(frames.iter().all(|f| {
             f.json()

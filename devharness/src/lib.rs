@@ -56,22 +56,10 @@ impl Cmd {
             Command::new("init"),
             Command::new("new")
                 .arg(Arg::new("arg").index(1).required(true))
-                .arg(
-                    Arg::new("no_red")
-                        .long("no-red")
-                        .action(ArgAction::Set),
-                )
-                .arg(
-                    Arg::new("no_crap")
-                        .long("no-crap")
-                        .action(ArgAction::Set),
-                ),
+                .arg(Arg::new("no_red").long("no-red").action(ArgAction::Set))
+                .arg(Arg::new("no_crap").long("no-crap").action(ArgAction::Set)),
             Command::new("auto")
-                .arg(
-                    Arg::new("from")
-                        .long("from")
-                        .action(ArgAction::Set),
-                )
+                .arg(Arg::new("from").long("from").action(ArgAction::Set))
                 .arg(
                     Arg::new("max")
                         .long("max")
@@ -92,11 +80,7 @@ impl Cmd {
             Command::new("logs").arg(Arg::new("id").index(1)),
             Command::new("bg")
                 .arg(Arg::new("id").index(1))
-                .arg(
-                    Arg::new("from")
-                        .long("from")
-                        .action(ArgAction::Set),
-                )
+                .arg(Arg::new("from").long("from").action(ArgAction::Set))
                 .arg(
                     Arg::new("max")
                         .long("max")
@@ -116,7 +100,9 @@ impl Cmd {
         match matches.subcommand_name() {
             Some("init") => Ok(Cmd::Init),
             Some("new") => {
-                let m = matches.subcommand_matches("new").unwrap_or_else(|| unreachable!());
+                let m = matches
+                    .subcommand_matches("new")
+                    .unwrap_or_else(|| unreachable!());
                 let arg = m
                     .get_one::<String>("arg")
                     .unwrap_or_else(|| unreachable!())
@@ -130,46 +116,62 @@ impl Cmd {
                 })
             }
             Some("auto") => {
-                let m = matches.subcommand_matches("auto").unwrap_or_else(|| unreachable!());
+                let m = matches
+                    .subcommand_matches("auto")
+                    .unwrap_or_else(|| unreachable!());
                 let from = m.get_one::<String>("from").cloned();
                 let max = m.get_one::<u32>("max").copied();
                 Ok(Cmd::Auto { from, max })
             }
             Some("list") => Ok(Cmd::List),
             Some("hint") => {
-                let m = matches.subcommand_matches("hint").unwrap_or_else(|| unreachable!());
+                let m = matches
+                    .subcommand_matches("hint")
+                    .unwrap_or_else(|| unreachable!());
                 let id = m.get_one::<String>("id").cloned();
                 Ok(Cmd::Hint { id })
             }
             Some("run") => {
-                let m = matches.subcommand_matches("run").unwrap_or_else(|| unreachable!());
+                let m = matches
+                    .subcommand_matches("run")
+                    .unwrap_or_else(|| unreachable!());
                 let id = m.get_one::<String>("id").cloned();
                 Ok(Cmd::Run { id })
             }
             Some("commit") => {
-                let m = matches.subcommand_matches("commit").unwrap_or_else(|| unreachable!());
+                let m = matches
+                    .subcommand_matches("commit")
+                    .unwrap_or_else(|| unreachable!());
                 let id = m.get_one::<String>("id").cloned();
                 Ok(Cmd::Commit { id })
             }
             Some("merge") => {
-                let m = matches.subcommand_matches("merge").unwrap_or_else(|| unreachable!());
+                let m = matches
+                    .subcommand_matches("merge")
+                    .unwrap_or_else(|| unreachable!());
                 let id = m.get_one::<String>("id").cloned();
                 Ok(Cmd::Merge { id })
             }
             Some("abort") => {
-                let m = matches.subcommand_matches("abort").unwrap_or_else(|| unreachable!());
+                let m = matches
+                    .subcommand_matches("abort")
+                    .unwrap_or_else(|| unreachable!());
                 let id = m.get_one::<String>("id").cloned();
                 Ok(Cmd::Abort { id })
             }
             Some("clean") => Ok(Cmd::Clean),
             Some("doctor") => Ok(Cmd::Doctor),
             Some("logs") => {
-                let m = matches.subcommand_matches("logs").unwrap_or_else(|| unreachable!());
+                let m = matches
+                    .subcommand_matches("logs")
+                    .unwrap_or_else(|| unreachable!());
                 let id = m.get_one::<String>("id").cloned();
                 Ok(Cmd::Logs { id })
             }
             Some("bg") => {
-                let m = matches.subcommand_matches("bg").unwrap_or_else(|| unreachable!());
+                let m = matches
+                    .subcommand_matches("bg")
+                    .unwrap_or_else(|| unreachable!());
                 let id = m.get_one::<String>("id").cloned();
                 let from = m.get_one::<String>("from").cloned();
                 let max = m.get_one::<u32>("max").copied();

@@ -272,7 +272,12 @@ mod tests {
             "####,
         )
         .unwrap_or_else(|_| unreachable!());
-        let eff = cfg.providers.get("x").unwrap_or_else(|| unreachable!()).effective(Some("pro")).unwrap_or_else(|_| unreachable!());
+        let eff = cfg
+            .providers
+            .get("x")
+            .unwrap_or_else(|| unreachable!())
+            .effective(Some("pro"))
+            .unwrap_or_else(|_| unreachable!());
         assert_eq!(eff.selectors.stop_button.as_deref(), Some("#stop"));
     }
 }

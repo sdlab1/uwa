@@ -244,7 +244,9 @@ mod tests {
     #[tokio::test]
     async fn tap_mirrors_events_from_every_target() {
         let bus = NetBus::with_tap();
-        let mut tap = bus.tap_subscribe().unwrap_or_else(|| unreachable!("tap present"));
+        let mut tap = bus
+            .tap_subscribe()
+            .unwrap_or_else(|| unreachable!("tap present"));
 
         let a = bus.sender_for("t1".into()).await;
         let b = bus.sender_for("t2".into()).await;

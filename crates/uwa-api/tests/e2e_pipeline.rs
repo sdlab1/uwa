@@ -11,6 +11,7 @@ use uwa_testkit::{
     AppBuilder, MockProvider, MockTransport,
 };
 
+#[allow(dead_code)]
 mod helpers {
     use super::*;
     pub fn test_app() -> uwa_testkit::TestApp {

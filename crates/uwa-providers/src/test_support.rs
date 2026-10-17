@@ -57,10 +57,15 @@ impl Page for ScriptedPage {
         Ok(())
     }
     async fn url(&self) -> Result<Url> {
-        Ok("https://chatgpt.com/".parse().unwrap_or_else(|_| unreachable!()))
+        Ok("https://chatgpt.com/"
+            .parse()
+            .unwrap_or_else(|_| unreachable!()))
     }
     async fn eval(&self, js: &str) -> Result<Value> {
-        self.log.lock().unwrap_or_else(|_| unreachable!()).push(js.to_string());
+        self.log
+            .lock()
+            .unwrap_or_else(|_| unreachable!())
+            .push(js.to_string());
         let mut s = self.script.lock().unwrap_or_else(|_| unreachable!());
         if let Some(idx) = s.iter().position(|(pat, _)| js.contains(pat.as_str())) {
             let (_, v) = s.remove(idx);

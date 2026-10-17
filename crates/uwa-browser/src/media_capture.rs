@@ -197,7 +197,9 @@ mod tests {
     #[tokio::test]
     async fn start_reports_ok() {
         let p = MockPage::new().expect_default(json!({"ok": true}));
-        start_capture(&p).await.unwrap_or_else(|e| unreachable!("{e}"));
+        start_capture(&p)
+            .await
+            .unwrap_or_else(|e| unreachable!("{e}"));
     }
 
     #[tokio::test]
@@ -213,21 +215,30 @@ mod tests {
             "ok": true,
             "chunks": ["SGk=", "IQ=="]
         }));
-        let bytes = stop_capture(&p).await.unwrap_or_else(|e| unreachable!("{e}")).unwrap_or_else(|| unreachable!());
+        let bytes = stop_capture(&p)
+            .await
+            .unwrap_or_else(|e| unreachable!("{e}"))
+            .unwrap_or_else(|| unreachable!());
         assert_eq!(bytes, b"Hi!");
     }
 
     #[tokio::test]
     async fn stop_empty_returns_none() {
         let p = MockPage::new().expect_default(json!({"ok": true, "chunks": []}));
-        assert!(stop_capture(&p).await.unwrap_or_else(|e| unreachable!("{e}")).is_none());
+        assert!(stop_capture(&p)
+            .await
+            .unwrap_or_else(|e| unreachable!("{e}"))
+            .is_none());
     }
 
     #[tokio::test]
     async fn stop_not_started_returns_none() {
         // No "chunks" array at all.
         let p = MockPage::new().expect_default(json!({"ok": false}));
-        assert!(stop_capture(&p).await.unwrap_or_else(|e| unreachable!("{e}")).is_none());
+        assert!(stop_capture(&p)
+            .await
+            .unwrap_or_else(|e| unreachable!("{e}"))
+            .is_none());
     }
 
     #[tokio::test]
@@ -251,6 +262,9 @@ mod tests {
     #[tokio::test]
     async fn scan_media_non_array_is_empty() {
         let p = MockPage::new().expect_default(json!({"ok": true}));
-        assert!(scan_media(&p).await.unwrap_or_else(|e| unreachable!("{e}")).is_empty());
+        assert!(scan_media(&p)
+            .await
+            .unwrap_or_else(|e| unreachable!("{e}"))
+            .is_empty());
     }
 }

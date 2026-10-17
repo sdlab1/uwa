@@ -279,8 +279,14 @@ mod tests {
         };
         let args = c.chrome_args();
         assert_eq!(args.len(), 2);
-        assert_eq!(args.first().unwrap_or_else(|| unreachable!()), "--proxy-server=socks5://127.0.0.1:1080");
-        assert_eq!(args.get(1).unwrap_or_else(|| unreachable!()), "--proxy-bypass-list=localhost,127.0.0.1");
+        assert_eq!(
+            args.first().unwrap_or_else(|| unreachable!()),
+            "--proxy-server=socks5://127.0.0.1:1080"
+        );
+        assert_eq!(
+            args.get(1).unwrap_or_else(|| unreachable!()),
+            "--proxy-bypass-list=localhost,127.0.0.1"
+        );
     }
 
     #[test]

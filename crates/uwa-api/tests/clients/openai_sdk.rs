@@ -38,7 +38,11 @@ async fn sdk_non_stream() {
         v.get("object").and_then(|v| v.as_str()).unwrap_or(""),
         "chat.completion"
     );
-    assert!(!v.get("id").and_then(|v| v.as_str()).unwrap_or("").is_empty());
+    assert!(!v
+        .get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .is_empty());
     assert!(v.get("created").and_then(|v| v.as_u64()).unwrap_or(0) > 0);
     assert_eq!(
         v.get("choices")
@@ -63,13 +67,12 @@ async fn sdk_non_stream() {
             .and_then(|c| c.as_str()),
         Some("The answer is 42.")
     );
-    assert!(
-        v.get("choices")
-            .and_then(|c| c.get(0))
-            .and_then(|c| c.get("finish_reason"))
-            .map(|f| f.is_string())
-            .unwrap_or(false)
-    );
+    assert!(v
+        .get("choices")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("finish_reason"))
+        .map(|f| f.is_string())
+        .unwrap_or(false));
     assert!(
         v.get("usage")
             .and_then(|u| u.get("prompt_tokens"))
@@ -110,11 +113,11 @@ async fn sdk_stream_with_usage() {
     let body = r.text();
     let frames: Vec<&str> = body.split("data: ").skip(1).collect();
     // First frame always carries role: assistant.
-    let first: Value = serde_json::from_str(
-        frames.get(0).map(|f| f.trim()).unwrap_or("")
-    ).unwrap_or_else(|e| unreachable!("bad frame: {e}"));
+    let first: Value = serde_json::from_str(frames.get(0).map(|f| f.trim()).unwrap_or(""))
+        .unwrap_or_else(|e| unreachable!("bad frame: {e}"));
     assert_eq!(
-        first.get("choices")
+        first
+            .get("choices")
             .and_then(|c| c.get(0))
             .and_then(|c| c.get("delta"))
             .and_then(|d| d.get("role"))

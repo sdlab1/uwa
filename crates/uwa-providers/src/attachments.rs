@@ -142,9 +142,14 @@ mod tests {
         let png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
         let url = format!("data:image/png;base64,{png_b64}");
         let req = req_with_image(&url);
-        let atts = extract_attachments(&req).await.unwrap_or_else(|_| unreachable!());
+        let atts = extract_attachments(&req)
+            .await
+            .unwrap_or_else(|_| unreachable!());
         assert_eq!(atts.len(), 1);
-        assert_eq!(atts.first().unwrap_or_else(|| unreachable!()).mime, "image/png");
+        assert_eq!(
+            atts.first().unwrap_or_else(|| unreachable!()).mime,
+            "image/png"
+        );
         assert!(atts.first().unwrap_or_else(|| unreachable!()).size > 0);
         assert!(atts.first().unwrap_or_else(|| unreachable!()).path.exists());
         cleanup(&atts);
@@ -164,14 +169,18 @@ mod tests {
             tool_choice: None,
             user: None,
         };
-        let atts = extract_attachments(&req).await.unwrap_or_else(|_| unreachable!());
+        let atts = extract_attachments(&req)
+            .await
+            .unwrap_or_else(|_| unreachable!());
         assert!(atts.is_empty());
     }
 
     #[tokio::test]
     async fn bad_data_uri_errors_quietly() {
         let req = req_with_image("data:image/png;base64,not-real-base64!!!");
-        let atts = extract_attachments(&req).await.unwrap_or_else(|_| unreachable!());
+        let atts = extract_attachments(&req)
+            .await
+            .unwrap_or_else(|_| unreachable!());
         // We log and skip; no panic, empty result.
         assert!(atts.is_empty());
     }
@@ -179,7 +188,9 @@ mod tests {
     #[tokio::test]
     async fn unsupported_scheme_skipped() {
         let req = req_with_image("ftp://example.com/img.png");
-        let atts = extract_attachments(&req).await.unwrap_or_else(|_| unreachable!());
+        let atts = extract_attachments(&req)
+            .await
+            .unwrap_or_else(|_| unreachable!());
         assert!(atts.is_empty());
     }
 }

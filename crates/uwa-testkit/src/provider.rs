@@ -207,7 +207,10 @@ mod tests {
     #[tokio::test]
     async fn answers_with_the_scripted_text() {
         let p = MockProvider::new("chatgpt").with_answer("hello");
-        let answer = p.wait_response(&MockPage::new()).await.unwrap_or_else(|_| unreachable!("answer"));
+        let answer = p
+            .wait_response(&MockPage::new())
+            .await
+            .unwrap_or_else(|_| unreachable!("answer"));
         assert_eq!(answer, "hello");
         assert_eq!(p.name(), "chatgpt");
         assert!(p.capabilities().streams);
@@ -242,7 +245,10 @@ mod tests {
     async fn delay_slows_the_answer_down() {
         let p = MockProvider::new("slow").with_delay(Duration::from_millis(50));
         let started = std::time::Instant::now();
-        let _ = p.wait_response(&MockPage::new()).await.unwrap_or_else(|_| unreachable!("answer"));
+        let _ = p
+            .wait_response(&MockPage::new())
+            .await
+            .unwrap_or_else(|_| unreachable!("answer"));
         assert!(started.elapsed() >= Duration::from_millis(40));
     }
 

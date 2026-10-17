@@ -91,7 +91,9 @@ mod tests {
         let (installed, events) = poll(&p, 0).await.unwrap_or_else(|e| unreachable!("{e}"));
         assert!(installed);
         assert_eq!(events.len(), 1);
-        assert!(matches!(events.first().unwrap_or_else(|| unreachable!()), TraceEvent::Click { selector, .. } if selector == "#a"));
+        assert!(
+            matches!(events.first().unwrap_or_else(|| unreachable!()), TraceEvent::Click { selector, .. } if selector == "#a")
+        );
     }
 
     #[tokio::test]

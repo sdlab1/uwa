@@ -49,16 +49,8 @@ impl ServiceAction {
         vec![
             Command::new("install")
                 .about("Register and start the service.")
-                .arg(
-                    Arg::new("system")
-                        .long("system")
-                        .action(ArgAction::SetTrue),
-                )
-                .arg(
-                    Arg::new("config")
-                        .long("config")
-                        .action(ArgAction::Set),
-                )
+                .arg(Arg::new("system").long("system").action(ArgAction::SetTrue))
+                .arg(Arg::new("config").long("config").action(ArgAction::Set))
                 .arg(
                     Arg::new("no_start")
                         .long("no-start")
@@ -66,18 +58,10 @@ impl ServiceAction {
                 ),
             Command::new("uninstall")
                 .about("Stop and unregister.")
-                .arg(
-                    Arg::new("system")
-                        .long("system")
-                        .action(ArgAction::SetTrue),
-                ),
+                .arg(Arg::new("system").long("system").action(ArgAction::SetTrue)),
             Command::new("status")
                 .about("Show whether the service is registered and running.")
-                .arg(
-                    Arg::new("system")
-                        .long("system")
-                        .action(ArgAction::SetTrue),
-                ),
+                .arg(Arg::new("system").long("system").action(ArgAction::SetTrue)),
         ]
     }
 

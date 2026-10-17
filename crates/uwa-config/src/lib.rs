@@ -787,7 +787,9 @@ mod tests {
     #[test]
     fn resolve_model_hits_alias_exactly() {
         let cfg = Config::load_from_str(SAMPLE).unwrap_or_else(|_| unreachable!());
-        let (p, name) = cfg.resolve_model("gpt-4o").unwrap_or_else(|_| unreachable!());
+        let (p, name) = cfg
+            .resolve_model("gpt-4o")
+            .unwrap_or_else(|_| unreachable!());
         assert_eq!(p.name, "chatgpt");
         assert_eq!(name, "gpt-4o");
     }
@@ -811,7 +813,9 @@ mod tests {
             assistant_message = "#a"
         "####;
         let cfg = Config::load_from_str(toml).unwrap_or_else(|_| unreachable!());
-        let (p, name) = cfg.resolve_model("deepseek-flash").unwrap_or_else(|_| unreachable!());
+        let (p, name) = cfg
+            .resolve_model("deepseek-flash")
+            .unwrap_or_else(|_| unreachable!());
         assert_eq!(p.name, "deepseek");
         assert_eq!(name, "deepseek-chat");
     }
@@ -831,16 +835,40 @@ mod tests {
     #[test]
     fn provider_concurrency_defaults_and_overrides() {
         let cfg = Config::load_from_str(SAMPLE).unwrap_or_else(|_| unreachable!());
-        assert_eq!(cfg.providers.get("chatgpt").unwrap_or_else(|| unreachable!()).max_concurrency, 2);
-        assert_eq!(cfg.providers.get("chatgpt").unwrap_or_else(|| unreachable!()).max_tool_retries, 2);
+        assert_eq!(
+            cfg.providers
+                .get("chatgpt")
+                .unwrap_or_else(|| unreachable!())
+                .max_concurrency,
+            2
+        );
+        assert_eq!(
+            cfg.providers
+                .get("chatgpt")
+                .unwrap_or_else(|| unreachable!())
+                .max_tool_retries,
+            2
+        );
 
         let toml = SAMPLE.replace(
             "[providers.chatgpt.selectors]",
             "max_concurrency = 4\nmax_tool_retries = 0\n\n[providers.chatgpt.selectors]",
         );
         let cfg = Config::load_from_str(&toml).unwrap_or_else(|_| unreachable!());
-        assert_eq!(cfg.providers.get("chatgpt").unwrap_or_else(|| unreachable!()).max_concurrency, 4);
-        assert_eq!(cfg.providers.get("chatgpt").unwrap_or_else(|| unreachable!()).max_tool_retries, 0);
+        assert_eq!(
+            cfg.providers
+                .get("chatgpt")
+                .unwrap_or_else(|| unreachable!())
+                .max_concurrency,
+            4
+        );
+        assert_eq!(
+            cfg.providers
+                .get("chatgpt")
+                .unwrap_or_else(|| unreachable!())
+                .max_tool_retries,
+            0
+        );
     }
 
     #[test]
@@ -859,20 +887,32 @@ mod tests {
     #[test]
     fn conversation_pinning_defaults_true_and_can_be_disabled() {
         let cfg = Config::load_from_str(SAMPLE).unwrap_or_else(|_| unreachable!());
-        assert!(cfg.providers.get("chatgpt").unwrap_or_else(|| unreachable!()).conversation_pinning);
+        assert!(
+            cfg.providers
+                .get("chatgpt")
+                .unwrap_or_else(|| unreachable!())
+                .conversation_pinning
+        );
 
         let toml = SAMPLE.replace(
             "[providers.chatgpt.selectors]",
             "conversation_pinning = false\n\n[providers.chatgpt.selectors]",
         );
         let cfg = Config::load_from_str(&toml).unwrap_or_else(|_| unreachable!());
-        assert!(!cfg.providers.get("chatgpt").unwrap_or_else(|| unreachable!()).conversation_pinning);
+        assert!(
+            !cfg.providers
+                .get("chatgpt")
+                .unwrap_or_else(|| unreachable!())
+                .conversation_pinning
+        );
     }
 
     #[test]
     fn vendor_prefix_is_stripped_before_alias_lookup() {
         let cfg = Config::load_from_str(SAMPLE).unwrap_or_else(|_| unreachable!());
-        let (p, name) = cfg.resolve_model("openai/gpt-4o").unwrap_or_else(|_| unreachable!());
+        let (p, name) = cfg
+            .resolve_model("openai/gpt-4o")
+            .unwrap_or_else(|_| unreachable!());
         assert_eq!(p.name, "chatgpt");
         assert_eq!(name, "gpt-4o");
     }
@@ -914,7 +954,10 @@ mod tests {
         "####;
         let cfg = Config::load_from_str_with_registry(toml, &Registry::from_builtin())
             .unwrap_or_else(|_| unreachable!());
-        let p = cfg.providers.get("chatgpt").unwrap_or_else(|| unreachable!());
+        let p = cfg
+            .providers
+            .get("chatgpt")
+            .unwrap_or_else(|| unreachable!());
         assert_eq!(p.selectors.input.as_deref(), Some("#custom-input"));
         // Filled in from the registry.
         assert!(p.selectors.send_button.is_some());
@@ -1019,7 +1062,13 @@ mod tests {
         )
         .unwrap_or_else(|_| unreachable!());
         assert_eq!(cfg.backend.kind, BackendKind::Nodriver);
-        assert_eq!(cfg.providers.get("x").unwrap_or_else(|| unreachable!()).backend, Some(BackendKind::Cdp));
+        assert_eq!(
+            cfg.providers
+                .get("x")
+                .unwrap_or_else(|| unreachable!())
+                .backend,
+            Some(BackendKind::Cdp)
+        );
     }
 
     #[test]
@@ -1144,7 +1193,9 @@ mod tests {
 
     #[test]
     fn url_glob_matches() {
-        let url: Url = "https://chatgpt.com/c/abc".parse().unwrap_or_else(|_| unreachable!());
+        let url: Url = "https://chatgpt.com/c/abc"
+            .parse()
+            .unwrap_or_else(|_| unreachable!());
         assert!(url_matches("https://chatgpt.com/*", &url));
         assert!(!url_matches("https://gemini.google.com/*", &url));
     }

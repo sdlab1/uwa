@@ -127,11 +127,7 @@ async fn same_profile_reuses_the_tab() {
         .map(Vec::as_slice)
         .unwrap_or(&[])
         .iter()
-        .filter(|s| {
-            s.get("profile")
-                .and_then(|p| p.as_str())
-                == Some("work")
-        })
+        .filter(|s| s.get("profile").and_then(|p| p.as_str()) == Some("work"))
         .collect();
     assert_eq!(work.len(), 1, "same (conversation, profile) must reuse");
 }
@@ -175,9 +171,7 @@ async fn profiles_endpoint_lists_everything() {
         .and_then(|p| p.as_array())
         .map(|a| {
             a.iter()
-                .filter_map(|p| {
-                    p.get("name").and_then(|n| n.as_str()).map(String::from)
-                })
+                .filter_map(|p| p.get("name").and_then(|n| n.as_str()).map(String::from))
                 .collect()
         })
         .unwrap_or_default();
@@ -195,13 +189,12 @@ async fn profiles_endpoint_lists_everything() {
         })
         .unwrap_or_else(|| unreachable!("work must be listed"));
     assert_eq!(work.get("active").and_then(|v| v.as_bool()), Some(true));
-    assert!(
-        !work.get("tabs")
-            .and_then(|t| t.as_array())
-            .map(Vec::as_slice)
-            .unwrap_or(&[])
-            .is_empty()
-    );
+    assert!(!work
+        .get("tabs")
+        .and_then(|t| t.as_array())
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+        .is_empty());
     assert_eq!(
         work.get("label").and_then(|v| v.as_str()).unwrap_or(""),
         "Work"
@@ -218,16 +211,12 @@ async fn open_profile_tab_creates_a_new_tab() {
         .await;
     r.assert_status_ok();
     let v: Value = r.json();
-    assert_eq!(
-        v.get("reused").and_then(|v| v.as_bool()),
-        Some(false)
-    );
-    assert!(
-        v.get("tab")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .starts_with("dyn_")
-    );
+    assert_eq!(v.get("reused").and_then(|v| v.as_bool()), Some(false));
+    assert!(v
+        .get("tab")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .starts_with("dyn_"));
 }
 
 #[tokio::test]
@@ -253,13 +242,12 @@ async fn reset_profile_drops_its_tabs_and_sessions() {
         .await;
     r.assert_status_ok();
     let v: Value = r.json();
-    assert!(
-        !v.get("dropped_tabs")
-            .and_then(|t| t.as_array())
-            .map(Vec::as_slice)
-            .unwrap_or(&[])
-            .is_empty()
-    );
+    assert!(!v
+        .get("dropped_tabs")
+        .and_then(|t| t.as_array())
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+        .is_empty());
 
     // The work session is gone.
     let v = sessions_list(&s).await;
@@ -269,11 +257,7 @@ async fn reset_profile_drops_its_tabs_and_sessions() {
         .map(Vec::as_slice)
         .unwrap_or(&[])
         .iter()
-        .filter(|s| {
-            s.get("profile")
-                .and_then(|p| p.as_str())
-                == Some("work")
-        })
+        .filter(|s| s.get("profile").and_then(|p| p.as_str()) == Some("work"))
         .collect();
     assert!(work.is_empty(), "work sessions must be dropped: {v}");
 }
@@ -304,14 +288,10 @@ async fn default_profile_reuses_an_existing_tab_and_navigates() {
     // The mock tab's URL is blank, so the reuse prefix never matches;
     // the handler navigates the existing static tab instead of creating
     // a dynamic one.
-    assert_eq!(
-        v.get("reused").and_then(|v| v.as_bool()),
-        Some(false)
-    );
-    assert!(
-        !v.get("tab")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .starts_with("dyn_")
-    );
+    assert_eq!(v.get("reused").and_then(|v| v.as_bool()), Some(false));
+    assert!(!v
+        .get("tab")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .starts_with("dyn_"));
 }

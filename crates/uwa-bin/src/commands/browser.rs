@@ -185,8 +185,8 @@ mod tests {
     /// single-read implementation missed it.
     fn serve_cdp_once(body: &str) -> u16 {
         use std::io::Write as _;
-        let listener = std::net::TcpListener::bind("127.0.0.1:0")
-            .unwrap_or_else(|_| unreachable!());
+        let listener =
+            std::net::TcpListener::bind("127.0.0.1:0").unwrap_or_else(|_| unreachable!());
         let port = listener
             .local_addr()
             .unwrap_or_else(|_| unreachable!())
