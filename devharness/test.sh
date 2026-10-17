@@ -36,6 +36,8 @@ base_env() {
   export HARNESS_BENCH='' HARNESS_MAX_ACTIVE=3 HARNESS_MAX_FIX=3 HARNESS_AGENT_TIMEOUT=60
   export HARNESS_LOG_DAYS=30 HARNESS_NO_IGNORED=1 T_MUT_GOOD="$T/mut-good"
   export HARNESS_REVIEW=0 HARNESS_LINT=1
+  # сброс гейтов, которые экспортят отдельные секции (иначе утекают в следующие)
+  unset HARNESS_CRAP HARNESS_CRAP_SCOPE HARNESS_CRAP_MAX
 }
 
 cat > "$T/stub.sh" <<'S'
@@ -297,9 +299,9 @@ grep -q "Блокер СРЕДЫ" "$T/out" && pass "блокер среды по
 grep -q "раунд фикса" "$T/out" && fail "не должен быть fix-раунд" || pass "не fix-раунд (env ≠ работа агента)"
 "$DEVH" abort >/dev/null 2>&1
 
-echo "== 17. NO-IGNORED: ignored>0 = скрытый красный =="
+echo "== 17. NO-IGNORED: незаявленный игнор = скрытый красный =="
 R="$(fresh r17)"; base_env
-export HARNESS_VERIFY='if [ -f ign-fix ]; then echo "3 passed; 0 failed; 0 ignored"; else echo "3 passed; 0 failed; 2 ignored"; fi; test -f done.txt'
+export HARNESS_VERIFY='if [ -f ign-fix ]; then echo "test result: ok. 3 passed; 0 failed; 0 ignored"; else echo "test mod::hidden_one ... ignored"; echo "test mod::hidden_two ... ignored, причина"; echo "test result: ok. 1 passed; 2 ignored"; fi; test -f done.txt'
 export HARNESS_AGENT="$T/stub-ign.sh"
 cd "$R" || exit 1; "$DEVH" init >/dev/null
 printf 'спека\n' | "$DEVH" new "ign item" --no-red x >/dev/null
@@ -495,6 +497,30 @@ if HARNESS_CRAP="$T/crap-garbage.sh" "$DEVH" doctor >"$T/out" 2>&1; then
 else
   grep -q "FAIL" "$T/out" && grep -q "CRAP" "$T/out" \
     && pass "doctor ловит сломанный CRAP-инструмент" || { fail "doctor ловит сломанный CRAP-инструмент"; cat "$T/out"; }
+fi
+
+echo "== 27. NO-IGNORED allowlist: заявленный игнор пропускается, незаявленный = красный =="
+# (a) заявленный в allowlist игнор → run зелёный
+R="$(fresh r27a)"; base_env; export HARNESS_MAX_FIX=0
+export HARNESS_VERIFY='echo "test suite::declared_slow ... ignored, сеть"; echo "test result: ok. 1 passed; 1 ignored"; test -f done.txt'
+export HARNESS_AGENT="$T/stub.sh"
+cd "$R" || exit 1; "$DEVH" init >/dev/null
+mkdir -p scripts && printf 'declared_slow\n' > scripts/ignored-tests.txt
+printf 'спека\n' | "$DEVH" new "ign allow ok" --no-red x >/dev/null
+"$DEVH" run >"$T/out" 2>&1 && ! grep -q "NO-IGNORED" "$T/out" \
+  && pass "allowlist: заявленный игнор НЕ красит NoIgnored" || { fail "allowlist: заявленный игнор НЕ красит NoIgnored"; cat "$T/out"; }
+# (b) незаявленный игнор (allowlist есть, но имя не в нём) → красный
+R="$(fresh r27b)"; base_env; export HARNESS_MAX_FIX=0
+export HARNESS_VERIFY='echo "test suite::rogue_test ... ignored"; echo "test result: ok. 0 passed; 1 ignored"; test -f done.txt'
+export HARNESS_AGENT="$T/stub.sh"
+cd "$R" || exit 1; "$DEVH" init >/dev/null
+mkdir -p scripts && printf 'declared_slow\n' > scripts/ignored-tests.txt
+printf 'спека\n' | "$DEVH" new "ign allow bad" --no-red x >/dev/null
+if "$DEVH" run >"$T/out" 2>&1; then
+  fail "allowlist: незаявленный игнор всё ещё красный"
+else
+  grep -q "NO-IGNORED" "$T/out" && grep -q "rogue_test" .harness/logs/W-001-verify.log \
+    && pass "allowlist: незаявленный игнор красный, имя в verify-логе" || { fail "allowlist: незаявленный игнор красный, имя в verify-логе"; cat "$T/out"; }
 fi
 
 echo

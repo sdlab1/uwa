@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::core::gates::{
-    self, ignored_lines, parse_review_verdict, tail_of, Gate, Raw, RedPhase, ReviewVerdict, Verdict,
+    self, parse_review_verdict, tail_of, Gate, Raw, RedPhase, ReviewVerdict, Verdict,
 };
 use crate::core::state::{self, Status};
 use crate::core::types::{CrapCfg, ItemId, MutateCfg, RunConfig};
@@ -461,15 +461,14 @@ fn gate_ladder(
     }
     timing.stage(format!("verify-r{}", round.saturating_add(1)), store, id);
 
-    if cfg.no_ignored && gates::parse_ignored_count(&verify_raw.log) > 0 {
-        let hits: Vec<String> = ignored_lines(&verify_raw.log)
-            .into_iter()
-            .take(10)
-            .collect();
-        return Err(GateFail::Red {
-            gate: Gate::NoIgnored,
-            tail: hits.join("\n"),
-        });
+    if cfg.no_ignored {
+        let violations = gates::unexpected_ignores(&verify_raw.log, &cfg.ignored_allowlist);
+        if !violations.is_empty() {
+            return Err(GateFail::Red {
+                gate: Gate::NoIgnored,
+                tail: violations.join("\n"),
+            });
+        }
     }
 
     let lint_log = lint_gate(cfg, wt);

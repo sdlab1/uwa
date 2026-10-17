@@ -102,6 +102,40 @@ pub fn parse_ignored_count(log: &str) -> u32 {
     total
 }
 
+/// Извлекает имена ignored-тестов из строк вида `test <name> ... ignored[, reason]`.
+pub fn parse_ignored_names(log: &str) -> Vec<String> {
+    log.lines()
+        .filter_map(|l| {
+            let rest = l.trim_start().strip_prefix("test ")?;
+            let (name, status) = rest.split_once(" ... ")?;
+            if !status.trim().starts_with("ignored") {
+                return None;
+            }
+            let name = name.trim();
+            if name.is_empty() {
+                None
+            } else {
+                Some(name.to_string())
+            }
+        })
+        .collect()
+}
+
+/// Чистая функция (без IO): имена ignored-тестов, НЕ заявленные ни в одном regex allowlist.
+pub fn unexpected_ignores(log: &str, allowlist: &[String]) -> Vec<String> {
+    parse_ignored_names(log)
+        .into_iter()
+        .filter(|name| !allowlist.iter().any(|pat| regex_matches(pat, name)))
+        .collect()
+}
+
+fn regex_matches(pat: &str, name: &str) -> bool {
+    match regex::Regex::new(pat) {
+        Ok(re) => re.is_match(name),
+        Err(_) => false,
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum ReviewVerdict {
     Ok,
@@ -251,13 +285,13 @@ pub fn judge(gate: &Gate, raw: &Raw, cfg: &RunConfig) -> Verdict {
         Gate::Verify | Gate::Bench => exit_or_fail(gate, raw),
         Gate::NoIgnored if !cfg.no_ignored => Verdict::Pass,
         Gate::NoIgnored => {
-            let n = parse_ignored_count(&raw.log);
-            if n == 0 {
+            let violations = unexpected_ignores(&raw.log, &cfg.ignored_allowlist);
+            if violations.is_empty() {
                 Verdict::Pass
             } else {
                 Verdict::Fail {
                     gate: gate.clone(),
-                    tail: format!("ignored тестов: {n}"),
+                    tail: format!("незаявленные ignored: {}", violations.join(", ")),
                 }
             }
         }
@@ -427,14 +461,53 @@ mod tests {
 
     #[test]
     fn no_ignored_hidden_red() {
-        let log = "test result: ok. 3 passed; 1 ignored;";
+        let log = "test foo::bar_baz ... ignored, reason\ntest result: ok. 3 passed; 1 ignored;";
         assert!(matches!(
             judge(&Gate::NoIgnored, &raw(Some(0), log), &cfg()),
             Verdict::Fail { .. }
         ));
         assert!(matches!(
-            judge(&Gate::NoIgnored, &raw(Some(0), "0 ignored"), &cfg()),
+            judge(
+                &Gate::NoIgnored,
+                &raw(Some(0), "test result: ok. 0 passed; 0 failed; 0 ignored"),
+                &cfg()
+            ),
             Verdict::Pass
+        ));
+    }
+
+    #[test]
+    fn allowlist_ignores() {
+        // (a) игнор по allowlist-имени → Pass
+        let ok_cfg = RunConfig {
+            no_ignored: true,
+            ignored_allowlist: vec!["slow_net".into()],
+            ..Default::default()
+        };
+        let allowlisted =
+            "test net::slow_net ... ignored, сеть\ntest result: ok. 1 passed; 1 ignored";
+        assert!(matches!(
+            judge(&Gate::NoIgnored, &raw(Some(0), allowlisted), &ok_cfg),
+            Verdict::Pass
+        ));
+
+        // (b) незаявленный игнор → Fail, имя попадает в tail
+        let unexpected =
+            "test net::surprise_conn ... ignored\ntest result: ok. 0 passed; 1 ignored";
+        match judge(&Gate::NoIgnored, &raw(Some(0), unexpected), &ok_cfg) {
+            Verdict::Fail { tail, .. } => assert!(tail.contains("surprise_conn"), "tail={tail}"),
+            v => panic!("ожидали Fail, получили {v:?}"),
+        }
+
+        // (c) пустой allowlist + игнор → Fail (сигнал не потерян)
+        let empty_cfg = RunConfig {
+            no_ignored: true,
+            ignored_allowlist: vec![],
+            ..Default::default()
+        };
+        assert!(matches!(
+            judge(&Gate::NoIgnored, &raw(Some(0), allowlisted), &empty_cfg),
+            Verdict::Fail { .. }
         ));
     }
 
@@ -492,7 +565,10 @@ mod tests {
         assert!(matches!(
             judge(
                 &Gate::NoIgnored,
-                &raw(Some(0), "2 passed; 2 ignored"),
+                &raw(
+                    Some(0),
+                    "test foo::bar ... ignored\ntest result: ok. 2 passed; 1 ignored"
+                ),
                 &cfg()
             ),
             Verdict::Fail { .. }
