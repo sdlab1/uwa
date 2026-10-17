@@ -72,6 +72,7 @@ pub fn parse_mutation_output(log: &str) -> Option<MutationStats> {
 ///   `N mutants? tested[ in <dur>]: [M missed][, C caught][, U unviable][, T timeouts]`
 ///   — все сегменты после `:` опциональны, singular/plural через plural();
 /// * muex (legacy devh): `Mutants: N, Killed: M`.
+///
 /// Прогресс-строки nutmeg (`N/M mutants tested, 1 MISSED, ...`) не матчатся:
 /// у них дробный счётчик и нет `:`-сегмента исходов.
 fn parse_mutation_line(line: &str) -> Option<MutationStats> {

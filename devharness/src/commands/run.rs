@@ -602,7 +602,7 @@ fn gate_ladder(
         let mpath = store.log_file(id, "mutate");
         std::fs::write(&mpath, &rep.log).ok();
         timing.stage(format!("mutate-r{}", round.saturating_add(1)), store, id);
-        perf_mutate(store, id, &rep, &timing);
+        perf_mutate(store, id, &rep, timing);
         match rep.outcome {
             MutateOutcome::Env => {
                 return Err(GateFail::Env {
