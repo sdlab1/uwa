@@ -20,7 +20,7 @@ fn happy_page() -> MockPage {
         .expect_default(Value::Null)
         .expect_seq("!!document.querySelector", vec![json!(true)])
         .expect_seq("el.focus()", vec![json!({ "ok": true })])
-        .expect_seq("el.disabled", vec![json!(true)])
+        .expect_seq("el.disabled", vec![json!(false)])
         .expect_seq("el.click()", vec![json!(true)])
         .expect_seq("el.value !== undefined", vec![json!(true)])
         .with_html("<div class='assistant'>ok</div>")

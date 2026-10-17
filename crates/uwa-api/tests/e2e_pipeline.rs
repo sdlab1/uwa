@@ -465,7 +465,7 @@ async fn buffered_and_streaming_produce_identical_tool_calls() {
             "model": "gpt-4o",
             "stream": true,
             "messages": [{"role": "user", "content": "weather in Kyiv?"}],
-            "tools": req.get("tools").unwrap()
+            "tools": req.get("tools").cloned().unwrap_or(serde_json::json!([]))
         }))
         .await;
     rs.assert_status_ok();

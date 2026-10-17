@@ -34,6 +34,7 @@ use uwa_core::{ToolSpec, UwaError};
 use uwa_tools::{ToolCall, ToolDefinition};
 
 use crate::error::ApiResult;
+use crate::routing::RoutingHint;
 use crate::state::AppState;
 
 // ---------- top-level handler ----------
@@ -91,6 +92,12 @@ async fn messages_inner(
     };
     let site = state.registry().get(&provider_cfg.name)?;
 
+    // Scope conversation_id by provider (UWA-137) — same as chat/mod.rs.
+    let hint = RoutingHint {
+        provider: Some(site.name().to_string()),
+        ..hint
+    };
+
     let tool_choice_disabled = match &req.tool_choice {
         Some(choice) => {
             if let Some(s) = choice.as_str() {
@@ -126,12 +133,6 @@ async fn messages_inner(
 
     let msg_id = format!("msg_{}", uuid::Uuid::new_v4().simple());
 
-    let profile = hint
-        .profile
-        .clone()
-        .map(|p| uwa_session::ProfileName::new(&p))
-        .unwrap_or_else(uwa_session::ProfileName::default_name);
-
     if req.stream.unwrap_or(false) {
         let (tx, rx) = mpsc::channel::<crate::routes::chat::pipeline::StreamEvent>(64);
         let state_task = state.clone();
@@ -139,14 +140,12 @@ async fn messages_inner(
         let specs_clone = all_specs.clone();
         let hint_clone = hint.clone();
         tokio::spawn(async move {
-            let _ = crate::routes::chat::pipeline::run_pipeline_streaming(
+            let _ = crate::routes::chat::pipeline::run_pipeline_streaming_with_hint(
                 &state_task,
                 &oa_req_task,
                 &specs_clone,
-                hint_clone.tab.as_ref(),
-                &profile,
-                tx,
                 &hint_clone,
+                tx,
             )
             .await;
         });
@@ -157,12 +156,10 @@ async fn messages_inner(
             rx,
         ))
     } else {
-        let outcome = crate::routes::chat::pipeline::run_pipeline(
+        let outcome = crate::routes::chat::pipeline::run_pipeline_with_hint(
             &state,
             &oa_req,
             &all_specs,
-            hint.tab.as_ref(),
-            &profile,
             &hint,
         )
         .await?;
