@@ -470,7 +470,10 @@ async fn buffered_and_streaming_produce_identical_tool_calls() {
         .await;
     rs.assert_status_ok();
     let body = rs.text();
-    assert!(body.contains("data: [DONE]"), "stream missing [DONE]: {body}");
+    assert!(
+        body.contains("data: [DONE]"),
+        "stream missing [DONE]: {body}"
+    );
 
     // Extract tool calls from the completed streaming response by
     // replaying the final Done event through the SSE frames.
@@ -489,12 +492,16 @@ async fn buffered_and_streaming_produce_identical_tool_calls() {
     );
     for (i, tc) in tb.iter().enumerate() {
         assert_eq!(
-            tc.get("function").and_then(|f| f.get("name")).and_then(|n| n.as_str()),
+            tc.get("function")
+                .and_then(|f| f.get("name"))
+                .and_then(|n| n.as_str()),
             Some("get_weather"),
             "buffered tool_call[{i}] wrong name: {vb}"
         );
         assert_eq!(
-            tc.get("function").and_then(|f| f.get("arguments")).and_then(|a| a.as_str()),
+            tc.get("function")
+                .and_then(|f| f.get("arguments"))
+                .and_then(|a| a.as_str()),
             Some(r#"{"city":"Kyiv"}"#),
             "buffered tool_call[{i}] wrong args: {vb}"
         );
@@ -509,8 +516,7 @@ async fn buffered_and_streaming_produce_identical_tool_calls() {
     );
     let kv_count = body.matches(r#"\"city\":\"Kyiv\""#).count();
     assert_eq!(
-        kv_count,
-        2,
+        kv_count, 2,
         "stream should contain exactly 2 Kyiv references (no duplication), got {kv_count}: {body}"
     );
 }

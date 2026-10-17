@@ -157,10 +157,7 @@ async fn messages_inner(
         ))
     } else {
         let outcome = crate::routes::chat::pipeline::run_pipeline_with_hint(
-            &state,
-            &oa_req,
-            &all_specs,
-            &hint,
+            &state, &oa_req, &all_specs, &hint,
         )
         .await?;
         Ok(Json(build_response(

@@ -198,13 +198,7 @@ pub async fn create(
         return Ok(stream_response(chat_req.model.clone(), input_chars, rx));
     }
 
-    let outcome = run_pipeline_with_hint(
-        &state,
-        &chat_req,
-        &local_tools,
-        &hint,
-    )
-    .await?;
+    let outcome = run_pipeline_with_hint(&state, &chat_req, &local_tools, &hint).await?;
 
     let id = RequestId::new();
     let created = now_secs();
