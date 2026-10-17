@@ -841,20 +841,38 @@ fn mutate_gate(m: &MutateCfg, wt: &Path) -> (String, MutateOutcome) {
         match run_mut(wt, &m.tool) {
             MutRun::Env => {
                 log += &format!(
-                    "mutation env: инструмент не распознан (нет 'Mutants: N, Killed: M'); MUTATE='{}'\n",
+                    "mutation env: вывод не распознан (ни 'N mutants tested in T: C caught, M missed', ни 'Mutants: N, Killed: M'); MUTATE='{}'\n",
                     m.tool
                 );
                 return (log, MutateOutcome::Env);
             }
-            MutRun::Stats { total, killed } => {
-                if let Some(pct) = killed.checked_mul(100).and_then(|n| n.checked_div(total)) {
-                    log += &format!("mutation: Mutants {total}, killed {killed} ({pct}%)\n");
+            MutRun::Stats {
+                total,
+                killed,
+                missed,
+                unviable,
+            } => {
+                let testable = total.saturating_sub(unviable);
+                if let Some(pct) = killed
+                    .checked_mul(100)
+                    .and_then(|n| n.checked_div(testable))
+                {
+                    log += &format!(
+                        "mutation: {total} mutants tested, killed {killed} ({pct}%) [caught+timeout, testable {testable}], missed {missed}, unviable {unviable}\n"
+                    );
                     if pct < m.min_kill {
-                        log += &format!("mutation FAIL: kill-rate {pct}% < {}%\n", m.min_kill);
+                        log += &format!(
+                            "mutation FAIL: kill-rate {pct}% < {}% (testable {testable}: missed {missed}, unviable {unviable})\n",
+                            m.min_kill
+                        );
                         fail = true;
                     }
-                } else {
+                } else if total == 0 {
                     log += "mutation: 0 мутантов — нечего убивать, пропуск\n";
+                } else {
+                    log += &format!(
+                        "mutation: все {total} мутантов unviable (не собираются) — тесты не при чём, пропуск\n"
+                    );
                 }
             }
         }
@@ -885,23 +903,38 @@ fn mutate_gate(m: &MutateCfg, wt: &Path) -> (String, MutateOutcome) {
         match run_mut(wt, &cmd) {
             MutRun::Env => {
                 log += &format!(
-                    "mutation env: инструмент не распознан для {f}; MUTATE='{}'\n",
+                    "mutation env: вывод не распознан для {f} (ни 'N mutants tested in T: C caught, M missed', ни 'Mutants: N, Killed: M'); MUTATE='{}'\n",
                     m.tool
                 );
                 return (log, MutateOutcome::Env);
             }
-            MutRun::Stats { total, killed } => {
-                if let Some(pct) = killed.checked_mul(100).and_then(|n| n.checked_div(total)) {
-                    log += &format!("mutation {f}: Mutants {total}, killed {killed} ({pct}%)\n");
+            MutRun::Stats {
+                total,
+                killed,
+                missed,
+                unviable,
+            } => {
+                let testable = total.saturating_sub(unviable);
+                if let Some(pct) = killed
+                    .checked_mul(100)
+                    .and_then(|n| n.checked_div(testable))
+                {
+                    log += &format!(
+                        "mutation {f}: {total} mutants tested, killed {killed} ({pct}%) [caught+timeout, testable {testable}], missed {missed}, unviable {unviable}\n"
+                    );
                     if pct < m.min_kill {
                         log += &format!(
-                            "mutation FAIL {f}: kill-rate {pct}% < {}% — тесты не ловят мутантов\n",
+                            "mutation FAIL {f}: kill-rate {pct}% < {}% (testable {testable}: missed {missed}, unviable {unviable}) — тесты не ловят мутантов\n",
                             m.min_kill
                         );
                         fail = true;
                     }
-                } else {
+                } else if total == 0 {
                     log += &format!("mutation {f}: 0 мутантов — пропуск\n");
+                } else {
+                    log += &format!(
+                        "mutation {f}: все {total} мутантов unviable (не собираются) — тесты не при чём, пропуск\n"
+                    );
                 }
             }
         }
@@ -917,7 +950,12 @@ fn mutate_gate(m: &MutateCfg, wt: &Path) -> (String, MutateOutcome) {
 }
 
 enum MutRun {
-    Stats { total: u32, killed: u32 },
+    Stats {
+        total: u32,
+        killed: u32,
+        missed: u32,
+        unviable: u32,
+    },
     Env,
 }
 
@@ -929,6 +967,8 @@ fn run_mut(wt: &Path, cmd: &str) -> MutRun {
                 Some(s) => MutRun::Stats {
                     total: s.mutants,
                     killed: s.killed,
+                    missed: s.missed,
+                    unviable: s.unviable,
                 },
                 None => MutRun::Env,
             }

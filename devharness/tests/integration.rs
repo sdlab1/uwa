@@ -314,6 +314,7 @@ fn section01_happy_path() {
     let mut_log =
         fs::read_to_string(sb.log_file("W-001-mutate.log")).unwrap_or_else(|_| unreachable!());
     assert!(contains(&mut_log, "killed 10 (100%)"), "{mut_log}");
+    assert!(contains(&mut_log, "missed 0, unviable 0"), "{mut_log}");
 
     let (ok, _) = sb.run_capture(&["merge"]);
     assert!(ok);
@@ -362,6 +363,7 @@ fn section02_mutation_fix_round() {
     let mut_log =
         fs::read_to_string(sb.log_file("W-001-mutate.log")).unwrap_or_else(|_| unreachable!());
     assert!(contains(&mut_log, "killed 10 (100%)"), "{mut_log}");
+    assert!(contains(&mut_log, "missed 0, unviable 0"), "{mut_log}");
 }
 
 #[test]
@@ -809,6 +811,7 @@ if [ -f "$T_MUT_GOOD" ]; then echo "Mutants: 10, Killed: 10 (100%)"; else echo "
     let mut_log =
         fs::read_to_string(sb.log_file("W-001-mutate.log")).unwrap_or_else(|_| unreachable!());
     assert!(contains(&mut_log, "killed 10 (100%)"), "{mut_log}");
+    assert!(contains(&mut_log, "missed 0, unviable 0"), "{mut_log}");
 }
 
 #[test]
