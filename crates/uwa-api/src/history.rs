@@ -188,6 +188,7 @@ mod tests {
             tools: None,
             tool_choice: None,
             user: None,
+            response_format: None,
         }
     }
 

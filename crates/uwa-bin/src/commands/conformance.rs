@@ -372,6 +372,7 @@ impl ConformanceBackend for LiveBackend {
             tools: if tools.is_empty() { None } else { Some(tools) },
             tool_choice: None,
             user: None,
+            response_format: None,
         };
 
         let all_specs =

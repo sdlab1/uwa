@@ -15,6 +15,7 @@
 pub mod definition;
 pub mod emulation;
 pub mod feedback;
+pub mod json_mode;
 pub mod parser;
 pub mod prompt;
 pub mod schema;
@@ -23,6 +24,7 @@ pub mod tokenizer;
 pub use definition::ToolDefinition;
 pub use emulation::{correction_prompt, validate_calls, ValidationOutcome};
 pub use feedback::{compose_browser_turn, render_tool_response};
+pub use json_mode as json;
 pub use parser::{
     has_tool_marker, parse, parse_with_defs, safe_emit_end, safe_emit_end_for, tool_marker_index,
     unstreamed_text, ToolCall, ToolParseOutcome,

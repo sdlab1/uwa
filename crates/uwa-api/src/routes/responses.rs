@@ -19,7 +19,8 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
 use uwa_core::types::openai::{
-    ChatCompletionRequest, ChatMessage, FunctionCall, MessageContent, ToolCallRef,
+    ChatCompletionRequest, ChatMessage, FunctionCall, JsonSchemaRef, MessageContent,
+    ResponseFormat, ToolCallRef,
 };
 use uwa_core::types::Role;
 use uwa_core::{RequestId, UwaError};
@@ -50,6 +51,33 @@ pub struct ResponsesRequest {
     pub tool_choice: Option<Value>,
     #[serde(default)]
     pub user: Option<String>,
+    /// `text.format` — the Responses API's spelling of `response_format`.
+    #[serde(default)]
+    pub text: Option<ResponsesText>,
+}
+
+/// The `text` envelope of a Responses request. Only `format` is meaningful
+/// today.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ResponsesText {
+    #[serde(default)]
+    pub format: Option<ResponsesTextFormat>,
+}
+
+/// `text.format` variants, mapped 1:1 onto [`ResponseFormat`].
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ResponsesTextFormat {
+    Text,
+    JsonObject,
+    JsonSchema {
+        name: String,
+        #[serde(default)]
+        description: Option<String>,
+        schema: Value,
+        #[serde(default)]
+        strict: bool,
+    },
 }
 
 // ---------- response ----------
@@ -503,6 +531,28 @@ fn to_chat_request(req: &ResponsesRequest) -> Result<ChatCompletionRequest, UwaE
         return Err(UwaError::BadRequest("`input` produced no messages".into()));
     }
 
+    let response_format = req
+        .text
+        .as_ref()
+        .and_then(|t| t.format.as_ref())
+        .map(|f| match f {
+            ResponsesTextFormat::Text => ResponseFormat::Text,
+            ResponsesTextFormat::JsonObject => ResponseFormat::JsonObject,
+            ResponsesTextFormat::JsonSchema {
+                name,
+                description,
+                schema,
+                strict,
+            } => ResponseFormat::JsonSchema {
+                json_schema: JsonSchemaRef {
+                    name: name.clone(),
+                    description: description.clone(),
+                    schema: schema.clone(),
+                    strict: *strict,
+                },
+            },
+        });
+
     Ok(ChatCompletionRequest {
         model: req.model.clone(),
         messages,
@@ -513,6 +563,7 @@ fn to_chat_request(req: &ResponsesRequest) -> Result<ChatCompletionRequest, UwaE
         tools: normalize_tools(req.tools.as_deref()),
         tool_choice: req.tool_choice.clone(),
         user: req.user.clone(),
+        response_format,
     })
 }
 
@@ -679,6 +730,7 @@ mod tests {
             tools: None,
             tool_choice: None,
             user: None,
+            text: None,
         }
     }
 

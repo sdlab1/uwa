@@ -123,12 +123,21 @@ export interface ToolCallRef {
   type: 'function';
   function: { name: string; arguments: string };
 }
+export type ResponseFormat =
+  | { type: 'text' }
+  | { type: 'json_object' }
+  | {
+      type: 'json_schema';
+      json_schema: { name: string; description?: string; schema: unknown; strict?: boolean };
+    };
+
 export interface ChatRequest {
   model: string;
   messages: ChatMessage[];
   stream?: boolean;
   tools?: unknown[];
   tool_choice?: unknown;
+  response_format?: ResponseFormat;
 }
 export interface ChatResponse {
   id: string;

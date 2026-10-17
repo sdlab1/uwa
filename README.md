@@ -267,6 +267,15 @@ No drag-and-drop, no node graph, no YAML. See
 [docs/RECORDER.md](docs/RECORDER.md) for what gets captured and how the
 proposal is built.
 
+## Structured output
+
+`response_format: {"type": "json_object"}` returns a single JSON object —
+prose and fences are stripped. `{"type": "json_schema", ...}` adds
+validation with a bounded correction-retry, and `strict: false` halves
+the budget. Works with `stream: true` (one clean chunk). The
+`/v1/responses` spelling is `text.format`. See
+[docs/JSON_MODE.md](docs/JSON_MODE.md).
+
 ## Dashboard
 
 Everything is at `http://127.0.0.1:8080`:
@@ -335,6 +344,7 @@ points:
 - [Configuration](docs/CONFIG.md) — `uwa.toml`, providers, presets, workflows.
 - [API](docs/API.md) — request/response shapes, error codes, examples.
 - [Streaming](docs/STREAMING.md) — where the tokens come from, TTFT, cancel.
+- [Structured output](docs/JSON_MODE.md) — `response_format`, JSON-mode retries, streaming behaviour.
 - [Compatibility](docs/COMPATIBILITY.md) — tested clients and versions.
 - [Conformance](docs/CONFORMANCE.md) — tool-calling conformance across providers.
 - [Providers](docs/PROVIDERS.md) — selector registry, merge rules, self-heal.

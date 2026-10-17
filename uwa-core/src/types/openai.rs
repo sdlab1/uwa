@@ -66,6 +66,8 @@ pub struct ChatCompletionRequest {
     pub tool_choice: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_format: Option<ResponseFormat>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -75,6 +77,35 @@ pub struct StreamOptions {
     /// this to budget their context.
     #[serde(default)]
     pub include_usage: bool,
+}
+
+// ---- response_format ----
+
+/// OpenAI `response_format` request field.
+///
+/// `Text` is the default and matches "no constraint". `JsonObject` asks
+/// for a single JSON object with no wrapper prose. `JsonSchema` adds a
+/// schema the object must validate against.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ResponseFormat {
+    Text,
+    JsonObject,
+    JsonSchema { json_schema: JsonSchemaRef },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct JsonSchemaRef {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub schema: Value,
+    /// OpenAI's `strict` bit. UWA treats it as "retry on failure is
+    /// required"; when `false`, a failure still returns 400 with the
+    /// validation error, but the retry count is halved (the caller opted
+    /// into leniency, so we don't fight the model as hard).
+    #[serde(default)]
+    pub strict: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -261,4 +292,65 @@ macro_rules! text_content {
     ($s:expr) => {
         Some($crate::types::openai::MessageContent::Text(($s).into()))
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn parse<T: serde::de::DeserializeOwned>(v: serde_json::Value) -> T {
+        serde_json::from_value(v).unwrap_or_else(|e| unreachable!("parse: {e}"))
+    }
+
+    #[test]
+    fn response_format_roundtrips_json_object() {
+        let v = json!({"type": "json_object"});
+        let f: ResponseFormat = parse(v.clone());
+        assert_eq!(f, ResponseFormat::JsonObject);
+        assert_eq!(serde_json::to_value(&f).unwrap_or_default(), v);
+    }
+
+    #[test]
+    fn response_format_roundtrips_json_schema() {
+        let v = json!({
+            "type": "json_schema",
+            "json_schema": {
+                "name": "weather",
+                "schema": {"type": "object"},
+                "strict": true
+            }
+        });
+        let f: ResponseFormat = parse(v.clone());
+        match &f {
+            ResponseFormat::JsonSchema { json_schema } => {
+                assert_eq!(json_schema.name, "weather");
+                assert!(json_schema.strict);
+            }
+            _ => unreachable!("expected json_schema"),
+        }
+        assert_eq!(serde_json::to_value(&f).unwrap_or_default(), v);
+    }
+
+    #[test]
+    fn response_format_text_is_explicit_noop() {
+        let f: ResponseFormat = parse(json!({"type": "text"}));
+        assert_eq!(f, ResponseFormat::Text);
+    }
+
+    #[test]
+    fn request_parses_with_and_without_response_format() {
+        let without: ChatCompletionRequest = parse(json!({
+            "model": "gpt-4o",
+            "messages": [{"role":"user","content":"hi"}]
+        }));
+        assert!(without.response_format.is_none());
+
+        let with: ChatCompletionRequest = parse(json!({
+            "model": "gpt-4o",
+            "messages": [{"role":"user","content":"hi"}],
+            "response_format": {"type":"json_object"}
+        }));
+        assert_eq!(with.response_format, Some(ResponseFormat::JsonObject));
+    }
 }

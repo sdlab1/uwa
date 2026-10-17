@@ -43,6 +43,7 @@
   // ---- DOM ----
   let scrollRef: HTMLDivElement | undefined;
   let composerRef: Composer | undefined;
+  let responseFormat: import('../lib/types').ResponseFormat | undefined = $state(undefined);
   let pinned = $state(true);
 
   // Auto-scroll when the user is already at the bottom.
@@ -149,7 +150,12 @@
 
     const reqMessages = s.messages.slice(0, -1); // exclude the placeholder
     const tools = parseTools(toolsJson);
-    const req = { model: s.model, messages: reqMessages, tools };
+    const req = {
+      model: s.model,
+      messages: reqMessages,
+      tools,
+      ...(responseFormat ? { response_format: responseFormat } : {}),
+    };
 
     try {
       if (streamMode) {
@@ -334,6 +340,7 @@
       onModelChange={(m) => { model = m; if (active) active.model = m; scheduleSave(); }}
       onStreamChange={(on) => (streamMode = on)}
       onToolsChange={(raw) => (toolsRaw = raw)}
+      onResponseFormatChange={(f) => (responseFormat = f)}
     />
   </section>
 </div>

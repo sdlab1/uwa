@@ -34,14 +34,14 @@ use std::time::Duration;
 use futures::StreamExt;
 use tokio::sync::mpsc;
 use uwa_core::types::media::MediaAsset;
-use uwa_core::types::openai::{ChatCompletionRequest, ChatMessage};
+use uwa_core::types::openai::{ChatCompletionRequest, ChatMessage, ResponseFormat};
 use uwa_core::types::FinishReason;
 use uwa_core::TabId;
 use uwa_core::{Page, SiteProvider, ToolSpec, UwaError};
 use uwa_tools::emulation::{correction_prompt, validate_calls, ValidationOutcome};
 use uwa_tools::{
-    build_system_prompt, compose_browser_turn, parse, safe_emit_end_for, ToolCall, ToolDefinition,
-    ToolParseOutcome,
+    build_system_prompt, compose_browser_turn, json_mode, parse, safe_emit_end_for, ToolCall,
+    ToolDefinition, ToolParseOutcome,
 };
 
 use crate::history::RequestRecorder;
@@ -374,11 +374,7 @@ async fn run_pipeline_streaming_inner(
         .iter()
         .map(|s| ToolDefinition::new(s.name.clone(), s.description.clone(), s.parameters.clone()))
         .collect();
-    let system_injection = if defs.is_empty() {
-        None
-    } else {
-        Some(build_system_prompt(&defs))
-    };
+    let system_injection = build_system_injection(&defs, req.response_format.as_ref());
 
     // Scope conversation_id by provider so different providers get
     // distinct pinning state (UWA-137).
@@ -485,6 +481,10 @@ async fn run_pipeline_streaming_inner(
     .await;
 
     // --- real streaming ---
+    // Structured output withholds deltas until the whole answer validates;
+    // the client then gets one clean chunk, like OpenAI's own structured
+    // streaming.
+    let json_fmt = req.response_format.as_ref().filter(|f| json_constrained(f));
     let mut stream = site.wait_response_stream(page.as_ref()).await?;
     let mut acc = String::new();
     let mut emitted_until: usize = 0;
@@ -511,17 +511,20 @@ async fn run_pipeline_streaming_inner(
 
         // Emit up to (but not past) anything that may be a tool call, in
         // any format `parse` understands, so the client never sees
-        // protocol markers or call JSON in the visible stream.
-        let target_end = safe_emit_end_for(&acc, &known_names);
-        if target_end > emitted_until {
-            if let Some(piece) = acc.get(emitted_until..target_end) {
-                let piece = piece.to_string();
-                if !piece.is_empty() && tx.send(StreamEvent::Delta(piece)).await.is_err() {
-                    let _ = site.cancel(page.as_ref()).await;
-                    return Err(Abort::ClientGone);
+        // protocol markers or call JSON in the visible stream. In JSON
+        // mode nothing streams until validation passes.
+        if json_fmt.is_none() {
+            let target_end = safe_emit_end_for(&acc, &known_names);
+            if target_end > emitted_until {
+                if let Some(piece) = acc.get(emitted_until..target_end) {
+                    let piece = piece.to_string();
+                    if !piece.is_empty() && tx.send(StreamEvent::Delta(piece)).await.is_err() {
+                        let _ = site.cancel(page.as_ref()).await;
+                        return Err(Abort::ClientGone);
+                    }
                 }
+                emitted_until = target_end;
             }
-            emitted_until = target_end;
         }
     }
 
@@ -531,7 +534,27 @@ async fn run_pipeline_streaming_inner(
     }
 
     let first: ToolParseOutcome = parse(&acc, &known_names);
-    let (text, calls, finish) = if first.has_calls() {
+    let (text, calls, finish) = if let Some(fmt) = json_fmt {
+        // Structured output: the stream was withheld. Tool calls (if any)
+        // still win — the client runs them and asks again — otherwise the
+        // accumulated text is validated and emitted as one clean chunk.
+        if first.has_calls() {
+            (first.text, first.calls, FinishReason::ToolCalls)
+        } else {
+            let cleaned = resolve_json_mode(
+                site.as_ref(),
+                page.as_ref(),
+                provider_cfg,
+                fmt,
+                acc.clone(),
+                send_timeout,
+                recorder,
+            )
+            .await?;
+            emit(tx, StreamEvent::Delta(cleaned.clone())).await?;
+            (cleaned, Vec::new(), FinishReason::Stop)
+        }
+    } else if first.has_calls() {
         // Same validation + self-heal as the buffered path. The retry
         // reply is not streamed: only its verdict (calls, or plain text)
         // reaches the client.
@@ -633,11 +656,7 @@ async fn run_pipeline_inner(
         .iter()
         .map(|s| ToolDefinition::new(s.name.clone(), s.description.clone(), s.parameters.clone()))
         .collect();
-    let system_injection = if defs.is_empty() {
-        None
-    } else {
-        Some(build_system_prompt(&defs))
-    };
+    let system_injection = build_system_injection(&defs, req.response_format.as_ref());
 
     // Session pinning — same tab for the whole bridge turn.
     // Scope conversation_id by provider so different providers get
@@ -764,7 +783,7 @@ async fn run_pipeline_inner(
         h.touch().await;
     }
 
-    let (text, tool_calls, finish) = resolve_tool_calls(
+    let (mut text, tool_calls, finish) = resolve_tool_calls(
         site.as_ref(),
         page.as_ref(),
         provider_cfg,
@@ -775,6 +794,23 @@ async fn run_pipeline_inner(
         raw,
     )
     .await?;
+
+    // Structured output: with no tool calls back, the text must satisfy
+    // `response_format` — validated, with a bounded correction loop.
+    if tool_calls.is_empty() {
+        if let Some(fmt) = req.response_format.as_ref().filter(|f| json_constrained(f)) {
+            text = resolve_json_mode(
+                site.as_ref(),
+                page.as_ref(),
+                provider_cfg,
+                fmt,
+                text,
+                send_timeout,
+                recorder,
+            )
+            .await?;
+        }
+    }
 
     Ok(crate::routes::chat::pipeline::PipelineOutcome {
         text,
@@ -848,6 +884,99 @@ async fn resolve_tool_calls(
                 recorder.mark_send_end();
 
                 raw = site.wait_response(page).await?;
+                recorder.mark_wait_end();
+            }
+        }
+    }
+}
+
+/// Combine the tool preamble and the JSON-mode instruction into one
+/// system message. Order matters: tools first (they explain the
+/// markers), then JSON (which constrains the *final* answer).
+fn build_system_injection(defs: &[ToolDefinition], fmt: Option<&ResponseFormat>) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    if !defs.is_empty() {
+        parts.push(build_system_prompt(defs));
+    }
+    if let Some(f) = fmt {
+        if let Some(p) = json_mode::build_prompt(f) {
+            parts.push(p);
+        }
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("\n"))
+    }
+}
+
+/// Only `json_object` and `json_schema` constrain the answer; an explicit
+/// `text` is a no-op, same as omitting the field.
+fn json_constrained(fmt: &ResponseFormat) -> bool {
+    matches!(
+        fmt,
+        ResponseFormat::JsonObject | ResponseFormat::JsonSchema { .. }
+    )
+}
+
+fn format_label(fmt: &ResponseFormat) -> &'static str {
+    match fmt {
+        ResponseFormat::Text => "text",
+        ResponseFormat::JsonObject => "json_object",
+        ResponseFormat::JsonSchema { .. } => "json_schema",
+    }
+}
+
+fn clean_and_validate(raw_text: &str, fmt: &ResponseFormat) -> Result<String, String> {
+    let cleaned = json_mode::clean(raw_text)?;
+    json_mode::validate(&cleaned, fmt)?;
+    Ok(cleaned)
+}
+
+/// JSON-mode validation with a bounded correction loop. The first
+/// candidate is the model's already-parsed text; every retry sends the
+/// correction prompt and waits for a fresh answer (not streamed — the
+/// client sees only the verdict, same as the tool-call self-heal).
+/// Budget comes from `max_tool_retries`, halved for lenient schemas.
+/// Exhausted → 400 naming the violation.
+#[allow(clippy::too_many_arguments)]
+async fn resolve_json_mode(
+    site: &dyn SiteProvider,
+    page: &dyn Page,
+    provider_cfg: &uwa_config::ProviderCfg,
+    fmt: &ResponseFormat,
+    first_text: String,
+    send_timeout: Duration,
+    recorder: &mut RequestRecorder,
+) -> Result<String, UwaError> {
+    let budget = json_mode::retry_budget(provider_cfg.max_tool_retries, fmt);
+    let mut attempt: usize = 0;
+    let mut text = first_text;
+    loop {
+        match clean_and_validate(&text, fmt) {
+            Ok(cleaned) => return Ok(cleaned),
+            Err(err) => {
+                if attempt >= budget {
+                    return Err(UwaError::BadRequest(format!(
+                        "response_format `{}` not satisfied after {} attempt(s): {err}",
+                        format_label(fmt),
+                        attempt.saturating_add(1)
+                    )));
+                }
+                attempt = attempt.saturating_add(1);
+                tracing::warn!(
+                    provider = %provider_cfg.name,
+                    attempt,
+                    budget,
+                    "json-mode validation failed, retrying: {err}"
+                );
+                let prompt = json_mode::correction_prompt(&err, fmt);
+                recorder.mark_send_start();
+                tokio::time::timeout(send_timeout, site.send_message(page, &prompt))
+                    .await
+                    .map_err(|_| UwaError::Timeout(send_timeout))??;
+                recorder.mark_send_end();
+                text = site.wait_response(page).await?;
                 recorder.mark_wait_end();
             }
         }

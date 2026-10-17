@@ -251,6 +251,7 @@ fn to_openai_request(
         tools,
         tool_choice: req.tool_choice.clone(),
         user: None,
+        response_format: None,
     })
 }
 
