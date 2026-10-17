@@ -68,7 +68,7 @@ RED-пруф первым, MSG_DENY-гигиена последней. Паде�
 |---|---|---|
 | VERIFY | `VERIFY` | тесты/сборка до коммита |
 | NO-IGNORED | `NO_IGNORED=1`, `IGNORED_ALLOWLIST` | allowlist-семантика: игнор разрешён, если имя теста матчится regex из `IGNORED_ALLOWLIST` (файл, дефолт `scripts/ignored-tests.txt`); незаявленный игнор = скрытый красный |
-| MUTATE | `MUTATE`, `MIN_KILL=90` | kill-rate ≥ MIN_KILL% на изменённых `MUTATE_SCOPE`-файлах (`{module}`/`{file}`); формат вывода `Mutants: N, Killed: M` (muex / cargo-mutants); инструмент не установлен = блокер среды (rc=2), не fix-раунд |
+| MUTATE | `MUTATE`, `MIN_KILL=90` | kill-rate ≥ MIN_KILL% на изменённых `MUTATE_SCOPE`-файлах; `{files}` = ОДИН запуск на все файлы (cargo-mutants: несколько `-f`), `{module}`/`{file}` = запуск на файл; вывод: `N mutants tested in T: C caught, M missed[, timeout][, unviable]` (cargo-mutants 27.x) либо `Mutants: N, Killed: M` (muex); инструмент не установлен = блокер среды (rc=2), не fix-раунд |
 | CRAP | `CRAP`, `CRAP_MAX=12` | guardrail №2 (Uncle Bob): score = C²·(1−cov)³ + C, нарушение = score > CRAP_MAX; формат вывода `file:line fun C=N cov=N` + итог `CRAP: functions=N`; контракт не распознан = блокер среды; обход только записанный (`--no-crap`) |
 | RED | `items/W-NNN/red.cmd` | в первую очередь: падает на чистом HEAD до работы, зеленеет после; источник — строка `RED:` в спеке либо red-фаза агента (первая задача run/auto); обход только записанный (`--no-red`) |
 | LINT | `LINT=1`, `LINT_CMD` | авто-shellcheck изменённых *.sh + проектный линтер |

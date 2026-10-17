@@ -1339,3 +1339,63 @@ fn observability_list_logs_clean() {
     let out = String::from_utf8_lossy(&sb.run_ok(&["abort", "W-002"]).stdout).to_string();
     assert!(contains(&out, "→ open"), "{out}");
 }
+
+#[test]
+fn section28_mutation_batch_files() {
+    let sb = Sandbox::new("r28");
+    let spy = sb.stubs.join("mut-spy.log");
+    write_exec(
+        &sb.stubs.join("mut-spy.sh"),
+        r#"#!/usr/bin/env bash
+echo "$*" >> "$SPY_LOG"
+echo "10 mutants tested in 1s: 9 caught, 1 missed"
+"#,
+    );
+    write_exec(
+        &sb.stubs.join("stub-two-files.sh"),
+        r#"#!/usr/bin/env bash
+echo 1 > "$HARNESS_WORKTREE/one.rs"
+echo 2 > "$HARNESS_WORKTREE/two.rs"
+echo marker > "$HARNESS_WORKTREE/done.txt"
+printf 'feat: два файла\n\nдетали\n' > "$HARNESS_SUMMARY"
+"#,
+    );
+    sb.run_ok(&["init"]);
+    sb.new_item("batch item", "спека\n", Some("x"));
+    let mut c = sb.devh(&["run"]);
+    c.env("HARNESS_AGENT", sb.stubs.join("stub-two-files.sh"));
+    c.env("SPY_LOG", &spy);
+    c.env(
+        "HARNESS_MUTATE",
+        format!("{} {{files}}", sb.stubs.join("mut-spy.sh").display()),
+    );
+    let out = c.output().unwrap_or_else(|_| unreachable!());
+    let all = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.status.success(), "run: {all}");
+    let mut_log =
+        fs::read_to_string(sb.log_file("W-001-mutate.log")).unwrap_or_else(|_| unreachable!());
+    assert!(
+        contains(
+            &mut_log,
+            "один прогон на 3 файл(ов): done.txt one.rs two.rs"
+        ),
+        "{mut_log}"
+    );
+    assert!(contains(&mut_log, "killed 9 (90%)"), "{mut_log}");
+    assert!(contains(&mut_log, "missed 1, unviable 0"), "{mut_log}");
+    // Главное P1b: мутатор запущен РОВНО один раз и получил оба файла.
+    let calls = fs::read_to_string(&spy).unwrap_or_else(|_| unreachable!());
+    assert_eq!(
+        calls.lines().count(),
+        1,
+        "мутатор должен быть вызван ровно один раз: {calls}"
+    );
+    assert!(
+        contains(&calls, "-f done.txt -f one.rs -f two.rs"),
+        "{calls}"
+    );
+}

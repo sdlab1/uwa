@@ -69,7 +69,7 @@ of the log (≤ MAX_FIX); a missing tool = an ENV blocker, not a fix-round.
 |---|---|---|
 | VERIFY | `VERIFY` | tests/build before commit |
 | NO-IGNORED | `NO_IGNORED=1`, `IGNORED_ALLOWLIST` | allowlist semantics: an ignore is allowed if the test name matches a regex in `IGNORED_ALLOWLIST` (file, default `scripts/ignored-tests.txt`); an undeclared ignore = hidden red |
-| MUTATE | `MUTATE`, `MIN_KILL=90` | kill-rate ≥ MIN_KILL% on changed `MUTATE_SCOPE` files (`{module}`/`{file}`); output format `Mutants: N, Killed: M` (muex / cargo-mutants); missing tool = env blocker (rc=2), not a fix-round |
+| MUTATE | `MUTATE`, `MIN_KILL=90` | kill-rate ≥ MIN_KILL% on changed `MUTATE_SCOPE` files; `{files}` = ONE run for all files (cargo-mutants: multiple `-f`), `{module}`/`{file}` = run per file; output: `N mutants tested in T: C caught, M missed[, timeout][, unviable]` (cargo-mutants 27.x) or `Mutants: N, Killed: M` (muex); missing tool = env blocker (rc=2), not a fix-round |
 | CRAP | `CRAP`, `CRAP_MAX=12` | guardrail #2 (Uncle Bob): score = C²·(1−cov)³ + C, violation = score > CRAP_MAX; output format `file:line fun C=N cov=N` + summary `CRAP: functions=N`; unrecognized contract = env blocker; bypass only recorded (`--no-crap`) |
 | RED | `items/W-NNN/red.cmd` | first of all: fails on a clean HEAD before the work, goes green after; source — the spec's `RED:` line or the agent's red phase (the first task of run/auto); only recorded bypass (`--no-red`) |
 | LINT | `LINT=1`, `LINT_CMD` | auto-shellcheck of changed *.sh + project linter |
