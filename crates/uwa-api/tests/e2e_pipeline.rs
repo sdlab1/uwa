@@ -2,6 +2,19 @@
 //! routing → session acquisition → workflow send → finisher → SSE encoding.
 //!
 //! These catch integration gaps that unit tests miss.
+//!
+//! ## Issue tracker (migrated from docs/ISSUES_AND_BRIDGE.md)
+//!
+//! ### UWA-138 ✅ Buffered/stream tool call deduplication — closed
+//!
+//! Both buffered and streaming paths share `resolve_tool_calls` for
+//! validation/self-heal, which deduplicates identical tool calls.
+//! Test `buffered_and_streaming_produce_identical_tool_calls` asserts
+//! both paths emit exactly the same two tool calls (no duplication
+//! across modes).
+//!
+//! Full hardening history: see the module docs of `crate` (uwa-api),
+//! Part 1 — Issue tracker, UWA-138 entry.
 
 use serde_json::json;
 use std::sync::Arc;

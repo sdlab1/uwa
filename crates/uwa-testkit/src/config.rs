@@ -12,7 +12,8 @@ pub const TEST_AUTH_HEADER: &str = "Bearer k";
 ///
 /// `expect`/`panic!` are forbid-level lints; a rejected static config is a
 /// wiring bug worth crashing the test process for, hence `unreachable!`
-/// (permitted by the policy — see docs/ISSUES_AND_BRIDGE.md UWA-101).
+/// (permitted by the policy — see `crate::uwa_api` module docs,
+/// Part 2 — Session 3, UWA-101 entry).
 fn load_static(toml: &str) -> Arc<Config> {
     match Config::load_from_str(toml) {
         Ok(c) => Arc::new(c),

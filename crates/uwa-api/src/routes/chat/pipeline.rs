@@ -1,6 +1,29 @@
 //! Chat pipeline: session pinning + circuit breaker + per-provider
 //! semaphore.
 //!
+//! ## Issue tracker (migrated from docs/ISSUES_AND_BRIDGE.md)
+//!
+//! ### UWA-131 ✅ X-UWA-Conversation header overrides content-derived
+//! conversation_id — closed
+//!
+//! `conversation_id()` remains a deterministic FNV-1a hash of the opening
+//! messages (session continuity requires identical history → same id;
+//! a per-call nonce breaks `sm.len() == 1` session-reuse tests). Clients
+//! can now override the hash by supplying `X-UWA-Conversation: <id>` on
+//! `/v1/chat/completions`. The header value wins over the content-derived
+//! hash in both buffered and streaming pipeline paths.
+//!
+//! ### UWA-138 ✅ Buffered/stream tool call deduplication — closed
+//!
+//! Both buffered and streaming paths share `resolve_tool_calls` for
+//! validation/self-heal, which deduplicates identical tool calls.
+//! Integration test `buffered_and_streaming_produce_identical_tool_calls`
+//! asserts both paths emit exactly the same two tool calls (no
+//! duplication across modes).
+//!
+//! Full hardening history: see the module docs of `crate` (uwa-api),
+//! Part 1 — Issue tracker, UWA-131 and UWA-138 entries.
+//!
 //! ## Bridge semantics
 //!
 //! UWA is a **translation bridge**, not an agent. Tools come from the

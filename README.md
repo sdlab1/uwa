@@ -359,21 +359,6 @@ points:
 - [Positioning](docs/POSITIONING.md) — what we're building and what we're not.
 - [Why UWA](docs/why_uwa.md) — architectural deep-dive comparing UWA to typical Python wrappers.
 
-## Maintenance & known issues
-
-One document covers both the hardening history (wire-fidelity fixes in
-the streaming adapters, the daemon probe and log follower, and the
-forbid-level clippy campaign) and the live issue tracker — closed items
-with their root causes, open ones with repro and suggested fixes:
-[docs/ISSUES_AND_BRIDGE.md](docs/ISSUES_AND_BRIDGE.md). Nothing is
-scattered across several docs anymore.
-
-Known-open highlights: `https://` health probes are connect-only
-(UWA-102), `uwa-config` registry.rs is occasionally edited mid-run by a
-parallel agent session (UWA-134), and `uwa-bin` providers.rs is
-in-flight / untracked in the sandbox (UWA-135). All forbid-lint debt is
-closed (UWA-101, UWA-108).
-
 ## License
 
 MIT.

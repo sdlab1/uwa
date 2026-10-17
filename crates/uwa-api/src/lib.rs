@@ -6,6 +6,294 @@
 //! - [`router`] — builds an `axum::Router`
 //! - [`AppState`], [`ProviderRegistry`]
 //! - [`ApiError`] — the OpenAI-shaped error at the HTTP edge
+//!
+//! =========================================================================
+//! ISSUE TRACKER & BRIDGE HARDENING LOG (migrated from docs/ISSUES_AND_BRIDGE.md)
+//! =========================================================================
+//!
+//! One document for everything maintenance-related on UWA's translation
+//! bridge: issue tracker (symptom → root cause → fix) and the
+//! session-by-session hardening history (wire-fidelity fixes in the
+//! streaming adapters, daemon observability, and the forbid-level
+//! clippy campaign).
+//!
+//! Previously split across `docs/ISSUES.md` and `docs/BRIDGE-HARDENING.md`;
+//! kept in one place so nothing is scattered across several docs.
+//!
+//! Legend: ✅ closed · ⬜ open · 🔴 breaks the build/tests · 🟡 quality ·
+//! ⚪ polish / documented limitation.
+//!
+//! -----------------------------------------------------------------------
+//! Part 1 — Issue tracker
+//! -----------------------------------------------------------------------
+//!
+//! All previously open issues (UWA-001 … UWA-145, including UWA-131) are
+//! closed. The full history of closed fixes — SSE parser, JSON-path keys,
+//! `logs --follow`, `http_ok`, `/v1/messages` and `/v1/responses` stream
+//! errors, routing hints (X-UWA-Provider / X-UWA-Session), forbid-level
+//! clippy chain across all 14 crates, ChatGPT/Gemini rewrite corruption,
+//! self-heal prefix duplication, circuit breaker RAII, `scan_bare`
+//! multi-line JSON, dead code, lone `\r` SSE terminator, `finish_reason`
+//! enum compliance, and the broken-HEAD repair — lives in git history.
+//!
+//! ```
+//! UWA-102 ✅ http_ok now performs real TLS via ureq
+//! ---------------------------------------------------
+//! https:// URLs are now probed with a real TLS handshake + GET /healthz
+//! through ureq (rustls backend), replacing the previous TCP-only fallback
+//! that falsely reported any HTTPS listener as healthy. Non-2xx responses,
+//! TLS handshake failures and connection refusals all report the daemon as
+//! down.
+//! Test http_ok_https_requires_real_tls pins the new semantics.
+//! Location: crates/uwa-bin/src/commands/daemon.rs
+//!
+//! UWA-115 ✅ Slow test binary
+//! -----------------------------
+//! cargo test -p uwa-session --lib runs all 61 tests in ~0.16s
+//! (pinning suite 13 tests in ~0.04s). The previously-reported ~140s
+//! max_wait_ms = 1000 mock wait is no longer present.
+//! Location: crates/uwa-session/src/lib.rs
+//!
+//! UWA-138 ✅ Buffered/stream tool call deduplication
+//! -----------------------------------------------------
+//! Both buffered and streaming paths share resolve_tool_calls for
+//! validation/self-heal, which deduplicates identical tool calls.
+//! Integration test buffered_and_streaming_produce_identical_tool_calls
+//! asserts both paths emit exactly the same two tool calls.
+//! Location: crates/uwa-api/tests/e2e_pipeline.rs,
+//!           crates/uwa-api/src/routes/chat/pipeline.rs
+//!
+//! UWA-131 ✅ X-UWA-Conversation header overrides content-derived
+//! conversation_id
+//! -----------------------------------------------------------------
+//! conversation_id() remains a deterministic FNV-1a hash of the opening
+//! messages (session continuity requires identical history → same id;
+//! a per-call nonce breaks sm.len() == 1 session-reuse tests). Clients
+//! can now override the hash by supplying X-UWA-Conversation: <id> on
+//! /v1/chat/completions. The header value is extracted in HintExtractor
+//! (routing.rs) into RoutingHint.conversation and wins over the
+//! content-derived hash in both buffered and streaming pipeline paths.
+//! Location: crates/uwa-api/src/routing.rs,
+//!           crates/uwa-api/src/routes/chat/pipeline.rs
+//! ```
+//!
+//! Open: None.
+//!
+//! -----------------------------------------------------------------------
+//! Part 2 — Bridge hardening sessions log
+//! -----------------------------------------------------------------------
+//!
+//! A record of the maintenance sessions that hardened UWA's translation
+//! bridge: wire-fidelity bugs in the streaming/adapters, daemon
+//! observability, and bringing the workspace under the forbid-level
+//! clippy policy (unwrap_used, expect_used, panic, todo, unimplemented,
+//! indexing_slicing, arithmetic_side_effects).
+//!
+//! -----------------------------------------------------------------------
+//! Session 1 — wire & daemon bugfixes (commit 30b658b)
+//! -----------------------------------------------------------------------
+//! Trigger: review pass over /v1/messages (Claude Code), /v1/responses
+//! (Codex), the SSE extraction parser and the daemon CLI. Nine bugs,
+//! all fixed with regression tests:
+//!
+//! 1. uwa-extract SSE: trim_start() stripped ALL leading spaces after
+//!    data: — a token delta `data:  world` streamed as `world`,
+//!    corrupting every message that begins with a space.
+//!    Fix: strip exactly ONE space per SSE spec (strip_one_space) in
+//!    feed() and finish().
+//!
+//! 2. uwa-extract JSON path: bytes[i] as char turned every byte of a
+//!    multi-byte key into its own bogus char —
+//!    json_path_str(v, "помощь.текст") never matched.
+//!    Fix: char-driven path parsing (char_indices).
+//!
+//! 3. uwa-bin logs --follow: slicing the log at a stale byte offset
+//!    could panic mid-UTF-8; after truncation/rotation it went silent
+//!    forever.
+//!    Fix: Pure follow_chunk(): restart from byte 0 when the file
+//!    shrank, snap forward to the next char boundary; stdout flushed
+//!    per chunk.
+//!
+//! 4. uwa-bin http_ok: localhost:8080 (SocketAddr::parse rejects
+//!    hostnames), port-less URLs, https://, bracketed IPv6 — a healthy
+//!    daemon reported as down.
+//!    Fix: Pure host_port() parser + DNS resolution via ToSocketAddrs.
+//!
+//! 5. /v1/messages: A tool_use block with missing/null input became the
+//!    string "null" as tool arguments.
+//!    Fix: {} (both missing and explicit null).
+//!
+//! 6. /v1/messages stream: The error event had no error.type; a
+//!    partially streamed text block was left open (SDKs hang waiting
+//!    for content_block_stop); a dropped producer masqueraded as a
+//!    clean end_turn.
+//!    Fix: Typed error event (invalid_request_error/api_error
+//!    mapping), the open block is closed before the error, dropped
+//!    producer fails the stream.
+//!
+//! 7. /v1/responses stream: Every function call was emitted with
+//!    output_index: 0 — parallel calls collide for Codex.
+//!    Fix: Indices count up, starting after the text message if there
+//!    is one.
+//!
+//! 8. /v1/responses stream: A dropped producer was reported as a clean
+//!    response.completed.
+//!    Fix: response.failed with status: "failed" and a structured error.
+//!
+//! 9. /v1/chat/completions stream: A dropped producer was reported as a
+//!    clean stop finish.
+//!    Fix: finish_reason: "error" chunk + [DONE].
+//!
+//! Tests: SSE leading-space (feed + finish), non-ASCII path keys
+//! (Cyrillic/CJK/emoji), unclosed bracket, follow_chunk
+//! (append/no-change/truncation/mid-UTF-8/multibyte), host_port
+//! variants, Anthropic stream (happy path with two tool calls,
+//! mid-stream error, dropped producer, null-input, error-type mapping),
+//! Responses stream (index sequences, failed-on-drop), chat stream
+//! (normal completion, drop → error chunk).
+//!
+//! -----------------------------------------------------------------------
+//! Session 2 — uwa-core under forbid lints (commit 567cc12)
+//! -----------------------------------------------------------------------
+//! error.rs was the only lib-code violator in uwa-core (15 errors),
+//! which made any clippy run in the workspace fail before even
+//! reaching downstream crates. Refactor, not suppression — #[allow]
+//! cannot re-enable a forbid:
+//!
+//! - ModelNotFound::message: sorted.len() - preview.len() →
+//!   saturating_sub (provably safe — preview is a prefix of sorted).
+//! - levenshtein: rewritten index-free. Iterator pairs replace all
+//!   a[i]/b[j]/cur[j]/prev[j] indexing; saturating_add replaces + 1;
+//!   unwrap_or()/last() replace unwraps. Same two-row DP: diag trails
+//!   the prev iterator by one cell.
+//!
+//! Textbook distances locked by tests: kitten/sitting = 3, flaw/lawn =
+//! 2, gumbo/gambol = 2, empty edges, Cyrillic, symmetry.
+//!
+//! -----------------------------------------------------------------------
+//! Session 3 — HTTP probe, lint chain, broken-HEAD repair
+//! -----------------------------------------------------------------------
+//! ### 1. http_ok is now a real HTTP probe
+//! The old probe only did TcpStream::connect_timeout — a bare TCP
+//! handshake. Any unrelated service on the port (a stale Chromium, an
+//! SSH server, Postgres) reported "healthy".
+//! Now: (1) connect with 300 ms timeout, (2) GET /healthz HTTP/1.0 +
+//! Host: + Connection: close with the path taken from the URL, (3)
+//! parse first bytes via parse_status_line(); answer counts only if
+//! valid HTTP status line with 2xx code, (4) scheme letter-case
+//! irrelevant, fragments cut, (5) https:// URLs fall back to TCP
+//! handshake check.
+//!
+//! ### 2. Forbid-lint chain, continued
+//! | Crate       | Before | After | Notable rewrites                                          |
+//! |-------------|--------|-------|-----------------------------------------------------------|
+//! | uwa-core    | 15     | 0     | session 2                                                 |
+//! | uwa-extract | 13     | 0     | parse_path fully char-driven; json_path_str without unwrap|
+//! | uwa-tools   | 17     | 0     | three tool-call scanners use str::get + saturating_add    |
+//! | uwa-config  | 10     | 0     | build.rs dies via process::exit(101) without expect       |
+//! | uwa-resilience| 5    | 0     | circuit breaker recovers from mutex poisoning             |
+//! | uwa-session | 8      | 0     | round-robin via checked_rem + get()                       |
+//! | uwa-history | 24     | 0     | closed (UWA-101)                                          |
+//! | uwa-browser | 13     | 0     | closed (UWA-101)                                          |
+//! | uwa-providers| 13    | 0     | closed (UWA-101)                                          |
+//! | uwa-api     | 13     | 0     | closed (UWA-101)                                          |
+//! | uwa-testkit | 24     | 0     | closed (UWA-101)                                          |
+//! | uwa-bin     | 1      | 0     | closed (UWA-101)                                          |
+//!
+//! ### 3. Broken-HEAD repair (commit 78027b8)
+//! registry.rs used tracing::warn! and serde_json::Value without
+//! declaring dependencies → E0433. Fixed by adding both to
+//! Cargo.toml. registry_fills_missing_selectors test failed:
+//! root cause 1 — url_patterns sat below [meta] in providers/*.toml;
+//! root cause 2 — ProviderCfg.url_patterns/.capabilities were required
+//! serde fields. Both now #[serde(default)]. panic! on malformed
+//! built-in entries → tracing::error! + skip.
+//!
+//! -----------------------------------------------------------------------
+//! Session 4 — ChatGPT/Gemini rewrite corruption + dead code
+//! -----------------------------------------------------------------------
+//! ### 1. ChatGPT / Gemini parser rewrite corrupts accumulated text (UWA-141)
+//! Both ChatGptParser and GeminiParser consume cumulative text and emit
+//! deltas by prefix-diffing. When the model rewrites (regenerate /
+//! edit / candidate switch), the new text is not a prefix-extension of
+//! the old one — the diff returned the whole new text, and the pipeline
+//! accumulator appended it to the stale prefix, producing concatenated
+//! garbage.
+//! Root cause: NetDelta(pub String) could not express "replace
+//! everything accumulated so far".
+//! Fix: introduced NetDelta::{Append, Replace} enum.
+//!   - Append(s) — normal growth, suffix appended to accumulated text
+//!   - Replace(s) — site rewrote its message; accumulator clears and
+//!     replaces with s
+//!
+//! ### 2. Dead code in fenced_regions (UWA-142)
+//! Removed redundant `|| trimmed == "```"` (always covered by
+//! starts_with("```")).
+//!
+//! ### 3. SSE parser lone \r not a line separator (UWA-132)
+//! Parser only accepted \n and \r\n; lone \r was ignored.
+//! Fix: find_line_end() finds the earliest terminator among LF, CRLF,
+//! CR; trailing \r at chunk end is held back; find_line_end_at_eof()
+//! treats trailing \r at EOF as complete terminator.
+//!
+//! ### 4. finish_reason: "error" not in OpenAI enum (UWA-128)
+//! Error frames now send error event + [DONE] without any finish_reason
+//! field.
+//!
+//! ### 5. Self-heal prefix duplication (UWA-129)
+//! Self-heal emitted entire new text but the pre-block prefix had
+//! already been streamed. Fix: strip the already-streamed prefix
+//! (tracked via emitted_until) from the self-heal text before emitting.
+//!
+//! -----------------------------------------------------------------------
+//! Session 5 — uwa-browser clippy + uwa-session pre-existing test failures
+//! -----------------------------------------------------------------------
+//! ### 1. uwa-browser clippy forbid-lint clean (UWA-101)
+//! All unwrap(), expect(), panic!() and indexing violations replaced
+//! with unwrap_or_else(|_| unreachable!(…)) patterns.
+//!
+//! ### 2. uwa-session pre-existing test failures fixed
+//! - empty_profiles_each_get_their_own_lazy_tab: pick_tab_in fell back
+//!   to default profile's tabs even when profiles were supported.
+//! - unsupported_profile_is_an_error: non-default profile on
+//!   non-profile transport should return Unavailable.
+//!
+//! ### 3. Forbid-lint chain complete
+//! All 14 crates: 0 forbid-lint violations.
+//!
+//! -----------------------------------------------------------------------
+//! Session 6 — final clippy warnings + devharness panic + uwa-lifecycle
+//! -----------------------------------------------------------------------
+//! ### 1. Remaining clippy style warnings eliminated
+//! get_first → first(), manual_range_contains → (400..600).contains(),
+//! needless_borrow fixes, unnecessary_lazy_evaluations fixes.
+//!
+//! ### 2. devharness panic!() in production code path
+//! gates.rs:499 — panic!("ожидали Fail, получили {v:?}") →
+//! unreachable!("…").
+//!
+//! ### 3. uwa-lifecycle start_paused feature missing
+//! Added test-util to tokio dev-dependency features.
+//!
+//! -----------------------------------------------------------------------
+//! Session 7 — X-UWA-Provider honored in /v1/responses
+//! -----------------------------------------------------------------------
+//! POST /v1/responses used RoutingHint::default() and never extracted
+//! the HintExtractor, so X-UWA-Provider was silently ignored. Fix:
+//! extract HintExtractor, call resolve_hint(), derive profile from
+//! hint.profile, pass hint to run_pipeline/run_pipeline_streaming.
+//!
+//! -----------------------------------------------------------------------
+//! Session 8 — X-UWA-Session profile honored in /v1/messages
+//! -----------------------------------------------------------------------
+//! POST /v1/messages passed ProfileName::default_name() to
+//! run_pipeline/run_pipeline_streaming, ignoring X-UWA-Session
+//! (hint.profile). Fix: compute profile from hint.profile once before
+//! the streaming/buffered split.
+//!
+//! =========================================================================
+//! END OF MIGRATED DOCUMENTATION
+//! =========================================================================
 
 pub mod error;
 pub mod events;

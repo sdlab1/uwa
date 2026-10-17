@@ -3,6 +3,22 @@
 //! The endpoint order in the router is important: `/url/{domain}/v1/...`
 //! and `/tab/{id}/v1/...` are merged **before** the plain `/v1/...` routes
 //! so that axum's matcher resolves path parameters first.
+//!
+//! ## Issue tracker (migrated from docs/ISSUES_AND_BRIDGE.md)
+//!
+//! ### UWA-131 ✅ X-UWA-Conversation header overrides content-derived
+//! conversation_id — closed
+//!
+//! `conversation_id()` remains a deterministic FNV-1a hash of the opening
+//! messages (session continuity requires identical history → same id;
+//! a per-call nonce breaks `sm.len() == 1` session-reuse tests). Clients
+//! can now override the hash by supplying `X-UWA-Conversation: <id>` on
+//! `/v1/chat/completions`. The header value is extracted in `HintExtractor`
+//! into `RoutingHint.conversation` and wins over the content-derived hash
+//! in both buffered and streaming pipeline paths.
+//!
+//! Full hardening history: see the module docs of `crate` (uwa-api),
+//! Part 1 — Issue tracker, UWA-131 entry.
 
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
