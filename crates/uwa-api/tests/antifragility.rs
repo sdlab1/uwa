@@ -344,7 +344,10 @@ async fn malformed_json_in_tool_call_is_rejected_gracefully() {
 
     // Should not panic - either returns 200 (no tool_calls) or 4xx
     let status = r.status_code().as_u16();
-    assert!(status == 200 || (400..600).contains(&status), "unexpected status: {status}");
+    assert!(
+        status == 200 || (400..600).contains(&status),
+        "unexpected status: {status}"
+    );
 
     let v: serde_json::Value = r.json();
     if status == 200 {

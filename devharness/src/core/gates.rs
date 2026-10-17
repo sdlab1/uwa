@@ -566,7 +566,10 @@ mod tests {
         assert_eq!(
             judge(
                 &Gate::NoIgnored,
-                &raw(Some(0), "test foo::bar ... ignored\ntest result: ok. 2 passed; 1 ignored"),
+                &raw(
+                    Some(0),
+                    "test foo::bar ... ignored\ntest result: ok. 2 passed; 1 ignored"
+                ),
                 &off
             ),
             Verdict::Pass
