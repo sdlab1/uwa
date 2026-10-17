@@ -126,6 +126,12 @@ async fn messages_inner(
 
     let msg_id = format!("msg_{}", uuid::Uuid::new_v4().simple());
 
+    let profile = hint
+        .profile
+        .clone()
+        .map(|p| uwa_session::ProfileName::new(&p))
+        .unwrap_or_else(uwa_session::ProfileName::default_name);
+
     if req.stream.unwrap_or(false) {
         let (tx, rx) = mpsc::channel::<crate::routes::chat::pipeline::StreamEvent>(64);
         let state_task = state.clone();
@@ -138,7 +144,7 @@ async fn messages_inner(
                 &oa_req_task,
                 &specs_clone,
                 hint_clone.tab.as_ref(),
-                &uwa_session::ProfileName::default_name(),
+                &profile,
                 tx,
                 &hint_clone,
             )
@@ -156,7 +162,7 @@ async fn messages_inner(
             &oa_req,
             &all_specs,
             hint.tab.as_ref(),
-            &uwa_session::ProfileName::default_name(),
+            &profile,
             &hint,
         )
         .await?;
