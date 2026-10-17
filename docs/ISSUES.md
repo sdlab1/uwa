@@ -205,6 +205,21 @@ mirroring `messages.rs`. Tests: `provider_switch_uses_correct_profile`
 (un-ignored together with the other two UWA-109 tests, rewritten to the
 current profiles contract), full `uwa-api` suite green.
 
+### UWA-144 ✅ Routing hint ignored by `/v1/responses` (X-UWA-Provider)
+`POST /v1/responses` (OpenAI Responses API endpoint used by Codex) used
+`RoutingHint::default()` and never extracted the `HintExtractor`, so the
+`X-UWA-Provider` header was silently ignored. A request routed to Claude
+via `X-UWA-Provider: claude` would still be served by whichever provider
+the model alias table selected. `chat/mod.rs`, `messages.rs`, and the
+chat pipeline (`provider_for`) already honored the hint; `/v1/responses`
+had the same hole. **Fix:** `crates/uwa-api/src/routes/responses.rs`:
+extract `crate::routing::HintExtractor(hint)`, call
+`resolve_hint(&state, &hint)`, derive the profile from `hint.profile`,
+and pass the full hint (including `pinned_tab` and `provider`) through
+to `run_pipeline` / `run_pipeline_streaming` on both streaming and
+buffered paths. `uwa-api` tests pass (55 lib + integration suites).
+Session 7 entry added to `docs/BRIDGE-HARDENING.md`.
+
 ---
 
 ## ⬜ Open
