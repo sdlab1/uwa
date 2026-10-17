@@ -39,22 +39,18 @@ commits `8373352` … `415baf7`).
 
 ### ⬜ Open
 
-### UWA-102 🟡 `http_ok` cannot speak TLS
+### UWA-102 ✅ `http_ok` now performs real TLS via `ureq`
 
-**Status:** open (known limitation, not a regression).
+**Status:** closed.
 
-`https://` URLs fall back to the TCP-handshake check because the Rust
-standard library has no TLS. The daemon URL is always `http://`, so this
-is theoretical today.
+`https://` URLs are now probed with a real TLS handshake + `GET /healthz`
+through `ureq` (rustls backend), replacing the previous TCP-only fallback
+that falsely reported any HTTPS listener as healthy. Non-2xx responses,
+TLS handshake failures and connection refusals all report the daemon as
+down.
 
-Options if it ever matters:
-- use `ureq` (already a workspace dev-dep with `tls` feature) for the
-  `https` path, or
-- document "https = connect-only" in `--help`.
-
-Test `http_ok_https_falls_back_to_tcp_handshake` pins the current
-semantics: a reachable `https` listener reports healthy, a refused one
-reports down.
+Test `http_ok_https_requires_real_tls` pins the new semantics: a plain
+TCP listener (no TLS) answers `false` for `https://` URLs.
 
 ---
 
@@ -72,16 +68,24 @@ was investigated and found resolved.
 
 ### UWA-131 ⚪ Identical opening messages get same conversation_id
 
-**Status:** open (documented as intentional behavior).
+**Status:** open (intentional, cannot be fixed without API changes).
 
-Two chats with the same system prompt and first user message ("hi")
-receive the same `conversation_id` and tab. This is by design — the
-conversation id is derived from the message content, not from a random
-token. Tests assert `!fills_a.is_empty() || !fills_b.is_empty()`;
-tab-switch behavior is covered by `repin_invalidates_pinning_state`.
+`conversation_id()` is a deterministic hash of the opening messages
+(system prompts + first user turn). Two chats with the same opening get
+the same id — this is required for session continuity: follow-up turns
+in the same chat must reuse the existing session/tab (tests
+`sessions_pin_a_conversation_to_one_entry` and
+`follow_up_turn_without_system_prompt_stays_on_the_same_session` assert
+`sm.len() == 1` for identical history).
 
-No fix required unless product decides conversation ids should be
-randomized per chat.
+Randomizing the id (e.g. per-call nonce) breaks session reuse — every
+request gets a fresh `conversation_id`, so `SessionManager` creates a new
+entry per request and pinning state is lost.
+
+A correct fix requires the client to supply a unique conversation id
+(e.g. via an `X-UWA-Conversation` header) that the server echoes back
+and uses as the session key instead of a content-derived hash. This is
+an API change, not a bugfix; tracked here until product decides.
 
 ---
 

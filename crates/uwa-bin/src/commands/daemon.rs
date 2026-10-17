@@ -538,11 +538,14 @@ fn http_ok(url: &str) -> bool {
         let _ = stream.set_read_timeout(Some(PROBE_TIMEOUT));
         let _ = stream.set_write_timeout(Some(PROBE_TIMEOUT));
 
-        // std has no TLS: for https URLs the completed TCP handshake is
-        // the strongest signal available (the daemon URL is always
-        // http:// — tracked in docs/ISSUES_AND_BRIDGE.md UWA-102).
         if https {
-            return true;
+            // Real TLS via ureq (rustls backend): perform an actual HTTPS
+            // GET /healthz and require a 2xx answer. Closes UWA-102.
+            return ureq::get(url)
+                .timeout(PROBE_TIMEOUT)
+                .call()
+                .map(|resp| (200..300).contains(&resp.status()))
+                .unwrap_or(false);
         }
 
         // A bare TCP connect proves nothing — any unrelated service on the
@@ -858,15 +861,17 @@ mod tests {
     }
 
     #[test]
-    fn http_ok_https_falls_back_to_tcp_handshake() {
-        // std has no TLS: https URLs are probed by TCP connect only.
+    fn http_ok_https_requires_real_tls() {
+        // ureq with the `tls` feature performs a real TLS handshake. A plain
+        // TCP listener (no TLS) cannot complete it, so https URLs report down.
+        // Closes UWA-102: https is no longer falsely marked healthy.
         let listener =
             std::net::TcpListener::bind("127.0.0.1:0").unwrap_or_else(|_| unreachable!());
         let port = listener
             .local_addr()
             .unwrap_or_else(|_| unreachable!())
             .port();
-        assert!(http_ok(&format!("https://127.0.0.1:{port}/healthz")));
+        assert!(!http_ok(&format!("https://127.0.0.1:{port}/healthz")));
         drop(listener);
         assert!(!http_ok(&format!("https://127.0.0.1:{port}/healthz")));
     }
