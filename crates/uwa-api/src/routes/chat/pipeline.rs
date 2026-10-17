@@ -383,7 +383,13 @@ async fn run_pipeline_streaming_inner(
 
     // Scope conversation_id by provider so different providers get
     // distinct pinning state (UWA-137).
-    let cid = uwa_session::conversation_id(&req.messages, hint.provider.as_deref());
+    // X-UWA-Conversation header overrides the content-derived hash
+    // (closes UWA-131): clients that need unique ids per chat pass them
+    // explicitly; without the header the deterministic hash is used.
+    let cid = hint
+        .conversation
+        .clone()
+        .unwrap_or_else(|| uwa_session::conversation_id(&req.messages, hint.provider.as_deref()));
     let session_handle = match &state.runtime.sessions {
         Some(sm) => Some(
             sm.acquire_with_profile(&cid, profile.clone(), state.transport.as_ref())
@@ -670,7 +676,13 @@ async fn run_pipeline_inner(
     // Session pinning — same tab for the whole bridge turn.
     // Scope conversation_id by provider so different providers get
     // distinct pinning state (UWA-137).
-    let cid = uwa_session::conversation_id(&req.messages, hint.provider.as_deref());
+    // X-UWA-Conversation header overrides the content-derived hash
+    // (closes UWA-131): clients that need unique ids per chat pass them
+    // explicitly; without the header the deterministic hash is used.
+    let cid = hint
+        .conversation
+        .clone()
+        .unwrap_or_else(|| uwa_session::conversation_id(&req.messages, hint.provider.as_deref()));
     let session_handle = match &state.runtime.sessions {
         Some(sm) => Some(
             sm.acquire_with_profile(&cid, profile.clone(), state.transport.as_ref())

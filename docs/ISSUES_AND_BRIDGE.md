@@ -23,8 +23,8 @@ open items carry a repro, a root-cause hypothesis and a suggested fix.
 
 ### ✅ Closed
 
-All previously open issues (UWA-001 … UWA-145, except UWA-131 listed
-below under Open) are closed. The full history of closed fixes — SSE
+All previously open issues (UWA-001 … UWA-145, including UWA-131) are
+closed. The full history of closed fixes — SSE
 parser, JSON-path keys, `logs --follow`, `http_ok`, `/v1/messages` and
 `/v1/responses` stream errors, routing hints (X-UWA-Provider /
 X-UWA-Session), forbid-level clippy chain across all 14 crates,
@@ -74,28 +74,31 @@ exactly the same two tool calls (no duplication across modes).
 
 ---
 
+### UWA-131 ✅ `X-UWA-Conversation` header overrides content-derived conversation_id
+
+**Status:** closed.
+
+`conversation_id()` remains a deterministic FNV-1a hash of the opening
+messages (session continuity requires identical history → same id; a
+per-call nonce breaks `sm.len() == 1` session-reuse tests). Clients can
+now override the hash by supplying `X-UWA-Conversation: <id>` on
+`/v1/chat/completions`. The header value is extracted in
+`HintExtractor` (`routing.rs`) into `RoutingHint.conversation` and
+wins over the content-derived hash in both buffered and streaming
+pipeline paths (`chat/pipeline.rs`), which then passes the id through
+`SessionManager::get_or_create` as the session key. Regression tests
+cover: header-present routes to the named conversation, header-absent
+falls back to the hash, empty header is ignored.
+
+Tests added: `x_uwa_conversation_header_overrides_hash` and
+`x_uwa_conversation_header_empty_ignored` in
+`crates/uwa-api/tests/messages.rs` and `crates/uwa-api/tests/responses.rs`.
+
+---
+
 ### ⬜ Open
 
-### UWA-131 ⚪ Identical opening messages get same conversation_id
-
-**Status:** open (intentional, cannot be fixed without API changes).
-
-`conversation_id()` is a deterministic hash of the opening messages
-(system prompts + first user turn). Two chats with the same opening get
-the same id — this is required for session continuity: follow-up turns
-in the same chat must reuse the existing session/tab (tests
-`sessions_pin_a_conversation_to_one_entry` and
-`follow_up_turn_without_system_prompt_stays_on_the_same_session` assert
-`sm.len() == 1` for identical history).
-
-Randomizing the id (e.g. per-call nonce) breaks session reuse — every
-request gets a fresh `conversation_id`, so `SessionManager` creates a new
-entry per request and pinning state is lost.
-
-A correct fix requires the client to supply a unique conversation id
-(e.g. via an `X-UWA-Conversation` header) that the server echoes back
-and uses as the session key instead of a content-derived hash. This is
-an API change, not a bugfix; tracked here until product decides.
+None.
 
 ---
 

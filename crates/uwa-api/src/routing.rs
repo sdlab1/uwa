@@ -61,10 +61,17 @@ impl<S: Send + Sync> FromRequestParts<S> for HintExtractor {
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(str::to_string);
+        let conversation = parts
+            .headers
+            .get("x-uwa-conversation")
+            .and_then(|v| v.to_str().ok())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| ConversationId::from_raw(s.to_string()));
         Ok(HintExtractor(RoutingHint {
             provider,
             tab: None,
-            conversation: None,
+            conversation,
             profile,
             group: None,
             preset: None,

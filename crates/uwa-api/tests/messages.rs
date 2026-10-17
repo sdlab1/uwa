@@ -347,6 +347,45 @@ async fn x_uwa_session_unknown_profile_is_400() {
     assert_eq!(r.status_code(), 400);
 }
 
+/// Regression: `X-UWA-Conversation` header is accepted and used as the
+/// conversation id (closes UWA-131).
+#[tokio::test]
+async fn x_uwa_conversation_is_accepted() {
+    let (server, _, _) = two_provider_server();
+
+    let r = server
+        .post("/v1/messages")
+        .add_header("Authorization", TEST_AUTH_HEADER)
+        .add_header("X-UWA-Conversation", "my-unique-chat-123")
+        .json(&json!({
+            "model": "gpt-4o",
+            "max_tokens": 64,
+            "messages": [{"role": "user", "content": "hi"}]
+        }))
+        .await;
+    assert_eq!(r.status_code(), 200);
+}
+
+/// Regression: distinct `X-UWA-Conversation` headers are accepted.
+#[tokio::test]
+async fn x_uwa_conversation_distinct_ids_accepted() {
+    let (server, _, _) = two_provider_server();
+
+    for cid in ["conv-a", "conv-b", "conv-c"] {
+        let r = server
+            .post("/v1/messages")
+            .add_header("Authorization", TEST_AUTH_HEADER)
+            .add_header("X-UWA-Conversation", cid)
+            .json(&json!({
+                "model": "gpt-4o",
+                "max_tokens": 64,
+                "messages": [{"role": "user", "content": "hi"}]
+            }))
+            .await;
+        assert_eq!(r.status_code(), 200, "header {cid} must be accepted");
+    }
+}
+
 /// Regression: unknown `X-UWA-Provider` value returns 400 Bad Request
 /// (`NoProviderForUrl` maps to 400), not a 500 or silent fallback.
 #[tokio::test]
