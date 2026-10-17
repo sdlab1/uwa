@@ -190,6 +190,21 @@ trimmed == "```"`; the right side is always covered by the left (a line
 equal to ``````` `` also `starts_with("```")`). Removed the redundant
 condition. Test suite unchanged (all pass).
 
+### UWA-143 ✅ Routing hint ignored by the chat pipeline
+`/v1/chat/completions` validated the hinted provider (capability check,
+conversation-id scoping) but the pipeline re-resolved the provider **by
+model alias** (`config.provider_for_model`) at all four resolution sites,
+so `X-UWA-Provider: claude` with a model aliased to another provider
+silently served the request to that other provider. `/v1/messages`
+already honored the hint; `/url/{domain}/…` and `/group/{id}/…` routing
+had the same hole on the chat endpoint. **Fix:** `pipeline::provider_for` —
+an explicit `RoutingHint::provider` now selects the `ProviderCfg`
+everywhere (buffered + streaming, wrapper + inner); without a hint the
+alias table decides as before. The client model is echoed back untouched,
+mirroring `messages.rs`. Tests: `provider_switch_uses_correct_profile`
+(un-ignored together with the other two UWA-109 tests, rewritten to the
+current profiles contract), full `uwa-api` suite green.
+
 ---
 
 ## ⬜ Open
