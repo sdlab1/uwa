@@ -204,6 +204,7 @@ pub fn dispatch(cmd: &Cmd, root: &Path) -> anyhow::Result<()> {
             misc::abort(&store, &cfg, &id)?;
         }
         Cmd::Clean => misc::clean(&store, &cfg)?,
+        Cmd::Sweep { maxsize } => misc::sweep(&store, &cfg, maxsize.as_deref())?,
         Cmd::Doctor => doctor::doctor(&store, &cfg, root)?,
         Cmd::Logs { id: None } => {
             misc::logs_all(&store);

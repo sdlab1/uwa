@@ -549,6 +549,10 @@ fn section10_doctor() {
         !contains(&out, "\x1b"),
         "piped output should have no ANSI: {out}"
     );
+    assert!(
+        contains(&out, "git worktree"),
+        "doctor проверяет сирот-worktree: {out}"
+    );
 }
 
 #[test]
@@ -1249,6 +1253,84 @@ fn section26_crap_gate() {
     );
     assert!(!out.status.success(), "doctor со сломанным CRAP: {all}");
     assert!(contains(&all, "FAIL") && contains(&all, "CRAP"), "{all}");
+}
+
+/// Второй путь в `git worktree list --porcelain` (первый — главное дерево):
+/// это и есть reuse-путь прогона.
+fn worktree_entry(list: &str) -> Option<std::path::PathBuf> {
+    list.lines()
+        .filter_map(|l| l.strip_prefix("worktree "))
+        .nth(1)
+        .map(std::path::PathBuf::from)
+}
+
+#[test]
+fn section29_sweep_closes_worktrees_and_prunes_orphans() {
+    let sb = Sandbox::new("r29");
+    sb.run_ok(&["init"]);
+    sb.new_item("sweep", "спека\n", Some("x"));
+    sb.run_ok(&["run"]);
+    sb.run_ok(&["merge"]);
+    assert_eq!(sb.status("W-001"), "done");
+
+    let list_before = sb.git_out(&["worktree", "list", "--porcelain"]);
+    let Some(active) = worktree_entry(&list_before) else {
+        unreachable!("reuse-путь зарегистрирован после merge (P1a-тепло): {list_before}")
+    };
+    assert_eq!(
+        list_before
+            .lines()
+            .filter(|l| l.starts_with("worktree "))
+            .count(),
+        2,
+        "главное дерево + reuse-путь: {list_before}"
+    );
+
+    // Сирота: зарегистрирована в git, но каталога нет на диске.
+    let orphan = sb.wt.join("gone-wt");
+    sb.git_out(&[
+        "worktree",
+        "add",
+        "--detach",
+        &orphan.to_string_lossy(),
+        "HEAD",
+    ]);
+    assert!(orphan.is_dir(), "worktree-сирота создана");
+    std::fs::remove_dir_all(&orphan).unwrap_or_else(|_| unreachable!());
+
+    // cargo sweep требует cargo-проект — в реале он есть, в песочнице add'им.
+    fs::write(
+        sb.repo.join("Cargo.toml"),
+        "[package]\nname = \"r29\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap_or_else(|_| unreachable!());
+
+    let (ok, out) = sb.run_capture(&["sweep", "--maxsize", "1GB"]);
+    assert!(ok, "sweep: {out}");
+    assert!(
+        contains(&out, "cargo sweep"),
+        "главное дерево тоже чистится: {out}"
+    );
+    assert!(
+        contains(&out, "OK sweep (1)"),
+        "сирота учтена в итоге: {out}"
+    );
+    assert!(contains(&out, "prune"), "регистрация сироты снята: {out}");
+
+    let list_after = sb.git_out(&["worktree", "list", "--porcelain"]);
+    assert!(!list_after.contains("gone-wt"), "{list_after}");
+    assert!(
+        list_after.contains(active.to_string_lossy().as_ref()),
+        "reuse-путь остался тёплым: {list_after}"
+    );
+    assert_eq!(
+        list_after
+            .lines()
+            .filter(|l| l.starts_with("worktree "))
+            .count(),
+        2,
+        "reuse-путь тёплый — остаётся: {list_after}"
+    );
 }
 
 #[test]

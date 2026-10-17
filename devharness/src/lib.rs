@@ -36,6 +36,9 @@ pub enum Cmd {
     },
     Clean,
     Doctor,
+    Sweep {
+        maxsize: Option<String>,
+    },
     Logs {
         id: Option<String>,
     },
@@ -77,6 +80,12 @@ impl Cmd {
             Command::new("abort").arg(Arg::new("id").index(1)),
             Command::new("clean"),
             Command::new("doctor"),
+            Command::new("sweep").arg(
+                Arg::new("maxsize")
+                    .long("maxsize")
+                    .action(ArgAction::Set)
+                    .help("лимит размера target/ для cargo sweep (напр. 20G)"),
+            ),
             Command::new("logs").arg(Arg::new("id").index(1)),
             Command::new("bg")
                 .arg(Arg::new("id").index(1))
@@ -161,6 +170,13 @@ impl Cmd {
             }
             Some("clean") => Ok(Cmd::Clean),
             Some("doctor") => Ok(Cmd::Doctor),
+            Some("sweep") => {
+                let m = matches
+                    .subcommand_matches("sweep")
+                    .unwrap_or_else(|| unreachable!());
+                let maxsize = m.get_one::<String>("maxsize").cloned();
+                Ok(Cmd::Sweep { maxsize })
+            }
             Some("logs") => {
                 let m = matches
                     .subcommand_matches("logs")

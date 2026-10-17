@@ -88,6 +88,28 @@ pub fn worktree_remove(root: &Path, path: &Path) -> anyhow::Result<()> {
     .map(|_| ())
 }
 
+/// Зарегистрированные worktree'ы: `git worktree list --porcelain` → пути.
+pub fn worktree_paths(root: &Path) -> Vec<PathBuf> {
+    git_out(root, &["worktree", "list", "--porcelain"])
+        .lines()
+        .filter_map(|l| l.strip_prefix("worktree "))
+        .map(PathBuf::from)
+        .collect()
+}
+
+/// Сироты: git помнит путь, а на диске его нет (снято вручную/слесарками).
+pub fn worktree_orphans(root: &Path) -> Vec<PathBuf> {
+    worktree_paths(root)
+        .into_iter()
+        .filter(|p| !p.exists())
+        .collect()
+}
+
+/// `git worktree prune` — снять регистрации пропавших путей.
+pub fn worktree_prune(root: &Path) -> anyhow::Result<()> {
+    git(root, &["worktree", "prune"]).map(|_| ())
+}
+
 pub fn branch_delete(root: &Path, branch: &str) -> anyhow::Result<()> {
     git(root, &["branch", "-D", branch]).map(|_| ())
 }
