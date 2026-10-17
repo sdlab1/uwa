@@ -13,7 +13,8 @@
 #
 # Гейты — ОБЯЗАТЕЛЬНЫ (проза report.md переведена в код):
 #   VERIFY     — тесты/сборка обязаны проходить до коммита
-#   NO-IGNORED — ни одного ignored-теста в выводе verify (N ignored > 0 = красный)
+#   NO-IGNORED — allowlist-семантика: игнор разрешён только для имён из
+#                IGNORED_ALLOWLIST (файл regex); незаявленный ignored = красный
 #   MUTATE     — мутационный гейт на изменённых файлах: kill-rate >= MIN_KILL%;
 #                инструмент не установлен = блокер СРЕДЫ, а не «пропуск»
 #   CRAP       — guardrail №2 (Uncle Bob): score = C²·(1−cov)³ + C, нарушение = score > CRAP_MAX;
@@ -68,6 +69,7 @@ RULES="${HARNESS_RULES:-}"
 RULES_LOG="${HARNESS_RULES_LOG:-}"
 MSG_DENY="${HARNESS_MSG_DENY:-}"
 NO_IGNORED="${HARNESS_NO_IGNORED:-1}"
+IGNORED_ALLOWLIST="${HARNESS_IGNORED_ALLOWLIST:-scripts/ignored-tests.txt}"
 LINT="${HARNESS_LINT:-1}"
 LINT_CMD="${HARNESS_LINT_CMD:-}"
 REVIEW="${HARNESS_REVIEW:-1}"
@@ -77,7 +79,7 @@ need_conf() {
   # shellcheck disable=SC1090
   . "$CONF"
   local v env
-  for v in VERIFY BOOTSTRAP AGENT MAX_FIX REMOTE MAIN WT_ROOT MAX_ACTIVE MIN_KILL MUTATE MUTATE_SCOPE CRAP CRAP_SCOPE CRAP_MAX BENCH AGENT_TIMEOUT LOG_DAYS RULES RULES_LOG MSG_DENY NO_IGNORED LINT LINT_CMD REVIEW; do
+  for v in VERIFY BOOTSTRAP AGENT MAX_FIX REMOTE MAIN WT_ROOT MAX_ACTIVE MIN_KILL MUTATE MUTATE_SCOPE CRAP CRAP_SCOPE CRAP_MAX BENCH AGENT_TIMEOUT LOG_DAYS RULES RULES_LOG MSG_DENY NO_IGNORED IGNORED_ALLOWLIST LINT LINT_CMD REVIEW; do
     env="HARNESS_$v"
     # shellcheck disable=SC2086
     if [ -n "${!env:-}" ]; then printf -v "$v" '%s' "${!env}"; fi
@@ -279,7 +281,8 @@ BENCH=''                     # перф-гейт, пример: bash devharness/
 RULES='$RULES'               # файл правил проекта; промпт: «прочитай полностью, исполняй беспрекословно»
 RULES_LOG='$RULES_LOG'       # куда дописывать «## Session N …» после merge (пусто = выкл)
 MSG_DENY='$MSG_DENY'         # гигиена сообщения коммита (grep -E): матч → reject, лечение: devh commit
-NO_IGNORED=$NO_IGNORED          # 1 = ни одного ignored-теста в выводе verify (0 = выкл для чужих форматов)
+NO_IGNORED=$NO_IGNORED          # 1 = allowlist-гейт ignored: незаявленный игнор = fail (0 = выкл для чужих форматов)
+IGNORED_ALLOWLIST='$IGNORED_ALLOWLIST'  # файл: regex имён ignored-тестов, которым разрешён игнор (нет файла = пустой)
 LINT=$LINT                      # 1 = авто-shellcheck изменённых *.sh
 LINT_CMD='$LINT_CMD'         # проектный линтер (напр. cargo clippy -- -D warnings); пусто = выкл
 REVIEW=$REVIEW                  # 1 = self-review диффа вторым запросом агенту (VERDICT: OK|ISSUES)
@@ -507,11 +510,27 @@ $out" 2>&1 )" || { echo "review: агент-ревьюер упал (API/timeout
   esac
 }
 
-# железное правило №2: ни одного ignored-теста в выводе verify
+# железное правило №2 (allowlist-семантика): игнор разрешён, если имя теста
+# матчится regex из IGNORED_ALLOWLIST; незаявленный ignored = красный.
+ignored_allowed() { # $1 = имя теста; allowlist — файл $IGNORED_ALLOWLIST (относительный — от $ROOT)
+  local name="$1" pat file
+  case "$IGNORED_ALLOWLIST" in /*) file="$IGNORED_ALLOWLIST" ;; *) file="$ROOT/$IGNORED_ALLOWLIST" ;; esac
+  [ -f "$file" ] || return 1
+  while IFS= read -r pat || [ -n "$pat" ]; do
+    pat="${pat%$'\r'}"
+    case "$pat" in '' | '#'*) continue ;; esac
+    printf '%s\n' "$name" | grep -Eq -- "$pat" && return 0
+  done <"$file"
+  return 1
+}
 no_ignored_ok() { # $1 = лог verify
-  local n
-  n="$( { grep -oE '[0-9]+ ignored' "$1" 2>/dev/null || true; } | awk '$1+0>0' | wc -l )"
-  [ "$n" -eq 0 ]
+  local name bad=""
+  while IFS= read -r name; do
+    [ -z "$name" ] && continue
+    ignored_allowed "$name" || bad="$bad $name"
+  done < <(grep -E '^test .+ \.\.\. ignored' "$1" 2>/dev/null |
+    sed -E 's/^test (.+) \.\.\. ignored.*/\1/' | sort -u)
+  [ -z "$bad" ]
 }
 
 # ─── run ────────────────────────────────────────────────────────────
@@ -676,7 +695,7 @@ $(tail -40 "$craplog")
 $(tail -5 "$rlog")
 
 Почини эти проблемы в рамках спеки, не расширяя скоуп. git не трогай. Обнови summary: $sum" ;;
-      NO-IGNORED) run_agent "Verify прошёл, но в выводе есть ignored-тесты (>0). Железное правило: ни одного ignored — ignored = скрытый красный. Хвост лога:\n\n$(grep -E '[0-9]+ ignored' "$log" | head -10)\n\nРазбери причину игнора: почини тест и включи его; удаление проверки или новый ignore без причины запрещены. git не трогай. Обнови summary: $sum" ;;
+      NO-IGNORED) run_agent "Verify прошёл, но в выводе есть НЕзаявленные ignored-тесты. Правило (allowlist): игнор разрешён только для имён из $IGNORED_ALLOWLIST; незаявленный ignored = скрытый красный. Хвост лога:\n\n$(grep -E '^test .+ \.\.\. ignored' "$log" | head -10)\n\nРазбери причину игнора: почини тест и включи его; удаление проверки или новый ignore без причины запрещены (легальный долг — запись в allowlist). git не трогай. Обнови summary: $sum" ;;
       MUTATE) run_agent "Mutation-гейт не прошёл: твои тесты НЕ УБИВАЮТ мутантов на изменённом коде (kill-rate < ${MIN_KILL}%). Лог:
 
 $(tail -40 "$mlog")
