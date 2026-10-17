@@ -20,6 +20,11 @@ impl ItemId {
         }
         digits.parse().ok().map(ItemId)
     }
+
+    /// Ветка задачи → id (`devh/W-007` → W-007); чужая/не наша ветка → None.
+    pub fn from_branch(b: &str) -> Option<Self> {
+        Self::resolve(b.strip_prefix("devh/")?)
+    }
 }
 
 impl std::fmt::Display for ItemId {
@@ -53,6 +58,9 @@ pub struct RunConfig {
     pub remote: String,
     pub main_branch: String,
     pub wt_root: PathBuf,
+    /// P1a: один стабильный worktree-путь на все задачи (тёплый инкремент).
+    /// По умолчанию выключен; `devh run` включает, `bg`/параллель — нет.
+    pub wt_reuse: bool,
     pub log_days: u32,
     pub mutate: Option<MutateCfg>,
     pub red_mutate: Option<MutateCfg>,
@@ -80,6 +88,7 @@ impl Default for RunConfig {
             remote: "origin".into(),
             main_branch: "main".into(),
             wt_root: PathBuf::from("/tmp"),
+            wt_reuse: false,
             log_days: 30,
             mutate: None,
             red_mutate: None,

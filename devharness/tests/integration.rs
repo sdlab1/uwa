@@ -326,6 +326,7 @@ fn section01_happy_path() {
     let mut_log =
         fs::read_to_string(sb.log_file("W-001-mutate.log")).unwrap_or_else(|_| unreachable!());
     assert!(contains(&mut_log, "killed 10 (100%)"), "{mut_log}");
+    assert!(contains(&mut_log, "missed 0, unviable 0"), "{mut_log}");
 
     let (ok, _) = sb.run_capture(&["merge"]);
     assert!(ok);
@@ -374,6 +375,7 @@ fn section02_mutation_fix_round() {
     let mut_log =
         fs::read_to_string(sb.log_file("W-001-mutate.log")).unwrap_or_else(|_| unreachable!());
     assert!(contains(&mut_log, "killed 10 (100%)"), "{mut_log}");
+    assert!(contains(&mut_log, "missed 0, unviable 0"), "{mut_log}");
 }
 
 #[test]
@@ -519,13 +521,13 @@ fn section09_run_lock_blocks_merge() {
         std::thread::spawn(move || {
             let status = Command::new("bash")
                 .arg("-c")
-                .arg(format!("exec 8>\"{}\"; flock -x 8; sleep 3", lp.display()))
+                .arg(format!("exec 8>\"{}\"; flock -x 8; sleep 1", lp.display()))
                 .status()
                 .unwrap_or_else(|_| unreachable!());
             assert!(status.success());
         })
     };
-    std::thread::sleep(std::time::Duration::from_millis(300));
+    std::thread::sleep(std::time::Duration::from_millis(250));
     let (ok, out) = sb.run_capture(&["merge"]);
     assert!(!ok, "merge should be rejected while run.lock held");
     assert!(contains(&out, "run.lock"), "{out}");
@@ -558,6 +560,10 @@ fn section10_doctor() {
     assert!(
         !contains(&out, "\x1b"),
         "piped output should have no ANSI: {out}"
+    );
+    assert!(
+        contains(&out, "git worktree"),
+        "doctor проверяет сирот-worktree: {out}"
     );
 }
 
@@ -821,6 +827,7 @@ if [ -f "$T_MUT_GOOD" ]; then echo "Mutants: 10, Killed: 10 (100%)"; else echo "
     let mut_log =
         fs::read_to_string(sb.log_file("W-001-mutate.log")).unwrap_or_else(|_| unreachable!());
     assert!(contains(&mut_log, "killed 10 (100%)"), "{mut_log}");
+    assert!(contains(&mut_log, "missed 0, unviable 0"), "{mut_log}");
 }
 
 #[test]
@@ -829,7 +836,7 @@ fn section21_bg_ps() {
     sb.run_ok(&["init"]);
     sb.new_item("bg item", "спека\n", Some("x"));
     let mut c = sb.devh(&["bg", "W-001"]);
-    c.env("HARNESS_VERIFY", "sleep 6; test -f done.txt");
+    c.env("HARNESS_VERIFY", "sleep 2; test -f done.txt");
     let out = c.output().unwrap_or_else(|_| unreachable!());
     assert!(
         out.status.success(),
@@ -843,15 +850,25 @@ fn section21_bg_ps() {
     );
     assert!(contains(&all, "PID"), "{all}");
 
-    std::thread::sleep(std::time::Duration::from_secs(1));
+    // Ждём фактический старт полёта (run.pid), а не фиксированную секунду:
+    // прогон начинается за десятки мс, секунда простоя была чистым налогом.
+    let pid_file = sb.item_dir("W-001").join("run.pid");
+    let mut n = 0;
+    while !pid_file.exists() && n < 200 {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        n += 1;
+    }
+    assert!(pid_file.exists(), "bg-прогон должен стартовать (run.pid)");
     let (ok, ps_out) = sb.run_capture(&["ps"]);
     assert!(ok);
     assert!(contains(&ps_out, "W-001"), "ps sees flight: {ps_out}");
-
-    let pid_file = sb.item_dir("W-001").join("run.pid");
+    assert!(
+        contains(&ps_out, "PID"),
+        "ps показывает живой PID: {ps_out}"
+    );
     let mut n = 0;
-    while pid_file.exists() && n < 40 {
-        std::thread::sleep(std::time::Duration::from_secs(1));
+    while pid_file.exists() && n < 200 {
+        std::thread::sleep(std::time::Duration::from_millis(50));
         n += 1;
     }
     assert!(!pid_file.exists(), "pid file should be removed");
@@ -916,7 +933,7 @@ fn section21c_auto_pid_ps() {
     )
     .unwrap_or_else(|_| unreachable!());
     let mut c = sb.devh(&["auto", "--from", "specs", "--max", "1"]);
-    c.env("HARNESS_VERIFY", "sleep 6; test -f done.txt");
+    c.env("HARNESS_VERIFY", "sleep 2; test -f done.txt");
     let mut child = c.spawn().unwrap_or_else(|_| unreachable!());
     let ap = sb.harness_file("auto.pid");
     let mut n = 0;
@@ -936,8 +953,8 @@ fn section21c_auto_pid_ps() {
     );
     assert!(contains(&ps_out, "PID"), "{ps_out}");
     let mut n = 0;
-    while ap.exists() && n < 90 {
-        std::thread::sleep(std::time::Duration::from_millis(500));
+    while ap.exists() && n < 200 {
+        std::thread::sleep(std::time::Duration::from_millis(100));
         n += 1;
     }
     assert!(!ap.exists(), "auto.pid убирается guard'ом по завершении");
@@ -956,7 +973,7 @@ fn section21d_bg_auto() {
     )
     .unwrap_or_else(|_| unreachable!());
     let mut c = sb.devh(&["bg", "auto", "--from", "specs", "--max", "1"]);
-    c.env("HARNESS_VERIFY", "sleep 6; test -f done.txt");
+    c.env("HARNESS_VERIFY", "sleep 2; test -f done.txt");
     let out = c.output().unwrap_or_else(|_| unreachable!());
     assert!(
         out.status.success(),
@@ -980,8 +997,8 @@ fn section21d_bg_auto() {
     assert!(ok);
     assert!(contains(&ps_out, "auto"), "ps видит bg-auto: {ps_out}");
     let mut n = 0;
-    while ap.exists() && n < 90 {
-        std::thread::sleep(std::time::Duration::from_millis(500));
+    while ap.exists() && n < 200 {
+        std::thread::sleep(std::time::Duration::from_millis(100));
         n += 1;
     }
     assert!(!ap.exists(), "auto.pid убран по завершении bg-auto");
@@ -1438,32 +1455,172 @@ fn section26_crap_gate() {
     assert!(contains(&all, "FAIL") && contains(&all, "CRAP"), "{all}");
 }
 
+/// Второй путь в `git worktree list --porcelain` (первый — главное дерево):
+/// это и есть reuse-путь прогона.
+fn worktree_entry(list: &str) -> Option<std::path::PathBuf> {
+    list.lines()
+        .filter_map(|l| l.strip_prefix("worktree "))
+        .nth(1)
+        .map(std::path::PathBuf::from)
+}
+
+#[test]
+fn section29_sweep_closes_worktrees_and_prunes_orphans() {
+    let sb = Sandbox::new("r29");
+    sb.run_ok(&["init"]);
+    sb.new_item("sweep", "спека\n", Some("x"));
+    sb.run_ok(&["run"]);
+    sb.run_ok(&["merge"]);
+    assert_eq!(sb.status("W-001"), "done");
+
+    let list_before = sb.git_out(&["worktree", "list", "--porcelain"]);
+    let Some(active) = worktree_entry(&list_before) else {
+        unreachable!("reuse-путь зарегистрирован после merge (P1a-тепло): {list_before}")
+    };
+    assert_eq!(
+        list_before
+            .lines()
+            .filter(|l| l.starts_with("worktree "))
+            .count(),
+        2,
+        "главное дерево + reuse-путь: {list_before}"
+    );
+
+    // Сирота: зарегистрирована в git, но каталога нет на диске.
+    let orphan = sb.wt.join("gone-wt");
+    sb.git_out(&[
+        "worktree",
+        "add",
+        "--detach",
+        &orphan.to_string_lossy(),
+        "HEAD",
+    ]);
+    assert!(orphan.is_dir(), "worktree-сирота создана");
+    std::fs::remove_dir_all(&orphan).unwrap_or_else(|_| unreachable!());
+
+    // cargo sweep требует cargo-проект — в реале он есть, в песочнице add'им.
+    fs::write(
+        sb.repo.join("Cargo.toml"),
+        "[package]\nname = \"r29\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap_or_else(|_| unreachable!());
+
+    let (ok, out) = sb.run_capture(&["sweep", "--maxsize", "1GB"]);
+    assert!(ok, "sweep: {out}");
+    assert!(
+        contains(&out, "cargo sweep"),
+        "главное дерево тоже чистится: {out}"
+    );
+    assert!(
+        contains(&out, "OK sweep (1)"),
+        "сирота учтена в итоге: {out}"
+    );
+    assert!(contains(&out, "prune"), "регистрация сироты снята: {out}");
+
+    let list_after = sb.git_out(&["worktree", "list", "--porcelain"]);
+    assert!(!list_after.contains("gone-wt"), "{list_after}");
+    assert!(
+        list_after.contains(active.to_string_lossy().as_ref()),
+        "reuse-путь остался тёплым: {list_after}"
+    );
+    assert_eq!(
+        list_after
+            .lines()
+            .filter(|l| l.starts_with("worktree "))
+            .count(),
+        2,
+        "reuse-путь тёплый — остаётся: {list_after}"
+    );
+}
+
 #[test]
 fn section00_shellcheck_oracle_files() {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    match Command::new("shellcheck").arg("--version").output() {
-        Ok(out) if out.status.success() => {}
+    let ver_s = match Command::new("shellcheck").arg("--version").output() {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
         _ => {
             assert_skippable("shellcheck");
             return;
         }
-    }
-    for f in [
+    };
+    let files = [
         "devh",
         "devh-classic",
         "test.sh",
         "selfmutate.sh",
         "examples/check_bench.sh",
-    ] {
-        let out = Command::new("shellcheck")
-            .arg(manifest.join(f))
-            .output()
-            .unwrap_or_else(|_| unreachable!());
-        assert!(
-            out.status.success(),
-            "shellcheck findings в {f}:\n{}",
-            String::from_utf8_lossy(&out.stdout)
-        );
+    ];
+    // Оракул дорогой: ~2с анализа НА ФАЙЛ. Кэшируем вердикт по
+    // (содержимое, версия shellcheck) — теплый
+    // прогон платит микросекунды, холодный перепроверяет только
+    // изменившиеся файлы. Независимые файлы гоним параллельно.
+    let cache = shellcheck_cache_dir(manifest);
+    let cache_ref = cache.as_deref();
+    let ver = ver_s.as_str();
+    let mut bad: Vec<String> = Vec::new();
+    std::thread::scope(|s| {
+        let handles: Vec<_> = files
+            .iter()
+            .map(|f| s.spawn(move || shellcheck_verdict(manifest, f, ver, cache_ref)))
+            .collect();
+        for (f, h) in files.iter().zip(handles) {
+            match h.join().unwrap_or_else(|_| unreachable!()) {
+                (true, _) => {}
+                (false, msg) => bad.push(format!("{f}: {msg}")),
+            }
+        }
+    });
+    assert!(bad.is_empty(), "shellcheck findings:\n{}", bad.join("\n"));
+}
+
+/// Кэш вердиктов shellcheck'а: target/ (в .gitignore), уезжает с `cargo clean`.
+fn shellcheck_cache_dir(manifest: &Path) -> Option<PathBuf> {
+    let d = manifest.join("target").join(".shellcheck-cache");
+    fs::create_dir_all(&d).ok()?;
+    Some(d)
+}
+
+/// FNV-1a по содержимому файла с примесью версии shellcheck: ключа кэша
+/// в тесте — 64 бит хватает с запасом (коллизия = молчаливо пропущенный
+/// линт, но только при равном содержимом И версии).
+fn fnv_chain(bytes: &[u8], ver: &str) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in ver.as_bytes().iter().chain(bytes.iter()) {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    // длина примешивает «размер файла» в ключ: подрезка не совпадёт.
+    h ^ (bytes.len() as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15)
+}
+
+/// (чисто?, диагноз). Кэш хранит исход И прогон, так что поведение теста
+/// идентично прямому вызову — меняется только цена повторной проверки.
+fn shellcheck_verdict(manifest: &Path, f: &str, ver: &str, cache: Option<&Path>) -> (bool, String) {
+    let path = manifest.join(f);
+    let bytes = fs::read(&path).unwrap_or_default();
+    let tag = format!("{}-{:016x}", f.replace('/', "_"), fnv_chain(&bytes, ver));
+    let hit = |ext: &str| cache.map(|c| c.join(format!("{tag}.{ext}")));
+    if let Some(p) = hit("ok") {
+        if p.is_file() {
+            return (true, String::new());
+        }
+    }
+    let out = Command::new("shellcheck").arg(&path).output();
+    match out {
+        Err(e) => (false, format!("shellcheck не запустился: {e}")),
+        Ok(o) if o.status.success() => {
+            if let Some(p) = hit("ok") {
+                let _ = fs::write(p, b"");
+            }
+            (true, String::new())
+        }
+        Ok(o) => {
+            let text = String::from_utf8_lossy(&o.stdout).to_string();
+            if let Some(p) = hit("fail") {
+                let _ = fs::write(p, &text);
+            }
+            (false, format!("shellcheck findings:\n{text}"))
+        }
     }
 }
 
@@ -1535,4 +1692,64 @@ fn observability_list_logs_clean() {
 
     let out = String::from_utf8_lossy(&sb.run_ok(&["abort", "W-002"]).stdout).to_string();
     assert!(contains(&out, "→ open"), "{out}");
+}
+
+#[test]
+fn section28_mutation_batch_files() {
+    let sb = Sandbox::new("r28");
+    let spy = sb.stubs.join("mut-spy.log");
+    write_exec(
+        &sb.stubs.join("mut-spy.sh"),
+        r#"#!/usr/bin/env bash
+echo "$*" >> "$SPY_LOG"
+echo "10 mutants tested in 1s: 9 caught, 1 missed"
+"#,
+    );
+    write_exec(
+        &sb.stubs.join("stub-two-files.sh"),
+        r#"#!/usr/bin/env bash
+echo 1 > "$HARNESS_WORKTREE/one.rs"
+echo 2 > "$HARNESS_WORKTREE/two.rs"
+echo marker > "$HARNESS_WORKTREE/done.txt"
+printf 'feat: два файла\n\nдетали\n' > "$HARNESS_SUMMARY"
+"#,
+    );
+    sb.run_ok(&["init"]);
+    sb.new_item("batch item", "спека\n", Some("x"));
+    let mut c = sb.devh(&["run"]);
+    c.env("HARNESS_AGENT", sb.stubs.join("stub-two-files.sh"));
+    c.env("SPY_LOG", &spy);
+    c.env(
+        "HARNESS_MUTATE",
+        format!("{} {{files}}", sb.stubs.join("mut-spy.sh").display()),
+    );
+    let out = c.output().unwrap_or_else(|_| unreachable!());
+    let all = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.status.success(), "run: {all}");
+    let mut_log =
+        fs::read_to_string(sb.log_file("W-001-mutate.log")).unwrap_or_else(|_| unreachable!());
+    assert!(
+        contains(
+            &mut_log,
+            "один прогон на 3 файл(ов): done.txt one.rs two.rs"
+        ),
+        "{mut_log}"
+    );
+    assert!(contains(&mut_log, "killed 9 (90%)"), "{mut_log}");
+    assert!(contains(&mut_log, "missed 1, unviable 0"), "{mut_log}");
+    // Главное P1b: мутатор запущен РОВНО один раз и получил оба файла.
+    let calls = fs::read_to_string(&spy).unwrap_or_else(|_| unreachable!());
+    assert_eq!(
+        calls.lines().count(),
+        1,
+        "мутатор должен быть вызван ровно один раз: {calls}"
+    );
+    assert!(
+        contains(&calls, "-f done.txt -f one.rs -f two.rs"),
+        "{calls}"
+    );
 }

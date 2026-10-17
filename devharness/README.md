@@ -69,7 +69,7 @@ crap(score≤CRAP_MAX) → review → mutation(kill≥MIN_KILL) → [bench] → 
 |---|---|---|
 | VERIFY | `VERIFY` | тесты/сборка до коммита |
 | NO-IGNORED | `NO_IGNORED=1`, `IGNORED_ALLOWLIST` | allowlist-семантика: игнор разрешён, если имя теста матчится regex из `IGNORED_ALLOWLIST` (файл, дефолт `scripts/ignored-tests.txt`); незаявленный игнор = скрытый красный |
-| MUTATE | `MUTATE`, `MIN_KILL=90` | kill-rate ≥ MIN_KILL% на изменённых `MUTATE_SCOPE`-файлах (`{module}`/`{file}`); формат вывода `Mutants: N, Killed: M` (muex / cargo-mutants); инструмент не установлен = блокер среды (rc=2), не fix-раунд |
+| MUTATE | `MUTATE`, `MIN_KILL=90` | kill-rate ≥ MIN_KILL% на изменённых `MUTATE_SCOPE`-файлах; `{files}` = ОДИН запуск на все файлы (cargo-mutants: несколько `-f`), `{module}`/`{file}` = запуск на файл; вывод: `N mutants tested in T: C caught, M missed[, timeout][, unviable]` (cargo-mutants 27.x) либо `Mutants: N, Killed: M` (muex); инструмент не установлен = блокер среды (rc=2), не fix-раунд |
 | CRAP | `CRAP`, `CRAP_MAX=12` | guardrail №2 (Uncle Bob): score = C²·(1−cov)³ + C, нарушение = score > CRAP_MAX; формат вывода `file:line fun C=N cov=N` + итог `CRAP: functions=N`; контракт не распознан = блокер среды; обход только записанный (`--no-crap`) |
 | RED | `items/W-NNN/red.cmd` | в первую очередь: падает на чистом HEAD до работы, зеленеет после; источник — строка `RED:` в спеке либо red-фаза агента (первая задача run/auto); обход только записанный (`--no-red`) |
 | RED-LINK | сверяется с `VERIFY` | red.cmd обязан запускать тот же раннер/бинарь, что и VERIFY (сигнатура = интерпретатор+скрипт либо бинарь; подкоманды через `;`/`&&`/`||`/`|` учитываются). Несовпадение → пере-авторинг с корректирующим промптом (≤ MAX_FIX), затем `FAIL: RED-LINK`; пустой VERIFY = проверка не применяется; обход `--no-red` |
@@ -91,7 +91,8 @@ crap(score≤CRAP_MAX) → review → mutation(kill≥MIN_KILL) → [bench] → 
 | merge | `devh merge [id]` | guard (дерево чисто, есть коммиты) → rebase → ff-push в MAIN → `## Session N` в RULES_LOG → лог → cleanup → `next:` |
 | abort | `devh abort [id]` | worktree/ветку вон, item → open (работа выброшена) |
 | clean | `devh clean` | worktree/ветки done-items + retention логов (LOG_DAYS) |
-| doctor | `devh doctor` | окружение: git/VERIFY (+ smoke-запуск ≤120s)/агент/flock/timeout/remote/exclude/mutation/CRAP (+ smoke)/shellcheck/bench + crash-recovery сироты; exit≠0 при fail |
+| sweep | `devh sweep [--maxsize 20GB]` | вернуть диск: `cargo sweep` в главном дереве + worktree/ветки done-items (reuse-путь только возвращается на main — target/ остаётся тёплым) + `git worktree prune` сирот |
+| doctor | `devh doctor` | окружение: git/VERIFY (+ smoke-запуск ≤120s)/агент/flock/timeout/remote/exclude/mutation/CRAP (+ smoke)/shellcheck/bench + crash-recovery сироты + P3: cargo-mutants ≥25 и `.cargo/mutants.toml`, тёплый `target/`, сироты `git worktree`, sccache hit-rate; exit≠0 при fail |
 | logs | `devh logs [id]` | пути логов item + хвосты agent/verify; без id — свежие логи всех items |
 | bg | `devh bg [id]` / `devh bg auto --from <dir> [--max N]` | detached-прогон: setsid+nohup (свой session, immune to HUP), лог в bg.log / bg-auto.log; параллельная работа безопасна (run.lock + WIP) |
 | ps | `devh ps` | PID, elapsed, текущая стадия из timing.log; живые авто-прогоны (auto.pid); мёртвые pid-файлы помечаются |

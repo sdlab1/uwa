@@ -114,6 +114,75 @@ pub fn doctor(store: &Store, cfg: &RunConfig, root: &Path) -> anyhow::Result<()>
         say("ok   mutation-гейт выключен");
     }
 
+    // P3: сам мутатор — версия и общий конфиг параметров.
+    if let Some(m) = &cfg.mutate {
+        let is_cm = m.tool.contains("cargo mutants") || m.tool.contains("cargo-mutants");
+        if is_cm {
+            match cargo_mutants_version() {
+                Some((major, ver)) if major >= 25 => {
+                    say(&format!("ok   cargo-mutants {ver} (>=25, вывод парсится)"));
+                }
+                Some((_, ver)) => {
+                    say(&format!(
+                        "FAIL cargo-mutants {ver} < 25 — формат вывода другой, мутационный гейт молча станет Env"
+                    ));
+                    fail = fail.saturating_add(1);
+                    failed.push(format!("cargo-mutants {ver} < 25 (нужен >=25)"));
+                }
+                None => {
+                    say("WARN cargo-mutants не отвечает на --version");
+                    warn = warn.saturating_add(1);
+                }
+            }
+            let mt = root.join(".cargo").join("mutants.toml");
+            if mt.is_file() {
+                say("ok   .cargo/mutants.toml (общие параметры cargo-mutants)");
+            } else {
+                say("WARN нет .cargo/mutants.toml — параметры только в шаблоне MUTATE");
+                warn = warn.saturating_add(1);
+            }
+        }
+    }
+
+    // P3: тёплый target главного дерева — иначе первый прогон платит cold-build.
+    if warm_target(root) {
+        say("ok   target тёплый (инкремент devh)");
+    } else {
+        say("WARN target/devh не прогрет — первый прогон заплатит cold-build (или devh run один раз)");
+        warn = warn.saturating_add(1);
+    }
+
+    // P3: регистрации worktree'ов, которых уже нет на диске.
+    let registered = git::worktree_paths(root);
+    let orphans = git::worktree_orphans(root);
+    if orphans.is_empty() {
+        say(&format!(
+            "ok   git worktree: {} зарегистрированных, сирот нет",
+            registered.len()
+        ));
+    } else {
+        say(&format!(
+            "WARN git worktree: {} сирот (путь пропал) — devh sweep снимет регистрации",
+            orphans.len()
+        ));
+        warn = warn.saturating_add(1);
+    }
+
+    // P3: sccache hit-rate — низкий = инкремент/target не переиспользуется.
+    match sccache_hit_rate() {
+        Some(rate) if rate >= 50 => say(&format!("ok   sccache hit-rate {rate}%")),
+        Some(rate) => {
+            say(&format!(
+                "WARN sccache hit-rate {rate}% < 50% — reuse-worktree/target холодные"
+            ));
+            warn = warn.saturating_add(1);
+        }
+        None => {
+            say("WARN sccache недоступен — hit-rate неизвестен");
+            warn = warn.saturating_add(1);
+        }
+    }
+
     if cfg.bench.is_some() {
         say(&format!(
             "ok   bench-гейт: {}",
@@ -158,7 +227,7 @@ fn orphan_checks(
     say: &mut dyn FnMut(&str),
     warn: &mut u32,
 ) {
-    let wt = worktree::path_of(cfg, store.root(), &it.id);
+    let wt = worktree::path_for(cfg, store.root(), &it.id);
     if it.status == crate::core::state::Status::Active && !wt.is_dir() {
         say(&format!(
             "WARN {} active без worktree (прерванный run?) — devh run {} продолжит или devh abort {}",
@@ -258,7 +327,57 @@ fn crap_smoke(
     }
 }
 
-fn tail_line(out: &std::process::Output) -> String {
+/// Последняя непустая строка вывода процесса — для диагностических WARN.
+/// (major, полная-строка-версии) из `cargo-mutants --version`.
+fn cargo_mutants_version() -> Option<(u64, String)> {
+    let out = std::process::Command::new("cargo")
+        .args(["mutants", "--version"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let txt = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let ver = txt.split_whitespace().last()?.to_string();
+    let major = ver.split('.').next()?.parse::<u64>().ok()?;
+    Some((major, ver))
+}
+
+/// Инкрементный кеш devh в главном дереве: признак прогретого target.
+fn warm_target(root: &Path) -> bool {
+    let dir = root.join("target").join("debug").join("incremental");
+    let Ok(rd) = std::fs::read_dir(&dir) else {
+        return false;
+    };
+    rd.flatten()
+        .any(|e| e.file_name().to_string_lossy().starts_with("devh"))
+}
+
+/// Процент попаданий sccache из `--show-stats` (None — не отвечает).
+fn sccache_hit_rate() -> Option<u64> {
+    let out = std::process::Command::new("sccache")
+        .arg("--show-stats")
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    let line = text
+        .lines()
+        .find(|l| l.contains("Cache hits") && l.contains('%'))?;
+    // «52.86 %»: хвост пробелов срезаем, иначе обратный скан цифр встаёт на пробел.
+    let before_pct = line.split('%').next()?.trim_end();
+    let digits: String = before_pct
+        .chars()
+        .rev()
+        .take_while(|ch| ch.is_ascii_digit() || *ch == '.')
+        .collect();
+    let normal: String = digits.chars().rev().collect();
+    normal.parse::<f64>().ok().map(|v| v.round() as u64)
+}
+
+pub(crate) fn tail_line(out: &std::process::Output) -> String {
     let mut all = String::from_utf8_lossy(&out.stdout).into_owned();
     all.push_str(&String::from_utf8_lossy(&out.stderr));
     let last = all

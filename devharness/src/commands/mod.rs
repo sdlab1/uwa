@@ -16,7 +16,7 @@ use crate::core::types::{CrapCfg, ItemId, MutateCfg, RunConfig};
 use crate::shell::store::{Item, Store};
 use crate::Cmd;
 
-pub const CONFIG_KEYS: [&str; 27] = [
+pub const CONFIG_KEYS: [&str; 28] = [
     "VERIFY",
     "BOOTSTRAP",
     "AGENT",
@@ -26,6 +26,7 @@ pub const CONFIG_KEYS: [&str; 27] = [
     "REMOTE",
     "MAIN",
     "WT_ROOT",
+    "WT_REUSE",
     "LOG_DAYS",
     "MUTATE",
     "MUTATE_SCOPE",
@@ -90,6 +91,7 @@ pub fn load_config(root: &Path) -> anyhow::Result<RunConfig> {
         wt_root: g("WT_ROOT")
             .map(Into::into)
             .unwrap_or_else(|| "/tmp".into()),
+        wt_reuse: boolv("WT_REUSE", false),
         log_days: u32v("LOG_DAYS", 30),
         mutate: g("MUTATE")
             .filter(|s| !s.trim().is_empty())
@@ -211,6 +213,7 @@ pub fn dispatch(cmd: &Cmd, root: &Path) -> anyhow::Result<()> {
             misc::abort(&store, &cfg, &id)?;
         }
         Cmd::Clean => misc::clean(&store, &cfg)?,
+        Cmd::Sweep { maxsize } => misc::sweep(&store, &cfg, maxsize.as_deref())?,
         Cmd::Doctor => doctor::doctor(&store, &cfg, root)?,
         Cmd::Logs { id: None } => {
             misc::logs_all(&store);

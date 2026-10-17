@@ -70,7 +70,7 @@ of the log (≤ MAX_FIX); a missing tool = an ENV blocker, not a fix-round.
 |---|---|---|
 | VERIFY | `VERIFY` | tests/build before commit |
 | NO-IGNORED | `NO_IGNORED=1`, `IGNORED_ALLOWLIST` | allowlist semantics: an ignore is allowed if the test name matches a regex in `IGNORED_ALLOWLIST` (file, default `scripts/ignored-tests.txt`); an undeclared ignore = hidden red |
-| MUTATE | `MUTATE`, `MIN_KILL=90` | kill-rate ≥ MIN_KILL% on changed `MUTATE_SCOPE` files (`{module}`/`{file}`); output format `Mutants: N, Killed: M` (muex / cargo-mutants); missing tool = env blocker (rc=2), not a fix-round |
+| MUTATE | `MUTATE`, `MIN_KILL=90` | kill-rate ≥ MIN_KILL% on changed `MUTATE_SCOPE` files; `{files}` = ONE run for all files (cargo-mutants: multiple `-f`), `{module}`/`{file}` = run per file; output: `N mutants tested in T: C caught, M missed[, timeout][, unviable]` (cargo-mutants 27.x) or `Mutants: N, Killed: M` (muex); missing tool = env blocker (rc=2), not a fix-round |
 | CRAP | `CRAP`, `CRAP_MAX=12` | guardrail #2 (Uncle Bob): score = C²·(1−cov)³ + C, violation = score > CRAP_MAX; output format `file:line fun C=N cov=N` + summary `CRAP: functions=N`; unrecognized contract = env blocker; bypass only recorded (`--no-crap`) |
 | RED | `items/W-NNN/red.cmd` | first of all: fails on a clean HEAD before the work, goes green after; source — the spec's `RED:` line or the agent's red phase (the first task of run/auto); only recorded bypass (`--no-red`) |
 | RED-LINK | compared against `VERIFY` | red.cmd must run the very same runner/binary as VERIFY (signature = interpreter+script or the binary; subcommands joined by `;`/`&&`/`||`/`|` are considered). A mismatch → re-authoring with a corrective prompt (≤ MAX_FIX), then `FAIL: RED-LINK`; an empty VERIFY = the check does not apply; bypass `--no-red` |
@@ -92,7 +92,8 @@ of the log (≤ MAX_FIX); a missing tool = an ENV blocker, not a fix-round.
 | merge | `devh merge [id]` | guard (clean tree, has commits) → rebase → ff-push to MAIN → `## Session N` into RULES_LOG → log → cleanup → `next:` |
 | abort | `devh abort [id]` | worktree/branch gone, item → open (work discarded) |
 | clean | `devh clean` | worktrees/branches of done items + log retention (LOG_DAYS) |
-| doctor | `devh doctor` | environment: git/VERIFY (+ a smoke run ≤120s)/agent/flock/timeout/remote/exclude/mutation/CRAP (+ smoke)/shellcheck/bench + crash-recovery for orphans; exit≠0 on fail |
+| sweep | `devh sweep [--maxsize 20GB]` | reclaim disk: `cargo sweep` in main tree + worktrees/branches of done items (the reuse path is only returned to main — its `target/` stays warm) + `git worktree prune` orphans |
+| doctor | `devh doctor` | environment: git/VERIFY (+ a smoke run ≤120s)/agent/flock/timeout/remote/exclude/mutation/CRAP (+ smoke)/shellcheck/bench + crash-recovery for orphans + P3: cargo-mutants ≥25, `.cargo/mutants.toml`, warm `target/`, orphaned `git worktree`, sccache hit-rate; exit≠0 on fail |
 | logs | `devh logs [id]` | item log paths + agent/verify tails; without id — fresh logs of all items |
 | bg | `devh bg [id]` / `devh bg auto --from <dir> [--max N]` | detached run: setsid+nohup (own session, immune to HUP), log in bg.log / bg-auto.log; parallel work is safe (run.lock + WIP) |
 | ps | `devh ps` | PID, elapsed, current stage from timing.log; live autopilot runs (auto.pid); dead pid files are flagged |

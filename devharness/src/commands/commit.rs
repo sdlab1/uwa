@@ -20,7 +20,7 @@ pub fn commit(store: &Store, cfg: &RunConfig, id: &ItemId) -> anyhow::Result<()>
             id.dir_name()
         )
     })?;
-    let wt = worktree::path_of(cfg, &root, id);
+    let wt = worktree::path_for(cfg, &root, id);
     let br = id.branch();
     if !wt.is_dir() {
         anyhow::bail!(

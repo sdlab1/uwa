@@ -1,6 +1,7 @@
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::commands::doctor::tail_line;
 use crate::core::state::Status;
 use crate::core::types::{ItemId, RunConfig};
 use crate::prompt;
@@ -49,7 +50,7 @@ pub fn hint(store: &Store, cfg: &RunConfig, id: &ItemId) -> anyhow::Result<()> {
     println!();
     println!("## Контекст для следующей модели:");
     let root = store.root();
-    let wt = worktree::path_of(cfg, root, id);
+    let wt = worktree::path_for(cfg, root, id);
     let agent = store
         .read(item_rel(id, "agent"))
         .filter(|a| !a.trim().is_empty())
@@ -187,12 +188,22 @@ pub fn abort(store: &Store, cfg: &RunConfig, id: &ItemId) -> anyhow::Result<()> 
             id.dir_name()
         )
     })?;
-    let wt = worktree::path_of(cfg, &root, id);
+    let wt = worktree::path_for(cfg, &root, id);
     let br = id.branch();
     store.remove_pid(id);
     if wt.is_dir() {
-        git::worktree_remove(&root, &wt)?;
-        println!("{}OK worktree убран{}", c.g, c.z);
+        if worktree::is_active_path(cfg, &root, &wt) {
+            // Общий reuse-путь удалять нельзя: он тёплый и общий. Сброс на
+            // main освобождает ветку задачи и сохраняет target/.
+            git::release_active(&wt, &cfg.main_branch)?;
+            println!(
+                "{}OK reuse-путь возвращён на {} (target сохранён){}",
+                c.g, cfg.main_branch, c.z
+            );
+        } else {
+            git::worktree_remove(&root, &wt)?;
+            println!("{}OK worktree убран{}", c.g, c.z);
+        }
     }
     let _ = git::branch_delete(&root, &br);
     if git::has_remote(&root) {
@@ -211,11 +222,17 @@ pub fn clean(store: &Store, cfg: &RunConfig) -> anyhow::Result<()> {
         if it.status != Status::Done {
             continue;
         }
-        let wt = worktree::path_of(cfg, &root, &it.id);
+        let wt = worktree::path_for(cfg, &root, &it.id);
         let br = it.id.branch();
         if wt.is_dir() || git::show_ref(&root, &br) {
             store.remove_pid(&it.id);
-            let _ = git::worktree_remove(&root, &wt);
+            if wt.is_dir() && worktree::is_active_path(cfg, &root, &wt) {
+                // Готовую задачу из общего пути не выпиливаем вместе с target —
+                // только возвращаем путь на main, чтобы ветку можно было удалить.
+                let _ = git::release_active(&wt, &cfg.main_branch);
+            } else {
+                let _ = git::worktree_remove(&root, &wt);
+            }
             let _ = git::branch_delete(&root, &br);
             n = n.saturating_add(1);
             println!("clean: {}", it.id);
@@ -241,4 +258,140 @@ pub fn clean(store: &Store, cfg: &RunConfig) -> anyhow::Result<()> {
     }
     println!("{}OK clean ({n}){}", c.g, c.z);
     Ok(())
+}
+
+/// `devh sweep` — вернуть диск после серии задач:
+/// 1. `cargo sweep --maxsize <LIMIT>` в главном дереве (если стоит cargo-sweep);
+/// 2. worktree'ы закрытых задач — вручную/по краху они с накопленными target/
+///    живут вечно (по 1 ГБ каждый). Общий reuse-путь не удаляем: он тёплый,
+///    его возвращаем на main (target/ сохраняется);
+/// 3. `git worktree prune` — снять регистрации пропавших путей.
+///
+/// Отличие от `clean`: sweep НЕ трогает items и логи — только деревья и мусор.
+pub fn sweep(store: &Store, cfg: &RunConfig, maxsize: Option<&str>) -> anyhow::Result<()> {
+    let c = colors();
+    let root = store.root().to_path_buf();
+    let limit = maxsize
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("20GB");
+    let mut freed: u64 = 0;
+    let mut n: usize = 0;
+
+    if crate::commands::run::which("cargo-sweep") {
+        match std::process::Command::new("cargo")
+            .args(["sweep", "--maxsize", limit])
+            .current_dir(&root)
+            .output()
+        {
+            Ok(o) if o.status.success() => {
+                let t = String::from_utf8_lossy(&o.stdout).to_string();
+                let last = t
+                    .lines()
+                    .map(str::trim)
+                    .find(|l| !l.is_empty())
+                    .unwrap_or("готово");
+                println!("sweep: cargo sweep --maxsize {limit}: {last}");
+            }
+            Ok(o) => println!(
+                "{}WARN cargo sweep rc={:?}: {}{}",
+                c.y,
+                o.status.code(),
+                tail_line(&o),
+                c.z
+            ),
+            Err(e) => println!("{}WARN cargo sweep не запустился: {e}{}", c.y, c.z),
+        }
+    } else {
+        println!(
+            "{}WARN cargo-sweep не установлен (cargo install cargo-sweep) — главное дерево пропущено{}",
+            c.y, c.z
+        );
+    }
+
+    for it in store.items() {
+        if it.status != Status::Done {
+            continue;
+        }
+        let wt = worktree::path_for(cfg, &root, &it.id);
+        let br = it.id.branch();
+        if !wt.is_dir() && !git::show_ref(&root, &br) {
+            continue;
+        }
+        let sz = dir_size(&wt);
+        store.remove_pid(&it.id);
+        if wt.is_dir() && worktree::is_active_path(cfg, &root, &wt) {
+            // Общий путь тёплый: tree чистить нельзя, только вернуть на main.
+            let _ = git::release_active(&wt, &cfg.main_branch);
+            println!(
+                "sweep: {} → reuse-путь возвращён на {} (target/ сохранён)",
+                it.id, cfg.main_branch
+            );
+        } else {
+            freed = freed.saturating_add(sz);
+            let _ = git::worktree_remove(&root, &wt);
+            let _ = std::fs::remove_dir_all(&wt);
+            println!("sweep: {} worktree удалён ({})", it.id, human_size(sz));
+        }
+        let _ = git::branch_delete(&root, &br);
+        n = n.saturating_add(1);
+    }
+
+    let orphans = git::worktree_orphans(&root);
+    if !orphans.is_empty() {
+        // Снятые регистрации — тоже работа sweep'а, учитываем в итоге.
+        let _ = git::worktree_prune(&root);
+        n = n.saturating_add(orphans.len());
+        println!(
+            "sweep: prune — сняты регистрации пропавших worktree ({}): {}",
+            orphans.len(),
+            orphans
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+
+    if freed > 0 {
+        println!("sweep: освобождено {}", human_size(freed));
+    }
+    println!("{}OK sweep ({n}){}", c.g, c.z);
+    Ok(())
+}
+
+/// Размер дерева: считаем только реальные файлы, символические ссылки не
+/// разворачиваем (иначе цикл по чужому дереву).
+fn dir_size(p: &Path) -> u64 {
+    let mut total: u64 = 0;
+    let mut stack = vec![p.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for e in rd.flatten() {
+            let Ok(ft) = e.file_type() else { continue };
+            if ft.is_dir() {
+                stack.push(e.path());
+            } else if ft.is_file() {
+                total = total.saturating_add(e.metadata().map(|m| m.len()).unwrap_or(0));
+            }
+        }
+    }
+    total
+}
+
+fn human_size(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = 1024 * KB;
+    const GB: u64 = 1024 * MB;
+    if bytes >= GB {
+        format!("{:.1} ГБ", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.1} МБ", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.1} КБ", bytes as f64 / KB as f64)
+    } else {
+        format!("{bytes} Б")
+    }
 }

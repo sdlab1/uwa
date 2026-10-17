@@ -19,7 +19,7 @@ pub fn merge(store: &Store, cfg: &RunConfig, id: &ItemId) -> anyhow::Result<()> 
             id.dir_name()
         )
     })?;
-    let wt = worktree::path_of(cfg, &root, id);
+    let wt = worktree::path_for(cfg, &root, id);
     let br = id.branch();
     if !wt.is_dir() {
         anyhow::bail!(
@@ -130,7 +130,19 @@ pub fn merge(store: &Store, cfg: &RunConfig, id: &ItemId) -> anyhow::Result<()> 
         }
     }
 
-    let _ = git::worktree_remove(&root, &wt);
+    if worktree::is_active_path(cfg, &root, &wt) {
+        // Общий reuse-путь: НЕ удаляем — в нём тёплый target/ (вся суть P1a:
+        // следующая задача платит инкремент, а не cold-build). Возвращаем
+        // путь на main и снимаем грязь прогона; `clean -fd` без `-x`
+        // сохраняет gitignored `target/`. Ветку задачи удаляем ниже.
+        let _ = git::release_active(&wt, &cfg.main_branch);
+        println!(
+            ".. reuse-путь возвращён на {} (target/ сохранён)",
+            cfg.main_branch
+        );
+    } else {
+        let _ = git::worktree_remove(&root, &wt);
+    }
     let _ = git::branch_delete(&root, &br);
     store.set_status(id, Status::Done)?;
     println!("{}OK {id} → done. Лог: .harness/log.md{}", c.g, c.z);

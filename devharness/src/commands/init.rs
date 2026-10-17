@@ -51,8 +51,13 @@ pub fn init(root: &Path) -> anyhow::Result<()> {
         mutate_scope = "gobot/lib".into();
     }
     if mutate.is_empty() && root.join("Cargo.toml").exists() {
-        mutate = "cargo mutants -f {file}".into();
-        mutate_scope = "src".into();
+        // {files} → ОДИН запуск на все изменённые файлы (P1b): cargo-mutants
+        // принимает несколько -f, так что один baseline и один тёплый target
+        // вместо N холодных прогонов. --in-place: без него mutants копирует
+        // дерево в новый путь и платит cold-build; в devh-worktree дерево и
+        // так чистое. --baseline=skip: devh уже прогнал VERIFY в этом дереве.
+        mutate = "cargo mutants --in-place --baseline=skip {files}".into();
+        mutate_scope = rust_mutate_scope(root);
     }
     if mutate_scope.is_empty() {
         mutate_scope = "lib".into();
@@ -117,7 +122,9 @@ pub fn init(root: &Path) -> anyhow::Result<()> {
         "LOG_DAYS={log_days}            # retention логов в .harness/logs (0 = не чистить)\n"
     );
     c += "# ── гейты качества тестов/кода (пусто = выкл) ──\n";
-    c += &format!("MUTATE='{mutate}'  # мутационный гейт; {{module}}/{{file}} подставляются на каждый изменённый файл\n");
+    c += &format!(
+        "MUTATE='{mutate}'  # мутационный гейт; {{files}} = один запуск на все изменённые файлы (cargo-mutants), {{file}}/{{module}} = запуск на файл\n"
+    );
     c += &format!("MUTATE_SCOPE='{mutate_scope}'  # какие пути считать «прод-кодом» для мутаций\n");
     c += &format!("MIN_KILL={min_kill}           # минимальный kill-rate, %\n");
     c += "RED_MUTATE=''  # контроль red-теста: шаблон мутантов с {test} (пусто = выкл)\n";
@@ -165,6 +172,21 @@ pub fn init(root: &Path) -> anyhow::Result<()> {
         );
     }
     Ok(())
+}
+
+/// Какие пути Rust-проекта считать прод-кодом для мутаций.
+///
+/// Ловушка git-pathspec'ов: матч идёт ДО КОНЦА строки, поэтому `crates/*/src`
+/// (каталог с глобом) не ловит НИЧЕГО внутри src — нужен `crates/*/src/*`.
+/// Голый каталог без глобов (`src`) — prefix, он матчит рекурсивно.
+fn rust_mutate_scope(root: &Path) -> String {
+    if root.join("crates").is_dir() {
+        let manifest = std::fs::read_to_string(root.join("Cargo.toml")).unwrap_or_default();
+        if manifest.contains("[workspace]") || manifest.contains("members") {
+            return "crates/*/src/*".into();
+        }
+    }
+    "src".into()
 }
 
 fn is_exec(p: std::path::PathBuf) -> bool {

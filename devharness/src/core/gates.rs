@@ -47,10 +47,15 @@ pub struct Raw {
     pub missing_tool: Option<String>,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+/// Итог мутационного прогона в терминах devh-гейта.
+/// `killed` = caught + timeout (тесты с мутантом не прошли → детектирован),
+/// `missed` = выжил тихо, `unviable` = мутант не собрался (код/линты, не тесты).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct MutationStats {
     pub mutants: u32,
     pub killed: u32,
+    pub missed: u32,
+    pub unviable: u32,
 }
 
 pub fn parse_mutation_output(log: &str) -> Option<MutationStats> {
@@ -62,14 +67,70 @@ pub fn parse_mutation_output(log: &str) -> Option<MutationStats> {
     None
 }
 
+/// Разбор одной строки итога. Два формата:
+/// * cargo-mutants >= 25 (LabOutcome::summary_string):
+///   `N mutants? tested[ in <dur>]: [M missed][, C caught][, U unviable][, T timeouts]`
+///   — все сегменты после `:` опциональны, singular/plural через plural();
+/// * muex (legacy devh): `Mutants: N, Killed: M`.
+///
+/// Прогресс-строки nutmeg (`N/M mutants tested, 1 MISSED, ...`) не матчатся:
+/// у них дробный счётчик и нет `:`-сегмента исходов.
 fn parse_mutation_line(line: &str) -> Option<MutationStats> {
+    parse_mutants_summary_line(line).or_else(|| parse_legacy_muex_line(line))
+}
+
+fn parse_mutants_summary_line(line: &str) -> Option<MutationStats> {
+    let (before, after) = line.split_once(" tested")?;
+    // before: "10 mutants"/"1 mutant" (итог) или "8/10 mutants" (прогресс)
+    let mut words = before.rsplit(' ');
+    match words.next()? {
+        "mutants" | "mutant" => {}
+        _ => return None,
+    }
+    let mutants: u32 = words.next()?.parse().ok()?;
+    // after: "[ in 5s]: <outcomes>" (итог) или ", 1 MISSED, 5s elapsed" (прогресс)
+    let colon = after.find(':')?;
+    let between = after.get(..colon).unwrap_or("");
+    let mid = between.trim_start();
+    if !(mid.is_empty() || mid.starts_with("in ")) {
+        return None;
+    }
+    let outcomes = after.get(colon.saturating_add(1)..)?;
+    let mut killed: u32 = 0;
+    let mut missed: u32 = 0;
+    let mut unviable: u32 = 0;
+    for tok in outcomes.split(',') {
+        let mut w = tok.split_whitespace();
+        let n: u32 = w.next()?.parse().ok()?;
+        match w.next()? {
+            "missed" => missed = n,
+            "caught" => killed = n,
+            "unviable" => unviable = n,
+            "timeout" | "timeouts" => killed = killed.saturating_add(n),
+            _ => return None,
+        }
+    }
+    Some(MutationStats {
+        mutants,
+        killed,
+        missed,
+        unviable,
+    })
+}
+
+fn parse_legacy_muex_line(line: &str) -> Option<MutationStats> {
     let (_, rest) = line.split_once("Mutants:")?;
     let rest = rest.trim_start();
     let (n, rest) = rest.split_once(',')?;
     let mutants: u32 = n.trim().parse().ok()?;
     let (_, rest) = rest.split_once("Killed:")?;
     let killed: u32 = rest.split_whitespace().next()?.parse().ok()?;
-    Some(MutationStats { mutants, killed })
+    Some(MutationStats {
+        mutants,
+        killed,
+        missed: mutants.saturating_sub(killed),
+        unviable: 0,
+    })
 }
 
 pub fn ignored_lines(log: &str) -> Vec<String> {
@@ -427,22 +488,48 @@ fn exit_or_fail(gate: &Gate, raw: &Raw) -> Verdict {
 }
 
 fn judge_mutation(raw: &Raw, min_kill: u32) -> Verdict {
+    // Красный baseline: cargo-mutants печатает «cargo <phase> failed in an
+    // unmutated tree, so no mutants were tested» и выходит с кодом 4
+    // (ExitCode::BaselineFailed). Это FAIL гейта, а не Env-блокер: без
+    // зелёного VERIFY смысла в MUTATE нет.
+    if raw.exit == Some(4) || raw.log.contains("failed in an unmutated tree") {
+        return Verdict::Fail {
+            gate: Gate::Mutate,
+            tail: format!(
+                "mutation baseline FAILED (exit={:?}): тесты уже падают в \
+                 немутированном дереве — сначала почини VERIFY\n{}",
+                raw.exit,
+                tail_of(&raw.log, 5)
+            ),
+        };
+    }
     match parse_mutation_output(&raw.log) {
         None => Verdict::EnvBlocked {
             missing: "mutation tool: вывод не распознан".into(),
         },
         Some(MutationStats { mutants: 0, .. }) => Verdict::Pass,
-        Some(MutationStats { mutants, killed }) => {
+        Some(stats) => {
+            // Политика знаменателя: unviable (мутант не собирается) вычитается —
+            // тестами его поймать невозможно в принципе, и сам cargo-mutants
+            // считает прогон успешным при unviable>0 (exit 0); фейлят только
+            // missed и timeout (ExitCode::FoundProblems / Timeout).
+            let testable = stats.mutants.saturating_sub(stats.unviable);
+            if testable == 0 {
+                return Verdict::Pass; // нечего ловить: всё не собирается
+            }
             let rate = 100_u32
-                .saturating_mul(killed)
-                .checked_div(mutants)
+                .saturating_mul(stats.killed)
+                .checked_div(testable)
                 .unwrap_or(0);
             if rate >= min_kill {
                 Verdict::Pass
             } else {
                 Verdict::Fail {
                     gate: Gate::Mutate,
-                    tail: format!("kill-rate {rate}% < {min_kill}%"),
+                    tail: format!(
+                        "kill-rate {rate}% < {min_kill}%: mutants {}, testable {}, killed (caught+timeout) {}, missed {}, unviable {}",
+                        stats.mutants, testable, stats.killed, stats.missed, stats.unviable
+                    ),
                 }
             }
         }
@@ -484,7 +571,9 @@ mod tests {
             parse_mutation_output("Mutants: 12, Killed: 11"),
             Some(MutationStats {
                 mutants: 12,
-                killed: 11
+                killed: 11,
+                missed: 1,
+                unviable: 0,
             })
         );
         assert_eq!(
@@ -495,10 +584,129 @@ mod tests {
             parse_mutation_output("noise\nMutants: 10, Killed: 2 (20%)\n"),
             Some(MutationStats {
                 mutants: 10,
-                killed: 2
+                killed: 2,
+                missed: 8,
+                unviable: 0,
             })
         );
         assert_eq!(parse_mutation_output("мусор"), None);
+    }
+
+    #[test]
+    fn mutation_parse_cargo_mutants_27_format() {
+        // реальный вывод cargo-mutants 27.1.0 (замерено на repro-крейте)
+        assert_eq!(
+            parse_mutation_output(
+                "Found 10 mutants to test\n\
+                 ok       Unmutated baseline in 0s build + 0s test\n\
+                 INFO Auto-set test timeout to 20s\n\
+                 MISSED   src/lib.rs:2:32: replace % with / in odd in 0s build + 0s test\n\
+                 10 mutants tested in 5s: 1 missed, 9 caught\n"
+            ),
+            Some(MutationStats {
+                mutants: 10,
+                killed: 9,
+                missed: 1,
+                unviable: 0,
+            })
+        );
+        // singular + без «in <dur>» (show_times=false)
+        assert_eq!(
+            parse_mutation_output("1 mutant tested: 1 caught"),
+            Some(MutationStats {
+                mutants: 1,
+                killed: 1,
+                missed: 0,
+                unviable: 0,
+            })
+        );
+        // все сегменты сразу: missed, caught, unviable, timeouts — в порядке summary_string
+        assert_eq!(
+            parse_mutation_output(
+                "42 mutants tested in 1m 30s: 10 missed, 5 caught, 3 unviable, 2 timeouts"
+            ),
+            Some(MutationStats {
+                mutants: 42,
+                killed: 7, // caught 5 + timeout 2
+                missed: 10,
+                unviable: 3,
+            })
+        );
+        // прогресс-строка nutmeg («N/M mutants tested, ...») — НЕ итог
+        assert_eq!(
+            parse_mutation_output("8/10 mutants tested, 1 MISSED, 1 caught, 5s elapsed"),
+            None
+        );
+        // выжившие (missed) НЕ считаются killed даже при exit 0-эквиваленте логов
+        assert_eq!(
+            parse_mutation_output("2 mutants tested in 2s: 2 missed"),
+            Some(MutationStats {
+                mutants: 2,
+                killed: 0,
+                missed: 2,
+                unviable: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn mutation_kill_rate_new_format_boundary() {
+        // 18/20 = 90% == min_kill (90) → Pass; 2/20 = 10% → Fail
+        let pass = raw(Some(0), "20 mutants tested in 10s: 2 missed, 18 caught");
+        let fail = raw(Some(2), "20 mutants tested in 10s: 18 missed, 2 caught");
+        assert!(matches!(judge(&Gate::Mutate, &pass, &cfg()), Verdict::Pass));
+        assert!(matches!(
+            judge(&Gate::Mutate, &fail, &cfg()),
+            Verdict::Fail { .. }
+        ));
+    }
+
+    #[test]
+    fn mutation_unviable_excluded_from_denominator() {
+        // реальный замер: 84 мутанта, 13 unviable, 71 caught, 0 missed
+        // старая формула: 71/84 = 84% < 90% → ложный FAIL;
+        // новая (как exit-коды cargo-mutants): 71/71 = 100% → Pass
+        let ok = raw(Some(0), "84 mutants tested in 40m: 71 caught, 13 unviable");
+        assert!(matches!(judge(&Gate::Mutate, &ok, &cfg()), Verdict::Pass));
+        // 100 mutants, 20 unviable, 70 killed → 70/80 = 87% < 90% → Fail
+        let bad = raw(
+            Some(2),
+            "100 mutants tested in 1h: 10 missed, 70 caught, 20 unviable",
+        );
+        assert!(matches!(
+            judge(&Gate::Mutate, &bad, &cfg()),
+            Verdict::Fail { .. }
+        ));
+        // всё unviable — нечего ловить → Pass (cargo-mutants тоже exit 0)
+        let all_unvia = raw(Some(0), "3 mutants tested in 1s: 3 unviable");
+        assert!(matches!(
+            judge(&Gate::Mutate, &all_unvia, &cfg()),
+            Verdict::Pass
+        ));
+    }
+
+    #[test]
+    fn mutation_baseline_failure_is_gate_fail_not_env() {
+        // красный baseline: cargo-mutants 27.1.0, exit 4 = BaselineFailed
+        let r = raw(
+            Some(4),
+            "ok       Unmutated baseline in 30s build + 17s test\n\
+             ERROR cargo test failed in an unmutated tree, so no mutants were tested\n",
+        );
+        assert!(matches!(
+            judge(&Gate::Mutate, &r, &cfg()),
+            Verdict::Fail { .. }
+        ));
+        // тот же смысл при потере exit — по тексту
+        let r2 = raw(
+            None,
+            "FAILED   Unmutated baseline in 30s build + 17s test\n\
+             error: cargo test failed in an unmutated tree, so no mutants were tested\n",
+        );
+        assert!(matches!(
+            judge(&Gate::Mutate, &r2, &cfg()),
+            Verdict::Fail { .. }
+        ));
     }
 
     #[test]
