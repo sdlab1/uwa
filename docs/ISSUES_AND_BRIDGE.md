@@ -23,9 +23,9 @@ open items carry a repro, a root-cause hypothesis and a suggested fix.
 
 ### ✅ Closed
 
-All previously open issues (UWA-001 … UWA-145, except those listed below
-under Open) are closed. The full history of closed fixes — SSE parser,
-JSON-path keys, `logs --follow`, `http_ok`, `/v1/messages` and
+All previously open issues (UWA-001 … UWA-145, except UWA-131 listed
+below under Open) are closed. The full history of closed fixes — SSE
+parser, JSON-path keys, `logs --follow`, `http_ok`, `/v1/messages` and
 `/v1/responses` stream errors, routing hints (X-UWA-Provider /
 X-UWA-Session), forbid-level clippy chain across all 14 crates,
 ChatGPT/Gemini rewrite corruption, self-heal prefix duplication, circuit
@@ -36,8 +36,6 @@ were merged into this file; their closed entries are preserved in
 commits `8373352` … `415baf7`).
 
 ---
-
-### ⬜ Open
 
 ### UWA-102 ✅ `http_ok` now performs real TLS via `ureq`
 
@@ -66,6 +64,18 @@ was investigated and found resolved.
 
 ---
 
+### UWA-138 ✅ Buffered/stream tool call deduplication
+
+**Closed.** Both buffered and streaming paths share `resolve_tool_calls`
+for validation/self-heal, which deduplicates identical tool calls.
+Added explicit integration test `buffered_and_streaming_produce_identical_tool_calls`
+in `crates/uwa-api/tests/e2e_pipeline.rs` asserting both paths emit
+exactly the same two tool calls (no duplication across modes).
+
+---
+
+### ⬜ Open
+
 ### UWA-131 ⚪ Identical opening messages get same conversation_id
 
 **Status:** open (intentional, cannot be fixed without API changes).
@@ -86,16 +96,6 @@ A correct fix requires the client to supply a unique conversation id
 (e.g. via an `X-UWA-Conversation` header) that the server echoes back
 and uses as the session key instead of a content-derived hash. This is
 an API change, not a bugfix; tracked here until product decides.
-
----
-
-### UWA-138 ✅ Buffered/stream tool call deduplication
-
-**Closed.** Both buffered and streaming paths share `resolve_tool_calls`
-for validation/self-heal, which deduplicates identical tool calls.
-Added explicit integration test `buffered_and_streaming_produce_identical_tool_calls`
-in `crates/uwa-api/tests/e2e_pipeline.rs` asserting both paths emit
-exactly the same two tool calls (no duplication across modes).
 
 ---
 
