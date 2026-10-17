@@ -417,8 +417,6 @@ impl SessionManager {
 
     /// Idle eviction. Never touches a leased session, and re-checks idleness
     /// under the shard lock so a session used since the scan survives.
-    /// Idle eviction. Never touches a leased session, and re-checks idleness
-    /// under the shard lock so a session used since the scan survives.
     /// Returns the evicted (conversation, profile) pairs.
     pub async fn evict_idle(&self) -> Vec<(ConversationId, ProfileName)> {
         let ttl = self.cfg.idle_ttl;
