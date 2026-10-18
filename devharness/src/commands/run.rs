@@ -1086,6 +1086,118 @@ struct MutReport {
     early: bool,
 }
 
+// P7-2.4: покрытийный отбор — подготовка nextest -E фильтра.
+/// Строит/загружает coverage index, получает список мутируемых строк из
+/// `cargo mutants --list`, генерирует объединённый фильтр.
+fn prepare_coverage_filter(
+    wt: &Path,
+    _m: &MutateCfg,
+    tool: &str,
+    _files: &[String],
+) -> anyhow::Result<Option<String>> {
+    use crate::core::coverage::{build_coverage_index, compute_test_files_hash, CoverageIndex};
+
+    // Используем store root для кэша (wt может быть worktree, store — в главном репо).
+    // Находим store: поднимаемся от wt до корня репо (где .harness).
+    let store_root = wt
+        .ancestors()
+        .find(|p| p.join(".harness").is_dir())
+        .ok_or_else(|| anyhow::anyhow!("no .harness found from wt"))?;
+
+    // Хэш тест-файлов для инвалидации
+    let test_hash = compute_test_files_hash(wt)?;
+
+    // Пытаемся загрузить существующий индекс
+    let index = if let Some(idx) = CoverageIndex::load_if_valid(store_root, &test_hash) {
+        println!(".. coverage: loaded cached index (hash match)");
+        idx
+    } else {
+        println!(".. coverage: building new index (llvm-cov)...");
+        let idx = build_coverage_index(wt, store_root)?;
+        // Сохраняем с текущим хэшем
+        let mut idx = idx;
+        idx.test_files_hash = test_hash;
+        idx.save(store_root)?;
+        println!(".. coverage: index built and cached");
+        idx
+    };
+
+    // Получаем список мутантов из cargo-mutants --list
+    // Сначала запускаем с --list чтобы узнать какие строки будут мутироваться
+    let list_cmd = format!("{} --list", tool);
+    let out = std::process::Command::new("bash")
+        .arg("-c")
+        .arg(&list_cmd)
+        .current_dir(wt)
+        .output()?;
+    if !out.status.success() {
+        anyhow::bail!(
+            "cargo mutants --list failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    // Парсим вывод --list (формат: "mutant_name file:line:col")
+    let mut all_lines: std::collections::HashMap<String, Vec<u32>> =
+        std::collections::HashMap::new();
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() >= 2 {
+            let file = parts.get(1).and_then(|s| s.split(':').next()).unwrap_or("");
+            let line_str = parts.get(1).and_then(|s| s.split(':').nth(1)).unwrap_or("");
+            if let Ok(line_num) = line_str.parse::<u32>() {
+                all_lines
+                    .entry(file.to_string())
+                    .or_default()
+                    .push(line_num);
+            }
+        }
+    }
+
+    if all_lines.is_empty() {
+        return Ok(None);
+    }
+
+    // Генерируем фильтр: для каждого файла берём тесты для всех его мутируемых строк
+    let mut all_tests = std::collections::HashSet::new();
+    for (file, lines) in &all_lines {
+        let tests = index.tests_for_lines(file, lines);
+        all_tests.extend(tests);
+    }
+
+    if all_tests.is_empty() {
+        return Ok(None);
+    }
+
+    let filter =
+        crate::core::coverage::make_nextest_filter(&all_tests.into_iter().collect::<Vec<_>>());
+    Ok(Some(filter))
+}
+
+/// Применяет coverage фильтр к команде cargo-mutants.
+/// Добавляет `-- <filter>` после `--test-tool nextest` или в конец.
+pub(crate) fn apply_cov_filter(cmd: &str, filter: Option<&str>) -> String {
+    let Some(filter) = filter else {
+        return cmd.to_string();
+    };
+    // Ищем --test-tool nextest и добавляем фильтр после него
+    if let Some(pos) = cmd.find("--test-tool nextest") {
+        let end = pos.saturating_add("--test-tool nextest".len());
+        let rest = cmd.get(end..).unwrap_or("");
+        // Находим следующую позицию для вставки (после nextest, перед другими флагами)
+        return format!(
+            "{} -- {}",
+            &cmd[..end],
+            format!("{} {}", rest.trim(), filter).trim()
+        );
+    }
+    // Fallback: добавляем в конец перед {files}/{file}/{module} если есть
+    if cmd.contains("{files}") || cmd.contains("{file}") || cmd.contains("{module}") {
+        return cmd.to_string(); // фильтр не применим к batch/per-file просто так
+    }
+    format!("{} -- {}", cmd, filter)
+}
+
 /// Гейт мутаций. scope — список git-pathspec через пробел; git сам матчит
 /// глобы (`crates/*/src/*`) и выкидывает удалённые файлы.
 ///
@@ -1160,12 +1272,43 @@ fn mutate_gate(
         }
     }
 
-    if !batch && !per_file {
-        return Ok(finish(m, run_mut(wt, &tool0, m), label, key));
-    }
-
     // Удалённые файлы НЕ отбрасываем: за них отвечает ветка «удалён агентом».
     let files = git::changed_files_scoped_all(wt, &m.scope);
+
+    // P7-2.4: покрытийный отбор тестов (MUTATE_COV=1).
+    // Строим/загружаем индекс line -> тесты, генерируем nextest -E фильтр
+    // для всех строк, которые будут мутироваться (из --list).
+    let cov_filter = if m.cov {
+        println!(".. coverage: building/loading index (llvm-cov)...");
+        match prepare_coverage_filter(wt, m, &tool0, &files) {
+            Ok(Some(filter)) => {
+                println!(
+                    ".. coverage: filter generated ({} tests)",
+                    filter.matches("test(").count()
+                );
+                Some(filter)
+            }
+            Ok(None) => {
+                eprintln!(
+                    ".. coverage: no filter generated (no mutated lines or no coverage data)"
+                );
+                None
+            }
+            Err(e) => {
+                eprintln!(
+                    ".. coverage: failed to prepare filter: {e}; proceeding without coverage"
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    if !batch && !per_file {
+        let cmd = apply_cov_filter(&tool0, cov_filter.as_deref());
+        return Ok(finish(m, run_mut(wt, &cmd, m), label, key));
+    }
 
     if batch {
         // cargo-mutants мутирует то, что лежит на диске: удалённое ему не даём.
@@ -1185,6 +1328,7 @@ fn mutate_gate(
             .collect::<Vec<_>>()
             .join(" ");
         let cmd = tool0.replace("{files}", &flags);
+        let cmd = apply_cov_filter(&cmd, cov_filter.as_deref());
         let head = format!(
             "mutation: один прогон на {} файл(ов): {}\n",
             live.len(),
@@ -1222,6 +1366,7 @@ fn mutate_gate(
         }
         let module = mod_of(f, &m.scope);
         let cmd = tool0.replace("{module}", &module).replace("{file}", f);
+        let cmd = apply_cov_filter(&cmd, cov_filter.as_deref());
         let rep = finish(m, run_mut(wt, &cmd, m), &format!("{label} {f}"), key);
         acc.log += &rep.log;
         match rep.outcome {

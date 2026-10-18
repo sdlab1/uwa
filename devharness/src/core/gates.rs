@@ -825,6 +825,7 @@ mod tests {
                 scope: "lib".into(),
                 min_kill: 90,
                 early: false,
+                cov: false,
             }),
             ..Default::default()
         }

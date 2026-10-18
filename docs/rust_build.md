@@ -525,3 +525,13 @@ which ld.lld && ld.lld --version # проверка
 - Грабля: `devh commit` = git add -A ⇒ mutants.out/ живущего прогона утаскивался в фичу-ветку — init кладёт mutants.out/ в .git/info/exclude (общий для worktrees).
 - Наблюдение из E2E (section37): списки append-only, фикс-раунды видели leftovers прошлых раундов — с fatal-семантикой проблема закрыта структурно.
 - Приёмка: section37 (DOOM→immediate FAIL + частичные live-счётчики; SAMPLE→Ok, commit/merge зелёные; MUTATE_EARLY=0→обычный kill-rate вердикт; poisoned→repair+FAIL), сьют 154/154.
+
+## 9.14. P7-2.4 покрытийный отбор тестов (2026-10-18)
+
+- Механика: один инструментированный прогон (`cargo test --no-run --lib --tests` с `RUSTFLAGS="-Zinstrument-coverage" LLVM_PROFILE_FILE=...`) + прогон тестов для профиля -> `llvm-profdata merge` -> `llvm-cov show --format=json` -> парсим JSON, маппим покрытые строки на nextest test ids (через `cargo nextest list --message-format=json`).
+- Кэш: `.harness/coverage-index.json` с version + test_files_hash (SHA256 от tests/*.rs + #[cfg(test)] модулей). При несовпадении хэша — перестройка.
+- На мутационном прогоне: `cargo mutants --list` выдаёт все мутанты с файлом:строкой; собираем объединение тестов для всех мутируемых строк, генерируем `nextest -E 'test(A) | test(B) | ...'`, подставляем в команду через `--test-tool nextest -- <filter>`.
+- Инвалидация работает: hash тест-файлов меняется при правке тестов -> перестройка индекса.
+- Требования: nightly rustc (для `-Zinstrument-coverage`), `llvm-cov` и `llvm-profdata` в PATH.
+- Ограничение MVP: маппинг покрытия на тесты эвристический (по имени бинаря); точное per-function покрытие требует `llvm-cov export` — отложено.
+- Приёмка: сьют 155/155, fmt/clippy чистые; отдельный прогон coverage-теста не добавлен (требует nightly в CI).

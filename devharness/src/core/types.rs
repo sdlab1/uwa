@@ -41,6 +41,9 @@ pub struct MutateCfg {
     /// P7-2.3: ранний выход — DOOM (kill-rate недостижим) / SAMPLE
     /// (rule-of-three при --shuffle). По умолчанию выключен.
     pub early: bool,
+    /// P7-2.4: покрытийный отбор тестов (llvm-cov -> nextest -E).
+    /// По умолчанию выключен (требует nightly rustc для -Zinstrument-coverage).
+    pub cov: bool,
 }
 
 #[derive(Debug, Clone)]
