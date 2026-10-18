@@ -268,6 +268,7 @@ mod tests {
                 tool: "muex".into(),
                 scope: ".".into(),
                 min_kill: 80,
+                early: false,
             }),
             ..Default::default()
         };

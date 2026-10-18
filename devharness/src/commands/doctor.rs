@@ -144,6 +144,15 @@ pub fn doctor(store: &Store, cfg: &RunConfig, root: &Path) -> anyhow::Result<()>
             // P5.5: корневой рычаг slow-build мутантов — профиль test с
             // incremental (rust_build.md §9.7). Без env-оверрайда каждый
             // мутант платит полную сборку: молча терять нельзя.
+            // P7-2.3: ранний выход — вердикт раньше хвоста. DOOM работает без
+            // --shuffle; SAMPLE честна только с --shuffle в шаблоне.
+            if m.early {
+                if m.tool.contains("--shuffle") {
+                    say("ok   MUTATE_EARLY=1 + --shuffle: DOOM и SAMPLE (rule-of-three)");
+                } else {
+                    say("ok   MUTATE_EARLY=1: DOOM (kill-rate недостижим); SAMPLE требует --shuffle в шаблоне");
+                }
+            }
             if m.tool.contains("CARGO_PROFILE_TEST_INCREMENTAL=true") {
                 say("ok   MUTATE: CARGO_PROFILE_TEST_INCREMENTAL=true (быстрые мутанты)");
             } else {

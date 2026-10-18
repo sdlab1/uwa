@@ -51,11 +51,12 @@ pub fn init(root: &Path) -> anyhow::Result<()> {
         mutate_scope = "gobot/lib".into();
     }
     if mutate.is_empty() && root.join("Cargo.toml").exists() {
-        // {files} → ОДИН запуск на все изменённые файлы (P1b): cargo-mutants
-        // принимает несколько -f, так что один baseline и один тёплый target
-        // вместо N холодных прогонов. --in-place: без него mutants копирует
-        // дерево в новый путь и платит cold-build; в devh-worktree дерево и
-        // так чистое. --baseline=skip: devh уже прогнал VERIFY в этом дереве.
+        // {diff} (P7-2.2) → ОДИН запуск на все изменённые строки: devh сам
+        // строит scoped-diff (git diff HEAD + intent-to-add) и отдаёт путь в
+        // --in-diff cargo-mutants. Один baseline и один тёплый target вместо
+        // N холодных прогонов (смысл P1b, тем же механизмом). --in-place:
+        // без него mutants копирует дерево в новый путь и платит
+        // cold-build; в devh-worktree дерево и так чистое. --baseline=skip: devh уже прогнал VERIFY в этом дереве.
         // CARGO_PROFILE_TEST_INCREMENTAL=true — корневой рычаг муть-сборки
         // (замер docs/rust_build.md §9.7: профиль test по умолчанию
         // incremental=false → каждый мутант платил полную пересборку 90s;
@@ -63,7 +64,10 @@ pub fn init(root: &Path) -> anyhow::Result<()> {
         // таймауты, дешевле cargo test на каждый мутант.
         // --timeout-multiplier 2 — мутант иногда медленнее baseline'а, не
         // плодить TIMEOUT'ы (docs/rust_build.md §9.7-9.11).
-        mutate = "CARGO_PROFILE_TEST_INCREMENTAL=true cargo mutants --in-place --test-tool nextest --baseline=skip --timeout-multiplier 2 {files}".into();
+        // --iterate (P7-3) — пропуск пойманных ранее: допустим ТОЛЬКО с нашим
+        // kill-cache (отпечаток дерева .rs+тестов гейтит outcomes.json);
+        // пустой остаток («No mutants to filter») гейт называет «0 мутантов».
+        mutate = "CARGO_PROFILE_TEST_INCREMENTAL=true cargo mutants --in-place --test-tool nextest --baseline=skip --timeout-multiplier 2 --iterate --in-diff \"{diff}\"".into();
         mutate_scope = rust_mutate_scope(root);
     }
     if mutate_scope.is_empty() {
@@ -130,11 +134,12 @@ pub fn init(root: &Path) -> anyhow::Result<()> {
     );
     c += "# ── гейты качества тестов/кода (пусто = выкл) ──\n";
     c += &format!(
-        "MUTATE='{mutate}'  # мутационный гейт; {{files}} = один запуск на все изменённые файлы (cargo-mutants), {{file}}/{{module}} = запуск на файл\n#   --iterate (пропуск пойманных ранее) допустим: devh гейтит кэш отпечатком ДЕРЕВА (.rs+тесты), дерево изменилось — прошлый outcomes.json уезжает в mutants.out.stale-* (слабый тест не «скипнет» мутанта)\n"
+        "MUTATE='{mutate}'  # мутационный гейт; {{diff}} = diff всех правок агента (devh строит сам, --in-diff cargo-mutants), {{file}}/{{module}} = запуск на файл, {{files}} = один запуск на все изменённые файлы\n#   {{diff}}: путь к .harness/mutate.diff пишет devh — в шаблоне его не вычислять; пустой скоуп («Diff file is empty») = Ok, «0 мутантов — нечего убивать»\n#   --iterate (пропуск пойманных ранее) допустим: devh гейтит кэш отпечатком ДЕРЕВА (.rs+тесты), дерево изменилось — прошлый outcomes.json уезжает в mutants.out.stale-* (слабый тест не «скипнет» мутанта)\n"
     );
     c += &format!("MUTATE_SCOPE='{mutate_scope}'  # какие пути считать «прод-кодом» для мутаций\n");
     c += &format!("MIN_KILL={min_kill}           # минимальный kill-rate, %\n");
-    c += "RED_MUTATE=''  # контроль red-теста: шаблон мутантов с {test} (пусто = выкл)\n";
+    c += "MUTATE_EARLY=0            # P7-2.3 ранний выход: DOOM (kill-rate недостижим) всегда, SAMPLE (rule-of-three ≥95%) — только с --shuffle в шаблоне\n";
+    c += "RED_MUTATE=''  # контроль red-теста: шаблон мутантов с {test} и {diff} (пусто = выкл)\n";
     c += &format!("RED_MIN_KILL={min_kill}      # минимальный kill-rate именно red-теста, %\n");
     c += "RED_EXPECT=''      # P7 red.expect: regex ОЖИДАЕМОЙ ошибки red-фазы (глобальный дефолт; пер-таск — строка спеки RED-EXPECT: или маркер '# red-expect:' в red.cmd). Пусто = выкл: любой exit≠0 на pre считается RED\n";
     c += &format!(
@@ -165,10 +170,15 @@ pub fn init(root: &Path) -> anyhow::Result<()> {
         std::fs::create_dir_all(parent).ok();
     }
     let mut text = std::fs::read_to_string(&excl).unwrap_or_default();
-    if !text.lines().any(|l| l.trim() == ".harness/") {
-        text += ".harness/\n";
-        std::fs::write(&excl, text)?;
+    // mutants.out/ — live-протокол cargo-mutants лежит в рабочем дереве
+    // (--in-place); без exclude `devh commit` (git add -A) утащит его в
+    // фичу-ветку. info/exclude общий для всех worktrees репозитория.
+    for entry in [".harness/", "mutants.out/"] {
+        if !text.lines().any(|l| l.trim() == entry) {
+            text += &format!("{entry}\n");
+        }
     }
+    std::fs::write(&excl, text)?;
 
     println!("{}OK init: {}{}", col.g, conf.display(), col.z);
     if verify.is_empty() {
