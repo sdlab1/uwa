@@ -20,6 +20,7 @@ use uwa_core::{Capabilities, UwaError};
 pub mod features;
 pub mod groups;
 pub mod preset;
+pub mod rate_limit;
 pub mod registry;
 pub mod timing;
 pub use timing::{TimingCfg, TimingProfile};
@@ -27,6 +28,7 @@ pub use timing::{TimingCfg, TimingProfile};
 pub use features::{FilePasteCfg, MediaCfg, PromptPaddingCfg, ProxyCfg};
 pub use groups::{GroupCfg, GroupMember, GroupStrategy};
 pub use preset::{EffectiveProviderCfg, PresetCfg};
+pub use rate_limit::RateLimitCfg;
 pub use registry::{
     Alternates, Candidates, ManifestEntry, Registry, RegistryEntry, RegistryManifest,
 };
@@ -295,6 +297,10 @@ pub struct ProviderCfg {
     #[serde(default)]
     pub fallback_model: Option<String>,
 
+    /// Optional per-provider request-rate budget. Disabled when absent.
+    #[serde(default)]
+    pub rate_limit: RateLimitCfg,
+
     /// Concurrent in-flight requests for this provider. Overrides the
     /// global default of 2 (four for undefined providers). Higher values
     /// risk tripping site rate limits; a value of 1 serializes requests
@@ -346,6 +352,7 @@ impl ProviderCfg {
             workflow: Default::default(),
             media: MediaCfg::default(),
             fallback_model: None,
+            rate_limit: RateLimitCfg::default(),
             max_concurrency: default_provider_concurrency(),
             max_tool_retries: default_tool_retries(),
             conversation_pinning: default_pinning(),
@@ -528,6 +535,9 @@ impl Config {
                     "providers.{key}.max_concurrency must be ≥ 1"
                 )));
             }
+            p.rate_limit
+                .validate()
+                .map_err(|e| UwaError::Config(format!("providers.{key}.{e}")))?;
         }
 
         // 4. Groups reference real providers (and real presets per member).
@@ -956,6 +966,29 @@ mod tests {
             .unwrap_or_else(|_| unreachable!());
         assert_eq!(p.name, "chatgpt");
         assert_eq!(name, "gpt-4o");
+    }
+
+    #[test]
+    fn provider_rate_limit_parses_and_validates() {
+        let toml = SAMPLE.replace(
+            "[providers.chatgpt.selectors]",
+            "rate_limit = { enabled = true, requests_per_minute = 12, burst = 3 }\n\n[providers.chatgpt.selectors]",
+        );
+        let cfg = Config::load_from_str(&toml).unwrap();
+        let rl = &cfg.providers["chatgpt"].rate_limit;
+        assert!(rl.enabled);
+        assert_eq!(rl.requests_per_minute, 12.0);
+        assert_eq!(rl.burst, Some(3));
+    }
+
+    #[test]
+    fn provider_rate_limit_rejects_zero_rpm() {
+        let toml = SAMPLE.replace(
+            "[providers.chatgpt.selectors]",
+            "rate_limit = { enabled = true, requests_per_minute = 0 }\n\n[providers.chatgpt.selectors]",
+        );
+        let e = Config::load_from_str(&toml).unwrap_err();
+        assert!(e.to_string().contains("requests_per_minute"), "{e}");
     }
 
     #[test]

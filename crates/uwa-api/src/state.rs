@@ -11,6 +11,7 @@ use dashmap::DashMap;
 use uwa_config::Config;
 use uwa_core::{Result, SiteProvider, Transport, UwaError};
 use uwa_resilience::circuit::{CircuitBreaker, CircuitCfg};
+use uwa_resilience::rate_limit::ProviderRateLimiters;
 use uwa_resilience::semaphore::ProviderSemaphores;
 use uwa_session::SessionManager;
 
@@ -97,6 +98,9 @@ pub struct RuntimeServices {
     /// Ring of recent network events. `None` when the transport has no
     /// tap; the UI shows a hint in that case.
     pub events: Option<Arc<crate::events::EventLog>>,
+    /// Per-provider request-rate budgets. Providers without a `rate_limit`
+    /// block get an unlimited limiter from the registry.
+    pub rate_limiters: Arc<ProviderRateLimiters>,
 }
 
 impl Default for RuntimeServices {
@@ -111,6 +115,7 @@ impl Default for RuntimeServices {
                 std::time::Duration::from_secs(30 * 60),
             ))),
             events: None,
+            rate_limiters: Arc::new(ProviderRateLimiters::new()),
         }
     }
 }
@@ -185,6 +190,16 @@ impl AppState {
     pub fn with_events(mut self, log: Arc<crate::events::EventLog>) -> Self {
         let mut rt = (*self.runtime).clone();
         rt.events = Some(log);
+        self.runtime = Arc::new(rt);
+        self
+    }
+
+    pub fn with_rate_limiters(
+        mut self,
+        rl: Arc<ProviderRateLimiters>,
+    ) -> Self {
+        let mut rt = (*self.runtime).clone();
+        rt.rate_limiters = rl;
         self.runtime = Arc::new(rt);
         self
     }

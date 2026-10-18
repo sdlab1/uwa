@@ -26,9 +26,11 @@ use uwa_core::types::Role;
 use uwa_core::{RequestId, UwaError};
 
 use crate::error::ApiResult;
-use crate::headers::{self, UwaMeta};
+use crate::headers::{self, RateHeaders, UwaMeta};
+use crate::metrics;
 use crate::routes::chat;
 use crate::state::AppState;
+use uwa_resilience::RateDecision;
 
 // ---------- request ----------
 
@@ -151,12 +153,53 @@ pub async fn create(
     // client request only.
     let local_tools = chat::local_tools(&chat_req)?;
 
+    // Resolve the provider name for rate limiting: hint override wins,
+    // otherwise the alias table.
+    let config = state.cfg();
+    let provider_name = if let Some(p) = hint.provider.as_deref() {
+        p.to_string()
+    } else {
+        config.resolve_model(&chat_req.model)?.0.name.clone()
+    };
+
+    // Rate-limit check: done at the handler (before the pipeline) so a
+    // 429 is fast, doesn't burn a concurrency permit.
+    let limiter = state.runtime.rate_limiters.get(&provider_name);
+    let rate_headers = if limiter.enabled() {
+        match limiter.try_acquire().await {
+            RateDecision::Allowed { remaining, reset_secs } => Some(RateHeaders {
+                limit: limiter.rpm().round() as u32,
+                remaining,
+                reset_secs,
+            }),
+            RateDecision::Denied { retry_after_secs } => {
+                metrics::counter!(
+                    "uwa_rate_limit_exceeded_total",
+                    "provider" => provider_name.clone(),
+                )
+                .increment(1);
+                tracing::warn!(
+                    provider = %provider_name,
+                    retry_after_secs,
+                    "rate limit exceeded"
+                );
+                return Ok(headers::rate_limited_response(
+                    &provider_name,
+                    retry_after_secs,
+                    limiter.rpm().round() as u32,
+                ));
+            }
+        }
+    } else {
+        None
+    };
+
     // Codex (and the SDKs) drive this endpoint with SSE: without it the
     // tool loop cannot show progress and some clients refuse the body.
     if req.stream.unwrap_or(false) {
         let conversation =
             uwa_session::conversation_id(&chat_req.messages, hint.provider.as_deref());
-        let meta = UwaMeta::stream_prefix(conversation);
+        let meta = UwaMeta::stream_prefix(conversation).with_rate(rate_headers);
         let hint_clone = hint.clone();
         let profile_clone = hint_clone
             .profile
@@ -208,7 +251,8 @@ pub async fn create(
         outcome.conversation.clone(),
         outcome.retry_count,
         outcome.tab.clone(),
-    );
+    )
+    .with_rate(rate_headers);
     let body = chat::nonstream::build_non_streaming(
         id,
         chat_req.model.clone(),

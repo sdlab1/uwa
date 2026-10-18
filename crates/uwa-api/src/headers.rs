@@ -19,8 +19,9 @@
 //! headers after the body begins. They arrive instead in the final SSE
 //! chunk under a `uwa_meta` field. See `docs/HEADERS.md`.
 
-use axum::http::{HeaderName, HeaderValue};
-use axum::response::Response;
+use axum::http::{HeaderName, HeaderValue, StatusCode};
+use axum::response::{IntoResponse, Response};
+use axum::Json;
 
 use uwa_core::ConversationId;
 
@@ -29,8 +30,23 @@ pub const RETRY_COUNT: HeaderName = HeaderName::from_static("x-uwa-retry-count")
 pub const CACHE: HeaderName = HeaderName::from_static("x-uwa-cache");
 pub const TAB: HeaderName = HeaderName::from_static("x-uwa-tab");
 
+/// Rate-limit response headers (RFC-style `x-ratelimit-*`).
+pub const RATE_LIMIT_LIMIT: HeaderName = HeaderName::from_static("x-ratelimit-limit");
+pub const RATE_LIMIT_REMAINING: HeaderName = HeaderName::from_static("x-ratelimit-remaining");
+pub const RATE_LIMIT_RESET: HeaderName = HeaderName::from_static("x-ratelimit-reset");
+
 pub const CACHE_HIT: &str = "hit";
 pub const CACHE_MISS: &str = "miss";
+
+/// Snapshot of a provider's rate-limit bucket at the moment a request was
+/// admitted. `None` when the provider has no limiter (we don't want to
+/// spam headers nobody reads).
+#[derive(Debug, Clone, Copy)]
+pub struct RateHeaders {
+    pub limit: u32,
+    pub remaining: u32,
+    pub reset_secs: u64,
+}
 
 /// Everything the HTTP layer needs to stamp onto a response.
 #[derive(Debug, Clone)]
@@ -39,6 +55,8 @@ pub struct UwaMeta {
     pub retry_count: u32,
     pub cache: &'static str,
     pub tab: Option<String>,
+    /// Rate-limit snapshot from the check that let this request through.
+    pub rate_limit: Option<RateHeaders>,
 }
 
 impl UwaMeta {
@@ -50,6 +68,7 @@ impl UwaMeta {
             retry_count: 0,
             cache: CACHE_MISS,
             tab: None,
+            rate_limit: None,
         }
     }
 
@@ -64,7 +83,15 @@ impl UwaMeta {
             retry_count,
             cache: CACHE_MISS,
             tab,
+            rate_limit: None,
         }
+    }
+
+    /// Attach a rate-limit snapshot to this meta. Builder-style so all
+    /// existing call sites from Session 17 keep compiling unchanged.
+    pub fn with_rate(mut self, r: Option<RateHeaders>) -> Self {
+        self.rate_limit = r;
+        self
     }
 
     /// The JSON object that rides in the final SSE chunk's `uwa_meta`
@@ -94,6 +121,51 @@ pub fn attach(mut resp: Response, meta: &UwaMeta) -> Response {
         if let Ok(v) = HeaderValue::from_str(t) {
             h.insert(TAB, v);
         }
+    }
+    if let Some(r) = &meta.rate_limit {
+        if let Ok(v) = HeaderValue::from_str(&r.limit.to_string()) {
+            h.insert(RATE_LIMIT_LIMIT, v);
+        }
+        if let Ok(v) = HeaderValue::from_str(&r.remaining.to_string()) {
+            h.insert(RATE_LIMIT_REMAINING, v);
+        }
+        if let Ok(v) = HeaderValue::from_str(&r.reset_secs.to_string()) {
+            h.insert(RATE_LIMIT_RESET, v);
+        }
+    }
+    resp
+}
+
+/// Build the OpenAI-shaped 429 with every rate-limit header the spec
+/// allows. Takes the decision info directly so the caller doesn't have
+/// to reach into `RateHeaders` machinery.
+pub fn rate_limited_response(
+    provider: &str,
+    retry_after_secs: u64,
+    limit: u32,
+) -> Response {
+    let body = serde_json::json!({
+        "error": {
+            "message": format!(
+                "rate limit exceeded for provider `{provider}`: retry after {retry_after_secs}s"
+            ),
+            "type": "server_error",
+            "code": "rate_limited",
+        }
+    });
+    let mut resp = (StatusCode::TOO_MANY_REQUESTS, Json(body)).into_response();
+    let h = resp.headers_mut();
+    let _ = h.insert(
+        axum::http::header::RETRY_AFTER,
+        HeaderValue::from_str(&retry_after_secs.to_string())
+            .unwrap_or(HeaderValue::from_static("1")),
+    );
+    if let Ok(v) = HeaderValue::from_str(&limit.to_string()) {
+        h.insert(RATE_LIMIT_LIMIT, v);
+    }
+    h.insert(RATE_LIMIT_REMAINING, HeaderValue::from_static("0"));
+    if let Ok(v) = HeaderValue::from_str(&retry_after_secs.to_string()) {
+        h.insert(RATE_LIMIT_RESET, v);
     }
     resp
 }
@@ -150,12 +222,50 @@ mod tests {
     }
 
     #[test]
+    fn rate_limited_response_has_429_and_headers() {
+        let r = rate_limited_response("chatgpt", 4, 20);
+        assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS);
+        let h = r.headers();
+        assert_eq!(
+            h.get(axum::http::header::RETRY_AFTER).unwrap(),
+            "4"
+        );
+        assert_eq!(h.get(RATE_LIMIT_LIMIT).unwrap(), "20");
+        assert_eq!(h.get(RATE_LIMIT_REMAINING).unwrap(), "0");
+        assert_eq!(h.get(RATE_LIMIT_RESET).unwrap(), "4");
+    }
+
+    #[test]
+    fn attach_emits_rate_headers_when_present() {
+        let meta = UwaMeta::complete(ConversationId::from_raw("conv"), 0, None)
+            .with_rate(Some(RateHeaders {
+                limit: 20,
+                remaining: 7,
+                reset_secs: 3,
+            }));
+        let r = attach(empty_response(), &meta);
+        assert_eq!(r.headers().get(RATE_LIMIT_LIMIT).unwrap(), "20");
+        assert_eq!(r.headers().get(RATE_LIMIT_REMAINING).unwrap(), "7");
+        assert_eq!(r.headers().get(RATE_LIMIT_RESET).unwrap(), "3");
+    }
+
+    #[test]
+    fn attach_skips_rate_headers_when_absent() {
+        let meta = UwaMeta::complete(ConversationId::from_raw("conv"), 0, None);
+        let r = attach(empty_response(), &meta);
+        assert!(r.headers().get(RATE_LIMIT_LIMIT).is_none());
+        assert!(r.headers().get(RATE_LIMIT_REMAINING).is_none());
+        assert!(r.headers().get(RATE_LIMIT_RESET).is_none());
+    }
+
+    #[test]
     fn stream_json_has_only_the_stream_specific_fields() {
         let m = UwaMeta {
             conversation: ConversationId::from_raw("conv_s"),
             retry_count: 3,
             cache: CACHE_MISS,
             tab: Some("tab_z".into()),
+            rate_limit: None,
         };
         let v = m.to_stream_json();
         assert_eq!(

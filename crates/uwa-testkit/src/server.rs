@@ -5,6 +5,7 @@ use uwa_api::events::EventLog;
 use uwa_api::{router, AppState, ProviderRegistry};
 use uwa_config::Config;
 use uwa_core::{SiteProvider, Transport};
+use uwa_resilience::rate_limit::ProviderRateLimiters;
 use uwa_resilience::semaphore::ProviderSemaphores;
 use uwa_session::SessionManager;
 
@@ -35,6 +36,7 @@ pub struct AppBuilder {
     transport: Arc<dyn Transport>,
     sessions: Option<Arc<SessionManager>>,
     semaphores: Option<Arc<ProviderSemaphores>>,
+    rate_limiters: Option<Arc<ProviderRateLimiters>>,
     history: Option<Arc<uwa_history::HistoryStore>>,
     events: Option<Arc<EventLog>>,
 }
@@ -47,6 +49,7 @@ impl AppBuilder {
             transport: Arc::new(MockTransport::with_n_tabs(1)),
             sessions: None,
             semaphores: None,
+            rate_limiters: None,
             history: None,
             events: None,
         }
@@ -86,6 +89,11 @@ impl AppBuilder {
         self
     }
 
+    pub fn with_rate_limiters(mut self, rl: Arc<ProviderRateLimiters>) -> Self {
+        self.rate_limiters = Some(rl);
+        self
+    }
+
     pub fn with_history(mut self, h: Arc<uwa_history::HistoryStore>) -> Self {
         self.history = Some(h);
         self
@@ -107,6 +115,9 @@ impl AppBuilder {
         }
         if let Some(s) = self.semaphores {
             state = state.with_semaphores(s);
+        }
+        if let Some(rl) = self.rate_limiters {
+            state = state.with_rate_limiters(rl);
         }
         if let Some(h) = self.history {
             state = state.with_history(h);

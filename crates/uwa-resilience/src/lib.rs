@@ -8,9 +8,11 @@
 //! - [`retry::{RetryCfg, retry}`]
 
 pub mod circuit;
+pub mod rate_limit;
 pub mod retry;
 pub mod semaphore;
 
 pub use circuit::{CircuitBreaker, CircuitCfg, CircuitState};
+pub use rate_limit::{ProviderRateLimiters, RateDecision, RateLimiter, RateSnapshot};
 pub use retry::{retry, RetryCfg};
 pub use semaphore::ProviderSemaphores;

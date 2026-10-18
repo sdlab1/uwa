@@ -198,6 +198,18 @@ pub async fn run_with(config_path: PathBuf, cdp_url: &str) -> anyhow::Result<()>
         "semaphores configured from provider.max_concurrency"
     );
 
+    // Rate limiters: per provider, from config. Providers without a
+    // `rate_limit` block get an unlimited limiter (cheap, shared).
+    let mut rate = uwa_resilience::rate_limit::ProviderRateLimiters::new();
+    let mut limited = 0;
+    for (name, p) in &config.providers {
+        if p.rate_limit.enabled {
+            rate = rate.with_limit(name, &p.rate_limit);
+            limited += 1;
+        }
+    }
+    tracing::info!(limited, "provider rate limiters configured");
+
     let mut state = AppState::minimal(
         config.clone(),
         Arc::new(registry),
@@ -207,7 +219,8 @@ pub async fn run_with(config_path: PathBuf, cdp_url: &str) -> anyhow::Result<()>
     .with_sessions(sessions.clone())
     .with_semaphores(Arc::new(sem))
     .with_history(history)
-    .with_pinning(pinning);
+    .with_pinning(pinning)
+    .with_rate_limiters(Arc::new(rate));
     if let Some(log) = events {
         state = state.with_events(log);
     }

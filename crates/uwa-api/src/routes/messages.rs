@@ -34,9 +34,11 @@ use uwa_core::{ToolSpec, UwaError};
 use uwa_tools::{ToolCall, ToolDefinition};
 
 use crate::error::ApiResult;
-use crate::headers::{self, UwaMeta};
+use crate::headers::{self, RateHeaders, UwaMeta};
+use crate::metrics;
 use crate::routing::RoutingHint;
 use crate::state::AppState;
+use uwa_resilience::RateDecision;
 
 // ---------- top-level handler ----------
 
@@ -132,11 +134,44 @@ async fn messages_inner(
         )));
     }
 
+    // Rate-limit check: done at the handler (before the pipeline) so a
+    // 429 is fast, doesn't burn a concurrency permit.
+    let provider_name = provider_cfg.name.clone();
+    let limiter = state.runtime.rate_limiters.get(&provider_name);
+    let rate_headers = if limiter.enabled() {
+        match limiter.try_acquire().await {
+            RateDecision::Allowed { remaining, reset_secs } => Some(RateHeaders {
+                limit: limiter.rpm().round() as u32,
+                remaining,
+                reset_secs,
+            }),
+            RateDecision::Denied { retry_after_secs } => {
+                metrics::counter!(
+                    "uwa_rate_limit_exceeded_total",
+                    "provider" => provider_name.clone(),
+                )
+                .increment(1);
+                tracing::warn!(
+                    provider = %provider_name,
+                    retry_after_secs,
+                    "rate limit exceeded"
+                );
+                return Ok(headers::rate_limited_response(
+                    &provider_name,
+                    retry_after_secs,
+                    limiter.rpm().round() as u32,
+                ));
+            }
+        }
+    } else {
+        None
+    };
+
     let msg_id = format!("msg_{}", uuid::Uuid::new_v4().simple());
 
     if req.stream.unwrap_or(false) {
         let conversation = uwa_session::conversation_id(&oa_req.messages, hint.provider.as_deref());
-        let meta = UwaMeta::stream_prefix(conversation);
+        let meta = UwaMeta::stream_prefix(conversation).with_rate(rate_headers);
         let (tx, rx) = mpsc::channel::<crate::routes::chat::pipeline::StreamEvent>(64);
         let state_task = state.clone();
         let oa_req_task = oa_req.clone();
@@ -168,7 +203,8 @@ async fn messages_inner(
             outcome.conversation.clone(),
             outcome.retry_count,
             outcome.tab.clone(),
-        );
+        )
+        .with_rate(rate_headers);
         let body = Json(build_response(
             &req,
             msg_id,

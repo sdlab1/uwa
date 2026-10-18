@@ -7,6 +7,8 @@ license.workspace = true
 
 [dependencies]
 uwa-core.workspace = true
+uwa-config.workspace = true
+serde = { workspace = true, features = ["derive"] }
 tokio = { workspace = true, features = ["sync", "time", "macros"] }
 tracing.workspace = true
 dashmap.workspace = true

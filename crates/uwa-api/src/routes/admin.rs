@@ -1196,3 +1196,33 @@ fn url_glob_matches(pattern: &str, url: &url::Url) -> bool {
         Some((head, tail)) => u.starts_with(head) && (tail.is_empty() || u.ends_with(tail)),
     }
 }
+
+/// `GET /admin/rate-limits` — snapshot of every provider's bucket.
+///
+/// The dashboard's Rate limits card reads this. Snapshots are taken
+/// live; a bucket that has been idle since the last check reflects the
+/// refill it earned in between, which is exactly what the UI wants to
+/// show.
+pub async fn rate_limits(
+    State(state): State<AppState>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let rl = &state.runtime.rate_limiters;
+    let mut providers = Vec::new();
+    for name in rl.providers() {
+        let limiter = rl.get(&name);
+        // Skip providers we auto-cached as unlimited. The UI shows
+        // "no limit" as an empty state, not a row of zeros.
+        if !limiter.enabled() {
+            continue;
+        }
+        let snap = limiter.snapshot().await;
+        providers.push(serde_json::json!({
+            "provider": name,
+            "requests_per_minute": snap.requests_per_minute,
+            "capacity": snap.capacity,
+            "remaining": snap.remaining,
+            "next_token_in_secs": snap.next_token_in_secs,
+        }));
+    }
+    Ok(Json(serde_json::json!({ "providers": providers })))
+}

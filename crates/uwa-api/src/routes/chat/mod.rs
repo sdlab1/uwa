@@ -27,8 +27,10 @@ use uwa_core::{RequestId, ToolSpec, UwaError};
 use uwa_tools::ToolDefinition;
 
 use crate::error::ApiResult;
-use crate::headers::{self, UwaMeta};
+use crate::headers::{self, RateHeaders, UwaMeta};
+use crate::metrics;
 use crate::state::AppState;
+use uwa_resilience::RateDecision;
 
 use crate::routing::RoutingHint;
 pub use pipeline::run_pipeline;
@@ -104,6 +106,40 @@ pub async fn chat_completions(
         ..hint
     };
 
+    // Rate-limit check: done at the handler (before the pipeline) so a
+    // 429 is fast, doesn't burn a concurrency permit, and doesn't show
+    // up in the request-history buffer.
+    let provider_name = site.name().to_string();
+    let limiter = state.runtime.rate_limiters.get(&provider_name);
+    let rate_headers = if limiter.enabled() {
+        match limiter.try_acquire().await {
+            RateDecision::Allowed { remaining, reset_secs } => Some(RateHeaders {
+                limit: limiter.rpm().round() as u32,
+                remaining,
+                reset_secs,
+            }),
+            RateDecision::Denied { retry_after_secs } => {
+                metrics::counter!(
+                    "uwa_rate_limit_exceeded_total",
+                    "provider" => provider_name.clone(),
+                )
+                .increment(1);
+                tracing::warn!(
+                    provider = %provider_name,
+                    retry_after_secs,
+                    "rate limit exceeded"
+                );
+                return Ok(headers::rate_limited_response(
+                    &provider_name,
+                    retry_after_secs,
+                    limiter.rpm().round() as u32,
+                ));
+            }
+        }
+    } else {
+        None
+    };
+
     let request_id = RequestId::new();
     let created = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -133,7 +169,7 @@ pub async fn chat_completions(
             .await;
         });
         let conversation = uwa_session::conversation_id(&req.messages, hint.provider.as_deref());
-        let meta = UwaMeta::stream_prefix(conversation);
+        let meta = UwaMeta::stream_prefix(conversation).with_rate(rate_headers);
         let response = stream::stream_response(
             request_id,
             effective_model,
@@ -151,7 +187,8 @@ pub async fn chat_completions(
         outcome.conversation.clone(),
         outcome.retry_count,
         outcome.tab.clone(),
-    );
+    )
+    .with_rate(rate_headers);
     let body = Json(nonstream::build_non_streaming(
         request_id,
         effective_model,

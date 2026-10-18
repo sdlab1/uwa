@@ -311,7 +311,8 @@ pub fn router(state: AppState) -> Router {
         .route("/admin/events", get(routes::admin::events_list))
         .route("/admin/events/summary", get(routes::admin::events_summary))
         .route("/admin/events/clear", post(routes::admin::events_clear))
-        .route("/admin/events/stream", get(routes::admin::events_stream));
+        .route("/admin/events/stream", get(routes::admin::events_stream))
+        .route("/admin/rate-limits", get(routes::admin::rate_limits));
 
     // Layer order: the last `.layer` is outermost and runs first. The origin
     // guard must reject a hostile browser request before anything else
