@@ -223,9 +223,10 @@ fn provider_for<'a>(
     hint: &RoutingHint,
 ) -> Result<&'a uwa_config::ProviderCfg, UwaError> {
     match hint.provider.as_deref() {
-        Some(p) => config.providers.get(p).ok_or_else(|| {
-            UwaError::Config(format!("routing hint points at unknown provider `{p}`"))
-        }),
+        Some(p) => config
+            .providers
+            .get(p)
+            .ok_or_else(|| UwaError::NoProviderForUrl(p.to_string())),
         None => config.provider_for_model(req_model).ok_or_else(|| {
             UwaError::UnknownModel(uwa_core::ModelNotFound::new(
                 req_model.to_string(),
