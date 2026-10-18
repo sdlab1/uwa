@@ -20,11 +20,13 @@ use uwa_core::{Capabilities, UwaError};
 pub mod features;
 pub mod groups;
 pub mod preset;
+pub mod cache;
 pub mod rate_limit;
 pub mod registry;
 pub mod timing;
 pub use timing::{TimingCfg, TimingProfile};
 
+pub use cache::CacheCfg;
 pub use features::{FilePasteCfg, MediaCfg, PromptPaddingCfg, ProxyCfg};
 pub use groups::{GroupCfg, GroupMember, GroupStrategy};
 pub use preset::{EffectiveProviderCfg, PresetCfg};
@@ -66,6 +68,10 @@ pub struct Config {
     /// Human-like timing between DOM actions (keystrokes, focus, send).
     #[serde(default)]
     pub timing: TimingCfg,
+
+    /// Response cache — opt-in, off by default.
+    #[serde(default)]
+    pub cache: CacheCfg,
 }
 
 /// One profile in `[profiles.<name>]`. The map key is the profile name.
@@ -610,6 +616,9 @@ impl Config {
 
         // 8. Timing config must have sane ranges.
         self.timing.validate().map_err(UwaError::Config)?;
+
+        // 9. Response cache ranges (only when enabled).
+        self.cache.validate().map_err(UwaError::Config)?;
 
         Ok(())
     }
@@ -1330,5 +1339,21 @@ mod tests {
             Ok(_) => unreachable!(),
         };
         assert!(e.to_string().contains("poll_ms"), "{e}");
+    }
+
+    #[test]
+    fn cache_section_parses() {
+        let toml = format!("{SAMPLE}\n[cache]\nenabled = true\nttl_secs = 120\ncapacity = 64\n");
+        let cfg = Config::load_from_str(&toml).unwrap();
+        assert!(cfg.cache.enabled);
+        assert_eq!(cfg.cache.ttl_secs, 120);
+        assert_eq!(cfg.cache.capacity, 64);
+    }
+
+    #[test]
+    fn cache_bad_ttl_is_rejected() {
+        let toml = format!("{SAMPLE}\n[cache]\nenabled = true\nttl_secs = 0\n");
+        let e = Config::load_from_str(&toml).unwrap_err();
+        assert!(e.to_string().contains("ttl_secs"), "{e}");
     }
 }

@@ -33,8 +33,9 @@ use uwa_core::types::{FinishReason, Role};
 use uwa_core::{ToolSpec, UwaError};
 use uwa_tools::{ToolCall, ToolDefinition};
 
+use crate::cache::ResponseCache;
 use crate::error::ApiResult;
-use crate::headers::{self, RateHeaders, UwaMeta};
+use crate::headers::{self, CACHE_HIT, RateHeaders, UwaMeta};
 use crate::metrics;
 use crate::routing::RoutingHint;
 use crate::state::AppState;
@@ -134,9 +135,78 @@ async fn messages_inner(
         )));
     }
 
+    // ---- cache check ----
+    let this_is_stream = req.stream.unwrap_or(false);
+    let profile_str = uwa_session::ProfileName::DEFAULT.to_string();
+    let cache = state.runtime.cache.clone();
+    let cache_eligible = cache
+        .as_ref()
+        .map(|c| c.is_eligible(&oa_req) && (!this_is_stream || c.stream_from_cache()))
+        .unwrap_or(false);
+
+    let provider_name = provider_cfg.name.clone();
+    let cache_key = cache_eligible.then(|| {
+        ResponseCache::key(
+            &provider_name,
+            &req.model,
+            &profile_str,
+            None,
+            &oa_req,
+        )
+    });
+
+    if let (Some(cache), Some(key)) = (cache.as_ref(), cache_key) {
+        if let Some(hit) = cache.get(key) {
+            metrics::counter!(
+                "uwa_cache_hit_total",
+                "provider" => provider_name.clone(),
+            )
+            .increment(1);
+            let msg_id = format!("msg_{}", uuid::Uuid::new_v4().simple());
+            let meta = UwaMeta::stream_prefix(
+                uwa_session::conversation_id(&oa_req.messages, hint.provider.as_deref()),
+            )
+            .with_cache(CACHE_HIT);
+
+            if this_is_stream {
+                let hit_prompt_tokens = hit.usage.prompt_tokens;
+                let (tx, rx) = mpsc::channel::<crate::routes::chat::pipeline::StreamEvent>(4);
+                let _ = tx.send(crate::routes::chat::pipeline::StreamEvent::Delta(
+                    hit.text.clone(),
+                )).await;
+                let _ = tx
+                    .send(crate::routes::chat::pipeline::StreamEvent::Done {
+                        finish: hit.finish,
+                        tool_calls: hit.tool_calls,
+                        media: hit.media,
+                        usage: hit.usage,
+                        retry_count: 0,
+                        tab: None,
+                    })
+                    .await;
+                drop(tx);
+                let response =
+                    stream_anthropic_from_channel(msg_id, req.model.clone(), hit_prompt_tokens, rx);
+                return Ok(headers::attach(response, &meta));
+            } else {
+                let body = Json(build_response(
+                    &req,
+                    msg_id,
+                    req.model.clone(),
+                    hit.text,
+                    hit.tool_calls,
+                    hit.finish,
+                ))
+                .into_response();
+                return Ok(headers::attach(body, &meta));
+            }
+        } else {
+            cache.miss();
+        }
+    }
+
     // Rate-limit check: done at the handler (before the pipeline) so a
     // 429 is fast, doesn't burn a concurrency permit.
-    let provider_name = provider_cfg.name.clone();
     let limiter = state.runtime.rate_limiters.get(&provider_name);
     let rate_headers = if limiter.enabled() {
         match limiter.try_acquire().await {

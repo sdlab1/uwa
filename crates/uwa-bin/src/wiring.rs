@@ -210,6 +210,39 @@ pub async fn run_with(config_path: PathBuf, cdp_url: &str) -> anyhow::Result<()>
     }
     tracing::info!(limited, "provider rate limiters configured");
 
+    // Response cache: off unless [cache] is enabled in config. A 60s
+    // sweeper drops stale entries so the LRU self-heals.
+    let cache = if config.cache.enabled {
+        let c = Arc::new(uwa_api::cache::ResponseCache::new(config.cache.clone()));
+        {
+            let c = c.clone();
+            let stop = shutdown.clone();
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(Duration::from_secs(60));
+                loop {
+                    tokio::select! {
+                        _ = stop.wait() => break,
+                        _ = interval.tick() => {
+                            let n = c.sweep();
+                            if n > 0 {
+                                tracing::debug!(n, "cache sweep removed stale entries");
+                            }
+                        }
+                    }
+                }
+            });
+        }
+        tracing::info!(
+            enabled = true,
+            ttl_secs = config.cache.ttl_secs,
+            capacity = config.cache.capacity,
+            "response cache configured"
+        );
+        Some(c)
+    } else {
+        None
+    };
+
     let mut state = AppState::minimal(
         config.clone(),
         Arc::new(registry),
@@ -221,6 +254,9 @@ pub async fn run_with(config_path: PathBuf, cdp_url: &str) -> anyhow::Result<()>
     .with_history(history)
     .with_pinning(pinning)
     .with_rate_limiters(Arc::new(rate));
+if let Some(c) = cache {
+    state = state.with_cache(c);
+}
     if let Some(log) = events {
         state = state.with_events(log);
     }

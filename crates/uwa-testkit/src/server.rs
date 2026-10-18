@@ -5,6 +5,7 @@ use uwa_api::events::EventLog;
 use uwa_api::{router, AppState, ProviderRegistry};
 use uwa_config::Config;
 use uwa_core::{SiteProvider, Transport};
+use uwa_api::cache::ResponseCache;
 use uwa_resilience::rate_limit::ProviderRateLimiters;
 use uwa_resilience::semaphore::ProviderSemaphores;
 use uwa_session::SessionManager;
@@ -39,6 +40,7 @@ pub struct AppBuilder {
     rate_limiters: Option<Arc<ProviderRateLimiters>>,
     history: Option<Arc<uwa_history::HistoryStore>>,
     events: Option<Arc<EventLog>>,
+    cache: Option<Arc<ResponseCache>>,
 }
 
 impl AppBuilder {
@@ -52,6 +54,7 @@ impl AppBuilder {
             rate_limiters: None,
             history: None,
             events: None,
+            cache: None,
         }
     }
 
@@ -104,6 +107,11 @@ impl AppBuilder {
         self
     }
 
+    pub fn with_cache(mut self, c: Arc<ResponseCache>) -> Self {
+        self.cache = Some(c);
+        self
+    }
+
     pub fn build_state(self) -> AppState {
         let mut registry = ProviderRegistry::new();
         for p in self.providers {
@@ -124,6 +132,9 @@ impl AppBuilder {
         }
         if let Some(l) = self.events {
             state = state.with_events(l);
+        }
+        if let Some(c) = self.cache {
+            state = state.with_cache(c);
         }
         state
     }

@@ -7,6 +7,7 @@
 //! - [`AppState`], [`ProviderRegistry`]
 //! - [`ApiError`] — the OpenAI-shaped error at the HTTP edge
 
+pub mod cache;
 pub mod error;
 pub mod events;
 pub mod headers;
@@ -312,7 +313,9 @@ pub fn router(state: AppState) -> Router {
         .route("/admin/events/summary", get(routes::admin::events_summary))
         .route("/admin/events/clear", post(routes::admin::events_clear))
         .route("/admin/events/stream", get(routes::admin::events_stream))
-        .route("/admin/rate-limits", get(routes::admin::rate_limits));
+        .route("/admin/rate-limits", get(routes::admin::rate_limits))
+        .route("/admin/cache", get(routes::admin::cache_stats))
+        .route("/admin/cache/clear", post(routes::admin::cache_clear));
 
     // Layer order: the last `.layer` is outermost and runs first. The origin
     // guard must reject a hostile browser request before anything else

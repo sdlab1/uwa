@@ -25,8 +25,9 @@ use uwa_core::types::openai::{
 use uwa_core::types::Role;
 use uwa_core::{RequestId, UwaError};
 
+use crate::cache::ResponseCache;
 use crate::error::ApiResult;
-use crate::headers::{self, RateHeaders, UwaMeta};
+use crate::headers::{self, CACHE_HIT, RateHeaders, UwaMeta};
 use crate::metrics;
 use crate::routes::chat;
 use crate::state::AppState;
@@ -161,6 +162,80 @@ pub async fn create(
     } else {
         config.resolve_model(&chat_req.model)?.0.name.clone()
     };
+
+    // ---- cache check ----
+    //
+    // Runs before the rate limiter on purpose: a cache hit doesn't
+    // touch the provider, so it shouldn't spend a rate-limit token.
+    // The order is: cache → rate limit → breaker → semaphore → pipeline.
+    let this_is_stream = req.stream.unwrap_or(false);
+    let profile_str = uwa_session::ProfileName::DEFAULT.to_string();
+    let cache = state.runtime.cache.clone();
+    let cache_eligible = cache
+        .as_ref()
+        .map(|c| c.is_eligible(&chat_req) && (!this_is_stream || c.stream_from_cache()))
+        .unwrap_or(false);
+
+    let cache_key = cache_eligible.then(|| {
+        ResponseCache::key(
+            &provider_name,
+            &chat_req.model,
+            &profile_str,
+            None,
+            &chat_req,
+        )
+    });
+
+    if let (Some(cache), Some(key)) = (cache.as_ref(), cache_key) {
+        if let Some(hit) = cache.get(key) {
+            metrics::counter!(
+                "uwa_cache_hit_total",
+                "provider" => provider_name.clone(),
+            )
+            .increment(1);
+            let conversation = uwa_session::conversation_id(&chat_req.messages, hint.provider.as_deref());
+            let meta = UwaMeta::stream_prefix(conversation).with_cache(CACHE_HIT);
+
+            if this_is_stream {
+                let (tx, rx) = mpsc::channel::<chat::pipeline::StreamEvent>(4);
+                let _ = tx.send(chat::pipeline::StreamEvent::Delta(hit.text.clone())).await;
+                let _ = tx
+                    .send(chat::pipeline::StreamEvent::Done {
+                        finish: hit.finish,
+                        tool_calls: hit.tool_calls,
+                        media: hit.media,
+                        usage: hit.usage,
+                        retry_count: 0,
+                        tab: None,
+                    })
+                    .await;
+                drop(tx);
+                let input_chars: usize = hit.text.len();
+                let response = stream_response(chat_req.model.clone(), input_chars, rx);
+                return Ok(headers::attach(response, &meta));
+            } else {
+                let id = RequestId::new();
+                let created = now_secs();
+                let usage = hit.usage;
+                let body = chat::nonstream::build_non_streaming(
+                    id,
+                    chat_req.model.clone(),
+                    created,
+                    hit.text,
+                    hit.tool_calls,
+                    hit.finish,
+                    usage,
+                    hit.media,
+                );
+                let body = serde_json::to_value(&body)
+                    .map_err(|e| UwaError::Internal(format!("serialize cached chat answer: {e}")))?;
+                let body = Json(reshape(&chat_req.model, &body)).into_response();
+                return Ok(headers::attach(body, &meta));
+            }
+        } else {
+            cache.miss();
+        }
+    }
 
     // Rate-limit check: done at the handler (before the pipeline) so a
     // 429 is fast, doesn't burn a concurrency permit.

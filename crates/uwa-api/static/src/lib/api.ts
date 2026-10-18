@@ -136,12 +136,32 @@ function sessionHeader(profile?: string): Record<string, string> {
   return profile ? { 'x-uwa-session': profile } : {};
 }
 
-export async function chat(req: ChatRequest, opts: ChatOpts = {}): Promise<ChatResponse> {
-  return request<ChatResponse>('/v1/chat/completions', {
+export interface ChatResult {
+  response: ChatResponse;
+  cached: boolean;
+}
+
+export async function chat(req: ChatRequest, opts: ChatOpts = {}): Promise<ChatResult> {
+  const r = await fetch('/v1/chat/completions', {
     method: 'POST',
-    headers: sessionHeader(opts.profile),
+    headers: headers(sessionHeader(opts.profile)),
     body: JSON.stringify({ ...req, stream: false }),
   });
+  if (!r.ok) {
+    let code = 'http_error';
+    let message = `${r.status} ${r.statusText}`;
+    try {
+      const body = (await r.json()) as { error?: { message?: string; code?: string } };
+      if (body?.error) {
+        message = body.error.message ?? message;
+        code = body.error.code ?? code;
+      }
+    } catch { /* non-JSON */ }
+    throw new ApiError(r.status, code, message);
+  }
+  const body = (await r.json()) as ChatResponse;
+  const cached = r.headers.get('x-uwa-cache') === 'hit';
+  return { response: body, cached };
 }
 
 export interface StreamHandlers {
@@ -409,3 +429,19 @@ export const recorderStart = (body: { provider: string; tab_id?: string }) =>
   request<RecorderStatus>('/admin/recorder/start', { method: 'POST', body: JSON.stringify(body) });
 export const recorderStop = () =>
   request<RecorderStopResponse>('/admin/recorder/stop', { method: 'POST' });
+
+// === cache ===
+export interface CacheStats {
+  enabled: boolean;
+  capacity: number;
+  entries: number;
+  ttl_secs: number;
+  stream_from_cache: boolean;
+  hits: number;
+  misses: number;
+  stores: number;
+  hit_rate: number;
+}
+export const getCacheStats = () => request<CacheStats>('/admin/cache');
+export const clearCache = () =>
+  request<{ removed: number }>('/admin/cache/clear', { method: 'POST' });

@@ -26,8 +26,9 @@ use uwa_core::types::openai::ChatCompletionRequest;
 use uwa_core::{RequestId, ToolSpec, UwaError};
 use uwa_tools::ToolDefinition;
 
+use crate::cache::{CachedOutcome, ResponseCache};
 use crate::error::ApiResult;
-use crate::headers::{self, RateHeaders, UwaMeta};
+use crate::headers::{self, CACHE_HIT, CACHE_MISS, RateHeaders, UwaMeta};
 use crate::metrics;
 use crate::state::AppState;
 use uwa_resilience::RateDecision;
@@ -106,10 +107,108 @@ pub async fn chat_completions(
         ..hint
     };
 
+    let request_id = RequestId::new();
+    let created = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    // ---- cache check ----
+    //
+    // Runs before the rate limiter on purpose: a cache hit doesn't
+    // touch the provider, so it shouldn't spend a rate-limit token.
+    // The order is: cache → rate limit → breaker → semaphore.
+    let provider_name = site.name().to_string();
+    let this_is_stream = req.stream.unwrap_or(false);
+    let profile_str = hint
+        .profile
+        .clone()
+        .unwrap_or_else(|| uwa_session::ProfileName::DEFAULT.to_string());
+
+    let cache = state.runtime.cache.clone();
+    let cache_eligible = cache
+        .as_ref()
+        .map(|c| {
+            c.is_eligible(&req)
+                && (!this_is_stream || c.stream_from_cache())
+        })
+        .unwrap_or(false);
+
+    let cache_key = if cache_eligible {
+        Some(ResponseCache::key(
+            &provider_name,
+            &effective_model,
+            &profile_str,
+            /* preset */ None,
+            &req,
+        ))
+    } else {
+        None
+    };
+
+    if let (Some(cache), Some(key)) = (cache.as_ref(), cache_key) {
+        if let Some(hit) = cache.get(key) {
+            metrics::counter!(
+                "uwa_cache_hit_total",
+                "provider" => provider_name.clone(),
+            )
+            .increment(1);
+
+            let conversation = uwa_session::conversation_id(&req.messages, hint.provider.as_deref());
+            let meta = UwaMeta::stream_prefix(conversation).with_cache(CACHE_HIT);
+
+            if this_is_stream {
+                let (tx, rx) = mpsc::channel::<pipeline::StreamEvent>(4);
+                let hit_prompt_tokens = hit.usage.prompt_tokens;
+                let _ = tx.send(pipeline::StreamEvent::Delta(hit.text.clone())).await;
+                let _ = tx
+                    .send(pipeline::StreamEvent::Done {
+                        finish: hit.finish,
+                        tool_calls: hit.tool_calls,
+                        media: hit.media,
+                        usage: hit.usage,
+                        retry_count: 0,
+                        tab: None,
+                    })
+                    .await;
+                drop(tx);
+                let include_usage = req
+                    .stream_options
+                    .as_ref()
+                    .map(|o| o.include_usage)
+                    .unwrap_or(false);
+                let response = stream::stream_response(
+                    request_id,
+                    effective_model,
+                    created,
+                    rx,
+                    include_usage,
+                    hit_prompt_tokens,
+                );
+                return Ok(headers::attach(response, &meta));
+            } else {
+                let body = Json(nonstream::build_non_streaming(
+                    request_id,
+                    effective_model,
+                    created,
+                    hit.text,
+                    hit.tool_calls,
+                    hit.finish,
+                    hit.usage,
+                    hit.media,
+                ))
+                .into_response();
+                return Ok(headers::attach(body, &meta));
+            }
+        } else {
+            cache.miss();
+        }
+    }
+
     // Rate-limit check: done at the handler (before the pipeline) so a
     // 429 is fast, doesn't burn a concurrency permit, and doesn't show
     // up in the request-history buffer.
-    let provider_name = site.name().to_string();
+    // `provider_name` is already bound above in the cache block.
     let limiter = state.runtime.rate_limiters.get(&provider_name);
     let rate_headers = if limiter.enabled() {
         match limiter.try_acquire().await {
@@ -140,12 +239,6 @@ pub async fn chat_completions(
         None
     };
 
-    let request_id = RequestId::new();
-    let created = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-
     if req.stream.unwrap_or(false) {
         let include_usage = req
             .stream_options
@@ -169,7 +262,9 @@ pub async fn chat_completions(
             .await;
         });
         let conversation = uwa_session::conversation_id(&req.messages, hint.provider.as_deref());
-        let meta = UwaMeta::stream_prefix(conversation).with_rate(rate_headers);
+        let meta = UwaMeta::stream_prefix(conversation)
+            .with_rate(rate_headers)
+            .with_cache(CACHE_MISS);
         let response = stream::stream_response(
             request_id,
             effective_model,
@@ -182,13 +277,31 @@ pub async fn chat_completions(
     }
 
     let outcome = run_pipeline_with_hint(&state, &req, &all_specs, &hint).await?;
+
     let usage = outcome.usage;
+
+    // Store on the way out. Eligibility is unchanged from the top of
+    // the function — no branch below alters `cache_eligible`.
+    if let (Some(cache), Some(key)) = (cache.as_ref(), cache_key) {
+        cache.put(
+            key,
+            CachedOutcome {
+                text: outcome.text.clone(),
+                tool_calls: outcome.tool_calls.clone(),
+                finish: outcome.finish,
+                media: outcome.media.clone(),
+                usage: usage.clone(),
+            },
+        );
+    }
+
     let meta = UwaMeta::complete(
         outcome.conversation.clone(),
         outcome.retry_count,
         outcome.tab.clone(),
     )
-    .with_rate(rate_headers);
+    .with_rate(rate_headers)
+    .with_cache(CACHE_MISS);
     let body = Json(nonstream::build_non_streaming(
         request_id,
         effective_model,

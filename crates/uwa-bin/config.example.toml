@@ -260,6 +260,28 @@ drain_secs = 30
 # [profiles.personal]
 # label = "Personal"
 
+# ---------- Response cache (opt-in) ----------
+#
+# Off by default. When enabled, requests with `temperature = 0` (or no
+# temperature field) are cached for `ttl_secs`. A subsequent request
+# with the same (model, messages, tools, response_format, profile)
+# returns the previous answer immediately, without touching the browser.
+#
+# Cache hits do not consume a rate-limit token, do not appear in the
+# History buffer, and do not count against provider concurrency.
+#
+# Do NOT enable this if you rely on non-deterministic answers, or if
+# your provider routes requests to different web sessions behind your
+# back. The whole point of the daemon is that you know what the site is
+# about to see; caching is only honest for requests that would produce
+# the same answer.
+
+# [cache]
+# enabled = true
+# ttl_secs = 300      # 5 minutes
+# capacity = 256
+# stream_from_cache = true
+
 # ---------- Timing (human-like pacing) ----------
 #
 # How much delay to add between DOM actions. Not fingerprint evasion —

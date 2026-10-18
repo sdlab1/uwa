@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import type { ChatMessage, ModelObject, ToolCallRef } from '../lib/types';
-  import { chat, chatStream, getModels, getProfiles, ApiError } from '../lib/api';
+  import { chat, chatStream, getModels, getProfiles, ApiError, type ChatResult } from '../lib/api';
   import type { ProfileSummary } from '../lib/types';
   import {
     toast, streamStart, streamFirstToken, streamDelta, streamDone, streamError,
@@ -36,6 +36,7 @@
   let finishedAt = $state<number | null>(null);
   let abort: AbortController | null = null;
   let charsStreamed = $state(0);
+  let cached = $state(false);
 
   let ttftMs = $derived(firstTokenAt != null && startedAt != null ? firstTokenAt - startedAt : undefined);
   let totalMs = $derived(finishedAt != null && startedAt != null ? finishedAt - startedAt : undefined);
@@ -128,6 +129,7 @@
     firstTokenAt = null;
     finishedAt = null;
     startedAt = performance.now();
+    cached = false;
     streamStart();
   }
 
@@ -198,7 +200,11 @@
         for (const k of Object.keys(streamToolCalls)) streamToolCalls[+k]!.done = true;
       } else {
         phase = 'waiting';
-        const r = await chat(req, { profile: profile || undefined });
+        const { response: r, cached: isCached } = await chat(
+          req,
+          { profile: profile || undefined },
+        );
+        cached = isCached;
         const m = r.choices[0]?.message;
         if (m) {
           s.messages[assistantIndex]!.content = m.content ?? '';
@@ -306,6 +312,9 @@
           </select>
         {/if}
         <StreamBadge {phase} {ttftMs} {totalMs} chars={charsStreamed} />
+        {#if cached}
+          <span class="text-[11px] muted uppercase tracking-[0.5px]">cached</span>
+        {/if}
         <button class="ghost-btn" onclick={clearActive}>clear</button>
       </div>
     </div>

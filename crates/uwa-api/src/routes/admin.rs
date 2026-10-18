@@ -1226,3 +1226,30 @@ pub async fn rate_limits(
     }
     Ok(Json(serde_json::json!({ "providers": providers })))
 }
+
+// ---------- cache ----------
+
+/// `GET /admin/cache` — current state and lifetime counters.
+///
+/// Always 200. When the cache is disabled, returns `{ "enabled": false }`
+/// so the dashboard can hide the card without a separate probe.
+pub async fn cache_stats(
+    State(state): State<AppState>,
+) -> ApiResult<Json<serde_json::Value>> {
+    match &state.runtime.cache {
+        Some(c) => Ok(Json(serde_json::to_value(c.stats()).unwrap_or_default())),
+        None => Ok(Json(serde_json::json!({ "enabled": false }))),
+    }
+}
+
+/// `POST /admin/cache/clear` — drop every entry. Lifetime counters
+/// survive, so the hit-rate panel keeps a useful number.
+pub async fn cache_clear(
+    State(state): State<AppState>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let removed = match &state.runtime.cache {
+        Some(c) => c.clear(),
+        None => 0,
+    };
+    Ok(Json(serde_json::json!({ "removed": removed })))
+}

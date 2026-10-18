@@ -347,6 +347,7 @@ points:
 - [Install](docs/INSTALL.md) — Homebrew, Scoop, Docker, build from source.
 - [Configuration](docs/CONFIG.md) — `uwa.toml`, providers, presets, workflows.
 - [API](docs/API.md) — request/response shapes, error codes, examples.
+- [Caching](docs/CACHING.md) — response cache, TTL, LRU, admin endpoints.
 - [Streaming](docs/STREAMING.md) — where the tokens come from, TTFT, cancel.
 - [Structured output](docs/JSON_MODE.md) — `response_format`, JSON-mode retries, streaming behaviour.
 - [Token accounting](docs/TOKENS.md) — how usage is estimated and rolled up.

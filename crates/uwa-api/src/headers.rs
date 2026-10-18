@@ -94,6 +94,14 @@ impl UwaMeta {
         self
     }
 
+    /// Override the cache status. Non-stream responses default to
+    /// `CACHE_MISS`; a cache hit changes it to `CACHE_HIT`. Streaming
+    /// responses use the same mechanism.
+    pub fn with_cache(mut self, cache: &'static str) -> Self {
+        self.cache = cache;
+        self
+    }
+
     /// The JSON object that rides in the final SSE chunk's `uwa_meta`
     /// field. Only the fields a stream can't get from headers.
     pub fn to_stream_json(&self) -> serde_json::Value {
@@ -256,6 +264,14 @@ mod tests {
         assert!(r.headers().get(RATE_LIMIT_LIMIT).is_none());
         assert!(r.headers().get(RATE_LIMIT_REMAINING).is_none());
         assert!(r.headers().get(RATE_LIMIT_RESET).is_none());
+    }
+
+    #[test]
+    fn with_cache_overrides_the_default() {
+        let m = UwaMeta::stream_prefix(ConversationId::from_raw("conv"))
+            .with_cache(CACHE_HIT);
+        let r = attach(empty_response(), &m);
+        assert_eq!(r.headers().get(CACHE).unwrap(), "hit");
     }
 
     #[test]

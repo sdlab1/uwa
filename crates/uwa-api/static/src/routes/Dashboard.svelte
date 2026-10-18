@@ -1,7 +1,8 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import type { ProviderMap, ReadyResp, StatsResp } from '../lib/types';
-  import { getProviders, getReady, getStats } from '../lib/api';
+import type { CacheStats } from '../lib/api';
+  import { clearCache, getCacheStats, getProviders, getReady, getStats } from '../lib/api';
   import Card from '../lib/components/Card.svelte';
   import StatCard from '../lib/components/StatCard.svelte';
   import MiniBars from '../lib/components/MiniBars.svelte';
@@ -12,7 +13,8 @@
   type WindowKey = 'last50' | 'last200' | 'all';
 
   let statsWindow: WindowKey = $state('last200');
-  let stats    = $state<StatsResp | null>(null);
+  let cacheStats = $state<CacheStats | null>(null);
+let stats    = $state<StatsResp | null>(null);
   let ready    = $state<ReadyResp | null>(null);
   let providers= $state<ProviderMap | null>(null);
   let err      = $state<string | null>(null);
@@ -30,14 +32,16 @@
     if (refreshing) return;
     refreshing = true;
     try {
-      const [s, r, p] = await Promise.all([
+      const [s, r, p, c] = await Promise.all([
         getStats(statsWindow),
         getReady().catch(() => null),
         getProviders().catch(() => null),
+        getCacheStats().catch(() => null),
       ]);
       stats = s;
       ready = r;
       providers = p;
+      cacheStats = c;
       err = null;
       updatedAt = Date.now();
 
@@ -315,6 +319,44 @@
       </div>
     {/if}
   </Card>
+
+  <!-- Cache -->
+  {#if cacheStats}
+    <Card title="Response cache">
+      <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2.5">
+        <StatCard label="Enabled" value={cacheStats.enabled ? 'yes' : 'no'} />
+        <StatCard label="Entries" value={fmtNum(cacheStats.entries)} />
+        <StatCard label="Hits" value={fmtNum(cacheStats.hits)} />
+        <StatCard
+          label="Hit rate"
+          value={cacheStats.hits + cacheStats.misses > 0
+            ? ((cacheStats.hits / (cacheStats.hits + cacheStats.misses)) * 100).toFixed(1) + '%'
+            : '—'} />
+        <StatCard label="Misses" value={fmtNum(cacheStats.misses)} />
+        <StatCard label="Stores" value={fmtNum(cacheStats.stores)} />
+        <StatCard label="TTL" value={fmtNum(cacheStats.ttl_secs)} sub="secs" />
+        <StatCard
+          label="Stream"
+          value={cacheStats.stream_from_cache ? 'on' : 'off'} />
+      </div>
+      <div class="mt-3 flex items-center gap-2">
+        <button
+          class="btn-secondary"
+          onclick={async () => {
+            const removed = await clearCache();
+            cacheStats = { ...cacheStats!, entries: 0 };
+          }}
+          disabled={!cacheStats.enabled}>
+          Clear cache
+        </button>
+        <span class="text-[11px] muted">
+          {cacheStats.enabled ? '' : 'disabled — enable [cache] in uwa.toml'}
+        </span>
+      </div>
+    </Card>
+  {:else}
+    <div class="card"><p class="muted">Loading cache stats…</p></div>
+  {/if}
 
   <!-- Readiness + Pool -->
   <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">

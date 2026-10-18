@@ -101,6 +101,9 @@ pub struct RuntimeServices {
     /// Per-provider request-rate budgets. Providers without a `rate_limit`
     /// block get an unlimited limiter from the registry.
     pub rate_limiters: Arc<ProviderRateLimiters>,
+    /// Response cache. `None` when `[cache].enabled = false`. When
+    /// present, only requests with `temperature = 0` consult it.
+    pub cache: Option<Arc<crate::cache::ResponseCache>>,
 }
 
 impl Default for RuntimeServices {
@@ -116,6 +119,7 @@ impl Default for RuntimeServices {
             ))),
             events: None,
             rate_limiters: Arc::new(ProviderRateLimiters::new()),
+            cache: None,
         }
     }
 }
@@ -200,6 +204,13 @@ impl AppState {
     ) -> Self {
         let mut rt = (*self.runtime).clone();
         rt.rate_limiters = rl;
+        self.runtime = Arc::new(rt);
+        self
+    }
+
+    pub fn with_cache(mut self, cache: Arc<crate::cache::ResponseCache>) -> Self {
+        let mut rt = (*self.runtime).clone();
+        rt.cache = Some(cache);
         self.runtime = Arc::new(rt);
         self
     }
