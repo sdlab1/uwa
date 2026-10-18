@@ -18,13 +18,25 @@ impl From<UwaError> for ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let (status, kind, code) = self.0.openai_shape();
-        let body = json!({
-            "error": {
-                "message": self.0.to_string(),
-                "type": kind,
-                "code": code,
-            }
+        let mut error = json!({
+            "message": self.0.to_string(),
+            "type": kind,
+            "code": code,
         });
+        if let UwaError::HumanVerificationRequired {
+            provider,
+            tab_id,
+            url,
+        } = &self.0
+        {
+            error["verification"] = json!({
+                "provider": provider,
+                "tab_id": tab_id,
+                "url": url,
+                "action": "Complete the challenge manually in the logged-in Chromium tab, then retry the request once.",
+            });
+        }
+        let body = json!({ "error": error });
         let status = StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
         (status, Json(body)).into_response()
     }

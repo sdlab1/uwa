@@ -138,6 +138,20 @@ export interface SessionInfo {
 }
 export interface SessionsResp { sessions: SessionInfo[]; }
 
+export interface VerificationChallenge {
+  tab_id: string;
+  provider: string | null;
+  url: string;
+  signals: string[];
+}
+export interface VerificationScanError { tab_id: string; error: string; }
+export interface VerificationResp {
+  total_tabs: number;
+  scanned_tabs: number;
+  challenges: VerificationChallenge[];
+  scan_errors: VerificationScanError[];
+}
+
 export interface LogEvent {
   level: string; target: string; message: string; fields?: string;
 }

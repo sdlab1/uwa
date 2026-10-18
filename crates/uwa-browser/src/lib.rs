@@ -25,6 +25,7 @@ pub mod page;
 pub mod recorder;
 pub mod tab_id;
 pub mod tabpool;
+pub mod tap;
 pub mod transport;
 pub use bus::NetBus;
 pub use frame::FrameMap;

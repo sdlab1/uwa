@@ -12,6 +12,7 @@
   import Recorder   from './routes/Recorder.svelte';
   import History    from './routes/History.svelte';
   import Sessions   from './routes/Sessions.svelte';
+  import Verification from './routes/Verification.svelte';
   import Config     from './routes/Config.svelte';
   import Logs       from './routes/Logs.svelte';
   import Events     from './routes/Events.svelte';
@@ -27,6 +28,7 @@
     '/recorder': Recorder,
     '/history': History,
     '/sessions': Sessions,
+    '/verification': Verification,
     '/config': Config,
     '/logs': Logs,
     '/events': Events,

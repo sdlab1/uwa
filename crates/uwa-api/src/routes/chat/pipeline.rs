@@ -52,14 +52,15 @@
 //!        └─ return (text, calls, finish)      — calls go to the client
 //! ```
 
+use std::future::Future;
 use std::time::Duration;
 
 use futures::StreamExt;
 use tokio::sync::mpsc;
-use uwa_core::ConversationId;
 use uwa_core::types::media::MediaAsset;
 use uwa_core::types::openai::{ChatCompletionRequest, ChatMessage, ResponseFormat, Usage};
 use uwa_core::types::FinishReason;
+use uwa_core::ConversationId;
 use uwa_core::TabId;
 use uwa_core::{Page, SiteProvider, ToolSpec, UwaError};
 use uwa_tools::emulation::{correction_prompt, validate_calls, ValidationOutcome};
@@ -71,6 +72,7 @@ use uwa_tools::{
 use crate::history::RequestRecorder;
 use crate::routing::RoutingHint;
 use crate::state::AppState;
+use crate::verification::ChallengeMonitor;
 
 use uwa_session::pinning::{decide, hash_messages, hash_system, ConversationState, PinDecision};
 use uwa_session::ProfileName;
@@ -142,6 +144,70 @@ struct AttachmentGuard(Vec<uwa_core::types::Attachment>);
 impl Drop for AttachmentGuard {
     fn drop(&mut self) {
         uwa_providers::attachments::cleanup(&self.0);
+    }
+}
+
+/// Run the browser's send action with a bounded wait, checking the current tab
+/// if the action fails or times out so a challenge is not reported as a generic
+/// selector/transport failure.
+async fn send_with_challenge_check<F>(
+    timeout: Duration,
+    future: F,
+    page: &dyn uwa_core::Page,
+    provider: &str,
+    tab: &TabId,
+    monitor: &mut ChallengeMonitor,
+) -> Result<(), UwaError>
+where
+    F: Future<Output = Result<(), UwaError>> + Send,
+{
+    match tokio::time::timeout(timeout, future).await {
+        Ok(Ok(())) => monitor.ensure_clear(page, provider, tab).await,
+        Ok(Err(err)) => {
+            monitor.ensure_clear(page, provider, tab).await?;
+            Err(err)
+        }
+        Err(_) => {
+            monitor.ensure_clear(page, provider, tab).await?;
+            Err(UwaError::Timeout(timeout))
+        }
+    }
+}
+
+/// Poll for a challenge while a provider is waiting for its response. This
+/// avoids waiting for the provider's longer timeout when Cloudflare has
+/// replaced the page with a verification interstitial.
+async fn await_with_challenge_check<F, T>(
+    future: F,
+    page: &dyn uwa_core::Page,
+    provider: &str,
+    tab: &TabId,
+    monitor: &mut ChallengeMonitor,
+) -> Result<T, UwaError>
+where
+    F: Future<Output = Result<T, UwaError>> + Send,
+    T: Send,
+{
+    tokio::pin!(future);
+    let mut poll = tokio::time::interval(Duration::from_secs(1));
+    poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    loop {
+        tokio::select! {
+            result = &mut future => {
+                match result {
+                    Ok(value) => {
+                        monitor.ensure_clear(page, provider, tab).await?;
+                        return Ok(value);
+                    }
+                    Err(err) => {
+                        monitor.ensure_clear(page, provider, tab).await?;
+                        return Err(err);
+                    }
+                }
+            }
+            _ = poll.tick() => monitor.ensure_clear(page, provider, tab).await?,
+        }
     }
 }
 
@@ -222,6 +288,12 @@ pub async fn run_pipeline(
                 "bridge",
                 Some(outcome.usage.clone()),
             );
+        }
+        Err(UwaError::HumanVerificationRequired { .. }) => {
+            // A browser challenge is an interaction requirement, not evidence
+            // that the provider is unhealthy; do not trip the circuit breaker.
+            breaker.record_success();
+            recorder.finish_error("human verification required");
         }
         Err(e) => {
             breaker.record_failure();
@@ -362,6 +434,13 @@ pub async fn run_pipeline_streaming(
             );
         }
         Err(_) if client_gone => breaker.release(),
+        Err(e @ UwaError::HumanVerificationRequired { .. }) => {
+            // A browser challenge is not a provider transport failure.
+            breaker.record_success();
+            recorder.finish_error("human verification required");
+            // Preserve the structured error for the SSE client.
+            let _ = tx.send(StreamEvent::Error(e.clone())).await;
+        }
         Err(e) => {
             breaker.record_failure();
             recorder.finish_error(&e.to_string());
@@ -482,6 +561,10 @@ async fn run_pipeline_streaming_inner(
     recorder.set_tab(tab.as_str());
     recorder.set_profile(profile.as_str());
     let tab_str: Option<String> = Some(tab.as_str().to_string());
+    let mut challenge_monitor = ChallengeMonitor::new(page.as_ref()).await;
+    challenge_monitor
+        .ensure_clear(page.as_ref(), &provider_cfg.name, &tab)
+        .await?;
 
     let (body, pin_mode, _system_used) = plan_browser_turn(
         state,
@@ -504,16 +587,25 @@ async fn run_pipeline_streaming_inner(
 
     recorder.mark_send_start();
     if _attachments.0.is_empty() {
-        tokio::time::timeout(send_timeout, site.send_message(page.as_ref(), &body))
-            .await
-            .map_err(|_| UwaError::Timeout(send_timeout))??;
+        send_with_challenge_check(
+            send_timeout,
+            site.send_message(page.as_ref(), &body),
+            page.as_ref(),
+            &provider_cfg.name,
+            &tab,
+            &mut challenge_monitor,
+        )
+        .await?;
     } else {
-        tokio::time::timeout(
+        send_with_challenge_check(
             send_timeout,
             site.send_multimodal(page.as_ref(), &body, &_attachments.0),
+            page.as_ref(),
+            &provider_cfg.name,
+            &tab,
+            &mut challenge_monitor,
         )
-        .await
-        .map_err(|_| UwaError::Timeout(send_timeout))??;
+        .await?;
     }
     recorder.mark_send_end();
 
@@ -536,7 +628,14 @@ async fn run_pipeline_streaming_inner(
     // streaming.
     let json_fmt = req.response_format.as_ref().filter(|f| json_constrained(f));
     let mut retry_count: u32 = 0;
-    let mut stream = site.wait_response_stream(page.as_ref()).await?;
+    let mut stream = await_with_challenge_check(
+        site.wait_response_stream(page.as_ref()),
+        page.as_ref(),
+        &provider_cfg.name,
+        &tab,
+        &mut challenge_monitor,
+    )
+    .await?;
     let mut acc = String::new();
     let mut emitted_until: usize = 0;
     let mut ttft_recorded = false;
@@ -553,7 +652,15 @@ async fn run_pipeline_streaming_inner(
             }
         };
         let Some(chunk) = chunk else { break };
-        let text = chunk?;
+        let text = match chunk {
+            Ok(text) => text,
+            Err(e) => {
+                challenge_monitor
+                    .ensure_clear(page.as_ref(), &provider_cfg.name, &tab)
+                    .await?;
+                return Err(Abort::Failed(e));
+            }
+        };
         if !ttft_recorded && !text.is_empty() {
             recorder.mark_first_delta();
             ttft_recorded = true;
@@ -579,6 +686,9 @@ async fn run_pipeline_streaming_inner(
         }
     }
 
+    challenge_monitor
+        .ensure_clear(page.as_ref(), &provider_cfg.name, &tab)
+        .await?;
     recorder.mark_wait_end();
     if let Some(h) = &session_handle {
         h.touch().await;
@@ -790,6 +900,10 @@ async fn run_pipeline_inner(
     recorder.set_tab(tab.as_str());
     recorder.set_profile(profile.as_str());
     let tab_str: Option<String> = Some(tab.as_str().to_string());
+    let mut challenge_monitor = ChallengeMonitor::new(page.as_ref()).await;
+    challenge_monitor
+        .ensure_clear(page.as_ref(), &provider_cfg.name, &tab)
+        .await?;
 
     let (body, pin_mode, _system_used) = plan_browser_turn(
         state,
@@ -813,16 +927,25 @@ async fn run_pipeline_inner(
     recorder.mark_send_start();
     let mut retry_count: u32 = 0;
     if _attachments.0.is_empty() {
-        tokio::time::timeout(send_timeout, site.send_message(page.as_ref(), &body))
-            .await
-            .map_err(|_| UwaError::Timeout(send_timeout))??;
+        send_with_challenge_check(
+            send_timeout,
+            site.send_message(page.as_ref(), &body),
+            page.as_ref(),
+            &provider_cfg.name,
+            &tab,
+            &mut challenge_monitor,
+        )
+        .await?;
     } else {
-        tokio::time::timeout(
+        send_with_challenge_check(
             send_timeout,
             site.send_multimodal(page.as_ref(), &body, &_attachments.0),
+            page.as_ref(),
+            &provider_cfg.name,
+            &tab,
+            &mut challenge_monitor,
         )
-        .await
-        .map_err(|_| UwaError::Timeout(send_timeout))??;
+        .await?;
     }
     recorder.mark_send_end();
 
@@ -839,7 +962,14 @@ async fn run_pipeline_inner(
     )
     .await;
 
-    let raw = site.wait_response(page.as_ref()).await?;
+    let raw = await_with_challenge_check(
+        site.wait_response(page.as_ref()),
+        page.as_ref(),
+        &provider_cfg.name,
+        &tab,
+        &mut challenge_monitor,
+    )
+    .await?;
     recorder.mark_wait_end();
 
     // Check if this is the first turn (no assistant message in history yet)

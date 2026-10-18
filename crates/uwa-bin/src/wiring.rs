@@ -254,9 +254,13 @@ pub async fn run_with(config_path: PathBuf, cdp_url: &str) -> anyhow::Result<()>
     .with_history(history)
     .with_pinning(pinning)
     .with_rate_limiters(Arc::new(rate));
-if let Some(c) = cache {
-    state = state.with_cache(c);
-}
+    if let Some(c) = cache {
+        state = state.with_cache(c);
+    }
+    let verification = Arc::new(uwa_api::verification::VerificationStore::new(
+        Duration::from_secs(30 * 60),
+    ));
+    state = state.with_verification(verification.clone());
     if let Some(log) = events {
         state = state.with_events(log);
     }
@@ -270,6 +274,25 @@ if let Some(c) = cache {
             "off"
         }
     );
+
+    {
+        let vs = verification.clone();
+        let stop = shutdown.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(120));
+            loop {
+                tokio::select! {
+                    _ = stop.wait() => break,
+                    _ = tick.tick() => {
+                        let n = vs.sweep().await;
+                        if n > 0 {
+                            tracing::debug!(removed = n, "verification sweep");
+                        }
+                    }
+                }
+            }
+        });
+    }
 
     // HTTP API.
     let addr: SocketAddr = format!("{}:{}", config.server.bind, config.server.port).parse()?;

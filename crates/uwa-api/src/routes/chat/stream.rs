@@ -93,6 +93,25 @@ pub fn stream_response(
                     // and then [DONE]. Do not include finish_reason: "error"
                     // as it's not a valid enum value (valid: stop, length,
                     // tool_calls, content_filter, function_call).
+                    let (_, error_type, error_code) = e.openai_shape();
+                    let mut error = json!({
+                        "message": e.to_string(),
+                        "type": error_type,
+                        "code": error_code,
+                    });
+                    if let uwa_core::UwaError::HumanVerificationRequired {
+                        provider,
+                        tab_id,
+                        url,
+                    } = &e
+                    {
+                        error["verification"] = json!({
+                            "provider": provider,
+                            "tab_id": tab_id,
+                            "url": url,
+                            "action": "Complete the challenge manually in the logged-in Chromium tab, then retry the request once.",
+                        });
+                    }
                     let payload = json!({
                         "id": stream_id,
                         "object": "chat.completion.chunk",
@@ -102,7 +121,7 @@ pub fn stream_response(
                             "index": 0,
                             "delta": {}
                         }],
-                        "error": { "message": e.to_string() }
+                        "error": error
                     });
                     if tx
                         .send(Ok(Event::default().data(payload.to_string())))

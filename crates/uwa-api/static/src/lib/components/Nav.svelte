@@ -10,6 +10,7 @@
     { path: '/recorder',   label: 'Recorder' },
     { path: '/history',    label: 'History' },
     { path: '/sessions',   label: 'Sessions' },
+    { path: '/verification', label: 'Verification' },
     { path: '/config',     label: 'Config' },
     { path: '/logs',       label: 'Logs' },
     { path: '/events',     label: 'Events' },

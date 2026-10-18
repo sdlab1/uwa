@@ -104,6 +104,8 @@ pub struct RuntimeServices {
     /// Response cache. `None` when `[cache].enabled = false`. When
     /// present, only requests with `temperature = 0` consult it.
     pub cache: Option<Arc<crate::cache::ResponseCache>>,
+    /// Pending challenge pages, per tab.
+    pub verification: Option<Arc<crate::verification::VerificationStore>>,
 }
 
 impl Default for RuntimeServices {
@@ -120,6 +122,9 @@ impl Default for RuntimeServices {
             events: None,
             rate_limiters: Arc::new(ProviderRateLimiters::new()),
             cache: None,
+            verification: Some(Arc::new(crate::verification::VerificationStore::new(
+                std::time::Duration::from_secs(30 * 60),
+            ))),
         }
     }
 }
@@ -198,10 +203,7 @@ impl AppState {
         self
     }
 
-    pub fn with_rate_limiters(
-        mut self,
-        rl: Arc<ProviderRateLimiters>,
-    ) -> Self {
+    pub fn with_rate_limiters(mut self, rl: Arc<ProviderRateLimiters>) -> Self {
         let mut rt = (*self.runtime).clone();
         rt.rate_limiters = rl;
         self.runtime = Arc::new(rt);
@@ -211,6 +213,20 @@ impl AppState {
     pub fn with_cache(mut self, cache: Arc<crate::cache::ResponseCache>) -> Self {
         let mut rt = (*self.runtime).clone();
         rt.cache = Some(cache);
+        self.runtime = Arc::new(rt);
+        self
+    }
+
+    pub fn with_verification(mut self, v: Arc<crate::verification::VerificationStore>) -> Self {
+        let mut rt = (*self.runtime).clone();
+        rt.verification = Some(v);
+        self.runtime = Arc::new(rt);
+        self
+    }
+
+    pub fn without_verification(mut self) -> Self {
+        let mut rt = (*self.runtime).clone();
+        rt.verification = None;
         self.runtime = Arc::new(rt);
         self
     }

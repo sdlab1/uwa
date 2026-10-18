@@ -1203,9 +1203,7 @@ fn url_glob_matches(pattern: &str, url: &url::Url) -> bool {
 /// live; a bucket that has been idle since the last check reflects the
 /// refill it earned in between, which is exactly what the UI wants to
 /// show.
-pub async fn rate_limits(
-    State(state): State<AppState>,
-) -> ApiResult<Json<serde_json::Value>> {
+pub async fn rate_limits(State(state): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
     let rl = &state.runtime.rate_limiters;
     let mut providers = Vec::new();
     for name in rl.providers() {
@@ -1233,9 +1231,7 @@ pub async fn rate_limits(
 ///
 /// Always 200. When the cache is disabled, returns `{ "enabled": false }`
 /// so the dashboard can hide the card without a separate probe.
-pub async fn cache_stats(
-    State(state): State<AppState>,
-) -> ApiResult<Json<serde_json::Value>> {
+pub async fn cache_stats(State(state): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
     match &state.runtime.cache {
         Some(c) => Ok(Json(serde_json::to_value(c.stats()).unwrap_or_default())),
         None => Ok(Json(serde_json::json!({ "enabled": false }))),
@@ -1244,12 +1240,58 @@ pub async fn cache_stats(
 
 /// `POST /admin/cache/clear` — drop every entry. Lifetime counters
 /// survive, so the hit-rate panel keeps a useful number.
-pub async fn cache_clear(
-    State(state): State<AppState>,
-) -> ApiResult<Json<serde_json::Value>> {
+pub async fn cache_clear(State(state): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
     let removed = match &state.runtime.cache {
         Some(c) => c.clear(),
         None => 0,
     };
     Ok(Json(serde_json::json!({ "removed": removed })))
+}
+
+// ---------- verification ----------
+
+/// `GET /admin/verification` — pending challenge pages, newest first.
+pub async fn verification_list(
+    State(state): State<AppState>,
+) -> ApiResult<Json<serde_json::Value>> {
+    match &state.runtime.verification {
+        Some(v) => {
+            let list = v.list().await;
+            Ok(Json(serde_json::json!({
+                "available": true,
+                "pending": list,
+            })))
+        }
+        None => Ok(Json(serde_json::json!({
+            "available": false,
+            "pending": [],
+        }))),
+    }
+}
+
+/// `POST /admin/verification/:tab/resolved` — mark a tab as solved.
+/// Purely a UI flag; the pipeline re-probes on the next request.
+pub async fn verification_resolve(
+    State(state): State<AppState>,
+    Path(tab): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let Some(v) = &state.runtime.verification else {
+        return Err(UwaError::Internal("verification store not configured".into()).into());
+    };
+    let ok = v.resolve(&tab).await;
+    if !ok {
+        return Err(UwaError::BadRequest(format!("no pending challenge for tab `{tab}`")).into());
+    }
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// `POST /admin/verification/clear` — drop every pending entry.
+pub async fn verification_clear(
+    State(state): State<AppState>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let n = match &state.runtime.verification {
+        Some(v) => v.clear().await,
+        None => 0,
+    };
+    Ok(Json(serde_json::json!({ "removed": n })))
 }

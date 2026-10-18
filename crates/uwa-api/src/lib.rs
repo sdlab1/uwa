@@ -18,6 +18,7 @@ pub mod recorder;
 pub mod routes;
 pub mod routing;
 pub mod state;
+pub mod verification;
 
 pub use error::ApiError;
 pub use state::{AppState, ProviderRegistry};
@@ -315,7 +316,19 @@ pub fn router(state: AppState) -> Router {
         .route("/admin/events/stream", get(routes::admin::events_stream))
         .route("/admin/rate-limits", get(routes::admin::rate_limits))
         .route("/admin/cache", get(routes::admin::cache_stats))
-        .route("/admin/cache/clear", post(routes::admin::cache_clear));
+        .route("/admin/cache/clear", post(routes::admin::cache_clear))
+        .route(
+            "/admin/verification",
+            get(routes::status::verification_status),
+        )
+        .route(
+            "/admin/verification/:tab/resolved",
+            post(routes::admin::verification_resolve),
+        )
+        .route(
+            "/admin/verification/clear",
+            post(routes::admin::verification_clear),
+        );
 
     // Layer order: the last `.layer` is outermost and runs first. The origin
     // guard must reject a hostile browser request before anything else

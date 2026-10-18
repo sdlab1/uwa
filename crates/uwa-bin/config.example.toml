@@ -282,6 +282,29 @@ drain_secs = 30
 # capacity = 256
 # stream_from_cache = true
 
+# ---------- Challenge detection (Cloudflare, interstitials) ----------
+#
+# UWA detects Cloudflare interstitial challenges and Turnstile-style
+# blocks by:
+#   1. The `cf-mitigated: challenge` response header (primary signal).
+#   2. URL path containing `/cdn-cgi/challenge-platform/` (excluding
+#      Turnstile widget scripts and `/scripts/jsd/`).
+#   3. DOM markers: `#challenge-form`, `#challenge-stage`,
+#      `cf-chl-*` tokens, and the "Checking your browser..." title.
+#
+# When a challenge is detected the API returns 409 Conflict with
+# `code: "human_verification_required"` and a `verification` object
+# containing the provider, tab_id, url, and recovery action.
+#
+# Detection is always on unless explicitly disabled. `auto_wait_ms`
+# governs how long (if at all) the pipeline will wait for a managed
+# challenge to solve itself in-browser before giving up.
+
+[challenge]
+detect = true
+auto_wait_ms = 15000  # 15 seconds; 0 = never wait
+poll_ms = 500         # must be 50-5000
+
 # ---------- Timing (human-like pacing) ----------
 #
 # How much delay to add between DOM actions. Not fingerprint evasion —

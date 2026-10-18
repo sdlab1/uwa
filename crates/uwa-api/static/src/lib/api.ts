@@ -1,6 +1,7 @@
 import type {
   ChatRequest, ChatResponse, HealthResp, HistoryResp, ModelList, PoolStatus,
   ProviderMap, ReadyResp, SelectorTestResp, SessionsResp, StatsResp,
+  VerificationResp,
   RegistryInfo,
   ProfileListResp,
   RecorderStatus, RecorderStopResponse,
@@ -96,6 +97,7 @@ export function getHistory(q: HistoryQuery = {}): Promise<HistoryResp> {
 export const getHistoryRecord = (id: string) =>
   request<unknown>(`/admin/history/${encodeURIComponent(id)}`);
 
+export const getVerification = () => request<VerificationResp>('/admin/verification');
 export const getSessions = () => request<SessionsResp>('/admin/sessions');
 
 export const dropSession = (id: string) =>
@@ -217,9 +219,17 @@ export async function chatStream(
       const payload = dataLines.join('\n');
       if (payload === '[DONE]') return acc;
 
-      let ev: { choices?: Array<{ delta?: { content?: string; tool_calls?: unknown[] } }> };
+      let ev: {
+        choices?: Array<{ delta?: { content?: string; tool_calls?: unknown[] } }>;
+        error?: { message?: string; code?: string; type?: string; verification?: unknown };
+      };
       try { ev = JSON.parse(payload); } catch { continue; }
       h.onChunk?.(ev);
+      if (ev.error) {
+        const code = ev.error.code ?? 'stream_error';
+        const status = code === 'human_verification_required' ? 409 : 500;
+        throw new ApiError(status, code, ev.error.message ?? 'Streaming request failed');
+      }
 
       const delta = ev.choices?.[0]?.delta;
       if (!delta) continue;

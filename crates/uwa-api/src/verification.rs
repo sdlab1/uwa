@@ -4,8 +4,8 @@
 //! solve it, forge clearance state, or alter Cloudflare's decision.
 
 use serde_json::Value;
-use uwa_core::{NetworkEvent, Page, TabId, UwaError};
 use tokio::sync::broadcast;
+use uwa_core::{NetworkEvent, Page, TabId, UwaError};
 
 const DOM_PROBE: &str = r#"(() => {
   const title = (document.title || '').toLowerCase();
@@ -26,9 +26,62 @@ pub struct PageVerification {
     pub signals: Vec<String>,
 }
 
+/// Challenge categories for the verification store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChallengeKind {
+    Cloudflare,
+    Generic,
+}
+
+impl ChallengeKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Cloudflare => "cloudflare",
+            Self::Generic => "generic",
+        }
+    }
+}
+
+/// Structured info about a detected challenge, stored per-tab for the dashboard.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ChallengeInfo {
+    pub kind: ChallengeKind,
+    pub url: String,
+    pub tab: String,
+    pub reason: String,
+    /// Milliseconds since Unix epoch.
+    pub detected_at_ms: u64,
+}
+
+/// Convert a `PageVerification` (signal list) into a structured `ChallengeInfo`.
+pub fn info_from_signals(pv: &PageVerification, tab: &str) -> ChallengeInfo {
+    let is_cloudflare = pv.signals.iter().any(|s| {
+        s.contains("challenge-platform")
+            || s.contains("challenge-form")
+            || s.contains("cf-browser-verification")
+            || s.contains("cf-chl")
+    });
+    let kind = if is_cloudflare {
+        ChallengeKind::Cloudflare
+    } else {
+        ChallengeKind::Generic
+    };
+    ChallengeInfo {
+        kind,
+        tab: tab.to_string(),
+        url: pv.url.clone(),
+        reason: pv.signals.join(", "),
+        detected_at_ms: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0),
+    }
+}
+
 /// Inspect the current top-level page without interacting with or solving any
-//! challenge. DOM and URL markers are kept specific to interstitial challenges
-//! to avoid mistaking regular Turnstile widgets or JavaScript Detections for a block.
+/// challenge. DOM and URL markers are kept specific to interstitial challenges
+/// to avoid mistaking regular Turnstile widgets or JavaScript Detections for a block.
 pub async fn inspect_page(page: &dyn Page) -> uwa_core::Result<PageVerification> {
     let url = page.url().await?.to_string();
     let mut signals = url_signals(&url);
@@ -55,10 +108,11 @@ pub async fn inspect_page(page: &dyn Page) -> uwa_core::Result<PageVerification>
     })
 }
 
-/// Per-request monitor. Its broadcast receiver is created before submitting
-//! the prompt so it can observe `cf-mitigated: challenge` responses even when
-//! the top-level document URL and DOM have not changed (for example, an XHR
-//! challenge). URL/DOM inspection remains the fallback for interstitial pages.
+/// Per-request monitor. Its broadcast receiver is created before
+/// submitting the prompt so it can observe `cf-mitigated: challenge`
+/// responses even when the top-level document URL and DOM have not
+/// changed (for example, an XHR challenge). URL/DOM inspection
+/// remains the fallback for interstitial pages.
 pub struct ChallengeMonitor {
     events: Option<broadcast::Receiver<NetworkEvent>>,
 }
@@ -87,7 +141,10 @@ impl ChallengeMonitor {
                         ..
                     }) => {
                         let url = if url.is_empty() {
-                            page.url().await.map(|url| url.to_string()).unwrap_or_default()
+                            page.url()
+                                .await
+                                .map(|url| url.to_string())
+                                .unwrap_or_default()
                         } else {
                             url
                         };
@@ -200,7 +257,9 @@ mod tests {
     #[test]
     fn detects_top_level_challenge_platform_url() {
         assert_eq!(
-            url_signals("https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/g/orchestrate"),
+            url_signals(
+                "https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/g/orchestrate"
+            ),
             vec!["url:challenge-platform".to_string()]
         );
         assert_eq!(
@@ -213,8 +272,14 @@ mod tests {
     fn does_not_flag_regular_cloudflare_fronted_site_by_url_alone() {
         assert!(url_signals("https://chat.deepseek.com/").is_empty());
         assert!(url_signals("https://example.com/cdn-cgi/trace").is_empty());
-        assert!(url_signals("https://example.com/cdn-cgi/challenge-platform/scripts/jsd/api.js").is_empty());
-        assert!(url_signals("https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/g/turnstile/frame").is_empty());
+        assert!(
+            url_signals("https://example.com/cdn-cgi/challenge-platform/scripts/jsd/api.js")
+                .is_empty()
+        );
+        assert!(url_signals(
+            "https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/g/turnstile/frame"
+        )
+        .is_empty());
     }
 
     #[test]
@@ -239,6 +304,7 @@ mod tests {
         let mut monitor = ChallengeMonitor::new(&page).await;
         page.network_sender()
             .send(NetworkEvent::ResponseBody {
+                request_id: "req_1".into(),
                 url: "https://chat.deepseek.com/api/conversation".into(),
                 body: "<!doctype html>challenge".into(),
                 mime: "text/html".into(),
@@ -254,5 +320,161 @@ mod tests {
             err,
             UwaError::HumanVerificationRequired { ref provider, .. } if provider == "deepseek"
         ));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Verification store
+// ---------------------------------------------------------------------------
+
+use std::collections::HashMap;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tokio::sync::RwLock;
+
+/// A detected challenge page, recorded for the dashboard.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PendingVerification {
+    pub info: crate::verification::ChallengeInfo,
+    pub resolved: bool,
+    pub resolved_at_ms: Option<u64>,
+}
+
+/// Per-tab record of "this tab is on a challenge page right now".
+/// The store is a convenience for the UI, not a control-flow gate.
+/// The pipeline decides what to do by probing the page (a fresh probe
+/// finds no challenge the moment the user solves it).
+pub struct VerificationStore {
+    inner: RwLock<HashMap<String, PendingVerification>>,
+    ttl: Duration,
+}
+
+impl VerificationStore {
+    pub fn new(ttl: Duration) -> Self {
+        Self {
+            inner: RwLock::new(HashMap::new()),
+            ttl,
+        }
+    }
+
+    pub async fn record(&self, info: crate::verification::ChallengeInfo) {
+        let mut g = self.inner.write().await;
+        g.insert(
+            info.tab.clone(),
+            PendingVerification {
+                info,
+                resolved: false,
+                resolved_at_ms: None,
+            },
+        );
+    }
+
+    pub async fn resolve(&self, tab: &str) -> bool {
+        let mut g = self.inner.write().await;
+        if let Some(e) = g.get_mut(tab) {
+            e.resolved = true;
+            e.resolved_at_ms = Some(now_ms());
+            true
+        } else {
+            false
+        }
+    }
+
+    pub async fn clear(&self) -> usize {
+        let mut g = self.inner.write().await;
+        let n = g.len();
+        g.clear();
+        n
+    }
+
+    pub async fn remove(&self, tab: &str) -> bool {
+        self.inner.write().await.remove(tab).is_some()
+    }
+
+    pub async fn list(&self) -> Vec<PendingVerification> {
+        let g = self.inner.read().await;
+        let mut out: Vec<PendingVerification> = g.values().cloned().collect();
+        out.sort_by(|a, b| b.info.detected_at_ms.cmp(&a.info.detected_at_ms));
+        out
+    }
+
+    pub async fn sweep(&self) -> usize {
+        let now = now_ms();
+        let ttl_ms = self.ttl.as_millis() as u64;
+        let mut g = self.inner.write().await;
+        let before = g.len();
+        g.retain(|_, e| now.saturating_sub(e.info.detected_at_ms) < ttl_ms);
+        before - g.len()
+    }
+
+    pub async fn len(&self) -> usize {
+        self.inner.read().await.len()
+    }
+
+    pub async fn is_empty(&self) -> bool {
+        self.inner.read().await.is_empty()
+    }
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod store_tests {
+    use super::*;
+    use crate::verification::ChallengeKind;
+
+    fn info(tab: &str, at: u64) -> crate::verification::ChallengeInfo {
+        crate::verification::ChallengeInfo {
+            kind: ChallengeKind::Generic,
+            url: "https://x/".into(),
+            tab: tab.into(),
+            reason: "test".into(),
+            detected_at_ms: at,
+        }
+    }
+
+    #[tokio::test]
+    async fn record_and_list() {
+        let s = VerificationStore::new(Duration::from_secs(60));
+        s.record(info("a", 100)).await;
+        s.record(info("b", 200)).await;
+        let list = s.list().await;
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].info.tab, "b");
+    }
+
+    #[tokio::test]
+    async fn resolve_sets_flag() {
+        let s = VerificationStore::new(Duration::from_secs(60));
+        s.record(info("a", 100)).await;
+        assert!(s.resolve("a").await);
+        assert!(!s.resolve("missing").await);
+        let list = s.list().await;
+        assert!(list[0].resolved);
+        assert!(list[0].resolved_at_ms.is_some());
+    }
+
+    #[tokio::test]
+    async fn remove_and_clear() {
+        let s = VerificationStore::new(Duration::from_secs(60));
+        s.record(info("a", 0)).await;
+        s.record(info("b", 0)).await;
+        assert!(s.remove("a").await);
+        assert_eq!(s.len().await, 1);
+        assert_eq!(s.clear().await, 1);
+        assert!(s.is_empty().await);
+    }
+
+    #[tokio::test]
+    async fn sweep_drops_old_entries() {
+        let s = VerificationStore::new(Duration::from_millis(10));
+        s.record(info("old", 1)).await;
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert_eq!(s.sweep().await, 1);
+        assert!(s.is_empty().await);
     }
 }

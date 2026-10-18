@@ -17,16 +17,18 @@ use std::path::{Path, PathBuf};
 use url::Url;
 use uwa_core::{Capabilities, UwaError};
 
+pub mod cache;
+pub mod challenge;
 pub mod features;
 pub mod groups;
 pub mod preset;
-pub mod cache;
 pub mod rate_limit;
 pub mod registry;
 pub mod timing;
 pub use timing::{TimingCfg, TimingProfile};
 
 pub use cache::CacheCfg;
+pub use challenge::ChallengeCfg;
 pub use features::{FilePasteCfg, MediaCfg, PromptPaddingCfg, ProxyCfg};
 pub use groups::{GroupCfg, GroupMember, GroupStrategy};
 pub use preset::{EffectiveProviderCfg, PresetCfg};
@@ -72,6 +74,10 @@ pub struct Config {
     /// Response cache — opt-in, off by default.
     #[serde(default)]
     pub cache: CacheCfg,
+
+    /// Challenge detection.
+    #[serde(default)]
+    pub challenge: ChallengeCfg,
 }
 
 /// One profile in `[profiles.<name>]`. The map key is the profile name.
@@ -619,6 +625,9 @@ impl Config {
 
         // 9. Response cache ranges (only when enabled).
         self.cache.validate().map_err(UwaError::Config)?;
+
+        // 10. Challenge detection ranges (only when enabled).
+        self.challenge.validate().map_err(UwaError::Config)?;
 
         Ok(())
     }
