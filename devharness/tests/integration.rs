@@ -2322,3 +2322,239 @@ fn section35_iterate_cache_is_test_keyed() {
     sb.run_ok(&["commit"]);
     sb.run_ok(&["merge"]);
 }
+
+/// P7-2.3: ранний выход мутационного гейта — «вердикт, а не красивый отчёт».
+/// cargo-mutants раннего выхода не имеет, но пишет live-протокол:
+/// mutants.out/{mutants.json,missed,caught,timeout,unviable}.txt (append)
+/// до/во время прогона. devh (MUTATE_EARLY=1) читает их раз в секунду.
+/// DOOM: missed >= (total-unviable)*(100-MIN_KILL)/100+1 — kill-rate
+/// недостижим (работает без --shuffle); RED_MIN_KILL=100 → первый выживший.
+/// SAMPLE: k=⌈3/(1-MIN_KILL/100)⌉ убитых без missed — только с --shuffle.
+/// Стоп = SIGINT группе (cargo-mutants сам откатывает мутанта), затем
+/// проверка маркеров `~ changed by cargo-mutants ~`: дерево в фазе гейта
+/// грязное, ремонт = git apply -R свежих диффов, не checkout.
+#[test]
+fn section37_early_exit_doom_sample_and_repair() {
+    // (а)+(d) DOOM: total=10, missed=2, MIN_KILL=90 → bound=2 → STOP, FAIL,
+    // частичные live-счётчики обязаны попасть в лог останова.
+    let sb = Sandbox::new("r37a");
+    sb.run_ok(&["init"]);
+    write_exec(
+        &sb.stubs.join("mut-doom.sh"),
+        r#"#!/usr/bin/env bash
+if [ "${HARNESS_MUTATE_EARLY:-0}" != "1" ]; then
+  echo "10 mutants tested in 1s: 8 caught, 2 missed"
+  exit 0
+fi
+mkdir -p mutants.out
+{ echo "["
+  i=0
+  while [ "$i" -lt 10 ]; do
+    printf '  {
+    "name": "m%s",
+    "file": "src/lib.rs"
+  },
+' "$i"
+    i=$((i+1))
+  done
+  echo "]"
+} > mutants.out/mutants.json
+printf 'm3 src/lib.rs:1:1
+m7 src/lib.rs:2:1
+' >> mutants.out/missed.txt
+i=0
+while [ "$i" -lt 8 ]; do echo "m$i caught" >> mutants.out/caught.txt; i=$((i+1)); done
+echo "Found 10 mutants to test"
+sleep 30
+echo "never: tail must not run"
+"#,
+    );
+    sb.new_item(
+        "doom item",
+        "спека\nRED: test -f done.txt || { printf 'assertion failed: no health payload\\n'; exit 1; }\n",
+        None,
+    );
+    let mut_doom = sb.stubs.join("mut-doom.sh").display().to_string();
+    let (ok, out) = sb.run_capture_env(
+        &["run"],
+        &[
+            (
+                "HARNESS_AGENT",
+                sb.stubs.join("stub.sh").display().to_string().as_str(),
+            ),
+            ("HARNESS_MUTATE", mut_doom.as_str()),
+            ("HARNESS_MUTATE_SCOPE", "."),
+            ("HARNESS_MUTATE_EARLY", "1"),
+            // load-гейт P5.5 — не предмет теста; на контендере он ловит 8.1>8.0
+            ("HARNESS_MUTATE_MAX_LOAD", "off"),
+        ],
+    );
+    assert!(!ok, "DOOM обязан валить прогон:\n{out}");
+    assert!(out.contains("STOP: DOOM"), "нет DOOM-останова:\n{out}");
+    assert!(
+        out.contains("kill-rate недостижим"),
+        "нет причины останова:\n{out}"
+    );
+    assert!(
+        out.contains("остановлено досрочно, проверено до останова: Mutants 10, killed 8, missed 2"),
+        "частичные live-счётчики обязаны попасть в лог:\n{out}"
+    );
+    assert!(
+        !out.contains("never: tail must not run"),
+        "хвост прогона обязан быть оборван:\n{out}"
+    );
+    // (d) маркеров мутанта не осталось — repair не шумит
+    assert!(
+        !out.contains("маркеры мутанта в дереве"),
+        "чистый SIGINT не оставляет маркеров:\n{out}"
+    );
+
+    // (б) SAMPLE: k=30 убитых без missed при --shuffle → STOP, Ok, дерево
+    // чистое — commit/merge проходят (E2E-проверка отсутствия отравления).
+    let sb2 = Sandbox::new("r37b");
+    sb2.run_ok(&["init"]);
+    write_exec(
+        &sb2.stubs.join("mut-sample.sh"),
+        r#"#!/usr/bin/env bash
+if [ "${HARNESS_MUTATE_EARLY:-0}" != "1" ]; then
+  echo "100 mutants tested in 1s: 100 caught, 0 missed"
+  exit 0
+fi
+mkdir -p mutants.out
+{ echo "["
+  i=0
+  while [ "$i" -lt 100 ]; do
+    printf '  {\n    "name": "m%s",\n    "file": "src/lib.rs"\n  },\n' "$i"
+    i=$((i+1))
+  done
+  echo "]"
+} > mutants.out/mutants.json
+i=0
+while [ "$i" -lt 30 ]; do echo "m$i caught" >> mutants.out/caught.txt; i=$((i+1)); done
+echo "Found 100 mutants to test"
+sleep 30
+echo "never: tail must not run"
+"#,
+    );
+    sb2.new_item(
+        "sample item",
+        "спека\nRED: test -f done.txt || { printf 'assertion failed: no health payload\\n'; exit 1; }\n",
+        None,
+    );
+    let mut_sample = format!("{} --shuffle", sb2.stubs.join("mut-sample.sh").display());
+    let (ok, out) = sb2.run_capture_env(
+        &["run"],
+        &[
+            (
+                "HARNESS_AGENT",
+                sb2.stubs.join("stub.sh").display().to_string().as_str(),
+            ),
+            ("HARNESS_MUTATE", mut_sample.as_str()),
+            ("HARNESS_MUTATE_SCOPE", "."),
+            ("HARNESS_MUTATE_EARLY", "1"),
+            ("HARNESS_MUTATE_MAX_LOAD", "off"),
+        ],
+    );
+    assert!(ok, "SAMPLE — это Ok, не Fail:\n{out}");
+    assert!(
+        out.contains("STOP: SAMPLE") && out.contains("rule-of-three"),
+        "нет SAMPLE-останова:\n{out}"
+    );
+    assert!(
+        !out.contains("never: tail must not run"),
+        "хвост прогона обязан быть оборван:\n{out}"
+    );
+    // дерево чистое после останова — commit/merge обязаны пройти
+    sb2.run_ok(&["commit"]);
+    sb2.run_ok(&["merge"]);
+
+    // (в) флаг выключен (MUTATE_EARLY=0): никакого STOP, полный итог,
+    // вердикт по kill-rate как раньше
+    let sb3 = Sandbox::new("r37c");
+    sb3.run_ok(&["init"]);
+    write_exec(
+        &sb3.stubs.join("mut-early-off.sh"),
+        "#!/usr/bin/env bash\necho \"10 mutants tested in 1s: 8 caught, 2 missed\"\n",
+    );
+    sb3.new_item(
+        "early off item",
+        "спека\nRED: test -f done.txt || { printf 'assertion failed: no health payload\\n'; exit 1; }\n",
+        None,
+    );
+    let mut_off = sb3.stubs.join("mut-early-off.sh").display().to_string();
+    let (ok, out) = sb3.run_capture_env(
+        &["run"],
+        &[
+            (
+                "HARNESS_AGENT",
+                sb3.stubs.join("stub.sh").display().to_string().as_str(),
+            ),
+            ("HARNESS_MUTATE", mut_off.as_str()),
+            ("HARNESS_MUTATE_SCOPE", "."),
+            ("HARNESS_MUTATE_EARLY", "0"),
+            ("HARNESS_MUTATE_MAX_LOAD", "off"),
+        ],
+    );
+    assert!(!ok, "kill-rate 80% < 90% обязан FAIL:\n{out}");
+    assert!(!out.contains("STOP"), "ранний выход выключен:\n{out}");
+    assert!(
+        out.contains("FAIL: kill-rate 80% < 90%"),
+        "вердикт по-прежнему из итога:\n{out}"
+    );
+
+    // (е) жёсткий случай: мутант остался в tracked-файле — repair через
+    // git apply -R свежего диффа; poisoned-файл = FAIL
+    let sb4 = Sandbox::new("r37d");
+    sb4.run_ok(&["init"]);
+    write_exec(
+        &sb4.stubs.join("mut-poison.sh"),
+        r#"#!/usr/bin/env bash
+mkdir -p mutants.out/diff
+{ echo "["; printf '  {\n    "name": "m%s",\n    "file": "b.txt"\n  },\n' 0; printf '  {\n    "name": "m%s",\n    "file": "b.txt"\n  },\n' 1; echo "]" ; } > mutants.out/mutants.json
+printf 'm0 b.txt:1:1\nm1 b.txt:1:1\n' >> mutants.out/missed.txt
+echo "Found 2 mutants to test"
+printf 'base\n/* ~ changed by cargo-mutants ~ */\n' > b.txt
+git diff b.txt > mutants.out/diff/b_line_1_col_1.diff
+sleep 30
+"#,
+    );
+    sb4.new_item(
+        "poison item",
+        "спека\nRED: test -f done.txt || { printf 'assertion failed: no health payload\\n'; exit 1; }\n",
+        None,
+    );
+    let mut_poison = sb4.stubs.join("mut-poison.sh").display().to_string();
+    let (ok, out) = sb4.run_capture_env(
+        &["run"],
+        &[
+            (
+                "HARNESS_AGENT",
+                sb4.stubs.join("stub.sh").display().to_string().as_str(),
+            ),
+            ("HARNESS_MUTATE", mut_poison.as_str()),
+            ("HARNESS_MUTATE_SCOPE", "."),
+            ("HARNESS_MUTATE_EARLY", "1"),
+            ("HARNESS_MUTATE_MAX_LOAD", "off"),
+        ],
+    );
+    assert!(!ok, "DOOM на 2/2 missed обязан FAIL:\n{out}");
+    assert!(
+        out.contains("STOP-repair: маркеры мутанта в дереве: b.txt"),
+        "маркер обязан быть найден:\n{out}"
+    );
+    assert!(
+        out.contains("git apply -R"),
+        "ремонт обязан идти через reverse-apply:\n{out}"
+    );
+    assert!(
+        !out.contains("маркеры остались"),
+        "дифф обязан починить b.txt:\n{out}"
+    );
+    let wt4 = worktree_entry(&sb4.git_out(&["worktree", "list", "--porcelain"]))
+        .unwrap_or_else(|| unreachable!());
+    let b = fs::read_to_string(wt4.join("b.txt")).unwrap_or_else(|_| unreachable!());
+    assert_eq!(
+        b, "base\n",
+        "b.txt обязан вернуться к оригиналу, got: {b:?}"
+    );
+}

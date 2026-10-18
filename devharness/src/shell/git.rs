@@ -364,6 +364,55 @@ pub fn ls_remote_ok(root: &Path, remote: &str) -> bool {
     git_ok(root, &["ls-remote", "-q", remote, "HEAD"])
 }
 
+/// P7-2.3: файлы дерева с маркером cargo-mutants (`/* ~ changed by ... */`) —
+/// остаётся, если прогон убит до revert'а. Только tracked-файлы: мутант
+/// мутирует и так только исходники из индекса.
+pub fn mutant_marked_files(wt: &Path) -> Vec<String> {
+    git_out(wt, &["grep", "-l", "-F", crate::core::early::MARKER])
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// P7-2.3: ремонт после жёсткой остановки. Дерево в фазе гейта ГРЯЗНОЕ
+/// (коммит идёт после лестницы), `git checkout` запрещён — единственный
+/// честный путь: `git apply -R` свежих диффов из mutants.out/diff.
+/// Дифф применяется только если его контекст совпал (то есть мутант ещё в
+/// дереве), порядок — от свежих к старым (применён может быть последний).
+/// Возвращает (отремонтированные, оставшиеся с маркером).
+pub fn revert_mutant_diffs(wt: &Path, out_dir: &Path) -> (Vec<String>, Vec<String>) {
+    let diff_dir = out_dir.join("diff");
+    let mut diffs: Vec<(std::time::SystemTime, PathBuf)> = std::fs::read_dir(&diff_dir)
+        .map(|rd| {
+            rd.filter_map(|e| e.ok())
+                .filter_map(|e| {
+                    let p = e.path();
+                    let m = e.metadata().ok()?;
+                    Some((m.modified().ok()?, p))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    diffs.sort_by_key(|(t, _)| std::cmp::Reverse(*t));
+    let mut repaired: Vec<String> = Vec::new();
+    for (_, path) in diffs {
+        if git_ok(wt, &["apply", "-R", "--check", &path.to_string_lossy()])
+            && git_ok(wt, &["apply", "-R", &path.to_string_lossy()])
+        {
+            repaired.push(
+                path.file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string(),
+            );
+        }
+    }
+    let left = mutant_marked_files(wt);
+    (repaired, left)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -384,6 +433,45 @@ mod tests {
         let _ = git(d.path(), &["commit", "-qm", "base"]);
     }
 
+    #[test]
+    fn mutant_markers_grep_and_repair_via_reverse_diff() {
+        // P7-2.3: жёсткий SIGKILL оставил мутанта в tracked-файле;
+        // ремонт = `git apply -R` свежего диффа (дерево грязное, checkout нельзя).
+        let d = repo();
+        let _ = std::fs::create_dir_all(d.path().join("src"));
+        let _ = std::fs::write(d.path().join("src/lib.rs"), "fn a() { 1 }\n");
+        commit_all(&d);
+        let out_dir = d.path().join("mutants.out");
+        let _ = std::fs::create_dir_all(out_dir.join("diff"));
+        // «мутант»: поменяли тело + маркер, дифф сохранён ДО правки-ремонта
+        std::fs::write(
+            d.path().join("src/lib.rs"),
+            "fn a() { 2 } /* ~ changed by cargo-mutants ~ */\n",
+        )
+        .unwrap_or_else(|_| unreachable!());
+        let mut c = Command::new("git");
+        let o = c
+            .args(["diff", "src/lib.rs"])
+            .current_dir(d.path())
+            .output()
+            .unwrap_or_else(|_| unreachable!());
+        std::fs::write(
+            out_dir.join("diff/x_line_1_col_1.diff"),
+            String::from_utf8_lossy(&o.stdout).as_bytes(),
+        )
+        .unwrap_or_else(|_| unreachable!());
+        assert_eq!(
+            mutant_marked_files(d.path()),
+            vec!["src/lib.rs".to_string()]
+        );
+        let (done, left) = revert_mutant_diffs(d.path(), &out_dir);
+        assert_eq!(done.len(), 1, "{done:?}");
+        assert!(left.is_empty(), "маркер обязан уйти: {left:?}");
+        assert_eq!(
+            std::fs::read_to_string(d.path().join("src/lib.rs")).unwrap_or_default(),
+            "fn a() { 1 }\n"
+        );
+    }
     #[test]
     fn scoped_glob_matches_files_inside_src() {
         let d = repo();

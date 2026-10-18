@@ -138,6 +138,7 @@ pub fn init(root: &Path) -> anyhow::Result<()> {
     );
     c += &format!("MUTATE_SCOPE='{mutate_scope}'  # какие пути считать «прод-кодом» для мутаций\n");
     c += &format!("MIN_KILL={min_kill}           # минимальный kill-rate, %\n");
+    c += "MUTATE_EARLY=0            # P7-2.3 ранний выход: DOOM (kill-rate недостижим) всегда, SAMPLE (rule-of-three ≥95%) — только с --shuffle в шаблоне\n";
     c += "RED_MUTATE=''  # контроль red-теста: шаблон мутантов с {test} и {diff} (пусто = выкл)\n";
     c += &format!("RED_MIN_KILL={min_kill}      # минимальный kill-rate именно red-теста, %\n");
     c += "RED_EXPECT=''      # P7 red.expect: regex ОЖИДАЕМОЙ ошибки red-фазы (глобальный дефолт; пер-таск — строка спеки RED-EXPECT: или маркер '# red-expect:' в red.cmd). Пусто = выкл: любой exit≠0 на pre считается RED\n";
@@ -169,10 +170,15 @@ pub fn init(root: &Path) -> anyhow::Result<()> {
         std::fs::create_dir_all(parent).ok();
     }
     let mut text = std::fs::read_to_string(&excl).unwrap_or_default();
-    if !text.lines().any(|l| l.trim() == ".harness/") {
-        text += ".harness/\n";
-        std::fs::write(&excl, text)?;
+    // mutants.out/ — live-протокол cargo-mutants лежит в рабочем дереве
+    // (--in-place); без exclude `devh commit` (git add -A) утащит его в
+    // фичу-ветку. info/exclude общий для всех worktrees репозитория.
+    for entry in [".harness/", "mutants.out/"] {
+        if !text.lines().any(|l| l.trim() == entry) {
+            text += &format!("{entry}\n");
+        }
     }
+    std::fs::write(&excl, text)?;
 
     println!("{}OK init: {}{}", col.g, conf.display(), col.z);
     if verify.is_empty() {

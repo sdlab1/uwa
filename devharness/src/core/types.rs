@@ -38,6 +38,9 @@ pub struct MutateCfg {
     pub tool: String,
     pub scope: String,
     pub min_kill: u32,
+    /// P7-2.3: ранний выход — DOOM (kill-rate недостижим) / SAMPLE
+    /// (rule-of-three при --shuffle). По умолчанию выключен.
+    pub early: bool,
 }
 
 #[derive(Debug, Clone)]

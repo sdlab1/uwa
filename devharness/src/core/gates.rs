@@ -824,6 +824,7 @@ mod tests {
                 tool: "muex".into(),
                 scope: "lib".into(),
                 min_kill: 90,
+                early: false,
             }),
             ..Default::default()
         }
