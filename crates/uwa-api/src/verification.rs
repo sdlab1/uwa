@@ -310,12 +310,15 @@ mod tests {
                 mime: "text/html".into(),
                 cf_mitigated_challenge: true,
             })
-            .expect("monitor subscribes before the response is sent");
+            .unwrap_or_else(|_| unreachable!("monitor subscribes before the response is sent"));
 
-        let err = monitor
+        let err = match monitor
             .ensure_clear(&page, "deepseek", &TabId::from_raw("tab_1"))
             .await
-            .expect_err("challenge response must stop the request");
+        {
+            Err(err) => err,
+            Ok(_) => unreachable!("challenge response must stop the request"),
+        };
         assert!(matches!(
             err,
             UwaError::HumanVerificationRequired { ref provider, .. } if provider == "deepseek"
@@ -393,7 +396,7 @@ impl VerificationStore {
     pub async fn list(&self) -> Vec<PendingVerification> {
         let g = self.inner.read().await;
         let mut out: Vec<PendingVerification> = g.values().cloned().collect();
-        out.sort_by(|a, b| b.info.detected_at_ms.cmp(&a.info.detected_at_ms));
+        out.sort_by_key(|e| std::cmp::Reverse(e.info.detected_at_ms));
         out
     }
 
@@ -403,7 +406,7 @@ impl VerificationStore {
         let mut g = self.inner.write().await;
         let before = g.len();
         g.retain(|_, e| now.saturating_sub(e.info.detected_at_ms) < ttl_ms);
-        before - g.len()
+        before.saturating_sub(g.len())
     }
 
     pub async fn len(&self) -> usize {
@@ -444,7 +447,7 @@ mod store_tests {
         s.record(info("b", 200)).await;
         let list = s.list().await;
         assert_eq!(list.len(), 2);
-        assert_eq!(list[0].info.tab, "b");
+        assert_eq!(list.first().map(|e| e.info.tab.as_str()), Some("b"));
     }
 
     #[tokio::test]
@@ -454,8 +457,9 @@ mod store_tests {
         assert!(s.resolve("a").await);
         assert!(!s.resolve("missing").await);
         let list = s.list().await;
-        assert!(list[0].resolved);
-        assert!(list[0].resolved_at_ms.is_some());
+        let first = list.first().unwrap_or_else(|| unreachable!("one entry"));
+        assert!(first.resolved);
+        assert!(first.resolved_at_ms.is_some());
     }
 
     #[tokio::test]

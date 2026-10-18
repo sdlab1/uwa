@@ -76,7 +76,7 @@ pub async fn verification_status(State(state): State<AppState>) -> Json<Value> {
                 continue;
             }
         };
-        scanned_tabs += 1;
+        scanned_tabs = scanned_tabs.saturating_add(1);
 
         if status.challenged {
             let provider = state

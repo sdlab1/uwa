@@ -105,12 +105,17 @@ pub fn stream_response(
                         url,
                     } = &e
                     {
-                        error["verification"] = json!({
-                            "provider": provider,
-                            "tab_id": tab_id,
-                            "url": url,
-                            "action": "Complete the challenge manually in the logged-in Chromium tab, then retry the request once.",
-                        });
+                        if let Some(obj) = error.as_object_mut() {
+                            obj.insert(
+                                "verification".to_string(),
+                                json!({
+                                    "provider": provider,
+                                    "tab_id": tab_id,
+                                    "url": url,
+                                    "action": "Complete the challenge manually in the logged-in Chromium tab, then retry the request once.",
+                                }),
+                            );
+                        }
                     }
                     let payload = json!({
                         "id": stream_id,

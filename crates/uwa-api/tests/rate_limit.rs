@@ -3,47 +3,75 @@
 use serde_json::json;
 use std::sync::Arc;
 use uwa_resilience::ProviderRateLimiters;
-use uwa_testkit::{
-    config::TEST_AUTH_HEADER,
-    AppBuilder, MockProvider, MockTransport,
-};
+use uwa_testkit::{config::TEST_AUTH_HEADER, AppBuilder, MockProvider, MockTransport};
+
+fn ok<T, E: std::fmt::Debug>(r: Result<T, E>) -> T {
+    r.unwrap_or_else(|e| unreachable!("{e:?}"))
+}
+
+fn hstr<'a>(r: &'a axum_test::TestResponse, name: &str) -> &'a str {
+    r.headers()
+        .get(name)
+        .unwrap_or_else(|| unreachable!("header {name} missing"))
+        .to_str()
+        .unwrap_or_else(|e| unreachable!("header {name} not ASCII: {e}"))
+}
+
+fn field<'a>(v: &'a serde_json::Value, key: &str) -> &'a serde_json::Value {
+    v.get(key)
+        .unwrap_or_else(|| unreachable!("missing key {key} in {v}"))
+}
+
+fn jstr<'a>(v: &'a serde_json::Value, key: &str) -> &'a str {
+    v.get(key)
+        .and_then(|x| x.as_str())
+        .unwrap_or_else(|| unreachable!("string key {key} in {v}"))
+}
+
+fn jarr<'a>(v: &'a serde_json::Value, key: &str) -> &'a [serde_json::Value] {
+    v.get(key)
+        .and_then(|x| x.as_array())
+        .unwrap_or_else(|| unreachable!("array key {key} in {v}"))
+}
 
 fn keyed_config_rpm(rpm: f64, burst: u32) -> Arc<uwa_config::Config> {
-    Arc::new(
-        uwa_config::Config::load_from_str(&format!(
-            r##"
-            [server]
-            bind = "127.0.0.1"
-            port = 8080
-            api_key = "k"
+    Arc::new(ok(uwa_config::Config::load_from_str(&format!(
+        r##"
+        [server]
+        bind = "127.0.0.1"
+        port = 8080
+        api_key = "k"
 
-            [model_aliases]
-            "gpt-4o" = "chatgpt"
+        [model_aliases]
+        "gpt-4o" = "chatgpt"
 
-            [providers.chatgpt]
-            name = "chatgpt"
-            url_patterns = ["https://chatgpt.com/*"]
-            capabilities = {{ streams = true, tool_calls = false, vision = false }}
+        [providers.chatgpt]
+        name = "chatgpt"
+        url_patterns = ["https://chatgpt.com/*"]
+        capabilities = {{ streams = true, tool_calls = false, vision = false }}
 
-            [providers.chatgpt.selectors]
-            input = "#prompt"
-            send_button = "button.send"
-            assistant_message = "[data-role=assistant]"
+        [providers.chatgpt.selectors]
+        input = "#prompt"
+        send_button = "button.send"
+        assistant_message = "[data-role=assistant]"
 
-            [providers.chatgpt.rate_limit]
-            enabled = true
-            requests_per_minute = {rpm}
-            burst = {burst}
-            "##
-        ))
-        .unwrap(),
-    )
+        [providers.chatgpt.rate_limit]
+        enabled = true
+        requests_per_minute = {rpm}
+        burst = {burst}
+        "##
+    ))))
 }
 
 async fn app_with_limiter(rpm: f64, burst: u32) -> axum_test::TestServer {
     let cfg = keyed_config_rpm(rpm, burst);
-    let mut rl = ProviderRateLimiters::new();
-    rl = rl.with_limit("chatgpt", &cfg.providers["chatgpt"].rate_limit);
+    let rl = ProviderRateLimiters::new().with_limit(
+        "chatgpt",
+        &cfg.providers
+            .get("chatgpt")
+            .unwrap_or_else(|| unreachable!("chatgpt provider"))
+            .rate_limit,
+    );
     AppBuilder::new()
         .with_config(cfg)
         .with_transport(Arc::new(MockTransport::with_n_tabs(1)))
@@ -68,9 +96,9 @@ async fn under_budget_sets_rate_headers() {
     let s = app_with_limiter(60.0, 5).await;
     let r = chat(&s).await;
     r.assert_status_ok();
-    assert_eq!(r.header("x-ratelimit-limit").to_str().unwrap(), "60");
+    assert_eq!(hstr(&r, "x-ratelimit-limit"), "60");
     // One consumed of five.
-    assert_eq!(r.header("x-ratelimit-remaining").to_str().unwrap(), "4");
+    assert_eq!(hstr(&r, "x-ratelimit-remaining"), "4");
     // Reset header is present (value 0 when bucket is above 1).
     assert!(r.headers().get("x-ratelimit-reset").is_some());
 }
@@ -78,23 +106,22 @@ async fn under_budget_sets_rate_headers() {
 #[tokio::test]
 async fn exceeding_burst_returns_429_with_retry_after() {
     let s = app_with_limiter(60.0, 2).await;
-    let _ = chat(&s).await.assert_status_ok();
-    let _ = chat(&s).await.assert_status_ok();
+    chat(&s).await.assert_status_ok();
+    chat(&s).await.assert_status_ok();
     let r = chat(&s).await;
     r.assert_status_too_many_requests();
 
-    let hv = r.header("retry-after");
-    let ra = hv.to_str().unwrap();
-    let secs: u64 = ra.parse().expect("Retry-After is an integer");
+    let ra = hstr(&r, "retry-after");
+    let secs: u64 = ok(ra.parse());
     assert!((1..=2).contains(&secs), "{secs}");
 
-    assert_eq!(r.header("x-ratelimit-limit").to_str().unwrap(), "60");
-    assert_eq!(r.header("x-ratelimit-remaining").to_str().unwrap(), "0");
+    assert_eq!(hstr(&r, "x-ratelimit-limit"), "60");
+    assert_eq!(hstr(&r, "x-ratelimit-remaining"), "0");
 
     let v: serde_json::Value = r.json();
-    assert_eq!(v["error"]["code"], "rate_limited");
+    assert_eq!(jstr(field(&v, "error"), "code"), "rate_limited");
     assert!(
-        v["error"]["message"].as_str().unwrap().contains("retry after"),
+        jstr(field(&v, "error"), "message").contains("retry after"),
         "{v}"
     );
 }
@@ -102,30 +129,27 @@ async fn exceeding_burst_returns_429_with_retry_after() {
 #[tokio::test]
 async fn unlimited_provider_never_429s() {
     // Config without a rate_limit block: default is unlimited.
-    let cfg = Arc::new(
-        uwa_config::Config::load_from_str(
-            r##"
-            [server]
-            bind = "127.0.0.1"
-            port = 8080
-            api_key = "k"
+    let cfg = Arc::new(ok(uwa_config::Config::load_from_str(
+        r##"
+        [server]
+        bind = "127.0.0.1"
+        port = 8080
+        api_key = "k"
 
-            [model_aliases]
-            "gpt-4o" = "chatgpt"
+        [model_aliases]
+        "gpt-4o" = "chatgpt"
 
-            [providers.chatgpt]
-            name = "chatgpt"
-            url_patterns = ["https://chatgpt.com/*"]
-            capabilities = { streams = true, tool_calls = false, vision = false }
+        [providers.chatgpt]
+        name = "chatgpt"
+        url_patterns = ["https://chatgpt.com/*"]
+        capabilities = { streams = true, tool_calls = false, vision = false }
 
-            [providers.chatgpt.selectors]
-            input = "#prompt"
-            send_button = "button.send"
-            assistant_message = "[data-role=assistant]"
-            "##,
-        )
-        .unwrap(),
-    );
+        [providers.chatgpt.selectors]
+        input = "#prompt"
+        send_button = "button.send"
+        assistant_message = "[data-role=assistant]"
+        "##,
+    )));
     let s = AppBuilder::new()
         .with_config(cfg)
         .with_transport(Arc::new(MockTransport::with_n_tabs(1)))
@@ -144,48 +168,47 @@ async fn unlimited_provider_never_429s() {
 #[tokio::test]
 async fn admin_endpoint_reports_enabled_providers() {
     let s = app_with_limiter(20.0, 4).await;
-    let _ = chat(&s).await;
+    chat(&s).await;
     let r = s
         .get("/admin/rate-limits")
         .add_header("Authorization", TEST_AUTH_HEADER)
         .await;
     r.assert_status_ok();
     let v: serde_json::Value = r.json();
-    let ps = v["providers"].as_array().unwrap();
+    let ps = jarr(&v, "providers");
     assert_eq!(ps.len(), 1);
-    let p = &ps[0];
-    assert_eq!(p["provider"], "chatgpt");
-    assert_eq!(p["requests_per_minute"], 20.0);
-    assert_eq!(p["capacity"], 4.0);
-    assert!(p["remaining"].as_u64().unwrap() <= 4);
+    let p = ps
+        .first()
+        .unwrap_or_else(|| unreachable!("one provider entry"));
+    assert_eq!(jstr(p, "provider"), "chatgpt");
+    assert_eq!(field(p, "requests_per_minute").as_f64(), Some(20.0));
+    assert_eq!(field(p, "capacity").as_f64(), Some(4.0));
+    assert!(field(p, "remaining").as_u64().unwrap_or(0) <= 4);
 }
 
 #[tokio::test]
 async fn admin_endpoint_skips_unlimited() {
-    let cfg = Arc::new(
-        uwa_config::Config::load_from_str(
-            r##"
-            [server]
-            bind = "127.0.0.1"
-            port = 8080
-            api_key = "k"
+    let cfg = Arc::new(ok(uwa_config::Config::load_from_str(
+        r##"
+        [server]
+        bind = "127.0.0.1"
+        port = 8080
+        api_key = "k"
 
-            [model_aliases]
-            "gpt-4o" = "chatgpt"
+        [model_aliases]
+        "gpt-4o" = "chatgpt"
 
-            [providers.chatgpt]
-            name = "chatgpt"
-            url_patterns = ["https://chatgpt.com/*"]
-            capabilities = { streams = true, tool_calls = false, vision = false }
+        [providers.chatgpt]
+        name = "chatgpt"
+        url_patterns = ["https://chatgpt.com/*"]
+        capabilities = { streams = true, tool_calls = false, vision = false }
 
-            [providers.chatgpt.selectors]
-            input = "#prompt"
-            send_button = "button.send"
-            assistant_message = "[data-role=assistant]"
-            "##,
-        )
-        .unwrap(),
-    );
+        [providers.chatgpt.selectors]
+        input = "#prompt"
+        send_button = "button.send"
+        assistant_message = "[data-role=assistant]"
+        "##,
+    )));
     let s = AppBuilder::new()
         .with_config(cfg)
         .with_transport(Arc::new(MockTransport::with_n_tabs(1)))
@@ -193,14 +216,14 @@ async fn admin_endpoint_skips_unlimited() {
         .build()
         .server;
     // Touch the registry so it caches an unlimited limiter.
-    let _ = chat(&s).await;
+    chat(&s).await;
     let r = s
         .get("/admin/rate-limits")
         .add_header("Authorization", TEST_AUTH_HEADER)
         .await;
     r.assert_status_ok();
     let v: serde_json::Value = r.json();
-    assert_eq!(v["providers"].as_array().unwrap().len(), 0);
+    assert_eq!(jarr(&v, "providers").len(), 0);
 }
 
 #[tokio::test]
@@ -216,8 +239,8 @@ async fn streaming_request_gets_rate_headers() {
         }))
         .await;
     r.assert_status_ok();
-    assert_eq!(r.header("x-ratelimit-limit").to_str().unwrap(), "60");
-    assert_eq!(r.header("x-ratelimit-remaining").to_str().unwrap(), "2");
+    assert_eq!(hstr(&r, "x-ratelimit-limit"), "60");
+    assert_eq!(hstr(&r, "x-ratelimit-remaining"), "2");
 }
 
 #[tokio::test]
@@ -233,7 +256,7 @@ async fn messages_endpoint_honours_the_limiter() {
         }))
         .await;
     r.assert_status_ok();
-    assert_eq!(r.header("x-ratelimit-remaining").to_str().unwrap(), "0");
+    assert_eq!(hstr(&r, "x-ratelimit-remaining"), "0");
 
     let r = s
         .post("/v1/messages")

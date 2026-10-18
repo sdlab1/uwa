@@ -73,11 +73,7 @@ impl UwaMeta {
     }
 
     /// Non-stream final metadata — everything set.
-    pub fn complete(
-        conversation: ConversationId,
-        retry_count: u32,
-        tab: Option<String>,
-    ) -> Self {
+    pub fn complete(conversation: ConversationId, retry_count: u32, tab: Option<String>) -> Self {
         Self {
             conversation,
             retry_count,
@@ -147,11 +143,7 @@ pub fn attach(mut resp: Response, meta: &UwaMeta) -> Response {
 /// Build the OpenAI-shaped 429 with every rate-limit header the spec
 /// allows. Takes the decision info directly so the caller doesn't have
 /// to reach into `RateHeaders` machinery.
-pub fn rate_limited_response(
-    provider: &str,
-    retry_after_secs: u64,
-    limit: u32,
-) -> Response {
+pub fn rate_limited_response(provider: &str, retry_after_secs: u64, limit: u32) -> Response {
     let body = serde_json::json!({
         "error": {
             "message": format!(
@@ -206,10 +198,10 @@ mod tests {
         );
         let r = attach(empty_response(), &meta);
         let h = r.headers();
-        assert_eq!(header(&h, CONVERSATION).as_deref(), Some("conv_abc"));
-        assert_eq!(header(&h, RETRY_COUNT).as_deref(), Some("2"));
-        assert_eq!(header(&h, CACHE).as_deref(), Some("miss"));
-        assert_eq!(header(&h, TAB).as_deref(), Some("tab_xyz"));
+        assert_eq!(header(h, CONVERSATION).as_deref(), Some("conv_abc"));
+        assert_eq!(header(h, RETRY_COUNT).as_deref(), Some("2"));
+        assert_eq!(header(h, CACHE).as_deref(), Some("miss"));
+        assert_eq!(header(h, TAB).as_deref(), Some("tab_xyz"));
     }
 
     #[test]
@@ -217,15 +209,15 @@ mod tests {
         let meta = UwaMeta::complete(ConversationId::from_raw("conv_a"), 0, None);
         let r = attach(empty_response(), &meta);
         assert!(r.headers().get(TAB).is_none());
-        assert_eq!(header(&r.headers(), RETRY_COUNT).as_deref(), Some("0"));
+        assert_eq!(header(r.headers(), RETRY_COUNT).as_deref(), Some("0"));
     }
 
     #[test]
     fn stream_prefix_omits_retry_and_tab() {
         let m = UwaMeta::stream_prefix(ConversationId::from_raw("conv_s"));
         let r = attach(empty_response(), &m);
-        assert_eq!(header(&r.headers(), CONVERSATION).as_deref(), Some("conv_s"));
-        assert_eq!(header(&r.headers(), CACHE).as_deref(), Some("miss"));
+        assert_eq!(header(r.headers(), CONVERSATION).as_deref(), Some("conv_s"));
+        assert_eq!(header(r.headers(), CACHE).as_deref(), Some("miss"));
         assert!(r.headers().get(TAB).is_none());
     }
 
@@ -235,26 +227,30 @@ mod tests {
         assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS);
         let h = r.headers();
         assert_eq!(
-            h.get(axum::http::header::RETRY_AFTER).unwrap(),
-            "4"
+            header(h, axum::http::header::RETRY_AFTER).as_deref(),
+            Some("4")
         );
-        assert_eq!(h.get(RATE_LIMIT_LIMIT).unwrap(), "20");
-        assert_eq!(h.get(RATE_LIMIT_REMAINING).unwrap(), "0");
-        assert_eq!(h.get(RATE_LIMIT_RESET).unwrap(), "4");
+        assert_eq!(header(h, RATE_LIMIT_LIMIT).as_deref(), Some("20"));
+        assert_eq!(header(h, RATE_LIMIT_REMAINING).as_deref(), Some("0"));
+        assert_eq!(header(h, RATE_LIMIT_RESET).as_deref(), Some("4"));
     }
 
     #[test]
     fn attach_emits_rate_headers_when_present() {
-        let meta = UwaMeta::complete(ConversationId::from_raw("conv"), 0, None)
-            .with_rate(Some(RateHeaders {
+        let meta = UwaMeta::complete(ConversationId::from_raw("conv"), 0, None).with_rate(Some(
+            RateHeaders {
                 limit: 20,
                 remaining: 7,
                 reset_secs: 3,
-            }));
+            },
+        ));
         let r = attach(empty_response(), &meta);
-        assert_eq!(r.headers().get(RATE_LIMIT_LIMIT).unwrap(), "20");
-        assert_eq!(r.headers().get(RATE_LIMIT_REMAINING).unwrap(), "7");
-        assert_eq!(r.headers().get(RATE_LIMIT_RESET).unwrap(), "3");
+        assert_eq!(header(r.headers(), RATE_LIMIT_LIMIT).as_deref(), Some("20"));
+        assert_eq!(
+            header(r.headers(), RATE_LIMIT_REMAINING).as_deref(),
+            Some("7")
+        );
+        assert_eq!(header(r.headers(), RATE_LIMIT_RESET).as_deref(), Some("3"));
     }
 
     #[test]
@@ -268,10 +264,9 @@ mod tests {
 
     #[test]
     fn with_cache_overrides_the_default() {
-        let m = UwaMeta::stream_prefix(ConversationId::from_raw("conv"))
-            .with_cache(CACHE_HIT);
+        let m = UwaMeta::stream_prefix(ConversationId::from_raw("conv")).with_cache(CACHE_HIT);
         let r = attach(empty_response(), &m);
-        assert_eq!(r.headers().get(CACHE).unwrap(), "hit");
+        assert_eq!(header(r.headers(), CACHE).as_deref(), Some("hit"));
     }
 
     #[test]
@@ -288,10 +283,7 @@ mod tests {
             v.get("retry_count").and_then(|v| v.as_u64()).unwrap_or(999),
             3
         );
-        assert_eq!(
-            v.get("tab").and_then(|v| v.as_str()).unwrap_or(""),
-            "tab_z"
-        );
+        assert_eq!(v.get("tab").and_then(|v| v.as_str()).unwrap_or(""), "tab_z");
         assert!(v.get("conversation").is_none());
         assert!(v.get("cache").is_none());
     }

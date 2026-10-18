@@ -28,7 +28,7 @@ use uwa_tools::ToolDefinition;
 
 use crate::cache::{CachedOutcome, ResponseCache};
 use crate::error::ApiResult;
-use crate::headers::{self, CACHE_HIT, CACHE_MISS, RateHeaders, UwaMeta};
+use crate::headers::{self, RateHeaders, UwaMeta, CACHE_HIT, CACHE_MISS};
 use crate::metrics;
 use crate::state::AppState;
 use uwa_resilience::RateDecision;
@@ -128,10 +128,7 @@ pub async fn chat_completions(
     let cache = state.runtime.cache.clone();
     let cache_eligible = cache
         .as_ref()
-        .map(|c| {
-            c.is_eligible(&req)
-                && (!this_is_stream || c.stream_from_cache())
-        })
+        .map(|c| c.is_eligible(&req) && (!this_is_stream || c.stream_from_cache()))
         .unwrap_or(false);
 
     let cache_key = if cache_eligible {
@@ -154,13 +151,16 @@ pub async fn chat_completions(
             )
             .increment(1);
 
-            let conversation = uwa_session::conversation_id(&req.messages, hint.provider.as_deref());
+            let conversation =
+                uwa_session::conversation_id(&req.messages, hint.provider.as_deref());
             let meta = UwaMeta::stream_prefix(conversation).with_cache(CACHE_HIT);
 
             if this_is_stream {
                 let (tx, rx) = mpsc::channel::<pipeline::StreamEvent>(4);
                 let hit_prompt_tokens = hit.usage.prompt_tokens;
-                let _ = tx.send(pipeline::StreamEvent::Delta(hit.text.clone())).await;
+                let _ = tx
+                    .send(pipeline::StreamEvent::Delta(hit.text.clone()))
+                    .await;
                 let _ = tx
                     .send(pipeline::StreamEvent::Done {
                         finish: hit.finish,
@@ -212,7 +212,10 @@ pub async fn chat_completions(
     let limiter = state.runtime.rate_limiters.get(&provider_name);
     let rate_headers = if limiter.enabled() {
         match limiter.try_acquire().await {
-            RateDecision::Allowed { remaining, reset_secs } => Some(RateHeaders {
+            RateDecision::Allowed {
+                remaining,
+                reset_secs,
+            } => Some(RateHeaders {
                 limit: limiter.rpm().round() as u32,
                 remaining,
                 reset_secs,

@@ -118,7 +118,7 @@ impl RateLimiter {
             g.tokens -= 1.0;
             let remaining = g.tokens.floor().max(0.0) as u32;
             let reset_secs = if self.refill_per_sec > 0.0 {
-                (((self.capacity - g.tokens) / self.refill_per_sec).ceil() as u64).max(0)
+                ((self.capacity - g.tokens) / self.refill_per_sec).ceil() as u64
             } else {
                 0
             };
@@ -213,7 +213,10 @@ mod tests {
     async fn unlimited_always_allows() {
         let l = RateLimiter::unlimited();
         for _ in 0..1000 {
-            assert!(matches!(l.try_acquire().await, RateDecision::Allowed { .. }));
+            assert!(matches!(
+                l.try_acquire().await,
+                RateDecision::Allowed { .. }
+            ));
         }
     }
 
@@ -222,7 +225,10 @@ mod tests {
         let l = RateLimiter::new(&cfg(60.0, 3));
         for i in 0..3 {
             let d = l.try_acquire().await;
-            assert!(matches!(d, RateDecision::Allowed { .. }), "acquire #{i}: {d:?}");
+            assert!(
+                matches!(d, RateDecision::Allowed { .. }),
+                "acquire #{i}: {d:?}"
+            );
         }
         let d = l.try_acquire().await;
         assert!(matches!(d, RateDecision::Denied { .. }), "{d:?}");
@@ -240,7 +246,7 @@ mod tests {
             RateDecision::Denied { retry_after_secs } => {
                 assert!((1..=2).contains(&retry_after_secs), "{retry_after_secs}");
             }
-            _ => panic!("expected Denied, got {d:?}"),
+            _ => unreachable!("expected Denied, got {d:?}"),
         }
     }
 
@@ -251,12 +257,12 @@ mod tests {
         let l = RateLimiter::new(&cfg(60.0, 2));
         let _ = l.try_acquire().await;
         let _ = l.try_acquire().await;
+        assert!(matches!(l.try_acquire().await, RateDecision::Denied { .. }));
+        tokio::time::sleep(Duration::from_millis(1100)).await;
         assert!(matches!(
             l.try_acquire().await,
-            RateDecision::Denied { .. }
+            RateDecision::Allowed { .. }
         ));
-        tokio::time::sleep(Duration::from_millis(1100)).await;
-        assert!(matches!(l.try_acquire().await, RateDecision::Allowed { .. }));
     }
 
     #[tokio::test(start_paused = true)]
@@ -271,10 +277,7 @@ mod tests {
                 "burst #{i} should still be allowed"
             );
         }
-        assert!(matches!(
-            l.try_acquire().await,
-            RateDecision::Denied { .. }
-        ));
+        assert!(matches!(l.try_acquire().await, RateDecision::Denied { .. }));
     }
 
     #[tokio::test]
@@ -282,11 +285,11 @@ mod tests {
         let l = RateLimiter::new(&cfg(60.0, 5));
         match l.try_acquire().await {
             RateDecision::Allowed { remaining, .. } => assert_eq!(remaining, 4),
-            _ => panic!(),
+            _ => unreachable!(),
         }
         match l.try_acquire().await {
             RateDecision::Allowed { remaining, .. } => assert_eq!(remaining, 3),
-            _ => panic!(),
+            _ => unreachable!(),
         }
     }
 
@@ -298,13 +301,19 @@ mod tests {
             requests_per_minute: 0.2,
             burst: Some(1),
         });
-        assert!(matches!(l.try_acquire().await, RateDecision::Allowed { .. }));
+        assert!(matches!(
+            l.try_acquire().await,
+            RateDecision::Allowed { .. }
+        ));
         match l.try_acquire().await {
             RateDecision::Denied { retry_after_secs } => {
                 // Should be ~300 s, allow for rounding.
-                assert!((295..=305).contains(&retry_after_secs), "{retry_after_secs}");
+                assert!(
+                    (295..=305).contains(&retry_after_secs),
+                    "{retry_after_secs}"
+                );
             }
-            other => panic!("{other:?}"),
+            other => unreachable!("{other:?}"),
         }
     }
 

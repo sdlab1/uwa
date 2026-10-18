@@ -992,8 +992,12 @@ mod tests {
             "[providers.chatgpt.selectors]",
             "rate_limit = { enabled = true, requests_per_minute = 12, burst = 3 }\n\n[providers.chatgpt.selectors]",
         );
-        let cfg = Config::load_from_str(&toml).unwrap();
-        let rl = &cfg.providers["chatgpt"].rate_limit;
+        let cfg = Config::load_from_str(&toml).unwrap_or_else(|e| unreachable!("parse: {e}"));
+        let rl = &cfg
+            .providers
+            .get("chatgpt")
+            .unwrap_or_else(|| unreachable!("provider chatgpt"))
+            .rate_limit;
         assert!(rl.enabled);
         assert_eq!(rl.requests_per_minute, 12.0);
         assert_eq!(rl.burst, Some(3));
@@ -1005,7 +1009,10 @@ mod tests {
             "[providers.chatgpt.selectors]",
             "rate_limit = { enabled = true, requests_per_minute = 0 }\n\n[providers.chatgpt.selectors]",
         );
-        let e = Config::load_from_str(&toml).unwrap_err();
+        let e = match Config::load_from_str(&toml) {
+            Err(err) => err,
+            Ok(_) => unreachable!(),
+        };
         assert!(e.to_string().contains("requests_per_minute"), "{e}");
     }
 
@@ -1353,7 +1360,7 @@ mod tests {
     #[test]
     fn cache_section_parses() {
         let toml = format!("{SAMPLE}\n[cache]\nenabled = true\nttl_secs = 120\ncapacity = 64\n");
-        let cfg = Config::load_from_str(&toml).unwrap();
+        let cfg = Config::load_from_str(&toml).unwrap_or_else(|e| unreachable!("parse: {e}"));
         assert!(cfg.cache.enabled);
         assert_eq!(cfg.cache.ttl_secs, 120);
         assert_eq!(cfg.cache.capacity, 64);
@@ -1362,7 +1369,10 @@ mod tests {
     #[test]
     fn cache_bad_ttl_is_rejected() {
         let toml = format!("{SAMPLE}\n[cache]\nenabled = true\nttl_secs = 0\n");
-        let e = Config::load_from_str(&toml).unwrap_err();
+        let e = match Config::load_from_str(&toml) {
+            Err(err) => err,
+            Ok(_) => unreachable!(),
+        };
         assert!(e.to_string().contains("ttl_secs"), "{e}");
     }
 }

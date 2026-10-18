@@ -75,7 +75,7 @@ impl ResponseCache {
             ttl: Duration::from_secs(cfg.ttl_secs.max(1)),
             cfg,
             inner: Mutex::new(LruCache::new(
-                NonZeroUsize::new(capacity).expect("clamp guarantees ≥ 1"),
+                NonZeroUsize::new(capacity).unwrap_or_else(|| unreachable!("clamp guarantees ≥ 1")),
             )),
             hits: AtomicU64::new(0),
             misses: AtomicU64::new(0),
@@ -99,7 +99,7 @@ impl ResponseCache {
         if !self.cfg.enabled {
             return false;
         }
-        matches!(req.temperature, None) || req.temperature == Some(0.0)
+        req.temperature.is_none() || req.temperature == Some(0.0)
     }
 
     /// Compute a key. The caller must have established eligibility; the
@@ -215,7 +215,7 @@ impl ResponseCache {
         let entries = self.inner.lock().map(|g| g.len()).unwrap_or(0);
         let hits = self.hits.load(Ordering::Relaxed);
         let misses = self.misses.load(Ordering::Relaxed);
-        let total = hits + misses;
+        let total = hits.saturating_add(misses);
         CacheStats {
             enabled: self.cfg.enabled,
             capacity: self.cfg.capacity,
@@ -255,9 +255,7 @@ pub struct CacheStats {
 mod tests {
     use super::*;
     use serde_json::json;
-    use uwa_core::types::openai::{
-        ChatCompletionRequest, ChatMessage, ResponseFormat,
-    };
+    use uwa_core::types::openai::{ChatCompletionRequest, ChatMessage, ResponseFormat};
     use uwa_core::types::Role;
 
     fn req_with(user: &str) -> ChatCompletionRequest {
@@ -329,10 +327,22 @@ mod tests {
     fn key_changes_with_any_input_field() {
         let r = req_with("hello");
         let base = ResponseCache::key("chatgpt", "gpt-4o", "default", None, &r);
-        assert_ne!(base, ResponseCache::key("claude", "gpt-4o", "default", None, &r));
-        assert_ne!(base, ResponseCache::key("chatgpt", "gpt-4o-mini", "default", None, &r));
-        assert_ne!(base, ResponseCache::key("chatgpt", "gpt-4o", "work", None, &r));
-        assert_ne!(base, ResponseCache::key("chatgpt", "gpt-4o", "default", Some("pro"), &r));
+        assert_ne!(
+            base,
+            ResponseCache::key("claude", "gpt-4o", "default", None, &r)
+        );
+        assert_ne!(
+            base,
+            ResponseCache::key("chatgpt", "gpt-4o-mini", "default", None, &r)
+        );
+        assert_ne!(
+            base,
+            ResponseCache::key("chatgpt", "gpt-4o", "work", None, &r)
+        );
+        assert_ne!(
+            base,
+            ResponseCache::key("chatgpt", "gpt-4o", "default", Some("pro"), &r)
+        );
         assert_ne!(
             base,
             ResponseCache::key("chatgpt", "gpt-4o", "default", None, &req_with("bye"))
@@ -345,7 +355,9 @@ mod tests {
         let base = ResponseCache::key("p", "m", "d", None, &r);
 
         let mut with_tools = r.clone();
-        with_tools.tools = Some(vec![json!({"type":"function","function":{"name":"x","parameters":{"type":"object"}}})]);
+        with_tools.tools = Some(vec![
+            json!({"type":"function","function":{"name":"x","parameters":{"type":"object"}}}),
+        ]);
         assert_ne!(base, ResponseCache::key("p", "m", "d", None, &with_tools));
 
         let mut with_format = r.clone();
@@ -359,7 +371,9 @@ mod tests {
         let k = 42;
         assert!(c.get(k).is_none());
         c.put(k, outcome("hi"));
-        let got = c.get(k).unwrap();
+        let got = c
+            .get(k)
+            .unwrap_or_else(|| unreachable!("entry was just put"));
         assert_eq!(got.text, "hi");
     }
 

@@ -53,9 +53,7 @@ impl RateLimitCfg {
                 ));
             }
             if self.requests_per_minute > 100_000.0 {
-                return Err(
-                    "rate_limit.requests_per_minute is unreasonably large".into(),
-                );
+                return Err("rate_limit.requests_per_minute is unreasonably large".into());
             }
             if let Some(b) = self.burst {
                 if b == 0 {

@@ -27,7 +27,7 @@ use uwa_core::{RequestId, UwaError};
 
 use crate::cache::ResponseCache;
 use crate::error::ApiResult;
-use crate::headers::{self, CACHE_HIT, RateHeaders, UwaMeta};
+use crate::headers::{self, RateHeaders, UwaMeta, CACHE_HIT};
 use crate::metrics;
 use crate::routes::chat;
 use crate::state::AppState;
@@ -193,12 +193,15 @@ pub async fn create(
                 "provider" => provider_name.clone(),
             )
             .increment(1);
-            let conversation = uwa_session::conversation_id(&chat_req.messages, hint.provider.as_deref());
+            let conversation =
+                uwa_session::conversation_id(&chat_req.messages, hint.provider.as_deref());
             let meta = UwaMeta::stream_prefix(conversation).with_cache(CACHE_HIT);
 
             if this_is_stream {
                 let (tx, rx) = mpsc::channel::<chat::pipeline::StreamEvent>(4);
-                let _ = tx.send(chat::pipeline::StreamEvent::Delta(hit.text.clone())).await;
+                let _ = tx
+                    .send(chat::pipeline::StreamEvent::Delta(hit.text.clone()))
+                    .await;
                 let _ = tx
                     .send(chat::pipeline::StreamEvent::Done {
                         finish: hit.finish,
@@ -227,8 +230,9 @@ pub async fn create(
                     usage,
                     hit.media,
                 );
-                let body = serde_json::to_value(&body)
-                    .map_err(|e| UwaError::Internal(format!("serialize cached chat answer: {e}")))?;
+                let body = serde_json::to_value(&body).map_err(|e| {
+                    UwaError::Internal(format!("serialize cached chat answer: {e}"))
+                })?;
                 let body = Json(reshape(&chat_req.model, &body)).into_response();
                 return Ok(headers::attach(body, &meta));
             }
@@ -242,7 +246,10 @@ pub async fn create(
     let limiter = state.runtime.rate_limiters.get(&provider_name);
     let rate_headers = if limiter.enabled() {
         match limiter.try_acquire().await {
-            RateDecision::Allowed { remaining, reset_secs } => Some(RateHeaders {
+            RateDecision::Allowed {
+                remaining,
+                reset_secs,
+            } => Some(RateHeaders {
                 limit: limiter.rpm().round() as u32,
                 remaining,
                 reset_secs,
@@ -341,7 +348,10 @@ pub async fn create(
     let body = serde_json::to_value(&body)
         .map_err(|e| UwaError::Internal(format!("serialize chat answer: {e}")))?;
 
-    Ok(headers::attach(Json(reshape(&chat_req.model, &body)).into_response(), &meta))
+    Ok(headers::attach(
+        Json(reshape(&chat_req.model, &body)).into_response(),
+        &meta,
+    ))
 }
 
 /// Responses-API SSE: `response.created` → `response.output_text.delta`*

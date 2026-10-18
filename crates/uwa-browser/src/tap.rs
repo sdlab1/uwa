@@ -65,11 +65,11 @@ mod tests {
         spawn_tap_forwarder(tap.clone(), "tab_a".into(), &src);
         tokio::time::sleep(Duration::from_millis(20)).await;
 
-        src.send(fin("r1")).unwrap();
+        src.send(fin("r1")).unwrap_or_else(|e| unreachable!("{e}"));
         let ev = tokio::time::timeout(Duration::from_secs(1), sub.recv())
             .await
-            .expect("event within 1s")
-            .unwrap();
+            .unwrap_or_else(|_| unreachable!("event within 1s"))
+            .unwrap_or_else(|e| unreachable!("{e}"));
         assert_eq!(ev.target, "tab_a");
         assert!(matches!(&ev.event, NetworkEvent::Finished { request_id } if request_id == "r1"));
     }
@@ -86,7 +86,8 @@ mod tests {
             let _ = src.send(fin(&format!("burst{i}")));
         }
         tokio::task::yield_now().await;
-        src.send(fin("after")).unwrap();
+        src.send(fin("after"))
+            .unwrap_or_else(|e| unreachable!("{e}"));
 
         let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
         let mut seen_after = false;
@@ -113,7 +114,7 @@ mod tests {
         drop(src);
         tokio::time::timeout(Duration::from_secs(1), h)
             .await
-            .expect("forwarder exits within 1s")
-            .expect("task did not panic");
+            .unwrap_or_else(|_| unreachable!("forwarder exits within 1s"))
+            .unwrap_or_else(|e| unreachable!("task did not panic: {e}"));
     }
 }

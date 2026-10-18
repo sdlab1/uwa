@@ -219,7 +219,6 @@ pub async fn profile_health(
 // helpers
 // ---------------------------------------------------------------------------
 
-
 /// Pick a tab in the profile to run a command on, opening a blank one if
 /// the profile has no tabs yet. The `default` profile doesn't support
 /// `open_tab`, so if it has no tabs we surface a clear error rather than
@@ -273,7 +272,9 @@ fn iso_now() -> String {
 fn civil(days: u64) -> (i64, u32, u32) {
     // Howard Hinnant's civil_from_days; all arithmetic saturates — values are
     // small (days since Unix epoch) so saturating never triggers in practice.
-    let z = i64::try_from(days).unwrap_or(i64::MAX).saturating_add(719_468);
+    let z = i64::try_from(days)
+        .unwrap_or(i64::MAX)
+        .saturating_add(719_468);
     let era = z.div_euclid(146_097);
     let doe = z.rem_euclid(146_097);
     let yoe = (doe
@@ -283,7 +284,10 @@ fn civil(days: u64) -> (i64, u32, u32) {
         / 365;
     let y = yoe.saturating_add(era.saturating_mul(400));
     let doy = doe.saturating_sub(
-        365_i64.saturating_mul(yoe).saturating_add(yoe / 4).saturating_sub(yoe / 100),
+        365_i64
+            .saturating_mul(yoe)
+            .saturating_add(yoe / 4)
+            .saturating_sub(yoe / 100),
     );
     let mp = 5_i64.saturating_mul(doy).saturating_add(2) / 153;
     let d = (doy

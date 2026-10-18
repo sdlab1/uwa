@@ -44,13 +44,18 @@ async fn non_stream_sets_conversation_retry_cache() {
 
     let conv = header_value(&r, "x-uwa-conversation");
     assert!(
-        conv.as_deref().map(|s| s.starts_with("conv_")).unwrap_or(false),
+        conv.as_deref()
+            .map(|s| s.starts_with("conv_"))
+            .unwrap_or(false),
         "conversation id starts with conv_: {conv:?}"
     );
     assert_eq!(header_str(&r, "x-uwa-retry-count"), "0");
     assert_eq!(header_str(&r, "x-uwa-cache"), "miss");
     // The tab is set when the request reached the pipeline successfully.
-    assert!(!header_str(&r, "x-uwa-tab").is_empty(), "tab header present");
+    assert!(
+        !header_str(&r, "x-uwa-tab").is_empty(),
+        "tab header present"
+    );
 }
 
 #[tokio::test]
@@ -146,7 +151,9 @@ async fn stream_sets_conversation_and_cache_headers() {
 
     let conv = header_value(&r, "x-uwa-conversation");
     assert!(
-        conv.as_deref().map(|s| s.starts_with("conv_")).unwrap_or(false),
+        conv.as_deref()
+            .map(|s| s.starts_with("conv_"))
+            .unwrap_or(false),
         "conversation id starts with conv_"
     );
     assert_eq!(header_str(&r, "x-uwa-cache"), "miss");
@@ -226,7 +233,9 @@ async fn messages_endpoint_sets_headers() {
     r.assert_status_ok();
     let conv = header_value(&r, "x-uwa-conversation");
     assert!(
-        conv.as_deref().map(|s| s.starts_with("conv_")).unwrap_or(false),
+        conv.as_deref()
+            .map(|s| s.starts_with("conv_"))
+            .unwrap_or(false),
         "conversation id starts with conv_"
     );
     assert_eq!(header_str(&r, "x-uwa-cache"), "miss");
@@ -242,7 +251,9 @@ async fn responses_endpoint_sets_headers() {
     r.assert_status_ok();
     let conv = header_value(&r, "x-uwa-conversation");
     assert!(
-        conv.as_deref().map(|s| s.starts_with("conv_")).unwrap_or(false),
+        conv.as_deref()
+            .map(|s| s.starts_with("conv_"))
+            .unwrap_or(false),
         "conversation id starts with conv_"
     );
     assert_eq!(header_str(&r, "x-uwa-cache"), "miss");

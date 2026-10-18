@@ -201,11 +201,11 @@ pub async fn run_with(config_path: PathBuf, cdp_url: &str) -> anyhow::Result<()>
     // Rate limiters: per provider, from config. Providers without a
     // `rate_limit` block get an unlimited limiter (cheap, shared).
     let mut rate = uwa_resilience::rate_limit::ProviderRateLimiters::new();
-    let mut limited = 0;
+    let mut limited: u32 = 0;
     for (name, p) in &config.providers {
         if p.rate_limit.enabled {
             rate = rate.with_limit(name, &p.rate_limit);
-            limited += 1;
+            limited = limited.saturating_add(1);
         }
     }
     tracing::info!(limited, "provider rate limiters configured");

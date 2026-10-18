@@ -29,12 +29,17 @@ impl IntoResponse for ApiError {
             url,
         } = &self.0
         {
-            error["verification"] = json!({
-                "provider": provider,
-                "tab_id": tab_id,
-                "url": url,
-                "action": "Complete the challenge manually in the logged-in Chromium tab, then retry the request once.",
-            });
+            if let Some(obj) = error.as_object_mut() {
+                obj.insert(
+                    "verification".to_string(),
+                    json!({
+                        "provider": provider,
+                        "tab_id": tab_id,
+                        "url": url,
+                        "action": "Complete the challenge manually in the logged-in Chromium tab, then retry the request once.",
+                    }),
+                );
+            }
         }
         let body = json!({ "error": error });
         let status = StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);

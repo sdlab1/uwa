@@ -35,7 +35,7 @@ use uwa_tools::{ToolCall, ToolDefinition};
 
 use crate::cache::ResponseCache;
 use crate::error::ApiResult;
-use crate::headers::{self, CACHE_HIT, RateHeaders, UwaMeta};
+use crate::headers::{self, RateHeaders, UwaMeta, CACHE_HIT};
 use crate::metrics;
 use crate::routing::RoutingHint;
 use crate::state::AppState;
@@ -145,15 +145,8 @@ async fn messages_inner(
         .unwrap_or(false);
 
     let provider_name = provider_cfg.name.clone();
-    let cache_key = cache_eligible.then(|| {
-        ResponseCache::key(
-            &provider_name,
-            &req.model,
-            &profile_str,
-            None,
-            &oa_req,
-        )
-    });
+    let cache_key = cache_eligible
+        .then(|| ResponseCache::key(&provider_name, &req.model, &profile_str, None, &oa_req));
 
     if let (Some(cache), Some(key)) = (cache.as_ref(), cache_key) {
         if let Some(hit) = cache.get(key) {
@@ -163,17 +156,20 @@ async fn messages_inner(
             )
             .increment(1);
             let msg_id = format!("msg_{}", uuid::Uuid::new_v4().simple());
-            let meta = UwaMeta::stream_prefix(
-                uwa_session::conversation_id(&oa_req.messages, hint.provider.as_deref()),
-            )
+            let meta = UwaMeta::stream_prefix(uwa_session::conversation_id(
+                &oa_req.messages,
+                hint.provider.as_deref(),
+            ))
             .with_cache(CACHE_HIT);
 
             if this_is_stream {
                 let hit_prompt_tokens = hit.usage.prompt_tokens;
                 let (tx, rx) = mpsc::channel::<crate::routes::chat::pipeline::StreamEvent>(4);
-                let _ = tx.send(crate::routes::chat::pipeline::StreamEvent::Delta(
-                    hit.text.clone(),
-                )).await;
+                let _ = tx
+                    .send(crate::routes::chat::pipeline::StreamEvent::Delta(
+                        hit.text.clone(),
+                    ))
+                    .await;
                 let _ = tx
                     .send(crate::routes::chat::pipeline::StreamEvent::Done {
                         finish: hit.finish,
@@ -210,7 +206,10 @@ async fn messages_inner(
     let limiter = state.runtime.rate_limiters.get(&provider_name);
     let rate_headers = if limiter.enabled() {
         match limiter.try_acquire().await {
-            RateDecision::Allowed { remaining, reset_secs } => Some(RateHeaders {
+            RateDecision::Allowed {
+                remaining,
+                reset_secs,
+            } => Some(RateHeaders {
                 limit: limiter.rpm().round() as u32,
                 remaining,
                 reset_secs,
@@ -257,12 +256,8 @@ async fn messages_inner(
             )
             .await;
         });
-        let response = stream_anthropic_from_channel(
-            msg_id,
-            effective_model,
-            estimate_input_tokens(&req),
-            rx,
-        );
+        let response =
+            stream_anthropic_from_channel(msg_id, effective_model, estimate_input_tokens(&req), rx);
         Ok(headers::attach(response, &meta))
     } else {
         let outcome = crate::routes::chat::pipeline::run_pipeline_with_hint(
