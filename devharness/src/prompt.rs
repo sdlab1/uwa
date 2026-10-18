@@ -269,6 +269,7 @@ mod tests {
                 scope: ".".into(),
                 min_kill: 80,
                 early: false,
+                cov: false,
             }),
             ..Default::default()
         };

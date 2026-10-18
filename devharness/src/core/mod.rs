@@ -1,3 +1,4 @@
+pub mod coverage;
 pub mod early;
 pub mod gates;
 pub mod load;
