@@ -130,7 +130,7 @@ pub fn init(root: &Path) -> anyhow::Result<()> {
     );
     c += "# ── гейты качества тестов/кода (пусто = выкл) ──\n";
     c += &format!(
-        "MUTATE='{mutate}'  # мутационный гейт; {{files}} = один запуск на все изменённые файлы (cargo-mutants), {{file}}/{{module}} = запуск на файл\n"
+        "MUTATE='{mutate}'  # мутационный гейт; {{files}} = один запуск на все изменённые файлы (cargo-mutants), {{file}}/{{module}} = запуск на файл\n#   --iterate (пропуск пойманных ранее) допустим: devh гейтит кэш отпечатком ДЕРЕВА (.rs+тесты), дерево изменилось — прошлый outcomes.json уезжает в mutants.out.stale-* (слабый тест не «скипнет» мутанта)\n"
     );
     c += &format!("MUTATE_SCOPE='{mutate_scope}'  # какие пути считать «прод-кодом» для мутаций\n");
     c += &format!("MIN_KILL={min_kill}           # минимальный kill-rate, %\n");

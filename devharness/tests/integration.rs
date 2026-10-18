@@ -2141,3 +2141,62 @@ printf 'feat: агент сделал работу\n\nдетали: стаб\n' 
     assert_eq!(sb.status("W-001"), "active");
     sb.run_ok(&["abort"]);
 }
+
+/// P7-3: `--iterate` в шаблоне мутатора допустим ТОЛЬКО с нашим
+/// тест-ключеванным kill-cache. Встроенный outcomes.json cargo-mutants
+/// знает лишь сценарий мутанта — ослабленный тест дал бы «пойман» на
+/// бумаге. Отпечаток дерева (.rs + тесты) гейтит skip-set: дерево
+/// менялось — прошлый кэш сброшен; не менялось — кэш честен.
+/// В одном прогоне два гейта (MUTATE, затем RED_MUTATE) на неизменившемся
+/// дереве: miss → hit.
+#[test]
+fn section35_iterate_cache_is_test_keyed() {
+    let sb = Sandbox::new("r35");
+    sb.run_ok(&["init"]);
+    write_exec(
+        &sb.stubs.join("mut-iter.sh"),
+        "#!/usr/bin/env bash\necho \"10 mutants tested in 1s: 10 caught, 0 missed\"\n",
+    );
+    write_exec(
+        &sb.stubs.join("redmut-iter.sh"),
+        "#!/usr/bin/env bash\necho \"Mutants: 10, Killed: 10 (100%)\"\n",
+    );
+    let mut_iter = format!("{} --iterate", sb.stubs.join("mut-iter.sh").display());
+    let redmut_iter = format!(
+        "{} --iterate '{{test}}'",
+        sb.stubs.join("redmut-iter.sh").display()
+    );
+    sb.new_item(
+        "iterate item",
+        "спека\nRED: test -f done.txt || { printf 'assertion failed: no health payload\\n'; exit 1; }\n",
+        None,
+    );
+    let (ok, out) = sb.run_capture_env(
+        &["run"],
+        &[
+            (
+                "HARNESS_AGENT",
+                sb.stubs.join("stub.sh").display().to_string().as_str(),
+            ),
+            ("HARNESS_MUTATE", mut_iter.as_str()),
+            ("HARNESS_RED_MUTATE", redmut_iter.as_str()),
+        ],
+    );
+    assert!(ok, "run должен быть зелёным:\n{out}");
+    let miss = out.find("kill-cache: дерево изменилось");
+    let hit = out.find("kill-cache: дерево не менялось");
+    assert!(miss.is_some(), "первый гейт обязан быть miss:\n{out}");
+    assert!(hit.is_some(), "второй гейт на том же дереве — hit:\n{out}");
+    assert!(
+        miss < hit,
+        "MUTATE (miss) идёт до RED_MUTATE (hit) — иначе гейты видели разное дерево:\n{out}"
+    );
+    // манифест отпечатка лежит в .harness/ worktree (вне git)
+    let wt = worktree_entry(&sb.git_out(&["worktree", "list", "--porcelain"]))
+        .unwrap_or_else(|| unreachable!());
+    let manifest = wt.join(".harness").join("mutate-manifest");
+    let m = fs::read_to_string(&manifest).unwrap_or_else(|_| unreachable!());
+    assert!(m.starts_with("tree: "), "{manifest:?}: {m}");
+    sb.run_ok(&["commit"]);
+    sb.run_ok(&["merge"]);
+}

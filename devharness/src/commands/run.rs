@@ -1074,6 +1074,23 @@ fn mutate_gate(
     let batch = tool0.contains("{files}");
     let per_file = tool0.contains("{file}") || tool0.contains("{module}");
 
+    // P7-3: `--iterate` в шаблоне допустим ТОЛЬКО с нашим тест-ключеванным
+    // гейтом: встроенный кэш cargo-mutants (outcomes.json) знает лишь
+    // сценарий мутанта, не хэши тестов — ослабленный тест дал бы «пойман»
+    // на бумаге. Совпал отпечаток дерева (.rs + Cargo.toml + тесты — в Rust
+    // unit-тесты в тех же файлах) — кэш честен; изменилось — прошлый
+    // skip-set уезжает в mutants.out.stale-*, A/B «слабили тест → выживший
+    // обязан стать caught» выполняется механикой.
+    if tool0.contains("--iterate") {
+        if crate::shell::mutcache::gate_iterate_cache(wt) {
+            println!(".. kill-cache: дерево не менялось — --iterate пропускает пойманных ранее");
+        } else {
+            println!(
+                ".. kill-cache: дерево изменилось — прошлый skip-set сброшен (mutants.out → stale):                  каждый мутант проверен заново"
+            );
+        }
+    }
+
     if !batch && !per_file {
         return Ok(finish(m, run_mut(wt, &tool0), label, key));
     }
