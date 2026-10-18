@@ -1116,6 +1116,20 @@ pub async fn events_clear(State(state): State<AppState>) -> ApiResult<Json<serde
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
+/// Query-string booleans: `serde_urlencoded` only accepts `true`/`false`,
+/// but callers write `?once=1`. Accept the common truthy/falsy spellings.
+fn query_bool<'de, D: serde::Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
+    use serde::de::Error;
+    let s = <String as serde::Deserialize>::deserialize(d)?;
+    match s.as_str() {
+        "1" | "true" | "yes" | "on" => Ok(true),
+        "0" | "false" | "no" | "off" | "" => Ok(false),
+        other => Err(D::Error::custom(format!(
+            "expected a boolean, got `{other}`"
+        ))),
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct EventsStreamQuery {
     #[serde(default)]
@@ -1124,6 +1138,11 @@ pub struct EventsStreamQuery {
     pub kind: Option<String>,
     #[serde(default)]
     pub url: Option<String>,
+    /// `?once=1` — replay the buffered ring once (oldest → newest), emit a
+    /// final `done` event and close, instead of tailing forever. Same
+    /// filters as the live tail. Gives curl/tests a finite SSE body.
+    #[serde(default, deserialize_with = "query_bool")]
+    pub once: bool,
 }
 
 /// `GET /admin/events/stream` — SSE tail of the tap.
@@ -1147,6 +1166,29 @@ pub async fn events_stream(
         });
         return Sse::new(s).into_response();
     };
+
+    if q.once {
+        // Snapshot mode: buffered ring, chronological order, then done.
+        // `recent` clamps to 1000 which is the ring's default capacity.
+        let mut events = log
+            .recent(
+                usize::MAX,
+                q.target.as_deref(),
+                q.kind.as_deref(),
+                q.url.as_deref(),
+            )
+            .await;
+        events.reverse();
+        let frames = events.into_iter().map(|ev| {
+            let json = serde_json::to_string(&ev).unwrap_or_default();
+            Ok::<_, std::convert::Infallible>(Event::default().event("event").data(json))
+        });
+        let done = [Ok::<_, std::convert::Infallible>(
+            Event::default().event("done").data("{}"),
+        )];
+        let stream = futures::stream::iter(frames).chain(futures::stream::iter(done));
+        return Sse::new(stream).into_response();
+    }
 
     let rx = log.subscribe();
     let target = q.target.clone();

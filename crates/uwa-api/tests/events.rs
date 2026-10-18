@@ -298,3 +298,49 @@ async fn body_truncation_is_visible_in_listing() {
     );
     let _ = json!({}); // silence unused-import lint on non-debug builds
 }
+
+#[tokio::test]
+async fn stream_once_replays_ring_chronologically_then_done() {
+    let (s, log) = app_with_events();
+    seed(&log).await;
+
+    let r = s
+        .get("/admin/events/stream?once=1")
+        .add_header("Authorization", TEST_AUTH_HEADER)
+        .await;
+    r.assert_status_ok();
+    // Finite stream: text() returns only after the `done` frame closes it.
+    let body = r.text();
+    assert_eq!(body.matches("event: event").count(), 3, "body: {body}");
+    assert!(body.contains("event: done"), "body: {body}");
+    // Chronological replay: seeded order req_a → r1 → req_b.
+    let pos_a = body.find("conversation/abc").unwrap_or(usize::MAX);
+    let pos_r1 = body.find("\"request_id\":\"r1\"").unwrap_or(usize::MAX);
+    let pos_b = body.find("claude.ai").unwrap_or(usize::MAX);
+    assert!(
+        pos_a < pos_r1 && pos_r1 < pos_b,
+        "chronological order wrong: {body}"
+    );
+    // done must be the final frame.
+    assert!(
+        body.rfind("event: done").unwrap_or(0) > pos_b,
+        "done is not last: {body}"
+    );
+}
+
+#[tokio::test]
+async fn stream_once_honours_filters() {
+    let (s, log) = app_with_events();
+    seed(&log).await;
+
+    let r = s
+        .get("/admin/events/stream?once=1&target=tab_b")
+        .add_header("Authorization", TEST_AUTH_HEADER)
+        .await;
+    r.assert_status_ok();
+    let body = r.text();
+    assert_eq!(body.matches("event: event").count(), 1, "body: {body}");
+    assert!(body.contains("tab_b"), "body: {body}");
+    assert!(!body.contains("tab_a"), "body: {body}");
+    assert!(body.contains("event: done"), "body: {body}");
+}
