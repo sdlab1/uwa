@@ -3,7 +3,7 @@ use crate::core::types::{ItemId, RunConfig};
 use crate::prompt;
 use crate::shell::color::colors;
 use crate::shell::git;
-use crate::shell::lock::ItemRunLock;
+use crate::shell::lock::{ItemRunLock, MutateLock};
 use crate::shell::store::{item_rel, Store};
 use crate::shell::worktree;
 
@@ -29,6 +29,16 @@ pub fn commit(store: &Store, cfg: &RunConfig, id: &ItemId) -> anyhow::Result<()>
             id.dir_name()
         );
     }
+    // P7: тот же локатор, что и у in-place прогона. Класс «отравленный
+    // коммит» (§9.13: git add поверх живого cargo-mutants закоммитил
+    // мутанта) закрывается механикой, а не протоколом «смотри git status».
+    let _mut = MutateLock::try_acquire(&wt, "commit").map_err(|holder| {
+        anyhow::anyhow!(
+            "devh: в дереве {} идёт in-place мутационный прогон ({holder}) — commit отклонён: \
+             git-операция поверх живого прогона бэккапит мутанта как              «изменения к коммиту». Дождись прогона или убери holder",
+            wt.display()
+        )
+    })?;
     let summary = store.read_summary(id);
     if summary.trim().is_empty() {
         eprintln!(

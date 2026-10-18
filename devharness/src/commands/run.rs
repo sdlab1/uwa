@@ -9,7 +9,7 @@ use crate::core::types::{CrapCfg, ItemId, MutateCfg, RunConfig};
 use crate::prompt;
 use crate::shell::color::colors;
 use crate::shell::git;
-use crate::shell::lock::{GlobalLock, ItemRunLock};
+use crate::shell::lock::{GlobalLock, ItemRunLock, MutateLock};
 use crate::shell::proc;
 use crate::shell::store::{item_rel, Store};
 use crate::shell::worktree;
@@ -412,7 +412,11 @@ pub fn run(store: &Store, cfg: &RunConfig, id: &ItemId) -> anyhow::Result<()> {
             die(store, id, 1);
         }
         let red_cmd = std::fs::read_to_string(&red_file).unwrap_or_default();
-        let rep = mutate_gate(m, &wt, Some(red_cmd.trim()), "red-mutation", "RED_MUTATE");
+        let rep = mutate_gate(m, &wt, Some(red_cmd.trim()), "red-mutation", "RED_MUTATE")
+            .unwrap_or_else(|e| {
+                eprintln!("{}{e}{}", c.r, c.z);
+                die(store, id, 1);
+            });
         let mpath = store.log_file(id, "redmut");
         std::fs::write(&mpath, &rep.log).ok();
         timing.stage("redmut", store, id);
@@ -765,7 +769,10 @@ fn gate_ladder(
     }
 
     if let Some(m) = &cfg.mutate {
-        let rep = mutate_gate(m, wt, None, "mutation", "MUTATE");
+        let rep = mutate_gate(m, wt, None, "mutation", "MUTATE").unwrap_or_else(|e| {
+            eprintln!("{}{e}{}", c.r, c.z);
+            die(store, id, 1);
+        });
         let mpath = store.log_file(id, "mutate");
         std::fs::write(&mpath, &rep.log).ok();
         timing.stage(format!("mutate-r{}", round.saturating_add(1)), store, id);
@@ -1044,7 +1051,22 @@ struct MutReport {
 ///   холодных;
 /// - `{file}`/`{module}` — по файлу на запуск (обратная совместимость);
 /// - без плейсхолдеров — запуск как задан, без scope-фильтра.
-fn mutate_gate(m: &MutateCfg, wt: &Path, test: Option<&str>, label: &str, key: &str) -> MutReport {
+fn mutate_gate(
+    m: &MutateCfg,
+    wt: &Path,
+    test: Option<&str>,
+    label: &str,
+    key: &str,
+) -> anyhow::Result<MutReport> {
+    // P7: in-place прогон = агент для этого дерева. Лок держится на весь
+    // гейт (batch и per-file цикл) — §9.13 «отравленный коммит».
+    let _mut = MutateLock::try_acquire(wt, label).map_err(|holder| {
+        anyhow::anyhow!(
+            "devh: в дереве {} идёт in-place мутационный прогон ({holder}) — этот запуск отклонлён: \
+             два in-place прогона в одном дереве взаимно мутируют базу (дождись или убери holder)",
+            wt.display()
+        )
+    })?;
     let tool0 = match test {
         Some(t) => m.tool.replace("{test}", t),
         None => m.tool.clone(),
@@ -1053,7 +1075,7 @@ fn mutate_gate(m: &MutateCfg, wt: &Path, test: Option<&str>, label: &str, key: &
     let per_file = tool0.contains("{file}") || tool0.contains("{module}");
 
     if !batch && !per_file {
-        return finish(m, run_mut(wt, &tool0), label, key);
+        return Ok(finish(m, run_mut(wt, &tool0), label, key));
     }
 
     // Удалённые файлы НЕ отбрасываем: за них отвечает ветка «удалён агентом».
@@ -1063,11 +1085,11 @@ fn mutate_gate(m: &MutateCfg, wt: &Path, test: Option<&str>, label: &str, key: &
         // cargo-mutants мутирует то, что лежит на диске: удалённое ему не даём.
         let live: Vec<&String> = files.iter().filter(|f| wt.join(f).is_file()).collect();
         if live.is_empty() {
-            return MutReport {
+            return Ok(MutReport {
                 log: mutate_skip_log(m, &files),
                 outcome: MutateOutcome::Ok,
                 stats: None,
-            };
+            });
         }
         let flags = live
             .iter()
@@ -1084,11 +1106,11 @@ fn mutate_gate(m: &MutateCfg, wt: &Path, test: Option<&str>, label: &str, key: &
                 .join(" ")
         );
         let rep = finish(m, run_mut(wt, &cmd), label, key);
-        return MutReport {
+        return Ok(MutReport {
             log: format!("{head}{}", rep.log),
             outcome: rep.outcome,
             stats: rep.stats,
-        };
+        });
     }
 
     let mut acc = MutReport {
@@ -1113,11 +1135,11 @@ fn mutate_gate(m: &MutateCfg, wt: &Path, test: Option<&str>, label: &str, key: &
         match rep.outcome {
             // Инструмент не распознан — смысла продолжать цикл нет (как и раньше).
             MutateOutcome::Env => {
-                return MutReport {
+                return Ok(MutReport {
                     log: acc.log,
                     outcome: MutateOutcome::Env,
                     stats: None,
-                };
+                });
             }
             MutateOutcome::Fail => acc.outcome = MutateOutcome::Fail,
             MutateOutcome::Ok => {}
@@ -1132,7 +1154,7 @@ fn mutate_gate(m: &MutateCfg, wt: &Path, test: Option<&str>, label: &str, key: &
             }
         }
     }
-    acc
+    Ok(acc)
 }
 
 /// Мутировать нечего: либо в scope нет изменений, либо агент всё удалил.

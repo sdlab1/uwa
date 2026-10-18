@@ -2,7 +2,7 @@ use crate::core::state::Status;
 use crate::core::types::{ItemId, RunConfig};
 use crate::shell::color::colors;
 use crate::shell::git;
-use crate::shell::lock::ItemRunLock;
+use crate::shell::lock::{ItemRunLock, MutateLock};
 use crate::shell::store::{item_rel, Store};
 use crate::shell::worktree;
 
@@ -28,6 +28,17 @@ pub fn merge(store: &Store, cfg: &RunConfig, id: &ItemId) -> anyhow::Result<()> 
             id.dir_name()
         );
     }
+    // P7: тот же локатор, что и у in-place прогона — rebase/ff-merge поверх
+    // смены базы считается отравленным коммитом ровно как commit (§9.13).
+    // Держим лок до конца merge: прогон, стартовавший после нас, отклонён.
+    let _mut = MutateLock::try_acquire(&wt, "merge").map_err(|holder| {
+        anyhow::anyhow!(
+            "devh: в дереве {} идёт in-place мутационный прогон ({holder}) — merge отклонён: \
+             rebase/ff поверх меняющейся базы = отравленный коммит. \
+             Дождись прогона или убери holder",
+            wt.display()
+        )
+    })?;
 
     if git::tree_dirty(&wt) {
         anyhow::bail!(

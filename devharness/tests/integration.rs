@@ -1,5 +1,6 @@
 use std::fs;
 use std::io::Write;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
@@ -1988,4 +1989,155 @@ printf 'feat: два файла\n\nдетали\n' > "$HARNESS_SUMMARY"
         contains(&calls, "-f done.txt -f one.rs -f two.rs"),
         "{calls}"
     );
+}
+
+// ── P7 mutate.lock: in-place прогон = агент для дерева; commit/merge под тем же локом ──
+
+/// Эмулятор живого in-place прогона: посторонний процесс держит flock на
+/// mutate.lock. Holder-строку пишем сами — devh должен её прочитать и
+/// показать оператору («pid N (label)»).
+struct LockHolder {
+    child: std::process::Child,
+}
+
+impl LockHolder {
+    fn release(mut self) {
+        // flock и его sleep — одна группа (process_group(0)): гасим обоих,
+        // чтобы не оставлять сирот в песочнице.
+        let pid = self.child.id();
+        let _ = Command::new("kill")
+            .arg("-KILL")
+            .arg(format!("-{pid}"))
+            .status();
+        let _ = self.child.wait();
+    }
+}
+
+fn wait_lock_held(lock: &Path) {
+    for _ in 0..100 {
+        let probe = Command::new("flock")
+            .arg("-n")
+            .arg(lock)
+            .arg("-c")
+            .arg("exit 0")
+            .status();
+        if let Ok(s) = probe {
+            if !s.success() {
+                return; // лок занят — probe не смог взять
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+}
+
+fn hold_mutate_lock(lock: &Path, holder: &str) -> LockHolder {
+    fs::write(lock, format!("{holder}\n")).unwrap_or_else(|_| unreachable!());
+    let child = Command::new("flock")
+        .arg(lock)
+        .arg("-c")
+        .arg("sleep 60")
+        .process_group(0)
+        .spawn()
+        .unwrap_or_else(|_| unreachable!());
+    wait_lock_held(lock);
+    LockHolder { child }
+}
+
+#[test]
+fn section33_mutate_lock_blocks_commit_and_merge() {
+    let sb = Sandbox::new("r33");
+    sb.run_ok(&["init"]);
+    sb.new_item("lock item", "спека\n", Some("x"));
+    sb.run_ok(&["run"]);
+    let wt = worktree_entry(&sb.git_out(&["worktree", "list", "--porcelain"]))
+        .unwrap_or_else(|| unreachable!());
+    let lock = wt.join(".harness").join("mutate.lock");
+    assert!(
+        lock.is_file(),
+        "мутационный гейт обязан был создать {lock:?}"
+    );
+
+    // commit поверх живого in-place прогона: git add закоммитил бы мутанта.
+    let holder = hold_mutate_lock(&lock, "pid 4242 (mutation)");
+    let (ok, out) = sb.run_capture(&["commit"]);
+    assert!(!ok, "commit должен быть отклонён при живом прогоне:\n{out}");
+    assert!(contains(&out, "мутационный прогон"), "{out}");
+    assert!(contains(&out, "pid 4242 (mutation)"), "{out}");
+    assert!(contains(&out, &wt.display().to_string()), "{out}");
+    assert_eq!(
+        sb.status("W-001"),
+        "active",
+        "статус не должен был смениться"
+    );
+    holder.release();
+
+    // после освобождения — тот же commit проходит
+    sb.run_ok(&["commit"]);
+
+    // merge поверх живого прогона: rebase/ff поверх меняющейся базы — тот же класс.
+    let holder = hold_mutate_lock(&lock, "pid 4243 (mutation)");
+    let (ok, out) = sb.run_capture(&["merge"]);
+    assert!(!ok, "merge должен быть отклонён при живом прогоне:\n{out}");
+    assert!(contains(&out, "мутационный прогон"), "{out}");
+    assert!(contains(&out, "pid 4243 (mutation)"), "{out}");
+    assert_eq!(
+        sb.status("W-001"),
+        "active",
+        "статус не должен был смениться"
+    );
+    holder.release();
+
+    sb.run_ok(&["merge"]);
+    assert_eq!(sb.status("W-001"), "done");
+}
+
+/// Второй in-place прогон в том же дереве отклоняется: два прогона взаимно
+/// мутируют базу (§9.13). Лок держит «агент» (orphan-flock из стаба) —
+/// прогон обязан умереть с именем holder'а, а не начать мутировать.
+#[test]
+fn section34_mutate_lock_blocks_parallel_inplace_run() {
+    let sb = Sandbox::new("r34");
+    sb.run_ok(&["init"]);
+    write_exec(
+        &sb.stubs.join("stub-holder.sh"),
+        r#"#!/usr/bin/env bash
+echo marker > "$HARNESS_WORKTREE/done.txt"
+mkdir -p "$HARNESS_WORKTREE/.harness"
+echo "pid 4242 (mutation)" > "$HARNESS_WORKTREE/.harness/mutate.lock"
+setsid flock "$HARNESS_WORKTREE/.harness/mutate.lock" -c 'sleep 120' >/dev/null 2>&1 </dev/null &
+printf 'feat: агент сделал работу\n\nдетали: стаб\n' > "$HARNESS_SUMMARY"
+"#,
+    );
+    // red падает по дефициту до работы, зеленеет после — доброкачественный RED.
+    sb.new_item(
+        "second run",
+        "спека\nRED: test -f done.txt || { printf 'assertion failed: no health payload\\n'; exit 1; }\n",
+        None,
+    );
+    let mut c = sb.devh(&["run"]);
+    c.env("HARNESS_AGENT", sb.stubs.join("stub-holder.sh"));
+    let out = c.output().unwrap_or_else(|_| unreachable!());
+    let all = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !out.status.success(),
+        "run должен умереть на занятом локе:\n{all}"
+    );
+    assert!(contains(&all, "мутационный прогон"), "{all}");
+    assert!(contains(&all, "pid 4242 (mutation)"), "{all}");
+    assert!(
+        contains(&all, "взаимно мутируют базу"),
+        "причина отказа должна быть названа:\n{all}"
+    );
+    // прогон отклонён до запуска мутатора: стаба-мутатора никто не звал
+    let mut_log = fs::read_to_string(sb.log_file("W-001-mutate.log")).unwrap_or_default();
+    assert!(
+        mut_log.trim().is_empty(),
+        "мутатор не должен был запускаться: {mut_log}"
+    );
+    assert_eq!(sb.status("W-001"), "active");
+    sb.run_ok(&["abort"]);
 }

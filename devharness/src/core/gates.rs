@@ -575,6 +575,7 @@ pub fn failing_tests(log: &str) -> Vec<String> {
 /// ожидаемая подпись (`expect`, regex), честный RED требует:
 /// 1. в логе есть упавший ТЕСТ (якорь test-id — не обрыв и не компиляция);
 /// 2. лог матчит regex причины.
+///
 /// Иначе — SpecBlock (блокер спеки): это ломает допущения контракта, а не
 /// работу агента, и fix-раундом агента такое не лечится.
 fn judge_red_pre(gate: &Gate, raw: &Raw, expect: Option<&str>) -> Verdict {
@@ -994,7 +995,7 @@ panicked at net.rs:88: connection refused";
                 assert!(tail.contains("no health payload"), "{tail}");
                 assert!(tail.contains("profiles::health"), "{tail}");
             }
-            v => panic!("ожидался SpecBlock, получил {v:?}"),
+            v => unreachable!("ожидался SpecBlock, получил {v:?}"),
         }
     }
 
@@ -1011,7 +1012,7 @@ panicked at net.rs:88: connection refused";
             Verdict::SpecBlock { tail, .. } => {
                 assert!(tail.contains("не дошёл"), "{tail}");
             }
-            v => panic!("ожидался SpecBlock, получил {v:?}"),
+            v => unreachable!("ожидался SpecBlock, получил {v:?}"),
         }
     }
 
@@ -1027,7 +1028,7 @@ panicked at net.rs:88: connection refused";
             Verdict::EnvBlocked { missing } => {
                 assert!(missing.contains("не запустилась"), "{missing}")
             }
-            v => panic!("ожидался EnvBlocked, получил {v:?}"),
+            v => unreachable!("ожидался EnvBlocked, получил {v:?}"),
         }
     }
 
@@ -1066,7 +1067,7 @@ panicked at net.rs:88: connection refused";
         let log = "test a::b ... FAILED\nfailures:\n    a::b\n";
         match judge(&g, &raw(Some(1), log), &cfg()) {
             Verdict::SpecBlock { tail, .. } => assert!(tail.contains("regex"), "{tail}"),
-            v => panic!("ожидался SpecBlock, получил {v:?}"),
+            v => unreachable!("ожидался SpecBlock, получил {v:?}"),
         }
     }
 
