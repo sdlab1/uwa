@@ -2,7 +2,13 @@ use super::types::RunConfig;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Gate {
-    Red { cmd: String, phase: RedPhase },
+    Red {
+        cmd: String,
+        phase: RedPhase,
+        /// P7 (red.expect): ожидаемая подпись падения — regex на лог red-фазы.
+        /// `None` = старое поведение: любой exit≠0 на pre считается RED.
+        expect: Option<String>,
+    },
     Verify,
     NoIgnored,
     Lint,
@@ -36,8 +42,19 @@ impl Gate {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Verdict {
     Pass,
-    Fail { gate: Gate, tail: String },
-    EnvBlocked { missing: String },
+    Fail {
+        gate: Gate,
+        tail: String,
+    },
+    EnvBlocked {
+        missing: String,
+    },
+    /// P7 (red.expect): гейт упал «не по той причине» — блокер СПЕКИ, его
+    /// чинит человек (правка спеки/red.cmd), а не fix-раунд агента.
+    SpecBlock {
+        gate: Gate,
+        tail: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -433,14 +450,27 @@ pub fn judge(gate: &Gate, raw: &Raw, cfg: &RunConfig) -> Verdict {
         };
     }
     match gate {
-        Gate::Red { phase, .. } => match phase {
-            RedPhase::Pre if raw.exit != Some(0) => Verdict::Pass,
-            RedPhase::Post if raw.exit == Some(0) => Verdict::Pass,
-            _ => Verdict::Fail {
-                gate: gate.clone(),
-                tail: tail_of(&raw.log, 15),
-            },
-        },
+        Gate::Red { phase, expect, .. } => {
+            // Таксономия P7 (три уровня):
+            // 1. команда не запустилась → блокер СРЕДЫ (rc=2);
+            // 2. запустилась, но упала не с той подписью → блокер СПЕКИ;
+            // 3. упала с той подписью → честный RED.
+            // До P7 exit=None ( spawn-сбой ) молча ПРОХОДИЛ pre-гейт —
+            // дыра закрыта: «не запустилась» ≠ «упала».
+            if raw.exit.is_none() {
+                return Verdict::EnvBlocked {
+                    missing: format!("red: команда не запустилась ({})", tail_of(&raw.log, 3)),
+                };
+            }
+            match phase {
+                RedPhase::Pre => judge_red_pre(gate, raw, expect.as_deref()),
+                RedPhase::Post if raw.exit == Some(0) => Verdict::Pass,
+                _ => Verdict::Fail {
+                    gate: gate.clone(),
+                    tail: tail_of(&raw.log, 15),
+                },
+            }
+        }
         Gate::Verify | Gate::Bench => exit_or_fail(gate, raw),
         Gate::NoIgnored if !cfg.no_ignored => Verdict::Pass,
         Gate::NoIgnored => {
@@ -473,6 +503,133 @@ pub fn judge(gate: &Gate, raw: &Raw, cfg: &RunConfig) -> Verdict {
             let min_kill = cfg.mutate.as_ref().map(|m| m.min_kill).unwrap_or(90);
             judge_mutation(raw, min_kill)
         }
+    }
+}
+
+/// Маркер ожидания прямо в red.cmd: строка-комментарий
+/// `# red-expect: <regex>` (регистр ключа любой). red.cmd — шелл-скрипт
+/// (`bash red.cmd`), поэтому `#`-строка для раннера инертна: исходник
+/// остаётся исполняемым, а харнес читает ожидание из него же.
+pub fn red_expect_marker(src: &str) -> Option<String> {
+    for line in src.lines() {
+        let Some(rest) = line.trim().strip_prefix('#') else {
+            continue;
+        };
+        let Some((key, val)) = rest.trim().split_once(':') else {
+            continue; // комментарий без ':' — не маркер, но и не конец разбора
+        };
+        if !key.trim().eq_ignore_ascii_case("red-expect") {
+            continue;
+        }
+        let val = val.trim();
+        if !val.is_empty() {
+            return Some(val.to_string());
+        }
+    }
+    None
+}
+
+/// Имена упавших тестов из лога тестового входа — якорь «причины» (test-id
+/// стабилен и в `cargo test`, и в `nextest` выводе). Два формата:
+/// * cargo test: `test <id> ... FAILED` и список после `failures:`;
+/// * nextest:    `<id> .... FAILED` (якорь — `::` + хвост FAILED).
+///
+/// Пустой список = до ассерта не дошло ни одного теста (не собралось /
+/// упал общий раннер): «RED» такого вида — не воспроизведённый тест.
+pub fn failing_tests(log: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut in_failures = false;
+    for line in log.lines() {
+        let t = line.trim();
+        if t == "failures:" {
+            in_failures = true;
+            continue;
+        }
+        if in_failures {
+            if t.is_empty() || t.starts_with("test result") {
+                in_failures = false;
+            } else if t.split_whitespace().count() == 1 && t != "test" {
+                out.push(t.to_string());
+            }
+        }
+        if !(t.ends_with("FAILED") || t.ends_with("FAILED,")) {
+            continue;
+        }
+        let mut words = t.split_whitespace();
+        let mut first = words.next().unwrap_or("");
+        if first == "test" {
+            first = words.next().unwrap_or("");
+        }
+        if first.contains("::") && !first.starts_with("test") {
+            out.push(first.trim_end_matches(',').to_string());
+        }
+    }
+    // cargo test дублирует id в статусе и в «failures:» — схлопываем.
+    let mut seen = std::collections::HashSet::new();
+    out.retain(|id| seen.insert(id.clone()));
+    out
+}
+
+/// PRE-гейт RED с проверкой РЕАКЦИИ (P7). exit≠0 — необходимое, но не
+/// достаточное условие: «тест упал» ≠ «упал по той причине». Если объявлена
+/// ожидаемая подпись (`expect`, regex), честный RED требует:
+/// 1. в логе есть упавший ТЕСТ (якорь test-id — не обрыв и не компиляция);
+/// 2. лог матчит regex причины.
+/// Иначе — SpecBlock (блокер спеки): это ломает допущения контракта, а не
+/// работу агента, и fix-раундом агента такое не лечится.
+fn judge_red_pre(gate: &Gate, raw: &Raw, expect: Option<&str>) -> Verdict {
+    if raw.exit == Some(0) {
+        return Verdict::Fail {
+            gate: gate.clone(),
+            tail: format!(
+                "red.cmd зелёный на чистом HEAD — это не баг\n{}",
+                tail_of(&raw.log, 10)
+            ),
+        };
+    }
+    let Some(pattern) = expect else {
+        return Verdict::Pass; // старое поведение: любой exit≠0
+    };
+    let failed = failing_tests(&raw.log);
+    if failed.is_empty() {
+        return Verdict::SpecBlock {
+            gate: gate.clone(),
+            tail: format!(
+                "RED объявил подпись /{pattern}/, но в логе нет ни одного упавшего теста — \
+                 red.cmd до тестов не дошёл (компиляция? обрыв? не тот раннер?)\n{}",
+                tail_of(&raw.log, 10)
+            ),
+        };
+    }
+    match regex::Regex::new(pattern) {
+        Ok(re) if re.is_match(&raw.log) => Verdict::Pass,
+        Ok(_) => Verdict::SpecBlock {
+            gate: gate.clone(),
+            tail: format!(
+                "RED упал НЕ ПО ТОЙ ПРИЧИНЕ: ожидалось /{pattern}/, а упали тесты [{}] — \
+                 блокер спеки (правь red.cmd / RED-EXPECT), не работа агента\n{}",
+                failed.join(", "),
+                tail_of(&raw.log, 10)
+            ),
+        },
+        Err(e) => Verdict::SpecBlock {
+            gate: gate.clone(),
+            tail: format!("RED-подпись /{pattern}/ — невалидный regex: {e}"),
+        },
+    }
+}
+
+/// Строка-пруф честного RED для консоли/лога: якорь (упавший тест) +
+/// класс причины (матч подписи). Для оператора это ответ на «а почему
+/// именно он упал?» без чтения всего лога.
+pub fn red_proof_line(log: &str, expect: Option<&str>) -> String {
+    let failed = failing_tests(log);
+    if failed.is_empty() {
+        return "падает на HEAD (exit≠0); падений с test-id в логе не найдено".into();
+    }
+    match expect {
+        Some(p) => format!("честный RED: [{}] матчит /{p}/", failed.join(", ")),
+        None => format!("падает на HEAD: [{}]", failed.join(", ")),
     }
 }
 
@@ -738,6 +895,7 @@ mod tests {
         let g = Gate::Red {
             cmd: "x".into(),
             phase: RedPhase::Pre,
+            expect: None,
         };
         assert!(matches!(
             judge(&g, &raw(Some(1), ""), &cfg()),
@@ -754,6 +912,7 @@ mod tests {
         let g = Gate::Red {
             cmd: "x".into(),
             phase: RedPhase::Post,
+            expect: None,
         };
         assert!(matches!(
             judge(&g, &raw(Some(0), ""), &cfg()),
@@ -763,6 +922,152 @@ mod tests {
             judge(&g, &raw(Some(1), ""), &cfg()),
             Verdict::Fail { .. }
         ));
+    }
+
+    // ---- P7: red.expect — гейт падает «по той причине» ----
+
+    #[test]
+    fn red_expect_marker_parsed_from_cmd_source() {
+        assert_eq!(
+            red_expect_marker(
+                "#!/bin/sh\n# red-expect: no health payload\ncargo nextest run -E 'test(x)'\n"
+            ),
+            Some("no health payload".into())
+        );
+        // регистр ключа любой; лишние пробелы/табуляции не мешают
+        assert_eq!(
+            red_expect_marker("#\tRED-EXPECT:  cookie expired "),
+            Some("cookie expired".into())
+        );
+        // не наш комментарий / пустое значение → нет маркера
+        assert_eq!(red_expect_marker("# обычный комментарий\nset -e"), None);
+        assert_eq!(red_expect_marker("# red-expect:"), None);
+        assert_eq!(red_expect_marker("cargo nextest run"), None);
+    }
+
+    #[test]
+    fn failing_tests_reads_cargo_and_nextest_formats() {
+        let cargo_log = "running 1 test\ntest profiles::health ... FAILED\n\
+failures:\n    profiles::health\ntest result: FAILED. 0 passed; 1 failed\n\
+thread 'profiles::health' panicked: no health payload";
+        assert_eq!(
+            failing_tests(cargo_log),
+            vec!["profiles::health".to_string()]
+        );
+        let nextest_log = "    profiles::health ....... FAILED\n\
+Summary [1.0s] 1 tests run: 0 passed, 1 failed";
+        assert_eq!(
+            failing_tests(nextest_log),
+            vec!["profiles::health".to_string()]
+        );
+        // сборка не прошла — ни один тест не дошёл до ассерта
+        assert!(failing_tests("error[E0433]: use of undeclared crate").is_empty());
+        assert!(failing_tests("test result: ok. 0 passed").is_empty());
+    }
+
+    #[test]
+    fn red_pre_honest_when_signature_matches() {
+        let g = Gate::Red {
+            cmd: "red.cmd".into(),
+            phase: RedPhase::Pre,
+            expect: Some("no health payload".into()),
+        };
+        let log = "test profiles::health ... FAILED\nfailures:\n    profiles::health\n\
+panicked at lib.rs:1: assertion failed: no health payload";
+        assert!(matches!(
+            judge(&g, &raw(Some(101), log), &cfg()),
+            Verdict::Pass
+        ));
+    }
+
+    #[test]
+    fn red_pre_spec_block_when_wrong_reason() {
+        let g = Gate::Red {
+            cmd: "red.cmd".into(),
+            phase: RedPhase::Pre,
+            expect: Some("no health payload".into()),
+        };
+        let log = "test profiles::health ... FAILED\nfailures:\n    profiles::health\n\
+panicked at net.rs:88: connection refused";
+        match judge(&g, &raw(Some(101), log), &cfg()) {
+            Verdict::SpecBlock { tail, .. } => {
+                assert!(tail.contains("no health payload"), "{tail}");
+                assert!(tail.contains("profiles::health"), "{tail}");
+            }
+            v => panic!("ожидался SpecBlock, получил {v:?}"),
+        }
+    }
+
+    #[test]
+    fn red_pre_spec_block_when_no_test_ran() {
+        let g = Gate::Red {
+            cmd: "red.cmd".into(),
+            phase: RedPhase::Pre,
+            expect: Some("no health payload".into()),
+        };
+        // red.cmd не дошёл до тестов: сломанная сборка / не тот раннер
+        let log = "error[E0599]: no method `foo` found for struct";
+        match judge(&g, &raw(Some(101), log), &cfg()) {
+            Verdict::SpecBlock { tail, .. } => {
+                assert!(tail.contains("не дошёл"), "{tail}");
+            }
+            v => panic!("ожидался SpecBlock, получил {v:?}"),
+        }
+    }
+
+    #[test]
+    fn red_pre_spawn_failure_is_env_blocked() {
+        let g = Gate::Red {
+            cmd: "red.cmd".into(),
+            phase: RedPhase::Pre,
+            expect: None,
+        };
+        // exit=None = команда не запустилась: раньше это МОЛЧА проходило pre-гейт
+        match judge(&g, &raw(None, "spawn: No such file or directory"), &cfg()) {
+            Verdict::EnvBlocked { missing } => {
+                assert!(missing.contains("не запустилась"), "{missing}")
+            }
+            v => panic!("ожидался EnvBlocked, получил {v:?}"),
+        }
+    }
+
+    #[test]
+    fn red_pre_without_expect_stays_lenient() {
+        // обратная совместимость: без подписи любой exit≠0 — честный RED
+        let g = Gate::Red {
+            cmd: "red.cmd".into(),
+            phase: RedPhase::Pre,
+            expect: None,
+        };
+        assert!(matches!(
+            judge(&g, &raw(Some(1), "sh: 1: tool-missing: not found"), &cfg()),
+            Verdict::Pass
+        ));
+    }
+
+    #[test]
+    fn red_proof_line_names_test_and_pattern() {
+        let log =
+            "test profiles::health ... FAILED\nfailures:\n    profiles::health\nno health payload";
+        let proof = red_proof_line(log, Some("no health"));
+        assert!(proof.contains("profiles::health"), "{proof}");
+        assert!(proof.contains("no health"), "{proof}");
+        let bare = red_proof_line(log, None);
+        assert!(bare.contains("profiles::health"), "{bare}");
+    }
+
+    #[test]
+    fn red_expect_invalid_regex_is_spec_block() {
+        let g = Gate::Red {
+            cmd: "red.cmd".into(),
+            phase: RedPhase::Pre,
+            expect: Some("[unclosed".into()),
+        };
+        let log = "test a::b ... FAILED\nfailures:\n    a::b\n";
+        match judge(&g, &raw(Some(1), log), &cfg()) {
+            Verdict::SpecBlock { tail, .. } => assert!(tail.contains("regex"), "{tail}"),
+            v => panic!("ожидался SpecBlock, получил {v:?}"),
+        }
     }
 
     #[test]

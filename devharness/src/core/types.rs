@@ -64,6 +64,10 @@ pub struct RunConfig {
     pub log_days: u32,
     pub mutate: Option<MutateCfg>,
     pub red_mutate: Option<MutateCfg>,
+    /// P7 (red.expect): ожидаемая подпись падения red-фазы (regex). Глобальный
+    /// дефолт; пер-тасковый источник — строка спеки `RED-EXPECT:` или маркер
+    /// `# red-expect:` в red.cmd (приоритет: маркер → спека → этот ключ).
+    pub red_expect: Option<String>,
     pub crap: Option<CrapCfg>,
     pub bench: Option<String>,
     pub no_ignored: bool,
@@ -92,6 +96,7 @@ impl Default for RunConfig {
             log_days: 30,
             mutate: None,
             red_mutate: None,
+            red_expect: None,
             crap: None,
             bench: None,
             no_ignored: true,

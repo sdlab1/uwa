@@ -136,6 +136,7 @@ pub fn init(root: &Path) -> anyhow::Result<()> {
     c += &format!("MIN_KILL={min_kill}           # минимальный kill-rate, %\n");
     c += "RED_MUTATE=''  # контроль red-теста: шаблон мутантов с {test} (пусто = выкл)\n";
     c += &format!("RED_MIN_KILL={min_kill}      # минимальный kill-rate именно red-теста, %\n");
+    c += "RED_EXPECT=''      # P7 red.expect: regex ОЖИДАЕМОЙ ошибки red-фазы (глобальный дефолт; пер-таск — строка спеки RED-EXPECT: или маркер '# red-expect:' в red.cmd). Пусто = выкл: любой exit≠0 на pre считается RED\n";
     c += &format!(
         "CRAP='{crap}'  # гейт CRAP (guardrail №2): score = C²·(1−cov)³ + C; пусто = выкл\n"
     );

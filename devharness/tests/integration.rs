@@ -791,6 +791,45 @@ fn section14_red_required() {
     sb.run_ok(&["abort"]);
 }
 
+// ── P7 red.expect: RED должен падать «по той причине» ──
+
+#[test]
+fn section14b_red_expect_spec_block_wrong_reason() {
+    let sb = Sandbox::new("r14b");
+    sb.run_ok(&["init"]);
+    // red.cmd падает по ДРУГОЙ причине (connection refused), а подпись ждёт
+    // «no health payload»: честного RED нет — это блокер спеки, не агент.
+    let spec = "спека\nRED: test -f done.txt; printf 'running 1 test\\ntest spec::reason ... FAILED\\nfailures:\\n    spec::reason\\npanicked at lib.rs:1: connection refused\\n'; exit 1\nRED-EXPECT: no health payload\n";
+    sb.new_item("кривая спека", spec, None);
+    let (ok, out) = sb.run_capture(&["run"]);
+    assert!(!ok, "run must die on spec-block:\n{out}");
+    assert!(contains(&out, "БЛОКЕР СПЕКИ"), "{out}");
+    assert!(contains(&out, "no health payload"), "{out}");
+    // агенту фаза НЕ поручалась: fix-раунд тут не лечит
+    assert!(!contains(&out, "раунд фикса"), "{out}");
+    let red_log = fs::read_to_string(sb.harness_file("logs/W-001-red.log"))
+        .unwrap_or_else(|_| unreachable!());
+    assert!(contains(&red_log, "connection refused"), "{red_log}");
+    sb.run_ok(&["abort"]);
+}
+
+#[test]
+fn section14c_red_expect_honest_pass() {
+    let sb = Sandbox::new("r14c");
+    sb.run_ok(&["init"]);
+    // Та же механика, но panic-текст совпал с подписью: честный RED.
+    // До работы done.txt нет → печатаем лог упавшего теста и exit 1;
+    // после работы done.txt есть → exit 0 (пост-гейт зеленеет).
+    let spec = "спека\nRED: test -f done.txt || { printf 'running 1 test\\ntest spec::reason ... FAILED\\nfailures:\\n    spec::reason\\npanicked at lib.rs:1: assertion failed: no health payload\\n'; exit 1; }\nRED-EXPECT: no health payload\n";
+    sb.new_item("честная спека", spec, None);
+    let (ok, out) = sb.run_capture(&["run"]);
+    assert!(ok, "run should pass:\n{out}");
+    assert!(contains(&out, "честный RED"), "{out}");
+    assert!(contains(&out, "spec::reason"), "{out}");
+    sb.run_ok(&["commit"]);
+    sb.run_ok(&["merge"]);
+}
+
 #[test]
 fn section15_mutate_required() {
     let sb = Sandbox::new("r15");

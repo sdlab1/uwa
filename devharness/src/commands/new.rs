@@ -11,6 +11,17 @@ pub fn red_from_spec(spec: &str) -> Option<String> {
         .filter(|c| !c.is_empty())
 }
 
+/// P7 (red.expect): строка спеки `RED-EXPECT: <regex>` — ожидаемая подпись
+/// падения red-фазы. Живёт файлом items/W-NNN/red-expect; приоритет источников
+/// (маркер red.cmd → спека → конфиг RED_EXPECT) — в run::resolve_red_expect.
+/// Префикс НЕ пересекается с `RED:` («RED-» ≠ «RED:»), разбор независим.
+pub fn red_expect_from_spec(spec: &str) -> Option<String> {
+    spec.lines()
+        .find(|l| l.starts_with("RED-EXPECT:"))
+        .map(|l| l["RED-EXPECT:".len()..].trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
 pub fn new_cmd(
     store: &Store,
     arg: Option<&str>,
@@ -92,6 +103,9 @@ pub fn new_cmd(
                 std::fs::write(d.join("red.cmd"), &red)?;
             }
         }
+        if let Some(expect) = red_expect_from_spec(&spec) {
+            std::fs::write(d.join("red-expect"), &expect)?;
+        }
         (id, d)
     } else {
         let spec = read_spec_stdin()?;
@@ -146,6 +160,9 @@ pub fn create_item(
     } else if let Some(red) = red_from_spec(spec) {
         std::fs::write(d.join("red.cmd"), &red)?;
     }
+    if let Some(expect) = red_expect_from_spec(spec) {
+        std::fs::write(d.join("red-expect"), &expect)?;
+    }
     if let Some(reason) = no_crap {
         std::fs::write(d.join("no-crap"), reason)?;
     }
@@ -167,5 +184,41 @@ pub fn create_item_numbered(
     if let Some(red) = red_from_spec(spec) {
         std::fs::write(item_rel(&id, "red.cmd"), &red)?;
     }
+    if let Some(expect) = red_expect_from_spec(spec) {
+        std::fs::write(item_rel(&id, "red-expect"), &expect)?;
+    }
     Ok(d)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn red_expect_from_spec_reads_line() {
+        let spec = "# Задача\nЧто сделать.\nRED: cargo nextest run health\nRED-EXPECT: no health payload\n";
+        assert_eq!(
+            red_from_spec(spec).as_deref(),
+            Some("cargo nextest run health")
+        );
+        assert_eq!(
+            red_expect_from_spec(spec).as_deref(),
+            Some("no health payload")
+        );
+    }
+
+    #[test]
+    fn red_and_red_expect_prefixes_do_not_collide() {
+        // строка RED: не должна читаться как RED-EXPECT: и наоборот
+        let only_red = "RED: true\n";
+        assert_eq!(red_expect_from_spec(only_red), None);
+        let only_expect = "RED-EXPECT: /panicked/\n";
+        assert_eq!(red_from_spec(only_expect), None);
+        assert_eq!(
+            red_expect_from_spec(only_expect).as_deref(),
+            Some("/panicked/")
+        );
+        // пустое значение → нет подписи (как и у RED:)
+        assert_eq!(red_expect_from_spec("RED-EXPECT:   \n"), None);
+    }
 }

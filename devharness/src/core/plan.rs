@@ -31,6 +31,11 @@ pub fn next(rounds_done: u32, max_fix: u32, verdict: &Verdict, summary_msg: &str
         Verdict::Fail { gate, .. } => Step::Die {
             reason: format!("гейт {gate:?} красный после {max_fix} раундов"),
         },
+        // Блокер спеки: fix-раунд агента чужой код не починит — умираем сразу,
+        // человека чинит спеку (P7: red.expect).
+        Verdict::SpecBlock { gate, tail } => Step::Die {
+            reason: format!("БЛОКЕР СПЕКИ ({gate:?}): {tail}"),
+        },
     }
 }
 

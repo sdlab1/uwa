@@ -231,26 +231,63 @@ pub fn run(store: &Store, cfg: &RunConfig, id: &ItemId) -> anyhow::Result<()> {
                 c.g, c.z
             );
         } else {
-            let raw = run_red(&red_file, &wt);
-            let verdict = gates::judge(
-                &Gate::Red {
-                    cmd: red_file.display().to_string(),
-                    phase: RedPhase::Pre,
-                },
-                &raw,
-                cfg,
-            );
-            if verdict == Verdict::Pass {
+            // P7 (red.expect): подпись причины — маркер `# red-expect:` в
+            // red.cmd → строка спеки `RED-EXPECT:` → ключ RED_EXPECT.
+            let red_src = std::fs::read_to_string(&red_file).unwrap_or_default();
+            let expect = resolve_red_expect(store, cfg, id, &red_src);
+            let red_gate = |expect: &Option<String>| Gate::Red {
+                cmd: red_file.display().to_string(),
+                phase: RedPhase::Pre,
+                expect: expect.clone(),
+            };
+            let mut raw = run_red(&red_file, &wt, false);
+            std::fs::write(store.log_file(id, "red"), &raw.log).ok();
+            let mut verdict = gates::judge(&red_gate(&expect), &raw, cfg);
+            // P7: контеншен-флейк — на перегруженной машине (load≈11 было)
+            // red.cmd может умереть таймаутом и не попасть под подпись;
+            // одна повторная попытка под nice лечит большую часть.
+            if matches!(verdict, Verdict::SpecBlock { .. }) {
                 println!(
-                    "{}OK red: падает на HEAD (пруф воспроизводится){}",
-                    c.g, c.z
+                    "{}.. red: подпись не совпала — повтор под nice (контеншен?){}",
+                    c.y, c.z
                 );
-            } else {
-                eprintln!(
-                    "{}FAIL: red.cmd уже зелёный на чистом HEAD — это не баг. Почини red.cmd или удали.{}",
-                    c.r, c.z
-                );
-                die(store, id, 1);
+                raw = run_red(&red_file, &wt, true);
+                std::fs::write(store.log_file(id, "red"), &raw.log).ok();
+                verdict = gates::judge(&red_gate(&expect), &raw, cfg);
+            }
+            match verdict {
+                Verdict::Pass => println!(
+                    "{}OK red: {}{}",
+                    c.g,
+                    gates::red_proof_line(&raw.log, expect.as_deref()),
+                    c.z
+                ),
+                Verdict::SpecBlock { tail, .. } => {
+                    eprintln!(
+                        "{}FAIL (red): БЛОКЕР СПЕКИ — правь red.cmd или RED-EXPECT; fix-раунд агента тут не лечит{}",
+                        c.r, c.z
+                    );
+                    eprintln!("{tail}");
+                    eprintln!("      лог: {}{}", store.log_file(id, "red").display(), c.z);
+                    die(store, id, 1);
+                }
+                Verdict::EnvBlocked { missing } => {
+                    eprintln!(
+                        "{}FAIL (red): env-блокер — {}. Блокер СРЕДЫ, не работа агента (rc=2). Лог: {}{}",
+                        c.r,
+                        missing,
+                        store.log_file(id, "red").display(),
+                        c.z
+                    );
+                    die(store, id, 2);
+                }
+                Verdict::Fail { .. } => {
+                    eprintln!(
+                        "{}FAIL: red.cmd уже зелёный на чистом HEAD — это не баг. Почини red.cmd или удали.{}",
+                        c.r, c.z
+                    );
+                    die(store, id, 1);
+                }
             }
         }
     }
@@ -338,11 +375,12 @@ pub fn run(store: &Store, cfg: &RunConfig, id: &ItemId) -> anyhow::Result<()> {
     );
 
     if !no_red && has_red {
-        let raw = run_red(&red_file, &wt);
+        let raw = run_red(&red_file, &wt, false);
         let verdict = gates::judge(
             &Gate::Red {
                 cmd: red_file.display().to_string(),
                 phase: RedPhase::Post,
+                expect: None,
             },
             &raw,
             cfg,
@@ -520,8 +558,10 @@ enum GateFail {
     Red { gate: Gate, tail: String },
 }
 
-fn run_red(red_file: &Path, wt: &Path) -> Raw {
-    let cmd = format!("bash {}", shell_quote(&red_file.to_string_lossy()));
+fn run_red(red_file: &Path, wt: &Path, nice: bool) -> Raw {
+    // P7: retry под nice — контеншен (load≈11 был) убивает red-таймаутом.
+    let prefix = if nice { "nice -n 19 " } else { "" };
+    let cmd = format!("{prefix}bash {}", shell_quote(&red_file.to_string_lossy()));
     match proc::run_logged(&cmd, wt, RED_TIMEOUT, &[]) {
         Ok(out) => Raw {
             exit: out.exit,
@@ -534,6 +574,26 @@ fn run_red(red_file: &Path, wt: &Path) -> Raw {
             missing_tool: None,
         },
     }
+}
+
+/// P7 (red.expect): приоритет источников подписи причины падения:
+/// 1. маркер `# red-expect:` в red.cmd (агент пишет его рядом с тестом);
+/// 2. строка спеки `RED-EXPECT:` (файл items/W-NNN/red-expect от `devh new`);
+/// 3. ключ конфига RED_EXPECT (глобальный дефолт).
+fn resolve_red_expect(
+    store: &Store,
+    cfg: &RunConfig,
+    id: &ItemId,
+    red_src: &str,
+) -> Option<String> {
+    gates::red_expect_marker(red_src)
+        .or_else(|| {
+            store
+                .read(item_rel(id, "red-expect"))
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        })
+        .or_else(|| cfg.red_expect.clone())
 }
 
 fn shell_quote(s: &str) -> String {
@@ -666,6 +726,12 @@ fn gate_ladder(
                     })
                 }
                 Verdict::Fail { tail, .. } => {
+                    return Err(GateFail::Red {
+                        gate: Gate::Crap,
+                        tail,
+                    })
+                }
+                Verdict::SpecBlock { tail, .. } => {
                     return Err(GateFail::Red {
                         gate: Gate::Crap,
                         tail,
