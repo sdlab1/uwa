@@ -102,6 +102,58 @@
     input.click();
   }
 
+  function promptUrl(): string | null {
+    const raw = window.prompt(
+      'Provider URL to open in this profile for login:',
+      'https://chatgpt.com/',
+    );
+    if (!raw) return null;
+    try {
+      return new URL(raw.trim()).toString();
+    } catch {
+      toast(`Not a valid URL: ${raw}`, 'warn');
+      return null;
+    }
+  }
+
+  async function openSite(p: ProfileSummary, url: string) {
+    busy = p.name;
+    try {
+      const reuse = new URL(url).origin;
+      const r = await openProfileTab(p.name, {
+        url,
+        reuse_if_url_starts_with: reuse,
+      });
+      toast(
+        `${r.reused ? 'Reused tab' : 'Opened tab'} ${r.tab} for ${p.name}`,
+        'ok',
+      );
+    } catch (e) {
+      toast(`Open failed: ${String(e)}`, 'err');
+    } finally {
+      busy = null;
+    }
+  }
+
+  async function reset(p: ProfileSummary) {
+    const sure = window.confirm(
+      `Reset profile "${p.name}"?\n\nEvery tab in it is closed and its cookies/storage are discarded.`,
+    );
+    if (!sure) return;
+    busy = p.name;
+    try {
+      const r = await resetProfile(p.name);
+      toast(`Dropped ${r.dropped_tabs.length} tab(s) from ${p.name}`, 'ok');
+      delete healthByProfile[p.name];
+      healthByProfile = { ...healthByProfile };
+      await load();
+    } catch (e) {
+      toast(`Reset failed: ${String(e)}`, 'err');
+    } finally {
+      busy = null;
+    }
+  }
+
   function statusTone(s: ProfileHealth['providers'][number]['status']): string {
     switch (s) {
       case 'logged_in': return 'ok';
@@ -220,11 +272,11 @@ label = "Work accounts"</code></pre>
               from uwa — check it directly in Chromium.</span>
           {:else if !healthByProfile[p.name]}
             <span class="muted">Not checked yet.</span>
-          {:else if healthByProfile[p.name].providers.length === 0}
+          {:else if healthByProfile[p.name]?.providers.length === 0}
             <span class="muted">No providers configured.</span>
           {:else}
             <ul class="list-none m-0 p-0 space-y-0.5">
-              {#each healthByProfile[p.name].providers as h (h.provider)}
+              {#each (healthByProfile[p.name]?.providers ?? []) as h (h.provider)}
                 <li class="flex items-center gap-2">
                   <span
                     class="pill pill-{statusTone(h.status)} text-[10px]"
