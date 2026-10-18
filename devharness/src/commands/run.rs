@@ -431,6 +431,8 @@ pub fn run(store: &Store, cfg: &RunConfig, id: &ItemId) -> anyhow::Result<()> {
                 die(store, id, 1);
             }
             MutateOutcome::Fail => {
+                // Причина (kill-rate / ранний STOP) — в консоль.
+                eprintln!("{}", tail_of(&rep.log, 40));
                 eprintln!(
                     "{}FAIL: RED-MUT: red-тест убивает слишком мало мутантов — он не доказывает, что проверяет изменение{}",
                     c.r, c.z
@@ -444,10 +446,25 @@ pub fn run(store: &Store, cfg: &RunConfig, id: &ItemId) -> anyhow::Result<()> {
                 die(store, id, 1);
             }
             MutateOutcome::Ok => {
-                println!(
-                    "{}OK red-mutation: red-тест ловит мутантов в изменённых файлах{}",
-                    c.g, c.z
-                );
+                // P7-2.3: SAMPLE — досрочная остановка на выборке: причина
+                // (rule-of-three) в консоль, а не только в лог.
+                if rep.early {
+                    eprintln!("{}", tail_of(&rep.log, 40));
+                }
+                // P7-2.2: пустой скоуп (--in-diff без мутантов на затронутых
+                // строках / всё вычищено --iterate) — не «ловит мутантов»,
+                // а честный «нечего убивать».
+                if rep.stats.is_some_and(|s| s.total == 0) {
+                    println!(
+                        "{}OK red-mutation: 0 мутантов в изменённых файлах — нечего убивать{}",
+                        c.g, c.z
+                    );
+                } else {
+                    println!(
+                        "{}OK red-mutation: red-тест ловит мутантов в изменённых файлах{}",
+                        c.g, c.z
+                    );
+                }
             }
         }
     }
@@ -790,12 +807,34 @@ fn gate_ladder(
                 })
             }
             MutateOutcome::Fail => {
+                // Хвост лога — в консоль: «FAIL: kill-rate …» и причина
+                // раннего останова видны сразу, а не только в logs/mutate.
+                eprintln!("{}", tail_of(&rep.log, 40));
+                if rep.fatal {
+                    // P7-2.3: ранний выход (DOOM / отравленное дерево) —
+                    // вердикт сразу. Fix-раунды перепрогнали бы мутатор
+                    // ради того же итога — ровно то, от чего мы уходим.
+                    eprintln!(
+                        "{}FAIL: гейт mutation остановлен досрочно (MUTATE_EARLY=1) — раунды фикса не нужны (детали: {}){}",
+                        c.r,
+                        mpath.display(),
+                        c.z
+                    );
+                    die(store, id, 1);
+                }
                 return Err(GateFail::Red {
                     gate: Gate::Mutate,
                     tail: tail_of(&rep.log, 40),
                 })
             }
-            MutateOutcome::Ok => {}
+            MutateOutcome::Ok => {
+                // P7-2.3: SAMPLE — решение «доверяем выборке» (rule-of-three).
+                // Гейт зелёный, но часть мутантов не прогонялась: причина
+                // обязана быть в консоли, иначе молчаливый пропуск хвоста.
+                if rep.early {
+                    eprintln!("{}", tail_of(&rep.log, 40));
+                }
+            }
         }
     }
 
@@ -1037,6 +1076,14 @@ struct MutReport {
     log: String,
     outcome: MutateOutcome,
     stats: Option<MutStats>,
+    /// P7-2.3: ранний выход (DOOM / отравленное дерево) — вердикт сразу,
+    /// без fix-раундов: три перепрогона мутатора ради того же результата
+    /// ровно то, от чего ранний выход и защищает.
+    fatal: bool,
+    /// P7-2.3: прогон остановлен досрочно (SAMPLE — «доверяем выборке»).
+    /// Это нетривиальное решение — пользователь обязан увидеть причину,
+    /// даже когда гейт зелёный.
+    early: bool,
 }
 
 /// Гейт мутаций. scope — список git-pathspec через пробел; git сам матчит
@@ -1071,6 +1118,28 @@ fn mutate_gate(
         Some(t) => m.tool.replace("{test}", t),
         None => m.tool.clone(),
     };
+    // P7-2.2: `{diff}` → путь к scoped-diff'у для `--in-diff` («только мутанты
+    // на строках, затронутых этим diff'ом»). Файл пишем здесь, а не в шаблоне:
+    // devh знает MUTATE_SCOPE и видит «изменённое» ровно так же, как `-f {files}`.
+    // Без {diff} в шаблоне git не трогаем вообще (ноль побочных эффектов).
+    let tool0 = if tool0.contains("{diff}") {
+        let path = wt.join(".harness").join("mutate.diff");
+        let nonempty = crate::shell::git::write_mutate_diff(wt, &m.scope, &path).map_err(|e| {
+            anyhow::anyhow!("{e} — шаблон {key} требует --in-diff, а diff не построить")
+        })?;
+        println!(
+            ".. in-diff: {} ({})",
+            path.display(),
+            if nonempty {
+                "diff непустой"
+            } else {
+                "diff пустой — cargo-mutants скажет «Diff file is empty»"
+            }
+        );
+        tool0.replace("{diff}", &path.to_string_lossy())
+    } else {
+        tool0
+    };
     let batch = tool0.contains("{files}");
     let per_file = tool0.contains("{file}") || tool0.contains("{module}");
 
@@ -1086,13 +1155,13 @@ fn mutate_gate(
             println!(".. kill-cache: дерево не менялось — --iterate пропускает пойманных ранее");
         } else {
             println!(
-                ".. kill-cache: дерево изменилось — прошлый skip-set сброшен (mutants.out → stale):                  каждый мутант проверен заново"
+                ".. kill-cache: дерево изменилось — прошлый skip-set сброшен (mutants.out → stale):\n                 каждый мутант проверен заново"
             );
         }
     }
 
     if !batch && !per_file {
-        return Ok(finish(m, run_mut(wt, &tool0), label, key));
+        return Ok(finish(m, run_mut(wt, &tool0, m), label, key));
     }
 
     // Удалённые файлы НЕ отбрасываем: за них отвечает ветка «удалён агентом».
@@ -1106,6 +1175,8 @@ fn mutate_gate(
                 log: mutate_skip_log(m, &files),
                 outcome: MutateOutcome::Ok,
                 stats: None,
+                fatal: false,
+                early: false,
             });
         }
         let flags = live
@@ -1122,11 +1193,13 @@ fn mutate_gate(
                 .collect::<Vec<_>>()
                 .join(" ")
         );
-        let rep = finish(m, run_mut(wt, &cmd), label, key);
+        let rep = finish(m, run_mut(wt, &cmd, m), label, key);
         return Ok(MutReport {
             log: format!("{head}{}", rep.log),
             outcome: rep.outcome,
             stats: rep.stats,
+            fatal: rep.fatal,
+            early: rep.early,
         });
     }
 
@@ -1139,6 +1212,8 @@ fn mutate_gate(
             missed: 0,
             unviable: 0,
         }),
+        fatal: false,
+        early: false,
     };
     for f in &files {
         if !wt.join(f).is_file() {
@@ -1147,7 +1222,7 @@ fn mutate_gate(
         }
         let module = mod_of(f, &m.scope);
         let cmd = tool0.replace("{module}", &module).replace("{file}", f);
-        let rep = finish(m, run_mut(wt, &cmd), &format!("{label} {f}"), key);
+        let rep = finish(m, run_mut(wt, &cmd, m), &format!("{label} {f}"), key);
         acc.log += &rep.log;
         match rep.outcome {
             // Инструмент не распознан — смысла продолжать цикл нет (как и раньше).
@@ -1156,9 +1231,15 @@ fn mutate_gate(
                     log: acc.log,
                     outcome: MutateOutcome::Env,
                     stats: None,
+                    fatal: false,
+                    early: false,
                 });
             }
-            MutateOutcome::Fail => acc.outcome = MutateOutcome::Fail,
+            MutateOutcome::Fail => {
+                acc.outcome = MutateOutcome::Fail;
+                acc.fatal = acc.fatal || rep.fatal;
+                acc.early = acc.early || rep.early;
+            }
             MutateOutcome::Ok => {}
         }
         // perf.log хочет ИТОГ по гейту, поэтому per-file статы суммируем.
@@ -1191,6 +1272,64 @@ fn mutate_skip_log(m: &MutateCfg, files: &[String]) -> String {
 /// Один прогон → лог + вердикт + статы. `label` = "mutation" /
 /// "red-mutation" (или "{label} <файл>" для per-file), `key` — ключ конфига
 fn finish(m: &MutateCfg, run: MutRun, label: &str, key: &str) -> MutReport {
+    if let MutRun::Empty { why } = &run {
+        return MutReport {
+            log: format!("{label}: 0 мутантов — {}, пропуск\n", why.0),
+            outcome: MutateOutcome::Ok,
+            stats: Some(MutStats {
+                total: 0,
+                killed: 0,
+                missed: 0,
+                unviable: 0,
+            }),
+            fatal: false,
+            early: false,
+        };
+    }
+    // P7-2.3: ранний выход — вердикт, а не красивый отчёт.
+    if let MutRun::Stopped {
+        kind,
+        reason,
+        stats,
+        poisoned,
+        repair,
+    } = &run
+    {
+        let mut log = format!("{label} STOP: {reason}\n");
+        if !repair.is_empty() {
+            log += repair;
+        }
+        log += &format!(
+            "{label}: остановлено досрочно, проверено до останова: Mutants {total}, killed {killed}, missed {missed}, unviable {unviable} (MUTATE_EARLY=1)\n",
+            total = stats.total,
+            killed = stats.killed,
+            missed = stats.missed,
+            unviable = stats.unviable
+        );
+        let fatal = matches!(kind, crate::core::early::EarlyStop::Doom { .. }) || *poisoned;
+        let outcome = if fatal {
+            if *poisoned {
+                log += &format!(
+                    "{label} FAIL: мутант остался в дереве после ремонта — коммитить нельзя\n"
+                );
+            } else {
+                log += &format!(
+                    "{label} FAIL: kill-rate < {}% недостижим — хвост прогона не нужен\n",
+                    m.min_kill
+                );
+            }
+            MutateOutcome::Fail
+        } else {
+            MutateOutcome::Ok
+        };
+        return MutReport {
+            log,
+            outcome,
+            stats: Some(*stats),
+            fatal,
+            early: true,
+        };
+    }
     let MutRun::Stats {
         total,
         killed,
@@ -1203,6 +1342,8 @@ fn finish(m: &MutateCfg, run: MutRun, label: &str, key: &str) -> MutReport {
                 log: format!("{label} env-blocked: {why}\n"),
                 outcome: MutateOutcome::Env,
                 stats: None,
+                fatal: false,
+                early: false,
             };
         }
         return MutReport {
@@ -1212,7 +1353,8 @@ fn finish(m: &MutateCfg, run: MutRun, label: &str, key: &str) -> MutReport {
             ),
             outcome: MutateOutcome::Env,
             stats: None,
-        };
+            fatal: false,
+            early: false,        };
     };
     let stats = MutStats {
         total,
@@ -1241,12 +1383,16 @@ fn finish(m: &MutateCfg, run: MutRun, label: &str, key: &str) -> MutReport {
             log,
             outcome,
             stats: Some(stats),
+            fatal: false,
+            early: false,
         }
     } else if total == 0 {
         MutReport {
             log: format!("{label}: 0 мутантов — нечего убивать, пропуск\n"),
             outcome: MutateOutcome::Ok,
             stats: Some(stats),
+            fatal: false,
+            early: false,
         }
     } else {
         MutReport {
@@ -1255,7 +1401,8 @@ fn finish(m: &MutateCfg, run: MutRun, label: &str, key: &str) -> MutReport {
             ),
             outcome: MutateOutcome::Ok,
             stats: Some(stats),
-        }
+            fatal: false,
+            early: false,        }
     }
 }
 
@@ -1295,7 +1442,15 @@ fn perf_mutate(store: &Store, id: &ItemId, rep: &MutReport, timing: &Timing) {
         .ok();
 }
 
+/// Пустой скоуп мутатора: cargo-mutants вышел 0 и написал почему
+/// («Diff file is empty» и т.п.) — это не сломанный инструмент (Env),
+/// а «нечего убивать».
+struct EmptyWhy(String);
+
 enum MutRun {
+    Empty {
+        why: EmptyWhy,
+    },
     Stats {
         total: u32,
         killed: u32,
@@ -1304,10 +1459,21 @@ enum MutRun {
     },
     /// P5.5: контенция — нагрузка выше порога, гейт перенесён (не молчаливый Env).
     Blocked(String),
+    /// P7-2.3: ранний выход по DOOM/SAMPLE — watcher остановил прогон
+    /// (SIGINT группе). stats — live-счётчики на момент останова.
+    Stopped {
+        kind: crate::core::early::EarlyStop,
+        reason: String,
+        stats: MutStats,
+        /// true: в дереве остались маркеры мутанта даже после ремонта —
+        /// коммитить нельзя («отравленный коммит»), гейт честно FAIL.
+        poisoned: bool,
+        repair: String,
+    },
     Env,
 }
 
-fn run_mut(wt: &Path, cmd: &str) -> MutRun {
+fn run_mut(wt: &Path, cmd: &str, m: &MutateCfg) -> MutRun {
     // P5.5: под контенцией мутации стоят ×2–4 (load 24 в логах; §9.10).
     // Один замер перед запуском: порог max(4, 2×CPU) либо
     // HARNESS_MUTATE_MAX_LOAD ("off" — выключить). Неизвестная нагрузка
@@ -1318,21 +1484,119 @@ fn run_mut(wt: &Path, cmd: &str) -> MutRun {
             return MutRun::Blocked(why);
         }
     }
-    match proc::run_logged(cmd, wt, MUTATE_TIMEOUT, &[]) {
-        Ok(out) => {
-            let log = proc::combined(&out);
-            match gates::parse_mutation_output(&log) {
-                Some(s) => MutRun::Stats {
-                    total: s.mutants,
-                    killed: s.killed,
-                    missed: s.missed,
-                    unviable: s.unviable,
+    // Пробрасываем HARNESS_* переменные в мутатор (P7-2.3: ранний выход
+    // читает их внутри cargo-mutants / скрипта).
+    let envs: Vec<(String, String)> = std::env::vars()
+        .filter(|(k, _)| k.starts_with("HARNESS_"))
+        .collect();
+    if !m.early {
+        return match proc::run_logged(cmd, wt, MUTATE_TIMEOUT, &envs) {
+            Ok(out) => classify(&proc::combined(&out)),
+            Err(_) => MutRun::Env,
+        };
+    }
+    run_mut_watched(wt, cmd, m, &envs)
+}
+
+/// Вывод мутатора → MutRun (классификация общая для run_logged/run_monitored).
+fn classify(log: &str) -> MutRun {
+    match gates::parse_mutation_output(log) {
+        Some(s) => MutRun::Stats {
+            total: s.mutants,
+            killed: s.killed,
+            missed: s.missed,
+            unviable: s.unviable,
+        },
+        // P7-2.2: пустой скоуп (--in-diff без мутантов на изменённых
+        // строках, либо всё вычищен --iterate) — честный пропуск,
+        // а не «инструмент не распознан».
+        None if let Some(why) = gates::parse_no_mutants_reason(log) => {
+            MutRun::Empty { why: EmptyWhy(why) }
+        }
+        // Ошибка фильтра --in-diff (rc 5/6): diff устарел/не читается.
+        None if let Some(why) = gates::parse_diff_filter_error(log) => MutRun::Blocked(why),
+        None => MutRun::Env,
+    }
+}
+
+/// P7-2.3: monitored-прогон. Watcher раз в секунду читает append-only
+/// списки mutants.out (ДЕЛЬТОЙ от базлайна: прошлый прогон/--iterate
+/// оставил строки) и mutants.json (total), останавливает по DOOM/SAMPLE
+/// SIGINT'ом группы: cargo-mutants сам откатывает мутанта и выходит чисто.
+fn run_mut_watched(wt: &Path, cmd: &str, m: &MutateCfg, envs: &[(String, String)]) -> MutRun {
+    use crate::core::early;
+    let dir = wt.join(early::mutants_out_dir(cmd));
+    let base = early::read_live(&dir);
+    let shuffled = cmd.split_whitespace().any(|w| w == "--shuffle");
+    let min_kill = m.min_kill;
+    let dir_clone = dir.clone();
+    let base_clone = base;
+    match proc::run_monitored(cmd, wt, MUTATE_TIMEOUT, envs, move |log_text| {
+        let mut live = early::read_live(&dir_clone);
+        live.sub_base(&base_clone);
+        let total = live.total.or_else(|| early::parse_discovered(log_text));
+        early::evaluate(&live, total, min_kill, shuffled)
+    }) {
+        Ok(mn) => {
+            let log = proc::combined(&mn.outcome);
+            let Some(stop) = mn.stopped else {
+                // не остановили — полный лог, обычная классификация
+                return classify(&log);
+            };
+            let mut live = early::read_live(&dir);
+            live.sub_base(&base);
+            let total = live
+                .total
+                .or_else(|| early::parse_discovered(&log))
+                .unwrap_or(0);
+            let (repair, poisoned) = repair_mutant_markers(wt, &dir);
+            let reason = stop.describe();
+            MutRun::Stopped {
+                kind: stop,
+                reason,
+                stats: MutStats {
+                    total,
+                    killed: live.killed(),
+                    missed: live.missed,
+                    unviable: live.unviable,
                 },
-                None => MutRun::Env,
+                poisoned,
+                repair,
             }
         }
         Err(_) => MutRun::Env,
     }
+}
+
+/// P7-2.3: после останова — маркеры cargo-mutants в дереве? Чистый SIGINT
+/// откатывает мутанта сам (interrupt.rs → revert); жёсткий SIGKILL — нет.
+/// Дерево в фазе гейта ГРЯЗНОЕ (коммит после лестницы) → `git checkout`
+/// запрещён, ремонт — только reverse-apply свежих диффов mutants.out/diff.
+fn repair_mutant_markers(wt: &Path, out_dir: &Path) -> (String, bool) {
+    let marked = git::mutant_marked_files(wt);
+    if marked.is_empty() {
+        return (String::new(), false);
+    }
+    let (done, left) = git::revert_mutant_diffs(wt, out_dir);
+    let mut note = format!(
+        "STOP-repair: маркеры мутанта в дереве: {} — остановка раньше revert'а\n",
+        marked.join(" ")
+    );
+    if !done.is_empty() {
+        note += &format!(
+            "STOP-repair: git apply -R свежих диффов: {}\n",
+            done.join(" ")
+        );
+    }
+    let poisoned = !left.is_empty();
+    if poisoned {
+        note += &format!(
+            "STOP-repair FAIL: маркеры остались в {} — диффов не хватило; вручную: grep -rn '{}', коммитить это дерево НЕЛЬЗЯ\n",
+            left.join(" "),
+            crate::core::early::MARKER
+        );
+    }
+    (note, poisoned)
 }
 
 fn mod_of(path: &str, scope: &str) -> String {
