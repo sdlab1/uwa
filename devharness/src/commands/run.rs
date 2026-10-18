@@ -444,10 +444,20 @@ pub fn run(store: &Store, cfg: &RunConfig, id: &ItemId) -> anyhow::Result<()> {
                 die(store, id, 1);
             }
             MutateOutcome::Ok => {
-                println!(
-                    "{}OK red-mutation: red-тест ловит мутантов в изменённых файлах{}",
-                    c.g, c.z
-                );
+                // P7-2.2: пустой скоуп (--in-diff без мутантов на затронутых
+                // строках / всё вычищено --iterate) — не «ловит мутантов»,
+                // а честный «нечего убивать».
+                if rep.stats.is_some_and(|s| s.total == 0) {
+                    println!(
+                        "{}OK red-mutation: 0 мутантов в изменённых файлах — нечего убивать{}",
+                        c.g, c.z
+                    );
+                } else {
+                    println!(
+                        "{}OK red-mutation: red-тест ловит мутантов в изменённых файлах{}",
+                        c.g, c.z
+                    );
+                }
             }
         }
     }
@@ -1071,6 +1081,28 @@ fn mutate_gate(
         Some(t) => m.tool.replace("{test}", t),
         None => m.tool.clone(),
     };
+    // P7-2.2: `{diff}` → путь к scoped-diff'у для `--in-diff` («только мутанты
+    // на строках, затронутых этим diff'ом»). Файл пишем здесь, а не в шаблоне:
+    // devh знает MUTATE_SCOPE и видит «изменённое» ровно так же, как `-f {files}`.
+    // Без {diff} в шаблоне git не трогаем вообще (ноль побочных эффектов).
+    let tool0 = if tool0.contains("{diff}") {
+        let path = wt.join(".harness").join("mutate.diff");
+        let nonempty = crate::shell::git::write_mutate_diff(wt, &m.scope, &path).map_err(|e| {
+            anyhow::anyhow!("{e} — шаблон {key} требует --in-diff, а diff не построить")
+        })?;
+        println!(
+            ".. in-diff: {} ({})",
+            path.display(),
+            if nonempty {
+                "diff непустой"
+            } else {
+                "diff пустой — cargo-mutants скажет «Diff file is empty»"
+            }
+        );
+        tool0.replace("{diff}", &path.to_string_lossy())
+    } else {
+        tool0
+    };
     let batch = tool0.contains("{files}");
     let per_file = tool0.contains("{file}") || tool0.contains("{module}");
 
@@ -1086,7 +1118,7 @@ fn mutate_gate(
             println!(".. kill-cache: дерево не менялось — --iterate пропускает пойманных ранее");
         } else {
             println!(
-                ".. kill-cache: дерево изменилось — прошлый skip-set сброшен (mutants.out → stale):                  каждый мутант проверен заново"
+                ".. kill-cache: дерево изменилось — прошлый skip-set сброшен (mutants.out → stale):\n                 каждый мутант проверен заново"
             );
         }
     }
@@ -1191,6 +1223,18 @@ fn mutate_skip_log(m: &MutateCfg, files: &[String]) -> String {
 /// Один прогон → лог + вердикт + статы. `label` = "mutation" /
 /// "red-mutation" (или "{label} <файл>" для per-file), `key` — ключ конфига
 fn finish(m: &MutateCfg, run: MutRun, label: &str, key: &str) -> MutReport {
+    if let MutRun::Empty { why } = &run {
+        return MutReport {
+            log: format!("{label}: 0 мутантов — {}, пропуск\n", why.0),
+            outcome: MutateOutcome::Ok,
+            stats: Some(MutStats {
+                total: 0,
+                killed: 0,
+                missed: 0,
+                unviable: 0,
+            }),
+        };
+    }
     let MutRun::Stats {
         total,
         killed,
@@ -1295,7 +1339,15 @@ fn perf_mutate(store: &Store, id: &ItemId, rep: &MutReport, timing: &Timing) {
         .ok();
 }
 
+/// Пустой скоуп мутатора: cargo-mutants вышел 0 и написал почему
+/// («Diff file is empty» и т.п.) — это не сломанный инструмент (Env),
+/// а «нечего убивать».
+struct EmptyWhy(String);
+
 enum MutRun {
+    Empty {
+        why: EmptyWhy,
+    },
     Stats {
         total: u32,
         killed: u32,
@@ -1328,6 +1380,16 @@ fn run_mut(wt: &Path, cmd: &str) -> MutRun {
                     missed: s.missed,
                     unviable: s.unviable,
                 },
+                // P7-2.2: пустой скоуп (--in-diff без мутантов на изменённых
+                // строках, либо всё вычищен --iterate) — честный пропуск,
+                // а не «инструмент не распознан».
+                None if let Some(why) = gates::parse_no_mutants_reason(&log) => {
+                    MutRun::Empty { why: EmptyWhy(why) }
+                }
+                // Ошибка фильтра --in-diff (rc 5/6): diff устарел/не читается.
+                None if let Some(why) = gates::parse_diff_filter_error(&log) => {
+                    MutRun::Blocked(why)
+                }
                 None => MutRun::Env,
             }
         }

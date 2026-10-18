@@ -283,6 +283,51 @@ fn scoped_names(wt: &Path, scope: &str) -> Vec<String> {
     files
 }
 
+/// P7-2.2: diff для `--in-diff` cargo-mutants («только мутанты на строках,
+/// затронутых этим diff'ом» — `-D, --in-diff <IN_DIFF>`). Пишем в
+/// `.harness/mutate.diff` (вне git: `.git/info/exclude`, значит и вне
+/// отпечатка kill-cache) и отдаём путь в шаблон как `{diff}`.
+///
+/// Почему `git add -N .` перед `git diff HEAD`: без intent-to-add новые
+/// файлы агента в `git diff HEAD` не видны, и их мутанты выпали бы из
+/// скоупа — а это самый ценный для гейта код. Тот же приём уже
+/// используется в `review_diff`. Побочный эффект безопасен: intent-to-add
+/// только переводит untracked в staged-new, содержимое не меняется.
+///
+/// Взгляд на «изменённое» тот же, что у `changed_files_scoped_all`
+/// (`git diff HEAD` + scope-pathspec) — скоуп `-f {files}` и скоуп
+/// `--in-diff` не расходятся.
+///
+/// Пустой diff — не ошибка: cargo-mutants печатает «Diff file is empty»
+/// и выходит 0 (0 мутантов), эту ветку гейт отличает от Env.
+pub fn write_mutate_diff(wt: &Path, scope: &str, out: &Path) -> anyhow::Result<bool> {
+    let _ = git_ok(wt, &["add", "-N", "."]);
+    let mut args: Vec<&str> = vec!["diff", "HEAD"];
+    let scopes: Vec<&str> = scope.split_whitespace().collect();
+    if !scopes.is_empty() {
+        args.push("--");
+        args.extend(scopes.iter().copied());
+    }
+    let mut c = Command::new("git");
+    c.args(&args).current_dir(wt);
+    let o = c
+        .output()
+        .map_err(|e| anyhow::anyhow!("devh: git diff не запустился ({e})"))?;
+    if !o.status.success() {
+        anyhow::bail!(
+            "git diff HEAD: {}",
+            String::from_utf8_lossy(&o.stderr).trim()
+        );
+    }
+    let text = String::from_utf8_lossy(&o.stdout).to_string();
+    if let Some(par) = out.parent() {
+        std::fs::create_dir_all(par).ok();
+    }
+    std::fs::write(out, &text)
+        .map_err(|e| anyhow::anyhow!("devh: не записать {} ({e})", out.display()))?;
+    Ok(!text.trim().is_empty())
+}
+
 pub fn current_branch(wt: &Path) -> Option<String> {
     let b = git_out(wt, &["rev-parse", "--abbrev-ref", "HEAD"]);
     (!b.trim().is_empty()).then(|| b.trim().to_string())
@@ -458,5 +503,37 @@ mod tests {
         let b = current_branch(d.path()).unwrap_or_default();
         assert!(!b.is_empty(), "ветка HEAD должна читаться");
         assert_ne!(b, "HEAD", "unborn/detached HEAD не есть ветка задачи");
+    }
+    #[test]
+    fn write_mutate_diff_sees_tracked_and_new_files() {
+        let d = repo();
+        std::fs::write(d.path().join("src.rs"), "fn a() {}\n").unwrap_or_else(|_| unreachable!());
+        commit_all(&d);
+        let out = d.path().join(".harness").join("mutate.diff");
+        // ничего не меняли — diff пустой, но файл существует (cargo-mutants сам скажет «empty»)
+        assert!(
+            !write_mutate_diff(d.path(), "src.rs", &out).unwrap_or_else(|_| unreachable!()),
+            "без правок diff пуст"
+        );
+        assert!(out.is_file(), "файл диффа обязан существовать: {out:?}");
+        // обычная правка + НОВЫЙ файл (intent-to-add)
+        std::fs::write(d.path().join("src.rs"), "fn a() { let _ = 1; }\n")
+            .unwrap_or_else(|_| unreachable!());
+        std::fs::write(d.path().join("new.rs"), "fn b() {}\n").unwrap_or_else(|_| unreachable!());
+        assert!(
+            write_mutate_diff(d.path(), ".", &out).unwrap_or_else(|_| unreachable!()),
+            "есть правки — diff непустой"
+        );
+        let text = std::fs::read_to_string(&out).unwrap_or_else(|_| unreachable!());
+        assert!(text.contains("diff --git a/src.rs b/src.rs"), "{text}");
+        assert!(
+            text.contains("diff --git a/new.rs b/new.rs"),
+            "новый файл агента обязан попадать в diff (иначе его мутанты вне скоупа): {text}"
+        );
+        // scope отсекает лишнее: diff только по src.rs
+        let out2 = d.path().join(".harness").join("scoped.diff");
+        write_mutate_diff(d.path(), "src.rs", &out2).unwrap_or_else(|_| unreachable!());
+        let text2 = std::fs::read_to_string(&out2).unwrap_or_else(|_| unreachable!());
+        assert!(!text2.contains("b/new.rs"), "scope не применился: {text2}");
     }
 }

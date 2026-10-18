@@ -96,6 +96,58 @@ fn parse_mutation_line(line: &str) -> Option<MutationStats> {
     parse_mutants_summary_line(line).or_else(|| parse_legacy_muex_line(line))
 }
 
+/// P7-2.2: cargo-mutants выходит с rc=0 БЕЗ строки итога, когда в скоупе не
+/// осталось мутантов. Три сообщения от `--in-diff` (`src/in_diff.rs`
+/// 27.1.0: `DiffFilterError` с `exit_code() == Success`) и одно от пустого
+/// результата `--iterate`/шардирования (`src/lab.rs`: «No mutants found under
+/// the active filters»).
+///
+/// Без этой ветки честный пустой скоуп давал `MutRun::Env` = «инструмент не
+/// распознан» — гейт выглядел сломанным на каждом diff'е, который не тронул
+/// мутируемый код. Для гейта это «0 мутантов — нечего убивать».
+///
+/// ВАЖНО: сообщения об ОШИБКАХ фильтра (`Diff content doesn't match source
+/// file`, `Failed to parse diff`, `Failed to read diff file`) сюда НЕ входят —
+/// у них rc=5/6, это поломка диффа, а не пустой скоуп.
+pub fn parse_no_mutants_reason(log: &str) -> Option<String> {
+    const KNOWN: [&str; 4] = [
+        "Diff file is empty",
+        "Diff changes no Rust source files",
+        "No mutants to filter",
+        "No mutants found under the active filters",
+    ];
+    for line in log.lines() {
+        let t = line.trim();
+        // формат tracing: " INFO <msg>" / " WARN <msg>"
+        let msg = match t.split_once(' ') {
+            Some((lvl, rest)) if matches!(lvl, "INFO" | "WARN") && !rest.is_empty() => rest.trim(),
+            _ => t,
+        };
+        if KNOWN.contains(&msg) {
+            return Some(msg.to_string());
+        }
+    }
+    None
+}
+
+/// Ошибки фильтра `--in-diff` (rc 5/6): diff устарел или не читается.
+/// Гейт обязан назвать причину, а не молчаливым «Env».
+pub fn parse_diff_filter_error(log: &str) -> Option<String> {
+    for line in log.lines() {
+        let t = line.trim_start();
+        for p in [
+            "Diff content doesn't match source file",
+            "Failed to parse diff",
+            "Failed to read diff file",
+        ] {
+            if t.contains(p) {
+                return Some(t.trim().to_string());
+            }
+        }
+    }
+    None
+}
+
 fn parse_mutants_summary_line(line: &str) -> Option<MutationStats> {
     let (before, after) = line.split_once(" tested")?;
     // before: "10 mutants"/"1 mutant" (итог) или "8/10 mutants" (прогресс)
@@ -702,6 +754,60 @@ pub fn tail_of(log: &str, lines: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn no_mutants_reasons_from_cargo_mutants() {
+        // rc=0 без строки итога — пустой скоуп, а не сломанный инструмент
+        for (line, want) in [
+            (" INFO Diff file is empty", "Diff file is empty"),
+            (" INFO No mutants to filter", "No mutants to filter"),
+            (
+                " INFO Diff changes no Rust source files",
+                "Diff changes no Rust source files",
+            ),
+            (
+                " WARN No mutants found under the active filters",
+                "No mutants found under the active filters",
+            ),
+            ("Diff file is empty", "Diff file is empty"),
+        ] {
+            assert_eq!(
+                parse_no_mutants_reason(line).as_deref(),
+                Some(want),
+                "{line}"
+            );
+        }
+    }
+
+    #[test]
+    fn no_mutants_reason_rejects_real_output() {
+        // обычный итог, прогресс и чухой вывод — не «пустой скоуп»
+        for line in [
+            "10 mutants tested in 5s: 9 caught, 1 missed",
+            "1/10 mutants tested, 1 MISSED, 5s elapsed",
+            "какой-то чужой вывод без маркеров",
+            "Diff content doesn't match source file: src/lib.rs line 3",
+            " ERROR Failed to read diff file: нет файла",
+        ] {
+            assert_eq!(parse_no_mutants_reason(line), None, "{line}");
+        }
+    }
+
+    #[test]
+    fn diff_filter_error_named() {
+        let log = " ERROR Diff content doesn't match source file: src/a.rs line 9\n\
+                   The diff might be out of date with this source tree.\n";
+        let got = parse_diff_filter_error(log).unwrap_or_else(|| unreachable!());
+        assert!(
+            got.contains("Diff content doesn't match source file"),
+            "{got}"
+        );
+        // успешный итог гейта ошибкой фильтра не является
+        assert_eq!(
+            parse_diff_filter_error("10 mutants tested in 5s: 10 caught"),
+            None
+        );
+    }
 
     fn raw(exit: Option<i32>, log: &str) -> Raw {
         Raw {

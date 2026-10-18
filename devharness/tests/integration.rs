@@ -2142,6 +2142,128 @@ printf 'feat: агент сделал работу\n\nдетали: стаб\n' 
     sb.run_ok(&["abort"]);
 }
 
+/// P7-2.2: `{diff}` в шаблоне мутатора — devh сам строит scoped-diff
+/// (`git diff HEAD` + intent-to-add, новые файлы агента видны) и отдаёт
+/// путь в `--in-diff`; scope совпадает со scope `-f {files}`. Часть (б):
+/// пустой скоуп (cargo-mutants вышел 0 с «Diff file is empty») — честный
+/// Ok «0 мутантов — нечего убивать», не Env «инструмент не распознан».
+#[test]
+fn section36_in_diff_template_and_empty_scope() {
+    let sb = Sandbox::new("r36");
+    sb.run_ok(&["init"]);
+    // стаб мутатора: принимает --in-diff <path>, проверяет, что devh реально
+    // построил diff, и печатает обычный итог
+    write_exec(
+        &sb.stubs.join("mut-indiff.sh"),
+        r#"#!/usr/bin/env bash
+path=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --in-diff) path="$2"; shift 2;;
+    *) shift;;
+  esac
+done
+if [ -z "$path" ]; then echo "STUB FAIL: нет --in-diff в аргументах: $*"; exit 1; fi
+if [ ! -f "$path" ]; then echo "STUB FAIL: devh не построил $path"; exit 1; fi
+if ! grep -q "diff --git" "$path"; then echo "STUB FAIL: $path не unified-diff"; exit 1; fi
+# stdout стаба уходит в лог гейта, не в stdout devh — поэтому маркер-файл
+echo "$path" > "$(dirname "$0")/indiff.marker"
+echo "IN-DIFF OK $path"
+echo "10 mutants tested in 1s: 10 caught, 0 missed"
+"#,
+    );
+    // стаб «пустого скоупа»: cargo-mutants так и выходит (rc 0, без строки итога)
+    write_exec(
+        &sb.stubs.join("mut-empty.sh"),
+        "#!/usr/bin/env bash\necho \" INFO Diff file is empty\"\n",
+    );
+    let tmpl = format!(
+        "{} --in-diff \"{{diff}}\"",
+        sb.stubs.join("mut-indiff.sh").display()
+    );
+    let red_tmpl = format!(
+        "{} --in-diff \"{{diff}}\" '{{test}}'",
+        sb.stubs.join("mut-indiff.sh").display()
+    );
+    let tmpl_empty = format!(
+        "{} --in-diff \"{{diff}}\"",
+        sb.stubs.join("mut-empty.sh").display()
+    );
+    let red_tmpl_empty = format!(
+        "{} --in-diff \"{{diff}}\" '{{test}}'",
+        sb.stubs.join("mut-empty.sh").display()
+    );
+    sb.new_item(
+        "in-diff item",
+        "спека\nRED: test -f done.txt || { printf 'assertion failed: no health payload\\n'; exit 1; }\n",
+        None,
+    );
+    // (а) агент сделал правку — devh пишет .harness/mutate.diff и отдаёт путь
+    let (ok, out) = sb.run_capture_env(
+        &["run"],
+        &[
+            (
+                "HARNESS_AGENT",
+                sb.stubs.join("stub.sh").display().to_string().as_str(),
+            ),
+            ("HARNESS_MUTATE", tmpl.as_str()),
+            ("HARNESS_RED_MUTATE", red_tmpl.as_str()),
+            ("HARNESS_MUTATE_SCOPE", "."),
+        ],
+    );
+    assert!(ok, "run должен быть зелёным:\n{out}");
+    assert!(
+        out.contains(".. in-diff: "),
+        "шаблон с {{diff}} обязан построить diff:\n{out}"
+    );
+    let marker = sb.stubs.join("indiff.marker");
+    let got = fs::read_to_string(&marker).unwrap_or_else(|_| unreachable!());
+    let got = got.trim_end();
+    assert!(
+        got.ends_with(".harness/mutate.diff"),
+        "стаб мутатора должен получить путь к нашему diff'у, получил: {got:?}"
+    );
+    let wt = worktree_entry(&sb.git_out(&["worktree", "list", "--porcelain"]))
+        .unwrap_or_else(|| unreachable!());
+    let diff = wt.join(".harness").join("mutate.diff");
+    let text = fs::read_to_string(&diff).unwrap_or_else(|_| unreachable!());
+    assert!(text.contains("diff --git"), "{diff:?}: {text}");
+    sb.run_ok(&["commit"]);
+    sb.run_ok(&["merge"]);
+
+    // (б) пустой скоуп мутатора — это Ok («нечего убивать»), а не Env
+    let sb2 = Sandbox::new("r36b");
+    sb2.run_ok(&["init"]);
+    sb2.new_item(
+        "empty scope item",
+        "спека\nRED: test -f done.txt || { printf 'assertion failed: no health payload\\n'; exit 1; }\n",
+        None,
+    );
+    let (ok, out) = sb2.run_capture_env(
+        &["run"],
+        &[
+            (
+                "HARNESS_AGENT",
+                sb2.stubs.join("stub.sh").display().to_string().as_str(),
+            ),
+            ("HARNESS_MUTATE", tmpl_empty.as_str()),
+            ("HARNESS_RED_MUTATE", red_tmpl_empty.as_str()),
+            ("HARNESS_MUTATE_SCOPE", "."),
+        ],
+    );
+    assert!(ok, "пустой скоуп не должен валить прогон:\n{out}");
+    assert!(
+        out.contains("0 мутантов"),
+        "пустой скоуп обязан быть назван нулём мутантов, а не Env:\n{out}"
+    );
+    assert!(
+        !out.contains("инструмент не распознан"),
+        "пустой скоуп — не поломка инструмента:\n{out}"
+    );
+    sb2.run_ok(&["commit"]);
+    sb2.run_ok(&["merge"]);
+}
+
 /// P7-3: `--iterate` в шаблоне мутатора допустим ТОЛЬКО с нашим
 /// тест-ключеванным kill-cache. Встроенный outcomes.json cargo-mutants
 /// знает лишь сценарий мутанта — ослабленный тест дал бы «пойман» на
