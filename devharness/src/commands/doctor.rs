@@ -1,10 +1,11 @@
 use std::path::Path;
 use std::time::Instant;
 
-use crate::core::types::RunConfig;
+use crate::core::state::Status;
+use crate::core::types::{ItemId, RunConfig};
 use crate::shell::color::{colors, Colors};
 use crate::shell::git;
-use crate::shell::store::Store;
+use crate::shell::store::{item_rel, Store};
 use crate::shell::worktree;
 
 const SMOKE_TIMEOUT_SECS: u64 = 120;
@@ -107,6 +108,34 @@ pub fn doctor(store: &Store, cfg: &RunConfig, root: &Path) -> anyhow::Result<()>
         } else {
             say(&format!(
                 "WARN mutation: '{mbin}' не найден — run будет заблокирован (установи инструмент)"
+            ));
+            warn = warn.saturating_add(1);
+        }
+        // P8-5: спека без точек наблюдения (OBSERVE) рискует породить слепые
+        // тесты — мутанты там выживут. Мягкая проверка (не гейт): вратами
+        // остаётся RED, а OBSERVE — про то, что автор до кода назвал, ЧЕМ
+        // фича проверяется (план third_loop §7).
+        let blind: Vec<ItemId> = store
+            .items()
+            .into_iter()
+            .filter(|i| i.status != Status::Done)
+            .filter(|i| {
+                store
+                    .read(item_rel(&i.id, "spec.md"))
+                    .as_deref()
+                    .and_then(crate::commands::new::observe_from_spec)
+                    .is_none()
+            })
+            .map(|i| i.id)
+            .collect();
+        if blind.is_empty() {
+            say("ok   OBSERVE: точки наблюдения у всех открытых спек");
+        } else {
+            let names: Vec<String> = blind.iter().map(|i| i.dir_name()).collect();
+            say(&format!(
+                "WARN спеки без точек наблюдения (OBSERVE): {} ({}) — тесты рискуют быть слепыми; перечисли return/side-effect/state/log до RED",
+                blind.len(),
+                names.join(", ")
             ));
             warn = warn.saturating_add(1);
         }

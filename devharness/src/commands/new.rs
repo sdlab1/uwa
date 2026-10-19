@@ -22,6 +22,49 @@ pub fn red_expect_from_spec(spec: &str) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+/// P8-5 (OBSERVE): точки наблюдения спеки — маркированный список сразу после
+/// строки `OBSERVE:` (план third_loop §7). Одна точка на строку (маркер `- `
+/// обрезается). Живёт файлом items/W-NNN/observe.md; инжектится в промпт
+/// (prompt.rs::agent_prompt) и проверяется мягко в doctor.
+/// Префикс НЕ пересекается с `RED:`/`RED-EXPECT:` — разбор независим.
+/// OBSERVE не гейт: вратами остаётся RED, истиной — мутационный вердикт.
+pub fn observe_from_spec(spec: &str) -> Option<String> {
+    let mut points: Vec<&str> = Vec::new();
+    let mut inside = false;
+    for raw in spec.lines() {
+        let l = raw.trim_start();
+        let head = l.strip_prefix("OBSERVE:").map(|rest| rest.trim());
+        if let Some(inline) = head {
+            inside = true;
+            if let Some(point) = inline.strip_prefix("- ").map(str::trim) {
+                if !point.is_empty() {
+                    points.push(point);
+                }
+            }
+            continue;
+        }
+        if !inside {
+            continue;
+        }
+        let t = l.trim();
+        if t.is_empty() {
+            continue; // пустая строка внутри блока не рвёт
+        }
+        let Some(rest) = t.strip_prefix("- ") else {
+            break;
+        }; // следующий раздел (RED:, …)
+        let point = rest.trim();
+        if !point.is_empty() {
+            points.push(point);
+        }
+    }
+    if points.is_empty() {
+        None
+    } else {
+        Some(points.join("\n"))
+    }
+}
+
 pub fn new_cmd(
     store: &Store,
     arg: Option<&str>,
@@ -65,6 +108,9 @@ pub fn new_cmd(
             if let Some(reason) = no_crap {
                 std::fs::write(d.join("no-crap"), reason)?;
             }
+            if let Some(points) = observe_from_spec(&spec) {
+                std::fs::write(d.join("observe.md"), &points)?;
+            }
             drop(_g);
             println!(
                 "{}OK {}: {} (спека из todo/{n}.md){}{}{}",
@@ -83,6 +129,7 @@ pub fn new_cmd(
                 "   RED-пруф ОБЯЗАТЕЛЕН (в первую очередь): {} — команда, падающая на чистом HEAD",
                 d.join("red.cmd").display()
             );
+            println!("   Спека (todo/{n}.md): секции OBSERVE: (точки наблюдения — return/side-effect/state/log списком «- …», до RED:) и RED:");
             return Ok(());
         }
     }
@@ -106,6 +153,9 @@ pub fn new_cmd(
         if let Some(expect) = red_expect_from_spec(&spec) {
             std::fs::write(d.join("red-expect"), &expect)?;
         }
+        if let Some(points) = observe_from_spec(&spec) {
+            std::fs::write(d.join("observe.md"), &points)?;
+        }
         (id, d)
     } else {
         let spec = read_spec_stdin()?;
@@ -128,6 +178,9 @@ pub fn new_cmd(
     println!(
         "   RED-пруф ОБЯЗАТЕЛЕН (в первую очередь): {} — команда, падающая на чистом HEAD",
         d.join("red.cmd").display()
+    );
+    println!(
+        "   Спека (spec.md): секции OBSERVE: (точки наблюдения — return/side-effect/state/log списком «- …», до RED:) и RED:"
     );
     Ok(())
 }
@@ -163,6 +216,9 @@ pub fn create_item(
     if let Some(expect) = red_expect_from_spec(spec) {
         std::fs::write(d.join("red-expect"), &expect)?;
     }
+    if let Some(points) = observe_from_spec(spec) {
+        std::fs::write(d.join("observe.md"), &points)?;
+    }
     if let Some(reason) = no_crap {
         std::fs::write(d.join("no-crap"), reason)?;
     }
@@ -187,6 +243,9 @@ pub fn create_item_numbered(
     if let Some(expect) = red_expect_from_spec(spec) {
         std::fs::write(item_rel(&id, "red-expect"), &expect)?;
     }
+    if let Some(points) = observe_from_spec(spec) {
+        std::fs::write(item_rel(&id, "observe.md"), &points)?;
+    }
     Ok(d)
 }
 
@@ -204,6 +263,36 @@ mod tests {
         assert_eq!(
             red_expect_from_spec(spec).as_deref(),
             Some("no health payload")
+        );
+    }
+
+    #[test]
+    fn observe_from_spec_reads_bullets_until_next_section() {
+        let spec = "# Задача\nЧто сделать.\n\nOBSERVE:\n- return: load_average() → Some(значение) / None при мусоре\n- state: HARNESS_MUTATE_MAX_LOAD читается один раз\n\nRED: cargo nextest run load\nRED-EXPECT: no payload\n";
+        assert_eq!(
+            observe_from_spec(spec).as_deref(),
+            Some("return: load_average() → Some(значение) / None при мусоре\nstate: HARNESS_MUTATE_MAX_LOAD читается один раз")
+        );
+    }
+
+    #[test]
+    fn observe_prefixes_do_not_collide_with_red() {
+        // спека без OBSERVE → точек нет (не падает)
+        assert_eq!(observe_from_spec("RED: true\n"), None);
+        // пустое значение и пустые буллеты → None
+        assert_eq!(observe_from_spec("OBSERVE:   \n"), None);
+        assert_eq!(observe_from_spec("OBSERVE:\n- \n"), None);
+        // RED: сразу после буллетов рвёт блок (не точка)
+        let spec = "OBSERVE:\n- log: «env-blocked»\nRED: cargo nextest\n";
+        assert_eq!(
+            observe_from_spec(spec).as_deref(),
+            Some("log: «env-blocked»")
+        );
+        // пустая строка внутри блока не рвёт
+        let spec = "OBSERVE:\n\n- side-effect: файл перезаписан\n\n- return: ok\n";
+        assert_eq!(
+            observe_from_spec(spec).as_deref(),
+            Some("side-effect: файл перезаписан\nreturn: ok")
         );
     }
 

@@ -1428,7 +1428,9 @@ fn section27_red_author_prompt() {
     write_exec(
         &dump,
         r#"#!/usr/bin/env bash
-printf '%s\n' "$1" > "$(dirname "$HARNESS_SPEC")/prompt.txt"
+# фиксируем ПЕРВЫЙ промпт (fix-раунды его перезапишут)
+p="$(dirname "$HARNESS_SPEC")/prompt.txt"
+[ -f "$p" ] || printf '%s\n' "$1" > "$p"
 "#,
     );
     let dump = dump.display().to_string();
@@ -2673,4 +2675,75 @@ echo "2 mutants tested in 1s: 1 caught, 1 missed"
     );
     let obs_after = fs::read_to_string(&obs_path).unwrap_or_else(|_| unreachable!());
     assert!(obs_after.trim().is_empty(), "import обнуляет очередь");
+}
+
+#[test]
+fn section39_observe_points_reach_prompt_and_doctor() {
+    // Спека с OBSERVE → items/W-NNN/observe.md (одна точка на строку) и точки
+    // в промпте агента; спека без OBSERVE → промпт без блока (не падает).
+    let sb = Sandbox::new("r39");
+    sb.run_ok(&["init"]);
+    // RED раннит тем же раннером, что и VERIFY (иначе RED-LINK уведёт в фазу
+    // автора red.cmd и основной промпт построится только после зелёного RED).
+    let spec = "# Задача\nOBSERVE:\n- return: load_average() → Some(значение)/None при мусоре\n- state: HARNESS_MUTATE_MAX_LOAD читается один раз\nRED: test -f done.txt\n";
+    sb.new_item("observe item 1", spec, None);
+    let obs = sb.item_dir("W-001").join("observe.md");
+    let points = fs::read_to_string(&obs).unwrap_or_else(|_| unreachable!());
+    assert!(
+        contains(&points, "- return: load_average()")
+            || contains(&points, "return: load_average()"),
+        "точки наблюдения записаны без маркера: {points}"
+    );
+    assert!(
+        contains(&points, "state: HARNESS_MUTATE_MAX_LOAD"),
+        "{points}"
+    );
+
+    // агент-стаб сохраняет промпт в spec-дире соседа; проверяем инжект.
+    let dump = sb.stubs.join("dump-prompt.sh");
+    write_exec(
+        &dump,
+        r#"#!/usr/bin/env bash
+# ТРЕЙС: каждый вызов агента (промпт + HARNESS_SPEC) — приёмка/отладка
+echo "CALL SPEC=$HARNESS_SPEC" >> "$TRACE"
+printf '=== PROMPT ===\n%s\n' "$1" >> "$TRACE"
+"#,
+    );
+    let dump = dump.display().to_string();
+    let trace = sb.stubs.join("agent-trace.txt");
+    let (ok, out) = sb.run_capture_env(
+        &["run", "W-001"],
+        &[
+            ("HARNESS_AGENT", dump.as_str()),
+            ("TRACE", trace.to_string_lossy().to_string().as_str()),
+        ],
+    );
+    assert!(!ok, "run останавливается на красном RED: {out}");
+    let prompt = fs::read_to_string(&trace).unwrap_or_else(|_| unreachable!());
+    // первый блок трейса — промпт фазы реализации (не fix-раунд)
+    let first_prompt = prompt.split("=== PROMPT ===").nth(1).unwrap_or_default();
+    assert!(
+        contains(first_prompt, "Точки наблюдения фичи")
+            && contains(first_prompt, "return: load_average()"),
+        "OBSERVE-точки в промпте (первый блок): {prompt}"
+    );
+    assert!(
+        contains(&prompt, "тестом фичи не считается"),
+        "требование ассерта на каждую точку: {prompt}"
+    );
+    sb.run_ok(&["abort"]);
+
+    // спека без OBSERVE → observe.md нет, блок отсутствует, doctor не блокирует.
+    sb.new_item(
+        "observe item 2",
+        "спека без точек\nRED: test -f done.txt\n",
+        None,
+    );
+    assert!(!sb.item_dir("W-002").join("observe.md").exists());
+    let (ok2, out2) = sb.run_capture(&["doctor"]);
+    assert!(
+        contains(&out2, "спеки без точек наблюдения"),
+        "doctor мягко подсвечивает спеку без OBSERVE: {out2}"
+    );
+    assert!(ok2, "doctor мягкий (WARN ≠ FAIL): {out2}");
 }
