@@ -278,6 +278,11 @@ struct GateStop { verdict: Verdict, log: String, message: String }
 - аудит: `cargo mutants --in-diff <main..HEAD diff> -f devharness/src/commands/run.rs -f devharness/src/core/gates.rs` — 0 missed;
 - коммит `devh(A1): …`, FF-merge в main, push.
 
+**СТАТУС: A1 СДАН (2026-10-19)** — коммит `b873a18` (ветка `devh/a1-verdict`, база `eaf4dac`), FF-merge в main, push origin/main + ветка.
+- Все пункты приёмки выполнены: carriers-grep → 0; test.sh **127 PASS / 0 FAIL**; unit **141** (137 + 4 новых `failure_kind_*`) + 54 integration; fmt/clippy чистые; аудит дельты **25 мутантов: 21 caught / 4 unviable / 0 missed** (unviable — арифметика на String; аудит-конфиг `/tmp/a1-mutants.toml`, т.к. `-f` НЕ снимает `exclude_globs` commands/** в каноническом конфиге — правка протокола для A2/A3).
+- Сверх плана (приёмка-риски, закрыты): (1) stale-`verdict` баг — mutation-ветка gate_ladder тащила лint/review-байнд (всегда Pass) в GateStop → `failure_kind(Pass)` = `unreachable!` (паника section02/section20); лечено `match &rep.verdict` + `verdict: rep.verdict.clone()`. (2) load-gate (P5 §5.1) ловил сам сьют (54 параллельных теста на 4 ядра → loadavg > 8) → «mutation env-блокер» в 30 интеграционных тестов = шум окружения, не регрессия (верификация `HARNESS_MUTATE_MAX_LOAD=off` — 54/54, затем натуральный прогон 54/54). (3) `Default` для `Verdict`(Pass)/`MutReport`(пустой)/`FailureKind`(Fix) — иначе FnValue-мутанты на моих кортежах были unviable (10/25 unviable → 4/25).
+- Журнал: docs/rust_build.md §9.16. Следующая: Сессия 2 (разрез run() + `decide_round`), база — текущий main = `b873a18`.
+
 ## Сессия 2 — разрез `run()` + чистый `decide_round` (детально)
 
 Предусловие: сессия 1 в main. Разрез по текущим строкам (после сессии 1 сдвинутся — ремерять):
