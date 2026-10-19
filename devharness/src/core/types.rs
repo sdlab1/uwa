@@ -44,6 +44,9 @@ pub struct MutateCfg {
     /// P7-2.4: покрытийный отбор тестов (llvm-cov -> nextest -E).
     /// По умолчанию выключен (требует nightly rustc для -Zinstrument-coverage).
     pub cov: bool,
+    /// P8-1: третья петля — MissedMutant'ы прогона в `.harness/observations.md`
+    /// (seen-дедуп + killmap + survivors.log). По умолчанию выключен.
+    pub survivors: bool,
 }
 
 #[derive(Debug, Clone)]

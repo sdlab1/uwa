@@ -16,7 +16,7 @@ use crate::core::types::{CrapCfg, ItemId, MutateCfg, RunConfig};
 use crate::shell::store::{Item, Store};
 use crate::Cmd;
 
-pub const CONFIG_KEYS: [&str; 31] = [
+pub const CONFIG_KEYS: [&str; 32] = [
     "VERIFY",
     "BOOTSTRAP",
     "AGENT",
@@ -33,6 +33,7 @@ pub const CONFIG_KEYS: [&str; 31] = [
     "MIN_KILL",
     "MUTATE_EARLY",
     "MUTATE_COV",
+    "MUTATE_SURVIVORS",
     "RED_MUTATE",
     "RED_MIN_KILL",
     "RED_EXPECT",
@@ -104,6 +105,7 @@ pub fn load_config(root: &Path) -> anyhow::Result<RunConfig> {
                 min_kill: u32v("MIN_KILL", 90),
                 early: boolv("MUTATE_EARLY", false),
                 cov: boolv("MUTATE_COV", false),
+                survivors: boolv("MUTATE_SURVIVORS", false),
             }),
         red_mutate: g("RED_MUTATE")
             .filter(|s| !s.trim().is_empty())
@@ -113,6 +115,7 @@ pub fn load_config(root: &Path) -> anyhow::Result<RunConfig> {
                 min_kill: u32v("RED_MIN_KILL", 90),
                 early: boolv("MUTATE_EARLY", false),
                 cov: false,
+                survivors: boolv("MUTATE_SURVIVORS", false),
             }),
         red_expect: g("RED_EXPECT").filter(|s| !s.trim().is_empty()),
         crap: g("CRAP")

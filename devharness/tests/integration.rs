@@ -2558,3 +2558,119 @@ sleep 30
         "b.txt обязан вернуться к оригиналу, got: {b:?}"
     );
 }
+
+// ── P8-1: мутационные выжившие → observations.md (третья петля) ──
+
+#[test]
+fn section38_survivors_feed_observations_queue() {
+    // Стаб мутатора пишет живой outcomes.json (1 caught + 1 missed) и честный
+    // итог «1 killed» — гейт зелёный при MIN_KILL=40, хук выживших активен.
+    let sb = Sandbox::new("r38");
+    write_exec(
+        &sb.stubs.join("mut-surv.sh"),
+        r#"#!/usr/bin/env bash
+mkdir -p mutants.out
+cat > mutants.out/outcomes.json <<'JSON'
+{"outcomes":[
+ {"scenario":{"Mutant":{"name":"devharness/src/core/load.rs:15:5: replace load_average -> Option<f64> with Some(0.0)","package":"devh","file":"devharness/src/core/load.rs","function":{"function_name":"load_average","return_type":"Option<f64>"},"span":{"start":{"line":15,"column":5},"end":{"line":15,"column":42}},"replacement":"Some(0.0)","genre":"FnValue"}},"summary":"CaughtMutant","log_path":"l1","diff_path":"d1","phase_results":[]},
+ {"scenario":{"Mutant":{"name":"devharness/src/core/load.rs:22:5: replace max_load -> Option<u32> with None","package":"devh","file":"devharness/src/core/load.rs","function":{"function_name":"max_load","return_type":"Option<u32>"},"span":{"start":{"line":22,"column":5},"end":{"line":22,"column":40}},"replacement":"None","genre":"FnValue"}},"summary":"MissedMutant","log_path":"l2","diff_path":"d2","phase_results":[]}
+]}
+JSON
+echo "2 mutants tested in 1s: 1 caught, 1 missed"
+"#,
+    );
+    let run_surv = |sb: &Sandbox, id: &str| {
+        let mut c = sb.devh(&["run", id]);
+        c.env(
+            "HARNESS_MUTATE",
+            sb.stubs.join("mut-surv.sh").to_string_lossy().to_string(),
+        )
+        .env("HARNESS_MUTATE_SURVIVORS", "1")
+        .env("HARNESS_MIN_KILL", "40")
+        .env("HARNESS_MUTATE_MAX_LOAD", "off");
+        let out = c.output().unwrap_or_else(|_| unreachable!());
+        let all = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(out.status.success(), "run {id}: {all}");
+        all
+    };
+    sb.run_ok(&["init"]);
+    sb.new_item("surv item 1", "спека\n", Some("x"));
+    let all1 = run_surv(&sb, "W-001");
+    assert!(
+        contains(&all1, "survivors: 1 → observations.md (fn-value 1)"),
+        "строка потока выживших видна на терминале: {all1}"
+    );
+
+    let obs_path = sb.repo.join(".harness/observations.md");
+    let obs = fs::read_to_string(&obs_path).unwrap_or_else(|_| unreachable!());
+    assert!(
+        contains(
+            &obs,
+            "devharness/src/core/load.rs:22 | survivor: replace max_load -> Option<u32> with None [FnValue]"
+        ),
+        "выживший в очереди формата §3: {obs}"
+    );
+    assert!(contains(&obs, "red-тест:"), "red-идея обязательна: {obs}");
+    assert!(
+        !contains(&obs, "load.rs:15"),
+        "пойманный в очередь не идёт: {obs}"
+    );
+
+    let mlog =
+        fs::read_to_string(sb.log_file("W-001-mutate.log")).unwrap_or_else(|_| unreachable!());
+    assert!(
+        contains(&mlog, "survivors: 1 → observations.md (fn-value 1)"),
+        "{mlog}"
+    );
+    let seen = fs::read_to_string(sb.repo.join(".harness/survivors-seen.json"))
+        .unwrap_or_else(|_| unreachable!());
+    assert!(contains(&seen, "\"hashes\""), "{seen}");
+    let km = fs::read_to_string(sb.repo.join(".harness/killmap.json"))
+        .unwrap_or_else(|_| unreachable!());
+    assert!(
+        contains(&km, "devharness/src/core/load.rs") && contains(&km, "\"missed\": 1"),
+        "killmap считает выживших: {km}"
+    );
+    let jrnl = fs::read_to_string(sb.repo.join(".harness/survivors.log"))
+        .unwrap_or_else(|_| unreachable!());
+    assert!(
+        contains(
+            &jrnl,
+            "| mutation | devharness/src/core/load.rs:22 | FnValue"
+        ),
+        "{jrnl}"
+    );
+
+    // Второй прогон с тем же outcomes.json → seen-дедуп: очередь не задвоена.
+    sb.new_item("surv item 2", "спека\n", Some("x"));
+    run_surv(&sb, "W-002");
+    let obs2 = fs::read_to_string(&obs_path).unwrap_or_else(|_| unreachable!());
+    assert_eq!(
+        obs2.lines().count(),
+        1,
+        "seen-дедуп: повтор прогона не дублирует очередь: {obs2}"
+    );
+
+    // tickets --import берёт строку выжившего (текст спеки — триаж, не OnFly).
+    sb.run_ok(&["tickets", "--import"]);
+    let mut imported = false;
+    let items = fs::read_dir(sb.repo.join(".harness/items")).unwrap_or_else(|_| unreachable!());
+    for e in items {
+        let d = e.unwrap_or_else(|_| unreachable!()).path();
+        if let Ok(spec) = fs::read_to_string(d.join("spec.md")) {
+            if contains(&spec, "мутационного триажа") {
+                imported = true;
+            }
+        }
+    }
+    assert!(
+        imported,
+        "тикет из survivor-строки ложится с текстом триажа"
+    );
+    let obs_after = fs::read_to_string(&obs_path).unwrap_or_else(|_| unreachable!());
+    assert!(obs_after.trim().is_empty(), "import обнуляет очередь");
+}

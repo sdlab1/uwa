@@ -270,6 +270,7 @@ mod tests {
                 min_kill: 80,
                 early: false,
                 cov: false,
+                survivors: false,
             }),
             ..Default::default()
         };

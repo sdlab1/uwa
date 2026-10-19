@@ -135,7 +135,9 @@ pub fn build_coverage_index(wt: &Path, store_root: &Path) -> Result<CoverageInde
         fs::create_dir_all(parent)?;
     }
 
-    let profraw_str = profraw.to_str().ok_or_else(|| anyhow::anyhow!("invalid profraw path"))?;
+    let profraw_str = profraw
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("invalid profraw path"))?;
     let env = [
         ("CARGO_INCREMENTAL", "0"),
         ("RUSTFLAGS", "-Zinstrument-coverage"),
@@ -172,16 +174,14 @@ pub fn build_coverage_index(wt: &Path, store_root: &Path) -> Result<CoverageInde
 
     // 3. llvm-profdata merge
     let profdata = store_root.join(".harness").join("coverage.profdata");
-    let profraw_str = profraw.to_str().ok_or_else(|| anyhow::anyhow!("invalid profraw path"))?;
-    let profdata_str = profdata.to_str().ok_or_else(|| anyhow::anyhow!("invalid profdata path"))?;
+    let profraw_str = profraw
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("invalid profraw path"))?;
+    let profdata_str = profdata
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("invalid profdata path"))?;
     let merge = Command::new("llvm-profdata")
-        .args([
-            "merge",
-            "-sparse",
-            profraw_str,
-            "-o",
-            profdata_str,
-        ])
+        .args(["merge", "-sparse", profraw_str, "-o", profdata_str])
         .output()
         .context("llvm-profdata merge failed")?;
     if !merge.status.success() {
@@ -231,12 +231,7 @@ fn find_test_binary(wt: &Path, pkg: &str) -> Result<String> {
         }
     }
     // Берём самый новый (последний собранный)
-    candidates.sort_by_key(|p| {
-        fs::metadata(p)
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|t| Some(t))
-    });
+    candidates.sort_by_key(|p| fs::metadata(p).and_then(|m| m.modified()).ok());
     candidates
         .last()
         .map(|p| p.to_string_lossy().to_string())

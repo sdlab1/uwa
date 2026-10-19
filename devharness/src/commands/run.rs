@@ -412,11 +412,18 @@ pub fn run(store: &Store, cfg: &RunConfig, id: &ItemId) -> anyhow::Result<()> {
             die(store, id, 1);
         }
         let red_cmd = std::fs::read_to_string(&red_file).unwrap_or_default();
-        let rep = mutate_gate(m, &wt, Some(red_cmd.trim()), "red-mutation", "RED_MUTATE")
-            .unwrap_or_else(|e| {
-                eprintln!("{}{e}{}", c.r, c.z);
-                die(store, id, 1);
-            });
+        let rep = mutate_gate(
+            m,
+            &wt,
+            &store.dir,
+            Some(red_cmd.trim()),
+            "red-mutation",
+            "RED_MUTATE",
+        )
+        .unwrap_or_else(|e| {
+            eprintln!("{}{e}{}", c.r, c.z);
+            die(store, id, 1);
+        });
         let mpath = store.log_file(id, "redmut");
         std::fs::write(&mpath, &rep.log).ok();
         timing.stage("redmut", store, id);
@@ -786,7 +793,7 @@ fn gate_ladder(
     }
 
     if let Some(m) = &cfg.mutate {
-        let rep = mutate_gate(m, wt, None, "mutation", "MUTATE").unwrap_or_else(|e| {
+        let rep = mutate_gate(m, wt, &store.dir, None, "mutation", "MUTATE").unwrap_or_else(|e| {
             eprintln!("{}{e}{}", c.r, c.z);
             die(store, id, 1);
         });
@@ -1198,11 +1205,33 @@ pub(crate) fn apply_cov_filter(cmd: &str, filter: Option<&str>) -> String {
     format!("{} -- {}", cmd, filter)
 }
 
+/// P8-1: хук выживших (MUTATE_SURVIVORS=1). Ставится строго ПОСЛЕ каждого
+/// finish(): batch-режим пишет один outcomes.json, per-file — каждый прогон
+/// перезаписывает его заново, поэтому сбор «по MutReport на call-site» потерял
+/// бы все планы кроме последнего. Очередь/seen/killmap — под тем же
+/// GlobalLock, что и `tickets --import` (§8.7): единственный append.
+/// `tool0` — шаблон прогона (нужен флаг `--output`, early::mutants_out_dir).
+fn survivors_hook(m: &MutateCfg, wt: &Path, tool: &str, obs: &Path, gate: &str) -> Option<String> {
+    if !m.survivors {
+        return None;
+    }
+    let _g = crate::shell::lock::GlobalLock::acquire(obs).ok()?;
+    let line = crate::core::survivors::collect_after_run(wt, tool, obs, gate);
+    if let Some(l) = &line {
+        eprintln!("{l}");
+    }
+    line
+}
+
 /// Гейт мутаций. scope — список git-pathspec через пробел; git сам матчит
 /// глобы (`crates/*/src/*`) и выкидывает удалённые файлы.
 ///
 /// `test`/`label`/`key` — red-фаза (RED_MUTATE): подстановка `{test}` в
 /// шаблон, метка в строках лога и ключ конфига в env-сообщении.
+///
+/// `obs` — каталог `.harness` store'а (main-репо): очередь наблюдений и
+/// состояние третьей петли (P8-1). Из worktree брать нельзя — у worktree
+/// свой .harness, а `devh tickets --import` читает очередь store'а.
 ///
 /// Три режима по шаблону `m.tool`:
 /// - `{files}` — ОДИН запуск на все живые изменённые файлы (cargo-mutants
@@ -1213,6 +1242,7 @@ pub(crate) fn apply_cov_filter(cmd: &str, filter: Option<&str>) -> String {
 fn mutate_gate(
     m: &MutateCfg,
     wt: &Path,
+    obs: &Path,
     test: Option<&str>,
     label: &str,
     key: &str,
@@ -1307,7 +1337,11 @@ fn mutate_gate(
 
     if !batch && !per_file {
         let cmd = apply_cov_filter(&tool0, cov_filter.as_deref());
-        return Ok(finish(m, run_mut(wt, &cmd, m), label, key));
+        let mut rep = finish(m, run_mut(wt, &cmd, m), label, key);
+        if let Some(line) = survivors_hook(m, wt, &tool0, obs, label) {
+            rep.log += &format!("{line}\n");
+        }
+        return Ok(rep);
     }
 
     if batch {
@@ -1337,7 +1371,10 @@ fn mutate_gate(
                 .collect::<Vec<_>>()
                 .join(" ")
         );
-        let rep = finish(m, run_mut(wt, &cmd, m), label, key);
+        let mut rep = finish(m, run_mut(wt, &cmd, m), label, key);
+        if let Some(line) = survivors_hook(m, wt, &tool0, obs, label) {
+            rep.log += &format!("{line}\n");
+        }
         return Ok(MutReport {
             log: format!("{head}{}", rep.log),
             outcome: rep.outcome,
@@ -1367,7 +1404,10 @@ fn mutate_gate(
         let module = mod_of(f, &m.scope);
         let cmd = tool0.replace("{module}", &module).replace("{file}", f);
         let cmd = apply_cov_filter(&cmd, cov_filter.as_deref());
-        let rep = finish(m, run_mut(wt, &cmd, m), &format!("{label} {f}"), key);
+        let mut rep = finish(m, run_mut(wt, &cmd, m), &format!("{label} {f}"), key);
+        if let Some(line) = survivors_hook(m, wt, &tool0, obs, &format!("{label} {f}")) {
+            rep.log += &format!("{line}\n");
+        }
         acc.log += &rep.log;
         match rep.outcome {
             // Инструмент не распознан — смысла продолжать цикл нет (как и раньше).
