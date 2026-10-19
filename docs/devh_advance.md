@@ -332,10 +332,19 @@ RED: стаб `GiveUp{code:1}` → тесты `decide_round_gives_up_at_max_fix`
 
 Приёмка: интеграция `devh run <done-item>` → rc≠0 + «уже done»; `grep -rn 'set_status' devharness/src/` — только определение/`apply_event`; test.sh 127; 137+54+новые; аудит `--in-diff` на `core/state.rs` + `shell/store.rs` — 0 missed; коммит + FF-merge + push.
 
+**СТАТУС: A3 СДАН (2026-10-19)** — коммит `f5427ef` (ветка `devh/a3-state-events`, база `5822179` = main), FF-merge в main, push origin/main + ветка.
+- Единый писатель статуса: `Store::apply_event(id, event)` (`shell/store.rs`) — status_of → `state::transition` → при Ok `atomic_write(status)` + строка `events.log` («{дата} | {W-NNN} | {event}»). `set_status` → `#[cfg(test)]` (только подготовка в тесте worktree.rs), в проде ни одного вызова.
+- Дефект 2 закрыт: `claim_item` идёт через чистый `state::claim_action(prev)` (RED-стаб `Claim` → 3 из 4 тестов падали в рантайме): Done → `bail «уже done — создай новый»` (rc≠0), Active → resume-printf, Open → WIP-чек + `apply_event(Claimed)`. Мёртвая запись `set_status(Active)` в `run::finalize` удалена (вместе с параметром `store`) — done-item больше не может уползти в active.
+- `merge` → `apply_event(Merged)`; `abort` → `apply_event(Aborted)` для Active; abort Open-item'а — без события (`Open+Aborted` недопустим, статус уже open; `Done+Aborted` = Err — осознанно: смёрженное не откатывают).
+- `fold(events) -> Status` + `event_parse`/`events_from_log` (последнее `|`-поле, мусор пропускается); doctor: `replay_checks` — fold vs файл status, рассинхрон = WARN в отчёт (не смерть doctor'а).
+- Гейты: unit **155** (147 + 8 новых) + integration **55** (новый `section43_run_refuses_done_item`: rc≠0 + «уже done», статус не тронут, журнал claim→merged без повторов, doctor без WARN реплея); test.sh **127 PASS / 0 FAIL**, нормализованный выход байт-идентичен снимку (md5 `46a0245b…`); fmt/clippy чистые (`-D warnings`); аудит `--in-diff` (a1-конфиг): **22 мутанта — 18 caught / 4 unviable / 0 missed / 0 timeout**.
+- Грабля: load-gate (P5 §5.1) ловил сам сьют (55 параллельных тестов → loadavg > 8) — 31 фейк-фейл «mutation env-блокер» при полном прогоне; проверено `HARNESS_MUTATE_MAX_LOAD=off` (55/55) + естественный прогон при load<4 (55/55). Реальная правка по фейлам: abort Open-item'а.
+- Журнал: docs/rust_build.md §9.18. **План A1–A3 исчерпан: все три сессии в main.**
+
 ## Что НЕ делаем в этих сессиях
 
 REVIEW-гейт второй моделью; P8-петля (закрыта); bash-слой. Смещение = размывание RED.
 
 ## Порядок исполнения
 
-A1 ✓ (`b873a18`) → merge+push → A2 ✓ (`971a245`) → merge+push → **A3 (сейчас)** → merge+push. Каждая сессия — один коммит-рефактор (+ возможность точечных фиксов в той же ветке до мержа).
+A1 ✓ (`b873a18`) → A2 ✓ (`971a245`) → A3 ✓ (`f5427ef`) — все merge+push, текущий main = `f5427ef`. Каждая сессия — один коммит-рефактор (+ возможность точечных фиксов в той же ветке до мержа).
