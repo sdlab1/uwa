@@ -39,8 +39,9 @@ impl Gate {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum Verdict {
+    #[default]
     Pass,
     Fail {
         gate: Gate,
@@ -55,6 +56,33 @@ pub enum Verdict {
         gate: Gate,
         tail: String,
     },
+}
+
+/// Класс реакции драйвера run() на вердикт гейта (P7-таксономия):
+/// Fail — работа агента (fix-раунд), EnvBlocked — блокер среды (rc=2),
+/// SpecBlock — блокер спеки, чинит человек (rc=1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailureKind {
+    Fix,
+    Env,
+    Spec,
+}
+
+/// Неизвестность → работа агента: консервативный дефолт (как исторический
+/// Red → fix-раунд). Спекальные/средовые блоки требует ЯВНОГО вердикта.
+impl Default for FailureKind {
+    fn default() -> Self {
+        FailureKind::Fix
+    }
+}
+
+pub fn failure_kind(v: &Verdict) -> FailureKind {
+    match v {
+        Verdict::Fail { .. } => FailureKind::Fix,
+        Verdict::EnvBlocked { .. } => FailureKind::Env,
+        Verdict::SpecBlock { .. } => FailureKind::Spec,
+        Verdict::Pass => unreachable!("failure_kind(Pass) — контракт вызова"),
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1591,5 +1619,38 @@ panicked at net.rs:88: connection refused";
         ));
         assert!(!red_links_verify("grep -q x f", "cargo test"));
         assert!(red_links_verify("anything", ""));
+    }
+
+    #[test]
+    fn failure_kind_routes_fix() {
+        let v = Verdict::Fail {
+            gate: Gate::Lint,
+            tail: "x".into(),
+        };
+        assert_eq!(failure_kind(&v), FailureKind::Fix);
+    }
+
+    #[test]
+    fn failure_kind_routes_env() {
+        let v = Verdict::EnvBlocked {
+            missing: "нет shellcheck".into(),
+        };
+        assert_eq!(failure_kind(&v), FailureKind::Env);
+    }
+
+    #[test]
+    fn failure_kind_routes_spec_block() {
+        let v = Verdict::SpecBlock {
+            gate: Gate::Crap,
+            tail: "y".into(),
+        };
+        assert_eq!(failure_kind(&v), FailureKind::Spec);
+    }
+
+    #[test]
+    fn failure_kind_defaults_to_fix() {
+        // Дефолт Fix — чтобы мутант замены тела на Default::default()
+        // был убиваемым: routing по умолчанию = работа агента.
+        assert_eq!(FailureKind::default(), FailureKind::Fix);
     }
 }

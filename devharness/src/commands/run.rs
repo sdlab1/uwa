@@ -331,35 +331,58 @@ pub fn run(store: &Store, cfg: &RunConfig, id: &ItemId) -> anyhow::Result<()> {
             die(store, id, 1);
         }
 
+        // P7/A1: единый роутинг вердикта — Fix (раунд), Env (rc=2),
+        // Spec (rc=1, блокер спеки чинит человек, не агент).
         match gate_ladder(store, cfg, &wt, id, &mut timing, round) {
             Ok(()) => break,
-            Err(GateFail::Env { log, message }) => {
-                eprint!("{log}");
-                eprintln!("{message}");
-                die(store, id, 1);
-            }
-            Err(GateFail::Red { gate, tail }) => {
-                round = round.saturating_add(1);
-                if round > cfg.max_fix {
+            Err(stop) => match gates::failure_kind(&stop.verdict) {
+                gates::FailureKind::Fix => {
+                    let Verdict::Fail { gate, tail } = stop.verdict else {
+                        unreachable!("класс Fix несёт Fail-вердикт")
+                    };
+                    round = round.saturating_add(1);
+                    if round > cfg.max_fix {
+                        eprintln!(
+                            "{}FAIL: гейт {} красный после {} раундов фикса (логи: {}){}",
+                            c.r,
+                            gate.name(),
+                            cfg.max_fix,
+                            store.dir.join("logs").display(),
+                            c.z
+                        );
+                        die(store, id, 1);
+                    }
+                    println!(
+                        ".. гейт {} упал — раунд фикса {}/{} (fix-раунд {})",
+                        gate.name(),
+                        round,
+                        cfg.max_fix,
+                        round
+                    );
+                    next_prompt = prompt::fix_prompt(&gate, &tail, cfg, store, id);
+                }
+                gates::FailureKind::Env => {
+                    let Verdict::EnvBlocked { missing } = stop.verdict else {
+                        unreachable!("класс Env несёт EnvBlocked-вердикт")
+                    };
+                    eprint!("{}", stop.log);
+                    eprintln!("{missing}");
+                    // Среда — не работа агента: rc=2 (как red-pre-фаза).
+                    die(store, id, 2);
+                }
+                gates::FailureKind::Spec => {
+                    let Verdict::SpecBlock { gate, .. } = stop.verdict else {
+                        unreachable!("класс Spec несёт SpecBlock-вердикт")
+                    };
                     eprintln!(
-                        "{}FAIL: гейт {} красный после {} раундов фикса (логи: {}){}",
+                        "{}FAIL: гейт {} — блокер СПЕКИ: чинит человек (правка спеки/red-expect), а не fix-раунд агента.{}",
                         c.r,
                         gate.name(),
-                        cfg.max_fix,
-                        store.dir.join("logs").display(),
                         c.z
                     );
                     die(store, id, 1);
                 }
-                println!(
-                    ".. гейт {} упал — раунд фикса {}/{} (fix-раунд {})",
-                    gate.name(),
-                    round,
-                    cfg.max_fix,
-                    round
-                );
-                next_prompt = prompt::fix_prompt(&gate, &tail, cfg, store, id);
-            }
+            },
         }
     }
     println!(
@@ -419,6 +442,7 @@ pub fn run(store: &Store, cfg: &RunConfig, id: &ItemId) -> anyhow::Result<()> {
             Some(red_cmd.trim()),
             "red-mutation",
             "RED_MUTATE",
+            Gate::Mutate,
         )
         .unwrap_or_else(|e| {
             eprintln!("{}{e}{}", c.r, c.z);
@@ -427,17 +451,17 @@ pub fn run(store: &Store, cfg: &RunConfig, id: &ItemId) -> anyhow::Result<()> {
         let mpath = store.log_file(id, "redmut");
         std::fs::write(&mpath, &rep.log).ok();
         timing.stage("redmut", store, id);
-        match rep.outcome {
-            MutateOutcome::Env => {
+        match rep.verdict {
+            Verdict::EnvBlocked { .. } => {
                 eprintln!(
                     "{}FAIL: RED-MUT env-блокер — инструмент не распознан (лог: {}){}",
                     c.r,
                     mpath.display(),
                     c.z
                 );
-                die(store, id, 1);
+                die(store, id, 2);
             }
-            MutateOutcome::Fail => {
+            Verdict::Fail { .. } => {
                 // Причина (kill-rate / ранний STOP) — в консоль.
                 eprintln!("{}", tail_of(&rep.log, 40));
                 eprintln!(
@@ -452,7 +476,7 @@ pub fn run(store: &Store, cfg: &RunConfig, id: &ItemId) -> anyhow::Result<()> {
                 );
                 die(store, id, 1);
             }
-            MutateOutcome::Ok => {
+            Verdict::Pass => {
                 // P7-2.3: SAMPLE — досрочная остановка на выборке: причина
                 // (rule-of-three) в консоль, а не только в лог.
                 if rep.early {
@@ -473,6 +497,7 @@ pub fn run(store: &Store, cfg: &RunConfig, id: &ItemId) -> anyhow::Result<()> {
                     );
                 }
             }
+            Verdict::SpecBlock { .. } => unreachable!("red-mutate не отдаёт SpecBlock"),
         }
     }
 
@@ -581,9 +606,12 @@ pub fn run(store: &Store, cfg: &RunConfig, id: &ItemId) -> anyhow::Result<()> {
     Ok(())
 }
 
-enum GateFail {
-    Env { log: String, message: String },
-    Red { gate: Gate, tail: String },
+/// Остановка гейта: вердикт (роутинг + gate/tail для fix-раунда) + полный лог.
+/// Для env-ветки `Verdict::EnvBlocked{missing}` несёт ГОТОВОЕ человекочитаемое
+/// сообщение гейта (как это уже делает `crap_gate`), `log` — вывод инструмента.
+struct GateStop {
+    verdict: Verdict,
+    log: String,
 }
 
 fn run_red(red_file: &Path, wt: &Path, nice: bool) -> Raw {
@@ -687,14 +715,17 @@ fn gate_ladder(
     id: &ItemId,
     timing: &mut Timing,
     round: u32,
-) -> Result<(), GateFail> {
+) -> Result<(), GateStop> {
     let c = colors();
 
     let verify_raw = exec_logged(store, wt, id, &cfg.verify, "verify", VERIFY_TIMEOUT);
     if verify_raw.exit != Some(0) {
-        return Err(GateFail::Red {
-            gate: Gate::Verify,
-            tail: tail_of(&verify_raw.log, 40),
+        return Err(GateStop {
+            verdict: Verdict::Fail {
+                gate: Gate::Verify,
+                tail: tail_of(&verify_raw.log, 40),
+            },
+            log: verify_raw.log,
         });
     }
     timing.stage(format!("verify-r{}", round.saturating_add(1)), store, id);
@@ -702,32 +733,38 @@ fn gate_ladder(
     if cfg.no_ignored {
         let violations = gates::unexpected_ignores(&verify_raw.log, &cfg.ignored_allowlist);
         if !violations.is_empty() {
-            return Err(GateFail::Red {
-                gate: Gate::NoIgnored,
-                tail: violations.join("\n"),
+            return Err(GateStop {
+                verdict: Verdict::Fail {
+                    gate: Gate::NoIgnored,
+                    tail: violations.join("\n"),
+                },
+                log: String::new(),
             });
         }
     }
 
-    let lint_log = lint_gate(cfg, wt);
+    let (lint_log, verdict) = lint_gate(cfg, wt);
     std::fs::write(store.log_file(id, "lint"), &lint_log).ok();
     timing.stage(format!("lint-r{}", round.saturating_add(1)), store, id);
-    match lint_log_kind(&lint_log) {
-        LintKind::Env(msg) => {
-            return Err(GateFail::Env {
+    match verdict {
+        Verdict::EnvBlocked { missing } => {
+            return Err(GateStop {
+                verdict: Verdict::EnvBlocked {
+                    missing: format!(
+                        "FAIL: lint env-блокер. Блокер СРЕДЫ, не работа агента (детали: {missing})."
+                    ),
+                },
                 log: lint_log,
-                message: format!(
-                    "FAIL: lint env-блокер. Блокер СРЕДЫ, не работа агента (детали: {msg})."
-                ),
             })
         }
-        LintKind::Fail => {
-            return Err(GateFail::Red {
-                gate: Gate::Lint,
-                tail: tail_of(&lint_log, 30),
+        Verdict::Fail { .. } => {
+            return Err(GateStop {
+                verdict,
+                log: lint_log,
             })
         }
-        LintKind::Ok => {}
+        Verdict::Pass => {}
+        Verdict::SpecBlock { .. } => unreachable!("lint_gate не отдаёт SpecBlock"),
     }
 
     if let Some(cr) = &cfg.crap {
@@ -746,23 +783,34 @@ fn gate_ladder(
             match verdict {
                 Verdict::Pass => {}
                 Verdict::EnvBlocked { missing } => {
-                    return Err(GateFail::Env {
+                    return Err(GateStop {
+                        verdict: Verdict::EnvBlocked {
+                            missing: format!(
+                                "FAIL: CRAP env-блокер ({missing}). Блокер СРЕДЫ, не работа агента (детали выше)."
+                            ),
+                        },
                         log: clog,
-                        message: format!(
-                            "FAIL: CRAP env-блокер ({missing}). Блокер СРЕДЫ, не работа агента (детали выше)."
-                        ),
                     })
                 }
                 Verdict::Fail { tail, .. } => {
-                    return Err(GateFail::Red {
-                        gate: Gate::Crap,
-                        tail,
+                    return Err(GateStop {
+                        verdict: Verdict::Fail {
+                            gate: Gate::Crap,
+                            tail,
+                        },
+                        log: clog,
                     })
                 }
+                // Дефект 1 (был): SpecBlock уходил в Red — агент получал
+                // fix-раунд на том, что чинит только человек (спека/red-expect).
+                // Теперь это свой класс: failure_kind → Spec → die(1).
                 Verdict::SpecBlock { tail, .. } => {
-                    return Err(GateFail::Red {
-                        gate: Gate::Crap,
-                        tail,
+                    return Err(GateStop {
+                        verdict: Verdict::SpecBlock {
+                            gate: Gate::Crap,
+                            tail,
+                        },
+                        log: clog,
                     })
                 }
             }
@@ -774,46 +822,55 @@ fn gate_ladder(
         std::fs::write(store.log_file(id, "review"), &review_log).ok();
         timing.stage(format!("review-r{}", round.saturating_add(1)), store, id);
         match verdict {
-            ReviewOutcome::Env(msg) => {
-                return Err(GateFail::Env {
+            Verdict::EnvBlocked { missing } => {
+                return Err(GateStop {
+                    verdict: Verdict::EnvBlocked {
+                        missing: format!(
+                            "FAIL: review env-блокер ({missing}). Блокер СРЕДЫ, не работа агента."
+                        ),
+                    },
                     log: review_log,
-                    message: format!(
-                        "FAIL: review env-блокер ({msg}). Блокер СРЕДЫ, не работа агента."
-                    ),
                 })
             }
-            ReviewOutcome::Issues => {
-                return Err(GateFail::Red {
-                    gate: Gate::Review,
-                    tail: tail_of(&review_log, 5),
+            Verdict::Fail { .. } => {
+                return Err(GateStop {
+                    verdict,
+                    log: review_log,
                 })
             }
-            ReviewOutcome::Ok => {}
+            Verdict::Pass => {}
+            Verdict::SpecBlock { .. } => unreachable!("review_gate не отдаёт SpecBlock"),
         }
     }
 
     if let Some(m) = &cfg.mutate {
-        let rep = mutate_gate(m, wt, &store.dir, None, "mutation", "MUTATE").unwrap_or_else(|e| {
-            eprintln!("{}{e}{}", c.r, c.z);
-            die(store, id, 1);
-        });
+        let rep = mutate_gate(m, wt, &store.dir, None, "mutation", "MUTATE", Gate::Mutate)
+            .unwrap_or_else(|e| {
+                eprintln!("{}{e}{}", c.r, c.z);
+                die(store, id, 1);
+            });
         let mpath = store.log_file(id, "mutate");
         std::fs::write(&mpath, &rep.log).ok();
         timing.stage(format!("mutate-r{}", round.saturating_add(1)), store, id);
         perf_mutate(store, id, &rep, timing);
-        match rep.outcome {
-            MutateOutcome::Env => {
-                return Err(GateFail::Env {
+        // match по ссылке + clone: иначе байнд `verdict` тенейватся
+        // чужой (lint/review) копией Pass, а Fail уносил бы Pass в
+        // GateStop → failure_kind(Pass) паниковал (gates.rs unreachable).
+        match &rep.verdict {
+            Verdict::EnvBlocked { .. } => {
+                return Err(GateStop {
+                    verdict: Verdict::EnvBlocked {
+                        missing: format!(
+                            "{}FAIL: mutation env-блокер — инструмент не распознан. Блокер СРЕДЫ, не работа агента: установи (gobot: muex; rust: cargo-mutants) или исправь MUTATE в .harness/config. Детали: {}{}",
+                            c.r,
+                            mpath.display(),
+                            c.z
+                        ),
+                    },
                     log: rep.log,
-                    message: format!(
-                        "{}FAIL: mutation env-блокер — инструмент не распознан. Блокер СРЕДЫ, не работа агента: установи (gobot: muex; rust: cargo-mutants) или исправь MUTATE в .harness/config. Детали: {}{}",
-                        c.r,
-                        mpath.display(),
-                        c.z
-                    ),
                 })
             }
-            MutateOutcome::Fail => {
+            Verdict::Fail { .. } => {
                 // Хвост лога — в консоль: «FAIL: kill-rate …» и причина
                 // раннего останова видны сразу, а не только в logs/mutate.
                 eprintln!("{}", tail_of(&rep.log, 40));
@@ -829,12 +886,12 @@ fn gate_ladder(
                     );
                     die(store, id, 1);
                 }
-                return Err(GateFail::Red {
-                    gate: Gate::Mutate,
-                    tail: tail_of(&rep.log, 40),
+                return Err(GateStop {
+                    verdict: rep.verdict.clone(),
+                    log: rep.log,
                 })
             }
-            MutateOutcome::Ok => {
+            Verdict::Pass => {
                 // P7-2.3: SAMPLE — решение «доверяем выборке» (rule-of-three).
                 // Гейт зелёный, но часть мутантов не прогонялась: причина
                 // обязана быть в консоли, иначе молчаливый пропуск хвоста.
@@ -842,6 +899,7 @@ fn gate_ladder(
                     eprintln!("{}", tail_of(&rep.log, 40));
                 }
             }
+            Verdict::SpecBlock { .. } => unreachable!("mutate_gate не отдаёт SpecBlock"),
         }
     }
 
@@ -849,9 +907,12 @@ fn gate_ladder(
         let raw = exec_logged(store, wt, id, bench, "bench", BENCH_TIMEOUT);
         timing.stage(format!("bench-r{}", round.saturating_add(1)), store, id);
         if raw.exit != Some(0) {
-            return Err(GateFail::Red {
-                gate: Gate::Bench,
-                tail: tail_of(&raw.log, 40),
+            return Err(GateStop {
+                verdict: Verdict::Fail {
+                    gate: Gate::Bench,
+                    tail: tail_of(&raw.log, 40),
+                },
+                log: raw.log,
             });
         }
     }
@@ -885,13 +946,9 @@ fn exec_logged(
     }
 }
 
-enum LintKind {
-    Ok,
-    Fail,
-    Env(String),
-}
-
-fn lint_gate(cfg: &RunConfig, wt: &Path) -> String {
+/// Линт-гейт: лог + вердикт. Env-причина (нет shellcheck при изменённых .sh)
+/// строится там, где факт известен — stringly-детект `"lint env:"` не нужен.
+fn lint_gate(cfg: &RunConfig, wt: &Path) -> (String, Verdict) {
     let mut log = String::new();
     let mut bad = false;
     let files = git::changed_files(wt);
@@ -899,7 +956,12 @@ fn lint_gate(cfg: &RunConfig, wt: &Path) -> String {
         let has_sh = files.iter().any(|f| f.ends_with(".sh"));
         if has_sh && !which("shellcheck") {
             log += "lint env: нет shellcheck, а изменены .sh — блокер СРЕДЫ (установи)\n";
-            return log;
+            return (
+                log,
+                Verdict::EnvBlocked {
+                    missing: "нет shellcheck, а изменены .sh — блокер СРЕДЫ (установи)".into(),
+                },
+            );
         }
         for f in &files {
             if !f.ends_with(".sh") {
@@ -952,30 +1014,23 @@ fn lint_gate(cfg: &RunConfig, wt: &Path) -> String {
     }
     if bad {
         log += "lint FAIL: замечания линтера выше\n";
+        let tail = tail_of(&log, 30);
+        return (
+            log,
+            Verdict::Fail {
+                gate: Gate::Lint,
+                tail,
+            },
+        );
     }
-    log
+    (log, Verdict::Pass)
 }
 
-fn lint_log_kind(log: &str) -> LintKind {
-    if log.contains("lint env:") {
-        LintKind::Env("нет shellcheck, а изменены .sh — блокер СРЕДЫ (установи)".into())
-    } else if log.contains("lint FAIL") {
-        LintKind::Fail
-    } else {
-        LintKind::Ok
-    }
-}
-
-enum ReviewOutcome {
-    Ok,
-    Issues,
-    Env(String),
-}
-
-fn review_gate(store: &Store, cfg: &RunConfig, wt: &Path, id: &ItemId) -> (String, ReviewOutcome) {
+/// Ревью-гейт: лог + вердикт (Ok→Pass, Issues→Fix, всё остальное — среда).
+fn review_gate(store: &Store, cfg: &RunConfig, wt: &Path, id: &ItemId) -> (String, Verdict) {
     let diff = git::review_diff(wt);
     if diff.trim().is_empty() {
-        return ("review: диффа нет — пропуск".into(), ReviewOutcome::Ok);
+        return ("review: диффа нет — пропуск".into(), Verdict::Pass);
     }
     let agent = store
         .read(item_rel(id, "agent"))
@@ -999,29 +1054,30 @@ fn review_gate(store: &Store, cfg: &RunConfig, wt: &Path, id: &ItemId) -> (Strin
             if out.exit != Some(0) {
                 return (
                     format!("{log}\nreview: агент-ревьюер упал (API/timeout)\n"),
-                    ReviewOutcome::Env("агент-ревьюер упал (API/timeout)".into()),
+                    Verdict::EnvBlocked {
+                        missing: "агент-ревьюер упал (API/timeout)".into(),
+                    },
                 );
             }
             let outcome = match parse_review_verdict(&log) {
-                ReviewVerdict::Ok => ReviewOutcome::Ok,
-                ReviewVerdict::Issues(_) => ReviewOutcome::Issues,
-                ReviewVerdict::Unrecognized => {
-                    ReviewOutcome::Env("вердикт не распознан (нужна строка VERDICT: …)".into())
-                }
+                ReviewVerdict::Ok => Verdict::Pass,
+                ReviewVerdict::Issues(_) => Verdict::Fail {
+                    gate: Gate::Review,
+                    tail: tail_of(&log, 5),
+                },
+                ReviewVerdict::Unrecognized => Verdict::EnvBlocked {
+                    missing: "вердикт не распознан (нужна строка VERDICT: …)".into(),
+                },
             };
             (log, outcome)
         }
         Err(e) => (
             format!("review: агент-ревьюер упал: {}\n", e.describe(&full)),
-            ReviewOutcome::Env("агент-ревьюер упал (API/timeout)".into()),
+            Verdict::EnvBlocked {
+                missing: "агент-ревьюер упал (API/timeout)".into(),
+            },
         ),
     }
-}
-
-enum MutateOutcome {
-    Ok,
-    Fail,
-    Env,
 }
 
 fn crap_gate(wt: &Path, cr: &CrapCfg) -> (String, Verdict) {
@@ -1079,9 +1135,11 @@ struct MutStats {
 }
 
 /// Итог мутационного гейта: лог, вердикт и (если вывод распарсился) статы.
+/// Default = пустой зелёный отчёт (мутантов не было) — нулевое значение.
+#[derive(Default)]
 struct MutReport {
     log: String,
-    outcome: MutateOutcome,
+    verdict: Verdict,
     stats: Option<MutStats>,
     /// P7-2.3: ранний выход (DOOM / отравленное дерево) — вердикт сразу,
     /// без fix-раундов: три перепрогона мутатора ради того же результата
@@ -1246,6 +1304,7 @@ fn mutate_gate(
     test: Option<&str>,
     label: &str,
     key: &str,
+    gate: Gate,
 ) -> anyhow::Result<MutReport> {
     // P7: in-place прогон = агент для этого дерева. Лок держится на весь
     // гейт (batch и per-file цикл) — §9.13 «отравленный коммит».
@@ -1337,7 +1396,7 @@ fn mutate_gate(
 
     if !batch && !per_file {
         let cmd = apply_cov_filter(&tool0, cov_filter.as_deref());
-        let mut rep = finish(m, run_mut(wt, &cmd, m), label, key);
+        let mut rep = finish(m, run_mut(wt, &cmd, m), label, key, gate.clone());
         if let Some(line) = survivors_hook(m, wt, &tool0, obs, label) {
             rep.log += &format!("{line}\n");
         }
@@ -1350,7 +1409,7 @@ fn mutate_gate(
         if live.is_empty() {
             return Ok(MutReport {
                 log: mutate_skip_log(m, &files),
-                outcome: MutateOutcome::Ok,
+                verdict: Verdict::Pass,
                 stats: None,
                 fatal: false,
                 early: false,
@@ -1371,13 +1430,22 @@ fn mutate_gate(
                 .collect::<Vec<_>>()
                 .join(" ")
         );
-        let mut rep = finish(m, run_mut(wt, &cmd, m), label, key);
+        let mut rep = finish(m, run_mut(wt, &cmd, m), label, key, gate.clone());
         if let Some(line) = survivors_hook(m, wt, &tool0, obs, label) {
             rep.log += &format!("{line}\n");
         }
+        let log = format!("{head}{}", rep.log);
+        // Хвост для fix-раунда — от полного лога (head + мутатор), как раньше.
+        let verdict = match &rep.verdict {
+            Verdict::Fail { .. } => Verdict::Fail {
+                gate: gate.clone(),
+                tail: tail_of(&log, 40),
+            },
+            other => other.clone(),
+        };
         return Ok(MutReport {
-            log: format!("{head}{}", rep.log),
-            outcome: rep.outcome,
+            log,
+            verdict,
             stats: rep.stats,
             fatal: rep.fatal,
             early: rep.early,
@@ -1386,7 +1454,7 @@ fn mutate_gate(
 
     let mut acc = MutReport {
         log: String::new(),
-        outcome: MutateOutcome::Ok,
+        verdict: Verdict::Pass,
         stats: Some(MutStats {
             total: 0,
             killed: 0,
@@ -1404,28 +1472,34 @@ fn mutate_gate(
         let module = mod_of(f, &m.scope);
         let cmd = tool0.replace("{module}", &module).replace("{file}", f);
         let cmd = apply_cov_filter(&cmd, cov_filter.as_deref());
-        let mut rep = finish(m, run_mut(wt, &cmd, m), &format!("{label} {f}"), key);
+        let mut rep = finish(
+            m,
+            run_mut(wt, &cmd, m),
+            &format!("{label} {f}"),
+            key,
+            gate.clone(),
+        );
         if let Some(line) = survivors_hook(m, wt, &tool0, obs, &format!("{label} {f}")) {
             rep.log += &format!("{line}\n");
         }
         acc.log += &rep.log;
-        match rep.outcome {
+        match &rep.verdict {
             // Инструмент не распознан — смысла продолжать цикл нет (как и раньше).
-            MutateOutcome::Env => {
+            Verdict::EnvBlocked { .. } => {
                 return Ok(MutReport {
                     log: acc.log,
-                    outcome: MutateOutcome::Env,
+                    verdict: rep.verdict.clone(),
                     stats: None,
                     fatal: false,
                     early: false,
                 });
             }
-            MutateOutcome::Fail => {
-                acc.outcome = MutateOutcome::Fail;
+            Verdict::Fail { .. } => {
+                acc.verdict = rep.verdict.clone();
                 acc.fatal = acc.fatal || rep.fatal;
                 acc.early = acc.early || rep.early;
             }
-            MutateOutcome::Ok => {}
+            _ => {}
         }
         // perf.log хочет ИТОГ по гейту, поэтому per-file статы суммируем.
         if let Some(s) = rep.stats {
@@ -1436,6 +1510,13 @@ fn mutate_gate(
                 a.unviable = a.unviable.saturating_add(s.unviable);
             }
         }
+    }
+    // Хвост итога per-file — от слитого лога (его тащил gate_ladder ранее).
+    if let Verdict::Fail { .. } = &acc.verdict {
+        acc.verdict = Verdict::Fail {
+            gate: gate.clone(),
+            tail: tail_of(&acc.log, 40),
+        };
     }
     Ok(acc)
 }
@@ -1456,11 +1537,11 @@ fn mutate_skip_log(m: &MutateCfg, files: &[String]) -> String {
 
 /// Один прогон → лог + вердикт + статы. `label` = "mutation" /
 /// "red-mutation" (или "{label} <файл>" для per-file), `key` — ключ конфига
-fn finish(m: &MutateCfg, run: MutRun, label: &str, key: &str) -> MutReport {
+fn finish(m: &MutateCfg, run: MutRun, label: &str, key: &str, gate: Gate) -> MutReport {
     if let MutRun::Empty { why } = &run {
         return MutReport {
             log: format!("{label}: 0 мутантов — {}, пропуск\n", why.0),
-            outcome: MutateOutcome::Ok,
+            verdict: Verdict::Pass,
             stats: Some(MutStats {
                 total: 0,
                 killed: 0,
@@ -1492,7 +1573,7 @@ fn finish(m: &MutateCfg, run: MutRun, label: &str, key: &str) -> MutReport {
             unviable = stats.unviable
         );
         let fatal = matches!(kind, crate::core::early::EarlyStop::Doom { .. }) || *poisoned;
-        let outcome = if fatal {
+        let verdict = if fatal {
             if *poisoned {
                 log += &format!(
                     "{label} FAIL: мутант остался в дереве после ремонта — коммитить нельзя\n"
@@ -1503,13 +1584,16 @@ fn finish(m: &MutateCfg, run: MutRun, label: &str, key: &str) -> MutReport {
                     m.min_kill
                 );
             }
-            MutateOutcome::Fail
+            Verdict::Fail {
+                gate: gate.clone(),
+                tail: tail_of(&log, 40),
+            }
         } else {
-            MutateOutcome::Ok
+            Verdict::Pass
         };
         return MutReport {
             log,
-            outcome,
+            verdict,
             stats: Some(*stats),
             fatal,
             early: true,
@@ -1525,7 +1609,9 @@ fn finish(m: &MutateCfg, run: MutRun, label: &str, key: &str) -> MutReport {
         if let MutRun::Blocked(why) = run {
             return MutReport {
                 log: format!("{label} env-blocked: {why}\n"),
-                outcome: MutateOutcome::Env,
+                verdict: Verdict::EnvBlocked {
+                    missing: format!("{label} env-blocked: {why}"),
+                },
                 stats: None,
                 fatal: false,
                 early: false,
@@ -1536,7 +1622,12 @@ fn finish(m: &MutateCfg, run: MutRun, label: &str, key: &str) -> MutReport {
                 "{label} env: инструмент не распознан (ни 'N mutants tested in T: C caught, M missed', ни 'Mutants: N, Killed: M'); {key}='{}'\n",
                 m.tool
             ),
-            outcome: MutateOutcome::Env,
+            verdict: Verdict::EnvBlocked {
+                missing: format!(
+                    "{label} env: инструмент не распознан (ни 'N mutants tested in T: C caught, M missed', ни 'Mutants: N, Killed: M'); {key}='{}'",
+                    m.tool
+                ),
+            },
             stats: None,
             fatal: false,
             early: false,        };
@@ -1555,18 +1646,21 @@ fn finish(m: &MutateCfg, run: MutRun, label: &str, key: &str) -> MutReport {
         let mut log = format!(
             "{label}: Mutants {total}, killed {killed} ({pct}%) [testable {testable}], missed {missed}, unviable {unviable}\n"
         );
-        let outcome = if pct < m.min_kill {
+        let verdict = if pct < m.min_kill {
             log += &format!(
                 "{label} FAIL: kill-rate {pct}% < {}% — тесты не ловят мутантов (missed {missed}, unviable {unviable})\n",
                 m.min_kill
             );
-            MutateOutcome::Fail
+            Verdict::Fail {
+                gate: gate.clone(),
+                tail: tail_of(&log, 40),
+            }
         } else {
-            MutateOutcome::Ok
+            Verdict::Pass
         };
         MutReport {
             log,
-            outcome,
+            verdict,
             stats: Some(stats),
             fatal: false,
             early: false,
@@ -1574,7 +1668,7 @@ fn finish(m: &MutateCfg, run: MutRun, label: &str, key: &str) -> MutReport {
     } else if total == 0 {
         MutReport {
             log: format!("{label}: 0 мутантов — нечего убивать, пропуск\n"),
-            outcome: MutateOutcome::Ok,
+            verdict: Verdict::Pass,
             stats: Some(stats),
             fatal: false,
             early: false,
@@ -1584,7 +1678,7 @@ fn finish(m: &MutateCfg, run: MutRun, label: &str, key: &str) -> MutReport {
             log: format!(
                 "{label}: все {total} мутантов unviable (не собираются) — тесты не при чём, пропуск\n"
             ),
-            outcome: MutateOutcome::Ok,
+            verdict: Verdict::Pass,
             stats: Some(stats),
             fatal: false,
             early: false,        }
