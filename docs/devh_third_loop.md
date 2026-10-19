@@ -327,4 +327,25 @@ OBSERVE **не** гейт и **не** условие: RED остаётся вр�
 
 ---
 
-*Документ плана. После P8-1..P8-4 статусы фиксируются здесь же (как «P7 — исполнение» в `docs/devh_fast_cycle.md`), замеры — в журнал `docs/rust_build.md`.*
+## 12. Статус исполнения (2026-10-19)
+
+Ветка `devh/p8-third-loop`: пять коммитов поверх `main` (`9d1daf5` — сам план, `8d7aa32` — origin/main).
+
+| Шаг | Коммит | Сделано | Приёмка |
+|---|---|---|---|
+| P8-1 | `3765653` | `core/survivors.rs`: прощающий парсер `outcomes.json`, выживший = MissedMutant ТОЛЬКО (timeout = убит, unviable = не про тесты), seen-дедуп SHA256(file:line:col:mutation), `survivors.log` (дата \| гейт \| файл:строка \| жанр \| мутация), `collect_after_run` под GlobalLock после каждого `finish()`; `core/killmap.rs` — накопительная карта kill-rate (missed/runs/last, файл без дельты не трогается); ключ `MUTATE_SURVIVORS` (код-дефолт 0, шаблон init пишет 1), `HARNESS_MUTATE_SURVIVORS`; tickets-импорт строк `survivor:` | section38: живой прогон стаб-мутатора → очередь, дедуп на втором прогоне, killmap, журнал, tickets --import |
+| P8-5 | `c8fa042` | секция `OBSERVE:` в спеке: парсер в `commands/new.rs`, `observe.md`, точки наблюдения — в ПЕРВЫЙ промпт фазы реализации (`prompt.rs`), doctor soft-warn (не FAIL), подсказка шаблона в `devh new` | section39: спека с OBSERVE → observe.md + точки в промпте; без OBSERVE → файла нет, doctor не краснеет |
+| P8-3 | `dbac1e9` | hot-spot пул из killmap → bounded-блок (top-3, одна строка на файл) в `agent_prompt` + таблица в `devh hint` (`misc.rs`); в тексте блока явно «на вердикт гейта не влияет» | section40: 5 файлов с missed → 3 в промпте; пустой killmap → блока нет |
+| P8-4 | `419ea7a` | `devh survivors [--rules] [--sessions K] [--reset]`: группировка `survivors.log` жанр × файл (только basename'ы, координаты остаются в observations.md — §8); `--rules` — жанры тега `blind:*`, тишина по датам сессий RULES_LOG, пенсия при тишине ≥K, бюджет активного слоя ≤12; маппинг жанр→класс по тексту тега, человек подтверждает глазами; строка «- survivors: …» в RULES_LOG рядом с «## Session N» (`merge.rs`, сумма тегов из логов `<id>-mutate.log`/`<id>-redmut.log`) | section41: журнал руками → группировка/пенсия на K=2/reset/пустой журнал без паники; живой прогон с missed → merge → RULES_LOG |
+| P8-6 | `fe6a564` | §8.6 red-mutation — ОТДЕЛЬНЫЙ поток выживших: `is_red(gate)`/`Shot::is_red`; `group_by_genre` ключуется (поток, жанр) — код первым, красный своей группой, digest с префиксом `red:`, `group_lines` с меткой `[red-mutation]`; `collect_after_run` НЕ пишет дельты red-гейта в killmap (карта остаётся кодовой — spec-проблема не маскируется под слепое место модуля); `rule_classes`: класс, назвавший в тексте «red-mutation», считает только красные выстрелы (своя дата, своя пенсия); `session_survivors_lines(code, red)` → RULES_LOG строкой `- survivors [red-mutation]: … — отдельный поток (§8.6)`; `streams_line` — итог `--rules` «потоки: код — …; red-mutation — …» (материал обоих потоков виден всегда) | section42: живой RED_MUTATE-run → redmut.log → `[red-mutation]` в RULES_LOG, killmap не создан; section41 расширен red-выстрелом в журнале и red-классом |
+
+Мутационный аудит новых модулей («ирония приёмки» §9 — иначе `survivors.rs` не примет собственный гейт): worktree `/tmp/devh-p8-audit` (detached на P8-1), scope `survivors.rs` + `killmap.rs`, 97 мутантов, на 05:45 — 58 исходов (56 caught, 2 unviable, 0 missed); догон по финальному дереву — `--in-diff` на дельты P8-4 (`419ea7a`) и P8-6 (`fe6a564`); детали и замеры — журнал `docs/rust_build.md` §9.15.
+
+Гейт на каждом шаге: `cargo test -p devh` (на P8-6 — 137 unit + 54 integration, выросло с 119+50 на P8-1), `cargo fmt -p devh -- --check`, `cargo clippy -p devh --all-targets` — чистые.
+
+Вне кода остаётся регулярная дистилляция (§6): человек называет классы `blind:*` в RULES и переносит пенсионеров руками — тулинг только собирает фактуру.
+
+---
+
+*Статусы P8-1..P8-6 зафиксированы в §12 (по аналогии с «P7 — исполнение» в `docs/devh_fast_cycle.md`); замеры и мутационный аудит — в журнале `docs/rust_build.md` §9.15.*
+
