@@ -85,6 +85,33 @@ pub fn failure_kind(v: &Verdict) -> FailureKind {
     }
 }
 
+/// Решение драйвера run() о судьбе раунда после вердикта гейта (A2).
+/// Чистая развилка «ещё фикс-раунд или сдаваться» — без store/IO, поэтому
+/// тестируется как функция (RED: граница round == max_fix, коды Env/Spec).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RoundDecision {
+    /// Бюджет раундов не исчерпан — ещё один fix-раунд агента.
+    #[default]
+    Continue,
+    /// Раунд закончен: код выхода (1 — бюджет/блокер спеки, 2 — блокер среды).
+    GiveUp { code: i32 },
+}
+
+/// Чистая развилка драйвера: класс отказа + бюджет раундов → решение.
+/// Бюджет: `round < max_fix` — ещё раунд (round уже потраченные);
+/// исчерпан (`round == max_fix`) — сдача кодом 1. Класс решает сильнее
+/// бюджета: Env → 2 (среда), Spec → 1 (чинит человек), данные до любого
+/// фикс-раунда. Дефолт Continue (Default) — мутант замены тела на
+/// `Default::default()` убивается env/spec-тестами.
+pub fn decide_round(round: u32, max_fix: u32, kind: FailureKind) -> RoundDecision {
+    match kind {
+        FailureKind::Env => RoundDecision::GiveUp { code: 2 },
+        FailureKind::Spec => RoundDecision::GiveUp { code: 1 },
+        FailureKind::Fix if round < max_fix => RoundDecision::Continue,
+        FailureKind::Fix => RoundDecision::GiveUp { code: 1 },
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Raw {
     pub exit: Option<i32>,
@@ -1652,5 +1679,41 @@ panicked at net.rs:88: connection refused";
         // Дефолт Fix — чтобы мутант замены тела на Default::default()
         // был убиваемым: routing по умолчанию = работа агента.
         assert_eq!(FailureKind::default(), FailureKind::Fix);
+    }
+
+    #[test]
+    fn decide_round_continues_below_max() {
+        // Бюджет есть (round 0 из 3) — ещё один fix-раунд.
+        assert_eq!(
+            decide_round(0, 3, FailureKind::Fix),
+            RoundDecision::Continue
+        );
+    }
+
+    #[test]
+    fn decide_round_gives_up_at_max_fix() {
+        // Граница: round == max_fix — бюджет исчерпан, сдача с кодом 1.
+        assert_eq!(
+            decide_round(3, 3, FailureKind::Fix),
+            RoundDecision::GiveUp { code: 1 }
+        );
+    }
+
+    #[test]
+    fn decide_round_env_gives_two() {
+        // Среда — не работа агента: rc=2 при любом бюджете.
+        assert_eq!(
+            decide_round(0, 3, FailureKind::Env),
+            RoundDecision::GiveUp { code: 2 }
+        );
+    }
+
+    #[test]
+    fn decide_round_spec_gives_one() {
+        // Блокер спеки чинит человек — rc=1, fix-раунды бессмысленны.
+        assert_eq!(
+            decide_round(0, 3, FailureKind::Spec),
+            RoundDecision::GiveUp { code: 1 }
+        );
     }
 }

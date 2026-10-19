@@ -59,7 +59,94 @@ pub fn run(store: &Store, cfg: &RunConfig, id: &ItemId) -> anyhow::Result<()> {
     let root = store.root().to_path_buf();
     let cfg = cfg_for_run(cfg);
     let cfg = &cfg;
+    require_gates(cfg)?;
+    let (lock, _pid) = lock_run(store, id)?;
+    let agent = resolve_agent(store, cfg, id);
+    let mut timing = Timing::start();
+    timing.flush(store, id);
 
+    claim_item(store, cfg, id)?;
+    let (wt, fresh) = ensure_worktree(store, cfg, id, &mut timing)?;
+    let red = red_pre_phase(store, cfg, id, &root, &wt, &agent, fresh, &mut timing)?;
+    no_crap_notice(store, cfg, id);
+    timing.stage("red-pre", store, id);
+
+    let mut round: u32 = 0;
+    let mut next_prompt = prompt::agent_prompt(store, cfg, &root, &wt, id, &agent);
+    loop {
+        if let Err(e) = run_agent(
+            store,
+            &wt,
+            id,
+            &next_prompt,
+            &agent,
+            Duration::from_secs(cfg.agent_timeout as u64),
+            format!("agent-r{}", round.saturating_add(1)),
+            &mut timing,
+            cfg,
+        ) {
+            eprintln!(
+                "{}FAIL агент (код выше; timeout={}s; лог: {}){} ({e})",
+                c.r,
+                cfg.agent_timeout,
+                store.log_file(id, "agent").display(),
+                c.z
+            );
+            die(store, id, 1);
+        }
+
+        // P7/A1: единый роутинг вердикта — класс отказа (Fix/Env/Spec) и
+        // бюджет решают судьбу раунда; код выхода даёт чистый decide_round.
+        match gate_ladder(store, cfg, &wt, id, &mut timing, round) {
+            Ok(()) => break,
+            Err(stop) => {
+                let kind = gates::failure_kind(&stop.verdict);
+                match gates::decide_round(round, cfg.max_fix, kind) {
+                    gates::RoundDecision::Continue => {
+                        let Verdict::Fail { gate, tail } = stop.verdict else {
+                            unreachable!("класс Fix несёт Fail-вердикт")
+                        };
+                        round = round.saturating_add(1);
+                        println!(
+                            ".. гейт {} упал — раунд фикса {}/{} (fix-раунд {})",
+                            gate.name(),
+                            round,
+                            cfg.max_fix,
+                            round
+                        );
+                        next_prompt = prompt::fix_prompt(&gate, &tail, cfg, store, id);
+                    }
+                    gates::RoundDecision::GiveUp { code } => {
+                        give_up(store, id, &stop, kind, code, cfg.max_fix)
+                    }
+                }
+            }
+        }
+    }
+    println!(
+        "{}OK гейты: verify{}{}{}",
+        c.g,
+        if cfg.mutate.is_some() {
+            " +mutation"
+        } else {
+            ""
+        },
+        if cfg.bench.is_some() { " +bench" } else { "" },
+        c.z
+    );
+
+    red_post(store, cfg, id, &wt, &red, &mut timing)?;
+    red_mutate_phase(store, cfg, id, &wt, &red, &mut timing)?;
+    commit_push(store, cfg, id, &wt, round, &mut timing, &root)?;
+    finalize(store, cfg, id, &wt, &timing)?;
+    drop(lock);
+    Ok(())
+}
+
+/// Конфиг-предусловия прогона: VERIFY — иначе нечем проверить работу;
+/// MUTATE-гейт ОБЯЗАТЕЛЕН («пропуск» запрещён — прогон без мутационного
+/// гейта не отличает «зелёный» от «недоказанный»).
+fn require_gates(cfg: &RunConfig) -> anyhow::Result<()> {
     if cfg.verify.is_empty() {
         anyhow::bail!("devh: VERIFY не задан (.harness/config)");
     }
@@ -68,17 +155,24 @@ pub fn run(store: &Store, cfg: &RunConfig, id: &ItemId) -> anyhow::Result<()> {
             "devh: MUTATE-гейт ОБЯЗАТЕЛЕН, «пропуск» запрещён — пропиши MUTATE в .harness/config (gobot: cd gobot + mix mutants/muex; rust: cargo-mutants)"
         );
     }
+    Ok(())
+}
 
+/// Захват item'а: run.lock (не два прогона одновременно) + pid-файл
+/// (`devh ps`). Оба guard'а живут весь вызов run() — поэтому возвращаются.
+fn lock_run<'a>(store: &'a Store, id: &ItemId) -> anyhow::Result<(ItemRunLock, PidGuard<'a>)> {
     let lock = ItemRunLock::acquire(&store.item_dir(id)).ok_or_else(|| {
         anyhow::anyhow!(
             "devh: {} сейчас в работе (run.lock занят) — run отклонён",
             id.dir_name()
         )
     })?;
-
     store.write_pid(id, std::process::id())?;
-    let _pid = PidGuard { store, id: *id };
+    Ok((lock, PidGuard { store, id: *id }))
+}
 
+/// Агент: per-item override (файл `agent` внутри item), иначе дефолт конфига.
+fn resolve_agent(store: &Store, cfg: &RunConfig, id: &ItemId) -> String {
     let mut agent = cfg.agent.clone();
     if let Some(a) = store.read(item_rel(id, "agent")) {
         if !a.trim().is_empty() {
@@ -86,32 +180,44 @@ pub fn run(store: &Store, cfg: &RunConfig, id: &ItemId) -> anyhow::Result<()> {
             agent = a.trim().to_string();
         }
     }
+    agent
+}
 
-    let mut timing = Timing::start();
-    timing.flush(store, id);
-
-    {
-        let _g = GlobalLock::acquire(&store.dir).map_err(|e| anyhow::anyhow!("flock: {e}"))?;
-        let prev_st = store.status_of(id);
-        if prev_st != Status::Active {
-            let active = store.count_active();
-            if !state::can_claim(active, cfg.max_active) {
-                anyhow::bail!(
-                    "devh: WIP-лимит — уже {active} active (MAX_ACTIVE={}). Заверши их (devh merge / abort) прежде чем брать новое.",
-                    cfg.max_active
-                );
-            }
-            store.set_status(id, Status::Active)?;
-        } else {
-            println!(
-                "{}OK resume: {} уже active — продолжаем{}",
-                c.g,
-                id.dir_name(),
-                c.z
+/// Claim/resume под GlobalLock: WIP-лимит (MAX_ACTIVE), перевод в Active;
+/// уже active — OK resume (повторный run продолжает прерванную работу).
+fn claim_item(store: &Store, cfg: &RunConfig, id: &ItemId) -> anyhow::Result<()> {
+    let c = colors();
+    let _g = GlobalLock::acquire(&store.dir).map_err(|e| anyhow::anyhow!("flock: {e}"))?;
+    let prev_st = store.status_of(id);
+    if prev_st != Status::Active {
+        let active = store.count_active();
+        if !state::can_claim(active, cfg.max_active) {
+            anyhow::bail!(
+                "devh: WIP-лимит — уже {active} active (MAX_ACTIVE={}). Заверши их (devh merge / abort) прежде чем брать новое.",
+                cfg.max_active
             );
         }
+        store.set_status(id, Status::Active)?;
+    } else {
+        println!(
+            "{}OK resume: {} уже active — продолжаем{}",
+            c.g,
+            id.dir_name(),
+            c.z
+        );
     }
+    Ok(())
+}
 
+/// Worktree: ensure (+bootstrap) — свежий либо тёплый reuse (P1a); стадия
+/// тайминга «worktree(+bootstrap)» (контракт `devh ps`).
+fn ensure_worktree(
+    store: &Store,
+    cfg: &RunConfig,
+    id: &ItemId,
+    timing: &mut Timing,
+) -> anyhow::Result<(PathBuf, bool)> {
+    let c = colors();
     let (wt, fresh) = worktree::ensure(store, cfg, id)?;
     if fresh {
         println!(
@@ -125,7 +231,35 @@ pub fn run(store: &Store, cfg: &RunConfig, id: &ItemId) -> anyhow::Result<()> {
         println!("{}OK resume worktree: {}{}", c.g, wt.display(), c.z);
     }
     timing.stage("worktree(+bootstrap)", store, id);
+    Ok((wt, fresh))
+}
 
+/// Факты о red.cmd, нужные driver'у после RED-pre-фазы (пост-гейт и
+/// RED-MUT смотрят на существование/обход). Классификация исхода
+/// (Proven/Resumed/Skipped) не вынесена в энум: все три ведут в один
+/// агент-цикл, развилки по классу нет — поле было бы dead_code, а факты
+/// классификации видны в логе («OK red» / «OK resume» / «⚠ RED пропущен»).
+struct RedInfo {
+    file: PathBuf,
+    has_red: bool,
+    no_red: bool,
+}
+
+/// RED-pre: записанный обход / автор red.cmd агентом / линковка к VERIFY +
+/// доказательство «падает на чистом HEAD» (resume-грязное дерево скипает).
+/// Падает rc=1 (Spec/FAIL) или rc=2 (env-блокер) — до любого fix-раунда.
+#[allow(clippy::too_many_arguments)]
+fn red_pre_phase(
+    store: &Store,
+    cfg: &RunConfig,
+    id: &ItemId,
+    root: &Path,
+    wt: &Path,
+    agent: &str,
+    fresh: bool,
+    timing: &mut Timing,
+) -> anyhow::Result<RedInfo> {
+    let c = colors();
     let no_red = store
         .read(item_rel(id, "no-red"))
         .map(|s| !s.trim().is_empty())
@@ -158,7 +292,7 @@ pub fn run(store: &Store, cfg: &RunConfig, id: &ItemId) -> anyhow::Result<()> {
                         c.y, c.z
                     );
                 }
-                let mut author = prompt::red_author_prompt(store, cfg, &root, &wt, id, &agent);
+                let mut author = prompt::red_author_prompt(store, cfg, root, wt, id, agent);
                 if attempt > 1 {
                     author += &format!(
                         "\nКОРРЕКЦИЯ: red.cmd обязан запускать тот же раннер/бинарь, что и VERIFY ({}), а сейчас там: {}. Перепиши файл строго этим раннером.\n",
@@ -170,13 +304,13 @@ pub fn run(store: &Store, cfg: &RunConfig, id: &ItemId) -> anyhow::Result<()> {
                 }
                 if let Err(e) = run_agent(
                     store,
-                    &wt,
+                    wt,
                     id,
                     &author,
-                    &agent,
+                    agent,
                     Duration::from_secs(cfg.agent_timeout as u64),
                     "red-author",
-                    &mut timing,
+                    timing,
                     cfg,
                 ) {
                     eprintln!(
@@ -225,7 +359,7 @@ pub fn run(store: &Store, cfg: &RunConfig, id: &ItemId) -> anyhow::Result<()> {
             let _ = std::fs::remove_file(&red_file);
             has_red = false;
         }
-        if !fresh && git::tree_dirty(&wt) {
+        if !fresh && git::tree_dirty(wt) {
             println!(
                 "{}OK resume: RED pre-check пропущен — дерево уже содержит работу; доказательство RED было на чистом HEAD первой попытки, позеленение проверит пост-гейт{}",
                 c.g, c.z
@@ -240,7 +374,7 @@ pub fn run(store: &Store, cfg: &RunConfig, id: &ItemId) -> anyhow::Result<()> {
                 phase: RedPhase::Pre,
                 expect: expect.clone(),
             };
-            let mut raw = run_red(&red_file, &wt, false);
+            let mut raw = run_red(&red_file, wt, false);
             std::fs::write(store.log_file(id, "red"), &raw.log).ok();
             let mut verdict = gates::judge(&red_gate(&expect), &raw, cfg);
             // P7: контеншен-флейк — на перегруженной машине (load≈11 было)
@@ -251,7 +385,7 @@ pub fn run(store: &Store, cfg: &RunConfig, id: &ItemId) -> anyhow::Result<()> {
                     "{}.. red: подпись не совпала — повтор под nice (контеншен?){}",
                     c.y, c.z
                 );
-                raw = run_red(&red_file, &wt, true);
+                raw = run_red(&red_file, wt, true);
                 std::fs::write(store.log_file(id, "red"), &raw.log).ok();
                 verdict = gates::judge(&red_gate(&expect), &raw, cfg);
             }
@@ -291,7 +425,16 @@ pub fn run(store: &Store, cfg: &RunConfig, id: &ItemId) -> anyhow::Result<()> {
             }
         }
     }
+    Ok(RedInfo {
+        file: red_file,
+        has_red,
+        no_red,
+    })
+}
 
+/// Обход CRAP (файл `no-crap`) — заметка пользователю; решение гейт примет сам.
+fn no_crap_notice(store: &Store, cfg: &RunConfig, id: &ItemId) {
+    let c = colors();
     let no_crap = store
         .read(item_rel(id, "no-crap"))
         .map(|s| !s.trim().is_empty())
@@ -305,103 +448,24 @@ pub fn run(store: &Store, cfg: &RunConfig, id: &ItemId) -> anyhow::Result<()> {
             c.z
         );
     }
-    timing.stage("red-pre", store, id);
+}
 
-    let mut round: u32 = 0;
-    let mut next_prompt = prompt::agent_prompt(store, cfg, &root, &wt, id, &agent);
-    loop {
-        if let Err(e) = run_agent(
-            store,
-            &wt,
-            id,
-            &next_prompt,
-            &agent,
-            Duration::from_secs(cfg.agent_timeout as u64),
-            format!("agent-r{}", round.saturating_add(1)),
-            &mut timing,
-            cfg,
-        ) {
-            eprintln!(
-                "{}FAIL агент (код выше; timeout={}s; лог: {}){} ({e})",
-                c.r,
-                cfg.agent_timeout,
-                store.log_file(id, "agent").display(),
-                c.z
-            );
-            die(store, id, 1);
-        }
-
-        // P7/A1: единый роутинг вердикта — Fix (раунд), Env (rc=2),
-        // Spec (rc=1, блокер спеки чинит человек, не агент).
-        match gate_ladder(store, cfg, &wt, id, &mut timing, round) {
-            Ok(()) => break,
-            Err(stop) => match gates::failure_kind(&stop.verdict) {
-                gates::FailureKind::Fix => {
-                    let Verdict::Fail { gate, tail } = stop.verdict else {
-                        unreachable!("класс Fix несёт Fail-вердикт")
-                    };
-                    round = round.saturating_add(1);
-                    if round > cfg.max_fix {
-                        eprintln!(
-                            "{}FAIL: гейт {} красный после {} раундов фикса (логи: {}){}",
-                            c.r,
-                            gate.name(),
-                            cfg.max_fix,
-                            store.dir.join("logs").display(),
-                            c.z
-                        );
-                        die(store, id, 1);
-                    }
-                    println!(
-                        ".. гейт {} упал — раунд фикса {}/{} (fix-раунд {})",
-                        gate.name(),
-                        round,
-                        cfg.max_fix,
-                        round
-                    );
-                    next_prompt = prompt::fix_prompt(&gate, &tail, cfg, store, id);
-                }
-                gates::FailureKind::Env => {
-                    let Verdict::EnvBlocked { missing } = stop.verdict else {
-                        unreachable!("класс Env несёт EnvBlocked-вердикт")
-                    };
-                    eprint!("{}", stop.log);
-                    eprintln!("{missing}");
-                    // Среда — не работа агента: rc=2 (как red-pre-фаза).
-                    die(store, id, 2);
-                }
-                gates::FailureKind::Spec => {
-                    let Verdict::SpecBlock { gate, .. } = stop.verdict else {
-                        unreachable!("класс Spec несёт SpecBlock-вердикт")
-                    };
-                    eprintln!(
-                        "{}FAIL: гейт {} — блокер СПЕКИ: чинит человек (правка спеки/red-expect), а не fix-раунд агента.{}",
-                        c.r,
-                        gate.name(),
-                        c.z
-                    );
-                    die(store, id, 1);
-                }
-            },
-        }
-    }
-    println!(
-        "{}OK гейты: verify{}{}{}",
-        c.g,
-        if cfg.mutate.is_some() {
-            " +mutation"
-        } else {
-            ""
-        },
-        if cfg.bench.is_some() { " +bench" } else { "" },
-        c.z
-    );
-
-    if !no_red && has_red {
-        let raw = run_red(&red_file, &wt, false);
+/// RED-пост-гейт: тот же red.cmd, что падал на чистом HEAD, обязан
+/// позеленеть — иначе «фикс» ничего не починил. Стадия «red-post».
+fn red_post(
+    store: &Store,
+    cfg: &RunConfig,
+    id: &ItemId,
+    wt: &Path,
+    red: &RedInfo,
+    timing: &mut Timing,
+) -> anyhow::Result<()> {
+    let c = colors();
+    if !red.no_red && red.has_red {
+        let raw = run_red(&red.file, wt, false);
         let verdict = gates::judge(
             &Gate::Red {
-                cmd: red_file.display().to_string(),
+                cmd: red.file.display().to_string(),
                 phase: RedPhase::Post,
                 expect: None,
             },
@@ -419,13 +483,26 @@ pub fn run(store: &Store, cfg: &RunConfig, id: &ItemId) -> anyhow::Result<()> {
         }
     }
     timing.stage("red-post", store, id);
+    Ok(())
+}
 
-    if let (Some(m), true) = (&cfg.red_mutate, !no_red && has_red) {
+/// RED-MUT: red-тест обязан ловить мутантов в изменённых файлах — иначе он
+/// не проверяет изменение, а лишь присутствует. Стадия «redmut».
+fn red_mutate_phase(
+    store: &Store,
+    cfg: &RunConfig,
+    id: &ItemId,
+    wt: &Path,
+    red: &RedInfo,
+    timing: &mut Timing,
+) -> anyhow::Result<()> {
+    let c = colors();
+    if let (Some(m), true) = (&cfg.red_mutate, !red.no_red && red.has_red) {
         if !m.tool.contains("{test}") {
             eprintln!(
                 "{}FAIL: RED-MUT: в RED_MUTATE нет шаблона {{test}} — нечем подставить команду red ({}){}",
                 c.r,
-                red_file.display(),
+                red.file.display(),
                 c.z
             );
             eprintln!(
@@ -434,10 +511,10 @@ pub fn run(store: &Store, cfg: &RunConfig, id: &ItemId) -> anyhow::Result<()> {
             );
             die(store, id, 1);
         }
-        let red_cmd = std::fs::read_to_string(&red_file).unwrap_or_default();
+        let red_cmd = std::fs::read_to_string(&red.file).unwrap_or_default();
         let rep = mutate_gate(
             m,
-            &wt,
+            wt,
             &store.dir,
             Some(red_cmd.trim()),
             "red-mutation",
@@ -470,7 +547,7 @@ pub fn run(store: &Store, cfg: &RunConfig, id: &ItemId) -> anyhow::Result<()> {
                 );
                 eprintln!(
                     "      усили {} (или удали его — агент напишет заново); лог: {}{}",
-                    red_file.display(),
+                    red.file.display(),
                     mpath.display(),
                     c.z
                 );
@@ -500,7 +577,22 @@ pub fn run(store: &Store, cfg: &RunConfig, id: &ItemId) -> anyhow::Result<()> {
             Verdict::SpecBlock { .. } => unreachable!("red-mutate не отдаёт SpecBlock"),
         }
     }
+    Ok(())
+}
 
+/// Финал прогона: summary обязан что-то сказать (или «blocked»), гигиена
+/// сообщения → add/staged → commit → push → last-run. Стадия «commit+push».
+#[allow(clippy::too_many_arguments)]
+fn commit_push(
+    store: &Store,
+    cfg: &RunConfig,
+    id: &ItemId,
+    wt: &Path,
+    round: u32,
+    timing: &mut Timing,
+    root: &Path,
+) -> anyhow::Result<()> {
+    let c = colors();
     let summary = store.read_summary(id);
     if summary.trim().is_empty() {
         eprintln!(
@@ -534,25 +626,25 @@ pub fn run(store: &Store, cfg: &RunConfig, id: &ItemId) -> anyhow::Result<()> {
         }
     }
 
-    git::add_all(&wt)?;
-    if !git::has_staged(&wt) {
+    git::add_all(wt)?;
+    if !git::has_staged(wt) {
         eprintln!("{}FAIL: агент не оставил изменений{}", c.r, c.z);
         die(store, id, 1);
     }
     println!("— staged:");
-    let stat = git::staged_stat(&wt);
+    let stat = git::staged_stat(wt);
     let lines: Vec<&str> = stat.lines().collect();
     for l in lines.iter().skip(lines.len().saturating_sub(5)) {
         println!("{l}");
     }
-    let dels = git::staged_deletions(&wt);
+    let dels = git::staged_deletions(wt);
     if dels > 5 {
         println!(
             "{}⚠  удалений в коммите: {dels} — проверь, что это задумано{}",
             c.y, c.z
         );
     }
-    git::commit(&wt, &msg)?;
+    git::commit(wt, &msg)?;
     println!("{}OK commit: {msg}{}", c.g, c.z);
 
     let gates_list = match (cfg.mutate.is_some(), cfg.bench.is_some()) {
@@ -568,8 +660,8 @@ pub fn run(store: &Store, cfg: &RunConfig, id: &ItemId) -> anyhow::Result<()> {
     );
     store.atomic_write(item_rel(id, "last-run"), &last_run)?;
 
-    if git::has_remote(&root) {
-        if git::push(&wt, &cfg.remote, &id.branch()).is_ok() {
+    if git::has_remote(root) {
+        if git::push(wt, &cfg.remote, &id.branch()).is_ok() {
             println!("{}OK push: {}/{}{}", c.g, cfg.remote, id.branch(), c.z);
         } else {
             println!(
@@ -581,7 +673,19 @@ pub fn run(store: &Store, cfg: &RunConfig, id: &ItemId) -> anyhow::Result<()> {
         }
     }
     timing.stage("commit+push", store, id);
+    Ok(())
+}
 
+/// Хвост run(): сводка тайминга стадий (контракт `devh ps`), статус Active
+/// (прогон завершён — item готов к ревью/merge) и инструкция «дальше».
+fn finalize(
+    store: &Store,
+    cfg: &RunConfig,
+    id: &ItemId,
+    wt: &Path,
+    timing: &Timing,
+) -> anyhow::Result<()> {
+    let c = colors();
     println!();
     println!("{}— тайминг стадий (сек):{}", c.c, c.z);
     for (name, sec) in timing.stages() {
@@ -602,8 +706,56 @@ pub fn run(store: &Store, cfg: &RunConfig, id: &ItemId) -> anyhow::Result<()> {
         id.dir_name(),
         c.z
     );
-    drop(lock);
     Ok(())
+}
+
+/// Сдача после вердикта гейта: причина печатается по классу отказа, код
+/// выхода приходит из decide_round (единственный источник кодов). Fix —
+/// бюджет fix-раундов исчерпан (rc=1); Env — блокер СРЕДЫ, лог + недостающее
+/// (rc=2); Spec — блокер СПЕКИ, чинит человек (rc=1).
+fn give_up(
+    store: &Store,
+    id: &ItemId,
+    stop: &GateStop,
+    kind: gates::FailureKind,
+    code: i32,
+    max_fix: u32,
+) -> ! {
+    let c = colors();
+    match kind {
+        gates::FailureKind::Fix => {
+            let Verdict::Fail { gate, .. } = &stop.verdict else {
+                unreachable!("класс Fix несёт Fail-вердикт")
+            };
+            eprintln!(
+                "{}FAIL: гейт {} красный после {} раундов фикса (логи: {}){}",
+                c.r,
+                gate.name(),
+                max_fix,
+                store.dir.join("logs").display(),
+                c.z
+            );
+        }
+        gates::FailureKind::Env => {
+            let Verdict::EnvBlocked { missing } = &stop.verdict else {
+                unreachable!("класс Env несёт EnvBlocked-вердикт")
+            };
+            eprint!("{}", stop.log);
+            eprintln!("{missing}");
+        }
+        gates::FailureKind::Spec => {
+            let Verdict::SpecBlock { gate, .. } = &stop.verdict else {
+                unreachable!("класс Spec несёт SpecBlock-вердикт")
+            };
+            eprintln!(
+                "{}FAIL: гейт {} — блокер СПЕКИ: чинит человек (правка спеки/red-expect), а не fix-раунд агента.{}",
+                c.r,
+                gate.name(),
+                c.z
+            );
+        }
+    }
+    die(store, id, code)
 }
 
 /// Остановка гейта: вердикт (роутинг + gate/tail для fix-раунда) + полный лог.
@@ -1925,4 +2077,63 @@ pub fn which(bin: &str) -> bool {
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    /// Парс-контракт `devh ps`: имена стадий тайминга печатаются дословно.
+    /// Разрез run() по фазам (A2) переносит вызовы между функциями, но не
+    /// имена — ассерт ловит любое переименование или потерю стадии.
+    #[test]
+    fn stage_names_preserved_for_ps() {
+        let src = include_str!("run.rs");
+        for stage in [
+            "worktree(+bootstrap)",
+            "red-pre",
+            "red-post",
+            "redmut",
+            "commit+push",
+            "verify-r{}",
+            "lint-r{}",
+            "crap-r{}",
+            "review-r{}",
+            "mutate-r{}",
+            "bench-r{}",
+        ] {
+            assert!(
+                src.contains(stage),
+                "стадия {stage} исчезла из run.rs — devh ps сломается"
+            );
+        }
+    }
+
+    /// Разрез A2: каждая фаза существует ровно один раз (не расползлась по
+    /// копипасте и не исчезла при следующем рефакторе). Считаем только
+    /// реализацию (до `#[cfg(test)]`) — иначе списки самих тестов удваивают счёт.
+    #[test]
+    fn run_is_split_into_phases() {
+        let src = include_str!("run.rs");
+        let (code, _) = src.split_once("#[cfg(test)]").unwrap_or((src, ""));
+        let src = code;
+        for phase in [
+            "fn require_gates(",
+            "fn lock_run<",
+            "fn resolve_agent(",
+            "fn claim_item(",
+            "fn ensure_worktree(",
+            "fn red_pre_phase(",
+            "fn no_crap_notice(",
+            "fn red_post(",
+            "fn red_mutate_phase(",
+            "fn commit_push(",
+            "fn finalize(",
+            "fn give_up(",
+        ] {
+            assert_eq!(
+                src.matches(phase).count(),
+                1,
+                "фаза {phase} исчезла/раздвоилась в run.rs"
+            );
+        }
+    }
 }
