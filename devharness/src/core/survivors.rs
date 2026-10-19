@@ -375,6 +375,518 @@ pub fn collect_after_run(wt: &Path, tool: &str, obs: &Path, gate: &str) -> Optio
     ))
 }
 
+// ---------------------------------------------------------------------------
+// P8-4: дистилляция — фактура для человека (группировка журнала, классы RULES,
+// тишина и пенсия) + строка сессии в RULES_LOG.
+//
+// Слои: `Shot` (журнал) → `group_by_genre` (повторы для глаз) и
+// `rule_blocks`/`rule_classes` (маппинг жанр→класс по тексту тега `blind:*` —
+// человек подтверждает, тулинг только считает, §6). Ни один выход здесь не
+// идёт в промпт агента и не влияет на вердикт гейта (§8): класс называет
+// человек, пенсия — строка с обоснованием.
+// ---------------------------------------------------------------------------
+
+/// Порог пенсии по умолчанию: класс молчит K сессий (§6).
+pub const SILENCE_DEFAULT: u32 = 10;
+/// Бюджет активного слоя RULES (§6): сверх — сначала пенсия.
+pub const RULES_BUDGET: usize = 12;
+/// Маркер строки хука в логе гейта — по нему merge находит выстрелы сессии.
+pub const HOOK_MARK: &str = "survivors:";
+/// Хвост строки хука с метками жанров (`… → observations.md (fn-value 1)`).
+pub const HOOK_TAIL: &str = "→ observations.md";
+/// Журнал выживших (`.harness/survivors.log`) — путь для команд и тестов.
+pub fn log_path(obs: &Path) -> std::path::PathBuf {
+    obs.join(LOG_FILE)
+}
+
+/// Жанр → aliases (полное имя из outcomes.json + короткая метка лога).
+/// Сопоставление по токенам, поэтому «MatchArmGuard» не даёт ложного
+/// «MatchArm» (§4: MatchArm внутри MatchArmGuard).
+const GENRE_ALIASES: &[(&str, &[&str])] = &[
+    (
+        "MatchArmGuard",
+        &["matcharmguard", "match-arm-guard", "guard"],
+    ),
+    (
+        "ComparisonOperator",
+        &["comparisonoperator", "comparison-operator", "cmp"],
+    ),
+    (
+        "BinaryOperator",
+        &["binaryoperator", "binary-operator", "binop"],
+    ),
+    ("FnValue", &["fnvalue", "fn-value"]),
+    ("MatchArm", &["matcharm", "match-arm", "match-arms"]),
+];
+
+/// Один выстрел из `.harness/survivors.log`:
+/// «дата | гейт | файл:строка | жанр | мутация».
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Shot {
+    pub date: String,
+    pub gate: String,
+    pub file: String,
+    pub line: u32,
+    pub genre: String,
+    pub mutation: String,
+}
+
+/// Разбор журнала. Прощающий: строка без пяти полей или без `файл:строка` —
+/// не наш формат, молча пропускаем (журнал дописывают люди и инструменты).
+pub fn parse_journal(text: &str) -> Vec<Shot> {
+    let mut out: Vec<Shot> = Vec::new();
+    for raw in text.lines() {
+        let l = raw.trim();
+        if l.is_empty() {
+            continue;
+        }
+        let mut parts = l.splitn(5, '|');
+        let date = parts.next().unwrap_or_default().trim().to_string();
+        let gate = parts.next().unwrap_or_default().trim().to_string();
+        let at = parts.next().unwrap_or_default().trim().to_string();
+        let genre = parts.next().unwrap_or_default().trim().to_string();
+        let mutation = parts.next().unwrap_or_default().trim().to_string();
+        if !looks_like_date(&date) || genre.is_empty() {
+            continue;
+        }
+        let Some((file, num)) = at.rsplit_once(':') else {
+            continue;
+        };
+        let file = file.trim();
+        if file.is_empty() {
+            continue;
+        }
+        out.push(Shot {
+            date,
+            gate,
+            file: file.to_string(),
+            line: num.trim().parse::<u32>().unwrap_or(0),
+            genre,
+            mutation,
+        });
+    }
+    out
+}
+
+/// Дата YYYY-MM-DD (без внешних крейтов; тот же вид, что печатает merge).
+fn looks_like_date(d: &str) -> bool {
+    d.len() == 10
+        && d.as_bytes().get(4) == Some(&b'-')
+        && d.as_bytes().get(7) == Some(&b'-')
+        && d.chars().take(4).all(|c| c.is_ascii_digit())
+        && d.chars().skip(5).take(2).all(|c| c.is_ascii_digit())
+        && d.chars().skip(8).all(|c| c.is_ascii_digit())
+}
+
+/// Базовое имя файла: в RULES координаты инстансов запрещены (§8), а для
+/// глаза человека «load.rs ×3» информативнее полного пути.
+fn basename(file: &str) -> String {
+    file.rsplit('/').next().unwrap_or(file).to_string()
+}
+
+/// Группа «жанр × файлы»: сколько выстрелов, где, когда последний, примеры.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GenreGroup {
+    pub genre: String,
+    pub tag: &'static str,
+    pub total: u32,
+    /// Имена файлов (basename) и число выстрелов, по убыванию.
+    pub files: Vec<(String, u32)>,
+    /// Самая свежая дата выстрела группы.
+    pub last: String,
+    /// До трёх различных хвостов мутаций (свежие first).
+    pub examples: Vec<String>,
+}
+
+/// Группировка выстрелов по жанру (§6). Порядок: total desc, затем жанр asc.
+pub fn group_by_genre(shots: &[Shot]) -> Vec<GenreGroup> {
+    let mut by: BTreeMap<&str, Vec<&Shot>> = BTreeMap::new();
+    for s in shots {
+        by.entry(s.genre.as_str()).or_default().push(s);
+    }
+    let mut out: Vec<GenreGroup> = by
+        .into_iter()
+        .map(|(genre, list)| {
+            let mut files: BTreeMap<String, u32> = BTreeMap::new();
+            for s in &list {
+                let b = basename(&s.file);
+                let e = files.entry(b).or_insert(0);
+                *e = e.saturating_add(1);
+            }
+            let mut files: Vec<(String, u32)> = files.into_iter().collect();
+            files.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+            let mut recent: Vec<&Shot> = list.clone();
+            recent.sort_by(|a, b| b.date.cmp(&a.date));
+            let mut examples: Vec<String> = Vec::new();
+            for s in recent {
+                if examples.len() >= 3 {
+                    break;
+                }
+                if !examples.iter().any(|e| e == &s.mutation) {
+                    examples.push(s.mutation.clone());
+                }
+            }
+            GenreGroup {
+                genre: genre.to_string(),
+                tag: genre_tag(genre),
+                total: list.len() as u32,
+                files,
+                last: list
+                    .iter()
+                    .map(|s| s.date.clone())
+                    .max()
+                    .unwrap_or_default(),
+                examples,
+            }
+        })
+        .collect();
+    out.sort_by(|a, b| b.total.cmp(&a.total).then_with(|| a.genre.cmp(&b.genre)));
+    out
+}
+
+/// «load.rs ×3, timing.rs ×1» — только basename'ы (§8: без координат).
+fn files_inline(files: &[(String, u32)]) -> String {
+    files
+        .iter()
+        .map(|(f, n)| format!("{f} ×{n}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Однострочная сводка: «fn-value 4 (load.rs ×3), binop 1 (gates.rs ×1)».
+pub fn digest_line(groups: &[GenreGroup]) -> Option<String> {
+    if groups.is_empty() {
+        return None;
+    }
+    let parts: Vec<String> = groups
+        .iter()
+        .map(|g| format!("{} {} ({})", g.tag, g.total, files_inline(&g.files)))
+        .collect();
+    Some(parts.join(", "))
+}
+
+/// Человекочитаемые строки режима по умолчанию (§6: «вот что повторялось»).
+pub fn group_lines(shots: &[Shot]) -> Vec<String> {
+    let groups = group_by_genre(shots);
+    let mut out: Vec<String> = Vec::new();
+    if let Some(d) = digest_line(&groups) {
+        out.push(format!("вот что повторялось: {d}"));
+    }
+    for g in &groups {
+        out.push(format!(
+            "- {} ({}) ×{} — {}; последний {}",
+            g.tag,
+            g.genre,
+            g.total,
+            files_inline(&g.files),
+            if g.last.is_empty() {
+                "?"
+            } else {
+                g.last.as_str()
+            }
+        ));
+        for ex in &g.examples {
+            out.push(format!("    напр. {ex}"));
+        }
+    }
+    out
+}
+
+/// Токен для сопоставления жанров: [a-z0-9-], поэтому `blind:match-arms`
+/// разбивается на «blind» + «match-arms» и не пересекается с «MatchArm».
+fn tokens(text: &str) -> Vec<String> {
+    let lower = text.to_lowercase();
+    let mut out: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    for ch in lower.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '-' {
+            cur.push(ch);
+        } else if !cur.is_empty() {
+            out.push(std::mem::take(&mut cur));
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+/// Жанры, названные в тексте тега класса (§4: «Признак: жанр FnValue»).
+/// Маппинг подтверждает человек — тулинг лишь ищет известные имена.
+pub fn genres_in(text: &str) -> Vec<String> {
+    let ts = tokens(text);
+    GENRE_ALIASES
+        .iter()
+        .filter(|(_, aliases)| aliases.iter().any(|a| ts.iter().any(|t| t == a)))
+        .map(|(g, _)| g.to_string())
+        .collect()
+}
+
+/// Тег класса из строки RULES (`- `blind:fn-value` …`). Упоминание «blind:»
+/// без имени — не класс.
+fn tag_in_line(line: &str) -> Option<String> {
+    if let Some(start) = line.find("`blind:") {
+        let rest = line.get(start.checked_add(1)?..)?;
+        if let Some(end) = rest.find('`') {
+            if let Some(t) = rest[..end].trim().strip_prefix("blind:") {
+                let tag = t.trim().trim_matches(|c: char| c == '*' || c == '.');
+                if !tag.is_empty() {
+                    return Some(tag.to_string());
+                }
+            }
+        }
+    }
+    let start = line.find("blind:")?;
+    let rest = line.get(start.checked_add("blind:".len())?..)?;
+    let end = rest
+        .find(|c: char| c.is_whitespace() || matches!(c, '`' | '"' | '\'' | ',' | ')' | ';'))
+        .unwrap_or(rest.len());
+    let tag = rest[..end]
+        .trim()
+        .trim_matches(|c: char| c == '*' || c == '.');
+    if tag.is_empty() {
+        return None;
+    }
+    Some(tag.to_string())
+}
+
+/// Блоки `blind:*` из RULES: [(тег, текст блока)]. Блок = строка тега +
+/// продолжения до пустой строки/заголовка/нового пункта (§4).
+pub fn rule_blocks(text: &str) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    let mut cur: Option<(String, String)> = None;
+    for raw in text.lines() {
+        let line = raw.trim_end();
+        if let Some(tag) = tag_in_line(line) {
+            if let Some(prev) = cur.take() {
+                out.push(prev);
+            }
+            cur = Some((tag, line.trim().to_string()));
+            continue;
+        }
+        let t = line.trim();
+        let stop = t.is_empty() || t.starts_with('#') || t.starts_with("- ") || t.starts_with("-`");
+        if stop {
+            if let Some(prev) = cur.take() {
+                out.push(prev);
+            }
+            continue;
+        }
+        if let Some((_, block)) = cur.as_mut() {
+            block.push('\n');
+            block.push_str(t);
+        }
+    }
+    if let Some(prev) = cur.take() {
+        out.push(prev);
+    }
+    out
+}
+
+/// Класс RULES с фактурой выстрелов и тишины. Пенсия — когда тишина ≥ K и
+/// маппинг жанров тега непустой (без жанров в теге пенсия не предлагается:
+/// это решение человека, а не догадка тулинга).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClassRow {
+    pub tag: String,
+    pub genres: Vec<String>,
+    pub shots: u32,
+    pub last: String,
+    pub silence: u32,
+    pub pension: bool,
+}
+
+/// Сколько сессий прошло после последнего выстрела (даты RULES_LOG'а позже
+/// даты выстрела). Нет выстрела — молчат все сессии.
+fn silence_sessions(last_shot: &str, sessions: &[String]) -> u32 {
+    if last_shot.is_empty() {
+        return sessions.len() as u32;
+    }
+    sessions.iter().filter(|d| d.as_str() > last_shot).count() as u32
+}
+
+/// Даты сессий из RULES_LOG («## Session N — title (YYYY-MM-DD)»).
+pub fn session_dates(rules_log: &str) -> Vec<String> {
+    rules_log
+        .lines()
+        .filter_map(|l| {
+            let t = l.trim();
+            if !t.starts_with("## Session") {
+                return None;
+            }
+            let s = t.rfind('(')?;
+            let e = t.rfind(')')?;
+            if e <= s {
+                return None;
+            }
+            let d = t.get(s.checked_add(1)?..e)?.trim();
+            looks_like_date(d).then(|| d.to_string())
+        })
+        .collect()
+}
+
+/// Маппинг классов RULES на фактуру журнала. `sessions` — даты сессий из
+/// RULES_LOG (для тишины), `k` — порог пенсии.
+pub fn rule_classes(
+    rules_text: &str,
+    shots: &[Shot],
+    sessions: &[String],
+    k: u32,
+) -> Vec<ClassRow> {
+    rule_blocks(rules_text)
+        .into_iter()
+        .map(|(tag, block)| {
+            let genres = genres_in(&block);
+            let hits: Vec<&Shot> = shots
+                .iter()
+                .filter(|s| genres.iter().any(|g| g == &s.genre))
+                .collect();
+            let last = hits
+                .iter()
+                .map(|s| s.date.clone())
+                .max()
+                .unwrap_or_default();
+            let silence = silence_sessions(&last, sessions);
+            ClassRow {
+                tag,
+                // без названных в теге жанров пенсия не предлагается: это
+                // решение человека, а не догадка тулинга по пустому тексту.
+                pension: !genres.is_empty() && silence >= k,
+                genres,
+                shots: hits.len() as u32,
+                last,
+                silence,
+            }
+        })
+        .collect()
+}
+
+/// Строки режима `--rules` (§6): жанры класса, выстрелы, тишина, пенсия,
+/// бюджет активного слоя. Без координат инстансов (§8).
+pub fn rules_lines(rows: &[ClassRow]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    if rows.is_empty() {
+        return out;
+    }
+    out.push(format!(
+        "активный слой RULES: {} классов (бюджет ≤{})",
+        rows.len(),
+        RULES_BUDGET
+    ));
+    for r in rows {
+        let g = if r.genres.is_empty() {
+            "не назван — маппинг подтверждает человек".to_string()
+        } else {
+            r.genres.join(", ")
+        };
+        out.push(format!(
+            "- `blind:{}` — жанры: {}; выстрелов {}, последний {}",
+            r.tag,
+            g,
+            r.shots,
+            if r.last.is_empty() {
+                "нет"
+            } else {
+                r.last.as_str()
+            }
+        ));
+        if r.genres.is_empty() {
+            out.push("    (допиши в тег «Признак: <жанр>» — тогда считается тишина)".to_string());
+        } else if r.pension {
+            out.push(format!(
+                "    на пенсию: обоснование — {} сессий без выстрелов класса",
+                r.silence
+            ));
+        } else {
+            out.push(format!("    тишина {} сессий", r.silence));
+        }
+    }
+    let over = rows.len().saturating_sub(RULES_BUDGET);
+    if over > 0 {
+        out.push(format!(
+            "!!! активный слой больше бюджета на {over}: сначала пенсия (§6)"
+        ));
+    }
+    out
+}
+
+/// Метки жанров из строки хука: «survivors: 2 → observations.md (fn-value 1)».
+pub fn tags_in_gate_line(line: &str) -> Vec<(String, u32)> {
+    let Some(s) = line.rfind('(') else {
+        return Vec::new();
+    };
+    let Some(e) = line.rfind(')') else {
+        return Vec::new();
+    };
+    if e <= s {
+        return Vec::new();
+    }
+    let Some(inner) = s.checked_add(1).and_then(|m| line.get(m..e)) else {
+        return Vec::new();
+    };
+    inner
+        .split(',')
+        .filter_map(|part| {
+            let mut it = part.split_whitespace();
+            let tag = it.next()?;
+            let n = it.next().and_then(|v| v.parse::<u32>().ok()).unwrap_or(1);
+            Some((tag.to_string(), n))
+        })
+        .collect()
+}
+
+/// Сумма меток жанров по логам гейтов сессии → строка «- survivors: …» для
+/// RULES_LOG (§6: дистилляция получает журнал по сессиям бесплатно).
+/// None — в сессии выживших не было (строку не пишем, журнал не засоряем).
+pub fn session_survivors_line(logs: &[String]) -> Option<String> {
+    let mut by: BTreeMap<String, u32> = BTreeMap::new();
+    for log in logs {
+        for l in log.lines() {
+            if !l.contains(HOOK_MARK) || !l.contains(HOOK_TAIL) {
+                continue;
+            }
+            for (tag, n) in tags_in_gate_line(l) {
+                let e = by.entry(tag).or_insert(0);
+                *e = e.saturating_add(n);
+            }
+        }
+    }
+    if by.is_empty() {
+        return None;
+    }
+    let list = by
+        .iter()
+        .map(|(t, n)| format!("{t} {n}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!(
+        "- survivors: {list} — выжившие на триаже в .harness/observations.md, классы называет человек"
+    ))
+}
+
+/// Строка сессии для RULES_LOG: читает логи гейтов item (`<id>-mutate.log`,
+/// `<id>-redmut.log`) и суммирует выстрелы. None — выживших в сессии не было.
+pub fn session_line(
+    store: &crate::shell::store::Store,
+    id: &crate::core::types::ItemId,
+) -> Option<String> {
+    let logs: Vec<String> = ["mutate", "redmut"]
+        .iter()
+        .filter_map(|n| std::fs::read_to_string(store.log_file(id, n)).ok())
+        .collect();
+    session_survivors_line(&logs)
+}
+
+/// `devh survivors --reset`: очистить seen-дедуп (ручной инструмент §6).
+/// true — файл был и удалён; false — не было (тоже не ошибка).
+pub fn reset_seen(obs: &Path) -> bool {
+    let p = obs.join(SEEN_FILE);
+    if p.is_file() {
+        return std::fs::remove_file(&p).is_ok();
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -609,5 +1121,284 @@ mod tests {
         assert_eq!(d.len(), 10, "{d}");
         assert_eq!(d.as_bytes().get(4), Some(&b'-'));
         assert!(d.starts_with("20"), "{d}");
+    }
+
+    // ---- P8-4: дистилляция (§6) ----
+
+    /// Журнал с датами: 4 выстрела FnValue (load.rs ×4, из них два «вечных» на
+    /// 15-й строке) + 1 binop в timing.rs.
+    const JOURNAL: &str = concat!(
+        "2026-10-10 | mutation | devharness/src/core/load.rs:15 | FnValue | replace load_average -> Option<f64> with Some(0.0)\n",
+        "2026-10-12 | mutation | devharness/src/core/load.rs:22 | FnValue | replace max_load -> Option<u32> with None\n",
+        "2026-10-14 | mutation | devharness/src/core/timing.rs:40 | BinaryOperator | replace == with !=\n",
+        "2026-10-15 | red-mutation load.rs | devharness/src/core/load.rs:15 | FnValue | replace load_average -> Option<f64> with Some(0.0)\n",
+        "2026-10-16 | mutation | devharness/src/core/load.rs:15 | FnValue | replace load_average -> Option<f64> with Some(1.5)\n",
+        "мусорная строка без полей\n",
+        "2026-10-13 | mutation | load.rs | FnValue | без координат — не наш формат\n",
+    );
+
+    const RULES: &str = concat!(
+        "# Отчёт\n\n",
+        "## Железные правила\n1. CI зелёный до коммита.\n\n",
+        "## Классы слепоты тестов (из мутационных выживших, P8)\n",
+        "- `blind:fn-value` Новая pub-fn с логикой получает прямой тест с точным ассертом\n",
+        "  (значение/None/Some(x)/граница), не is_some/is_ok. Признак в триаже: жанр FnValue.\n",
+        "- `blind:boundary` Новое if/сравнение/булево покрывается кейсами на оба плеча\n",
+        "  и на границу (равенство). Признак: BinaryOperator/ComparisonOperator.\n",
+        "- `blind:wrapper` Делегирующая pub-fn с добавленной логикой — контракт-тест на\n",
+        "  результат, не на делегирование. Признак: FnValue в тонких модулях.\n",
+        "- `blind:pure-fn` Чистая функция с операторами — proptest с инвариантом, не пять юнитов.\n",
+    );
+
+    #[test]
+    fn journal_grouping_counts_files_and_examples() {
+        let shots = parse_journal(JOURNAL);
+        assert_eq!(shots.len(), 5, "мусор и строка без координат пропущены");
+        let groups = group_by_genre(&shots);
+        assert_eq!(groups.len(), 2, "два жанра");
+        let fnv = groups.first().unwrap_or_else(|| unreachable!());
+        assert_eq!(fnv.tag, "fn-value");
+        assert_eq!(fnv.total, 4);
+        assert_eq!(fnv.files.len(), 1, "группировка жанр × файл");
+        assert_eq!(fnv.files.first().map(|(f, _)| f.as_str()), Some("load.rs"));
+        assert_eq!(fnv.files.first().map(|(_, n)| *n), Some(4));
+        assert_eq!(fnv.last, "2026-10-16", "самая свежая дата группы");
+        assert_eq!(fnv.examples.len(), 3, "примеров не больше трёх");
+        assert!(
+            fnv.examples
+                .first()
+                .map(|e| e.contains("Some(1.5)"))
+                .unwrap_or(false),
+            "свежие примеры first: {:?}",
+            fnv.examples
+        );
+        let binop = groups.get(1).unwrap_or_else(|| unreachable!());
+        assert_eq!((binop.tag, binop.total), ("binop", 1));
+        assert_eq!(
+            binop.files.first().map(|(f, _)| f.as_str()),
+            Some("timing.rs")
+        );
+        assert_eq!(
+            digest_line(&groups).as_deref(),
+            Some("fn-value 4 (load.rs ×4), binop 1 (timing.rs ×1)")
+        );
+        let lines = group_lines(&shots);
+        assert!(
+            lines
+                .first()
+                .map(|l| l.starts_with("вот что повторялось: fn-value 4 (load.rs ×4)"))
+                .unwrap_or(false),
+            "{lines:?}"
+        );
+        // граница честности §8: в выводе только basename'ы, без координат.
+        assert!(
+            !lines.join("\n").contains(".rs:"),
+            "строки вывода без file:line: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn rules_mode_silence_and_pension() {
+        let shots = parse_journal(JOURNAL);
+        // 12 сессий после последнего выстрела (10-16) + 2 до него.
+        let mut sessions: Vec<String> = vec!["2026-10-01".into(), "2026-10-09".into()];
+        sessions.extend((17..=28).map(|d| format!("2026-10-{d:02}")));
+        let rows = rule_classes(RULES, &shots, &sessions, 10);
+        assert_eq!(rows.len(), 4, "четыре blind-тега в RULES");
+        let by = |tag: &str| rows.iter().find(|r| r.tag == tag).cloned();
+        let fnv = by("fn-value").unwrap_or_else(|| unreachable!());
+        assert_eq!(fnv.genres, vec!["FnValue".to_string()]);
+        assert_eq!((fnv.shots, fnv.last.as_str()), (4, "2026-10-16"));
+        assert_eq!(fnv.silence, 12, "сессии после последнего выстрела");
+        assert!(fnv.pension, "тишина ≥ K → пенсия");
+        let bnd = by("boundary").unwrap_or_else(|| unreachable!());
+        assert!(bnd.genres.iter().any(|g| g == "BinaryOperator"), "{bnd:?}");
+        assert!(
+            bnd.genres.iter().any(|g| g == "ComparisonOperator"),
+            "{bnd:?}"
+        );
+        assert_eq!(
+            (bnd.shots, bnd.last.as_str()),
+            (1, "2026-10-14"),
+            "binop-выстрел журнала"
+        );
+        assert_eq!(bnd.silence, 12, "сессии после выстрела класса");
+        assert!(bnd.pension);
+        let pure = by("pure-fn").unwrap_or_else(|| unreachable!());
+        assert_eq!(
+            pure.silence,
+            sessions.len() as u32,
+            "без жанров в теге тишина — весь журнал сессий"
+        );
+        assert!(
+            pure.genres.is_empty(),
+            "в теге не назван жанр — маппинг за человеком: {pure:?}"
+        );
+        assert!(
+            !pure.pension,
+            "без маппинга пенсия не предлагается: {pure:?}"
+        );
+        let out = rules_lines(&rows).join("\n");
+        assert!(
+            out.contains("на пенсию: обоснование — 12 сессий без выстрелов класса"),
+            "{out}"
+        );
+        // Тот же K, но меньше порога не достигнут («тишина K сессий»).
+        let alive = rule_classes(RULES, &shots, &sessions, 13);
+        let out2 = rules_lines(&alive).join("\n");
+        assert!(out2.contains("тишина 12 сессий"), "{out2}");
+        assert!(
+            alive.iter().all(|r| !r.pension),
+            "порог 13 не достигнут: {alive:?}"
+        );
+        assert!(
+            out.contains("активный слой RULES: 4 классов (бюджет ≤12)"),
+            "{out}"
+        );
+        assert!(out.contains("маппинг подтверждает человек"), "{out}");
+        // §8: слой RULES не получает координат инстансов.
+        assert!(!out.contains(".rs"), "{out}");
+    }
+
+    #[test]
+    fn rules_silence_without_any_shot_pensions_named_genre() {
+        let rows = rule_classes(
+            "- `blind:fn-value` тест, признак: жанр FnValue.\n",
+            &[],
+            &["2026-10-01".to_string(), "2026-10-08".to_string()],
+            2,
+        );
+        let r = rows.first().unwrap_or_else(|| unreachable!());
+        assert_eq!(
+            (r.shots, r.silence),
+            (0, 2),
+            "нет выстрела — молчат все сессии"
+        );
+        assert!(r.pension, "тишина ≥ K → пенсия даже без единого выстрела");
+    }
+
+    #[test]
+    fn rules_budget_overflow_is_flagged() {
+        let mut text = String::from("## Классы\n");
+        for i in 0..15 {
+            text.push_str(&format!(
+                "- `blind:class-{i}` чего-то там, признаком служит жанр FnValue.\n\n"
+            ));
+        }
+        let rows = rule_classes(&text, &[], &[], 10);
+        assert_eq!(rows.len(), 15);
+        let out = rules_lines(&rows).join("\n");
+        assert!(
+            out.contains("активный слой больше бюджета на 3"),
+            "сверх бюджета — сначала пенсия: {out}"
+        );
+    }
+
+    #[test]
+    fn empty_journal_gives_no_data_and_no_panic() {
+        assert!(parse_journal("").is_empty());
+        assert!(group_lines(&[]).is_empty());
+        assert!(digest_line(&[]).is_none());
+        assert!(rules_lines(&[]).is_empty());
+        assert!(session_survivors_line(&[]).is_none());
+        // классы без журнала: тишина = все сессии, пенсии нет (K не достигнут)
+        let rows = rule_classes(RULES, &[], &["2026-10-01".into()], 10);
+        assert!(!rows.is_empty());
+        assert!(rows.iter().all(|r| !r.pension), "одна сессия молчания ≠ K");
+    }
+
+    #[test]
+    fn parse_journal_keeps_pipes_in_mutation() {
+        let shots = parse_journal(
+            "2026-10-12 | mutation | load.rs:20 | FnValue | replace a with b | лишний | хвост\n",
+        );
+        assert_eq!(shots.len(), 1);
+        assert_eq!(
+            shots.first().map(|s| s.mutation.as_str()),
+            Some("replace a with b | лишний | хвост")
+        );
+    }
+
+    #[test]
+    fn session_survivors_line_sums_gate_logs() {
+        let logs = vec![
+            String::from("MUTATE: Mutants 10, killed 9 (90%)\nsurvivors: 1 → observations.md (fn-value 1)\n"),
+            String::from(
+                "survivors: 2 → observations.md (binop 1, fn-value 1)\n.. survivors: 1 исход(ов) outcomes.json без разбираемого summary — пропущены\n",
+            ),
+        ];
+        let line = session_survivors_line(&logs).unwrap_or_else(|| unreachable!());
+        assert!(line.starts_with("- survivors: "), "{line}");
+        assert!(line.contains("fn-value 2"), "сумма по логам: {line}");
+        assert!(line.contains("binop 1"), "{line}");
+        assert!(!line.contains("исход"), "WARN хука — не выстрел: {line}");
+        // без выживших строки нет; пустые скобки тоже не выстрел
+        assert!(session_survivors_line(&["MUTATE: Mutants 10, killed 10 (100%)".into()]).is_none());
+        assert!(session_survivors_line(&["survivors: 0 → observations.md ()".into()]).is_none());
+    }
+
+    #[test]
+    fn session_dates_from_rules_log() {
+        let log = "# Отчёт\n\n## Session 40 — Титул (2026-10-01)\n- commit: abc\n\n## Session 41 — Другое (2026-10-15)\n";
+        assert_eq!(
+            session_dates(log),
+            vec!["2026-10-01".to_string(), "2026-10-15".to_string()]
+        );
+        assert!(session_dates("нет сессий тут").is_empty());
+        assert!(session_dates("## Session 42 — без даты (особая)").is_empty());
+    }
+
+    #[test]
+    fn genres_in_tag_text_and_no_false_match() {
+        assert_eq!(
+            genres_in("Признак в триаже: жанр FnValue."),
+            vec!["FnValue".to_string()]
+        );
+        assert_eq!(
+            genres_in("MatchArmGuard и MatchArm"),
+            vec!["MatchArmGuard".to_string(), "MatchArm".to_string()]
+        );
+        assert_eq!(
+            genres_in("`blind:match-arms` класс"),
+            vec!["MatchArm".to_string()]
+        );
+        assert_eq!(
+            genres_in("`blind:fn-value` класс"),
+            vec!["FnValue".to_string()]
+        );
+        assert!(genres_in("никуда не годный текст").is_empty());
+        // «guard» — короткий alias, но «blind:match-arms» его не содержит
+        assert!(!genres_in("`blind:match-arms`")
+            .iter()
+            .any(|g| g == "MatchArmGuard"));
+    }
+
+    #[test]
+    fn rule_blocks_split_by_tag_and_headings() {
+        let blocks = rule_blocks(RULES);
+        assert_eq!(blocks.len(), 4, "{blocks:?}");
+        assert_eq!(blocks.first().map(|(t, _)| t.as_str()), Some("fn-value"));
+        assert!(
+            blocks
+                .first()
+                .map(|(_, b)| b.contains("Признак в триаже: жанр FnValue"))
+                .unwrap_or(false),
+            "продолжение блока собрано: {:?}",
+            blocks.first()
+        );
+        // тег без имени классом не считается
+        assert!(rule_blocks("- про слепоту: blind: без имени\n").is_empty());
+    }
+
+    #[test]
+    fn reset_seen_removes_file_and_is_silent_without_it() {
+        let t = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let obs = t.path();
+        assert!(!reset_seen(obs), "нет файла — не ошибка");
+        std::fs::write(obs.join("survivors-seen.json"), "{\"version\":1}")
+            .unwrap_or_else(|_| unreachable!());
+        assert!(reset_seen(obs), "файл был — удалён");
+        assert!(!obs.join("survivors-seen.json").exists());
+        assert!(!reset_seen(obs), "повторно удалять нечего");
     }
 }

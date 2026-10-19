@@ -131,6 +131,13 @@ pub fn merge(store: &Store, cfg: &RunConfig, id: &ItemId) -> anyhow::Result<()> 
             for line in summary.lines().skip(1) {
                 rent += &format!("  {line}\n");
             }
+            // P8-4: дистилляция — какие классы/жанры выстрелили в этой сессии
+            // (логи гейтов item: `<id>-mutate.log`, `<id>-redmut.log`). Нет
+            // выживших — строки нет: журнал RULES_LOG не засоряется (§6).
+            if let Some(surv) = crate::core::survivors::session_line(store, id) {
+                rent.push_str(&surv);
+                rent.push('\n');
+            }
             use std::io::Write;
             let mut f = std::fs::OpenOptions::new()
                 .create(true)

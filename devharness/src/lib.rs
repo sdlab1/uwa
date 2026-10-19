@@ -51,6 +51,14 @@ pub enum Cmd {
     Tickets {
         import: bool,
     },
+    Survivors {
+        /// режим классов RULES (`blind:*`): выстрелы, тишина, пенсия.
+        rules: bool,
+        /// порог пенсии K (сессий тишины); дефолт 10.
+        sessions: Option<u32>,
+        /// очистить `.harness/survivors-seen.json` (ручной инструмент §6).
+        reset: bool,
+    },
 }
 
 impl Cmd {
@@ -102,6 +110,29 @@ impl Cmd {
             Command::new("ps"),
             Command::new("tickets")
                 .arg(Arg::new("import").long("import").action(ArgAction::SetTrue)),
+            Command::new("survivors")
+                .about("фактура выживших мутантов для дистилляции классов слепоты")
+                .arg(
+                    Arg::new("rules")
+                        .long("rules")
+                        .action(ArgAction::SetTrue)
+                        .help(
+                            "режим классов RULES (`blind:*`): жанры тега, выстрелы, тишина, пенсия",
+                        ),
+                )
+                .arg(
+                    Arg::new("sessions")
+                        .long("sessions")
+                        .action(ArgAction::Set)
+                        .value_parser(clap::value_parser!(u32))
+                        .help("K сессий тишины для пенсии (дефолт 10)"),
+                )
+                .arg(
+                    Arg::new("reset")
+                        .long("reset")
+                        .action(ArgAction::SetTrue)
+                        .help("очистить .harness/survivors-seen.json (ручной инструмент)"),
+                ),
         ]
     }
 
@@ -200,6 +231,19 @@ impl Cmd {
                     .unwrap_or_else(|| unreachable!());
                 let import = m.get_one::<bool>("import").copied().unwrap_or(false);
                 Ok(Cmd::Tickets { import })
+            }
+            Some("survivors") => {
+                let m = matches
+                    .subcommand_matches("survivors")
+                    .unwrap_or_else(|| unreachable!());
+                let rules = m.get_one::<bool>("rules").copied().unwrap_or(false);
+                let sessions = m.get_one::<u32>("sessions").copied();
+                let reset = m.get_one::<bool>("reset").copied().unwrap_or(false);
+                Ok(Cmd::Survivors {
+                    rules,
+                    sessions,
+                    reset,
+                })
             }
             _ => Err("unknown subcommand".to_string()),
         }

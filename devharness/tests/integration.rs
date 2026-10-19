@@ -2862,3 +2862,166 @@ echo "3 mutants tested in 1s: 1 caught, 2 missed"
         "слабые зоны: файл + счётчики: {hint_out}"
     );
 }
+
+#[test]
+fn section41_survivors_distillation_and_rules_log() {
+    // Часть 1: `devh survivors` — группировка журнала + классы RULES.
+    // Журнал пишем руками (xref: run-часть ниже проверяет живой сбор),
+    // сессии — строками «## Session N … (дата)» в RULES_LOG.
+    let sb = Sandbox::new("r41a");
+    fs::create_dir_all(sb.repo.join("todo")).unwrap_or_else(|_| unreachable!());
+    fs::write(
+        sb.repo.join("todo/report.md"),
+        "# Отчёт\n\n\
+         ## Железные правила\n1. CI зелёный до коммита.\n\n\
+         ## Классы слепоты тестов (из мутационных выживших, P8)\n\
+         - `blind:fn-value` Новая pub-fn с логикой получает прямой тест с точным ассертом\n\
+         \x20 (значение/None/Some(x)/граница), не is_some/is_ok. Признак в триаже: жанр FnValue.\n\
+         - `blind:boundary` Новое if/сравнение/булево покрывается кейсами на оба плеча\n\
+         \x20 и на границу (равенство). Признак: BinaryOperator/ComparisonOperator.\n\n\
+         ## Session 1 — Первая (2026-09-10)\n- commit: aaa\n\n\
+         ## Session 2 — Вторая (2026-09-20)\n- commit: bbb\n",
+    )
+    .unwrap_or_else(|_| unreachable!());
+    sb.run_ok(&["init"]);
+    fs::write(
+        sb.harness_file("survivors.log"),
+        "2026-09-01 | mutation | devharness/src/core/load.rs:15 | FnValue | replace load_average -> Option<f64> with Some(0.0)\n\
+         2026-09-02 | mutation | devharness/src/core/load.rs:22 | FnValue | replace max_load -> Option<u32> with None\n\
+         2026-09-03 | mutation | devharness/src/core/timing.rs:40 | BinaryOperator | replace == with !=\n",
+    )
+    .unwrap_or_else(|_| unreachable!());
+    // seen-дедуп живёт рядом: --reset его чистит.
+    fs::write(
+        sb.harness_file("survivors-seen.json"),
+        "{\"version\":1,\"hashes\":[\"ab\"]}",
+    )
+    .unwrap_or_else(|_| unreachable!());
+
+    let (ok, out) = sb.run_capture(&["survivors"]);
+    assert!(ok, "survivors: {out}");
+    assert!(
+        contains(&out, "load.rs ×2"),
+        "группировка жанр × файл: {out}"
+    );
+    assert!(
+        contains(&out, "fn-value 2"),
+        "счётчик повторов жанра: {out}"
+    );
+    assert!(contains(&out, "binop 1"), "второй жанр тоже виден: {out}");
+    assert!(
+        contains(&out, "2026-09-02"),
+        "самая свежая дата группы: {out}"
+    );
+    assert!(
+        !contains(&out, "load.rs:15"),
+        "в выводе только basename'ы, без координат (§8): {out}"
+    );
+
+    // --rules: жанры тега, тишина и порог пенсии. K=3 — тишина 2 < 3 (жив).
+    let (ok, out) = sb.run_capture(&["survivors", "--rules", "--sessions", "3"]);
+    assert!(ok, "survivors --rules: {out}");
+    assert!(contains(&out, "blind:fn-value"), "класс из RULES: {out}");
+    assert!(
+        contains(&out, "жанры: FnValue"),
+        "маппинг жанр→класс по тексту тега: {out}"
+    );
+    assert!(contains(&out, "тишина 2 сессий"), "{out}");
+    assert!(!contains(&out, "на пенсию"), "порог 3 не достигнут: {out}");
+    assert!(
+        !contains(&out, "load.rs"),
+        "в классах нет координат инстансов (§8): {out}"
+    );
+    // K=2 — тишина 2 = порог → строка пенсии с обоснованием.
+    let (ok, out) = sb.run_capture(&["survivors", "--rules", "--sessions", "2"]);
+    assert!(ok, "survivors --rules K=2: {out}");
+    assert!(
+        contains(
+            &out,
+            "на пенсию: обоснование — 2 сессий без выстрелов класса"
+        ),
+        "{out}"
+    );
+    // blind:boundary покрывает два жанра — маппинг человека виден в выводе.
+    assert!(
+        contains(&out, "ComparisonOperator, BinaryOperator"),
+        "{out}"
+    );
+
+    // --reset: seen удалён, повторная команса не падает.
+    let (ok, out) = sb.run_capture(&["survivors", "--reset"]);
+    assert!(ok, "survivors --reset: {out}");
+    assert!(contains(&out, "seen очищен"), "{out}");
+    assert!(!sb.harness_file("survivors-seen.json").exists());
+    let (ok, out) = sb.run_capture(&["survivors", "--reset"]);
+    assert!(ok, "повторный --reset: {out}");
+    assert!(contains(&out, "seen и так пуст"), "{out}");
+
+    // Пустой журнал → «нет данных», не паника (§6 приёмка).
+    fs::remove_file(sb.harness_file("survivors.log")).unwrap_or_else(|_| unreachable!());
+    let (ok, out) = sb.run_capture(&["survivors"]);
+    assert!(ok, "пустой журнал: {out}");
+    assert!(contains(&out, "нет данных"), "{out}");
+    let (ok, out) = sb.run_capture(&["survivors", "--rules"]);
+    assert!(ok, "пустой журнал --rules: {out}");
+    assert!(contains(&out, "нет данных"), "{out}");
+
+    // Часть 2: живой прогон с missed + merge → строка survivors в RULES_LOG.
+    let sb = Sandbox::new("r41b");
+    fs::create_dir_all(sb.repo.join("todo")).unwrap_or_else(|_| unreachable!());
+    fs::write(
+        sb.repo.join("todo/report.md"),
+        "# Отчёт\n\n## Железные правила\n1. CI.\n",
+    )
+    .unwrap_or_else(|_| unreachable!());
+    sb.run_ok(&["init"]);
+    write_exec(
+        &sb.stubs.join("mut-surv41.sh"),
+        r#"#!/usr/bin/env bash
+mkdir -p mutants.out
+cat > mutants.out/outcomes.json <<'JSON'
+{"outcomes":[
+ {"scenario":{"Mutant":{"name":"devharness/src/core/load.rs:22:5: replace max_load -> Option<u32> with None","package":"devh","file":"devharness/src/core/load.rs","function":{"function_name":"max_load","return_type":"Option<u32>"},"span":{"start":{"line":22,"column":5},"end":{"line":22,"column":40}},"replacement":"None","genre":"FnValue"}},"summary":"MissedMutant","log_path":"l2","diff_path":"d2","phase_results":[]}
+]}
+JSON
+echo "1 mutants tested in 1s: 0 caught, 1 missed"
+"#,
+    );
+    sb.new_item("surv merge item", "спека\n", Some("x"));
+    let mut c = sb.devh(&["run", "W-001"]);
+    c.env(
+        "HARNESS_MUTATE",
+        sb.stubs.join("mut-surv41.sh").to_string_lossy().to_string(),
+    )
+    .env("HARNESS_MUTATE_SURVIVORS", "1")
+    .env("HARNESS_MIN_KILL", "0")
+    .env("HARNESS_MUTATE_MAX_LOAD", "off");
+    let out = c.output().unwrap_or_else(|_| unreachable!());
+    let all = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.status.success(), "run W-001: {all}");
+    assert!(
+        contains(&all, "survivors: 1 → observations.md (fn-value 1)"),
+        "{all}"
+    );
+
+    sb.run_ok(&["merge", "W-001"]);
+    let report =
+        fs::read_to_string(sb.repo.join("todo/report.md")).unwrap_or_else(|_| unreachable!());
+    assert!(
+        contains(&report, "## Session 1 — surv merge item"),
+        "сессия в RULES_LOG: {report}"
+    );
+    assert!(
+        contains(&report, "- survivors: fn-value 1"),
+        "строка выстрелов сессии рядом с Session (§6): {report}"
+    );
+    assert!(contains(&report, "классы называет человек"), "{report}");
+    // журнал выживых накоплен той же сессией — группировка его видит.
+    let (ok, out) = sb.run_capture(&["survivors"]);
+    assert!(ok, "survivors после merge: {out}");
+    assert!(contains(&out, "fn-value 1 (load.rs ×1)"), "{out}");
+}

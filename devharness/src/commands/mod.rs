@@ -8,6 +8,7 @@ pub mod misc;
 pub mod new;
 pub mod ps;
 pub mod run;
+pub mod survivors;
 pub mod tickets;
 
 use std::path::Path;
@@ -260,6 +261,18 @@ pub fn dispatch(cmd: &Cmd, root: &Path) -> anyhow::Result<()> {
         Cmd::Tickets { import: true } => {
             tickets::import(&store)?;
         }
+        Cmd::Survivors {
+            rules,
+            sessions,
+            reset,
+        } => survivors::survivors(
+            &store,
+            &cfg,
+            root,
+            *rules,
+            sessions.unwrap_or(crate::core::survivors::SILENCE_DEFAULT),
+            *reset,
+        )?,
     }
     Ok(())
 }
