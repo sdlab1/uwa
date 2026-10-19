@@ -313,6 +313,14 @@ RED: стаб `GiveUp{code:1}` → тесты `decide_round_gives_up_at_max_fix`
 
 Приёмка: run()≤100 строк; diff по `println!`/`die` — нулевой (сверяем выхлоп smoke-сессии до/после); test.sh 127; 137+54+новые; аудит `--in-diff -f run.rs` — 0 missed; коммит + FF-merge + push.
 
+**СТАТУС: A2 СДАН (2026-10-19)** — коммит `971a245` (ветка `devh/a2-run-phases`, база `79d09cc` = main), FF-merge в main, push origin/main + ветка.
+- run() **551 → 88 строк**: водитель + **11 фаз** (`require_gates`, `lock_run`, `resolve_agent`, `claim_item`, `ensure_worktree`, `red_pre_phase`, `no_crap_notice`, `red_post`, `red_mutate_phase`, `commit_push`, `finalize`) + единый хвост `give_up(kind,code)` (три inline-ветки `die` свернуты в одну; die-вызовы 22→20 by design).
+- Тела фаз подняты **байт-идентично** питон-экстрактором из исходного run() (`/tmp/transform_a2.py`), только подстановки путей параметров (`&wt`→`wt`, `&red_file`→`&red.file`, `!no_red && has_red`→`!red.no_red && red.has_red`). Приёмка «diff по println!/die — нулевой»: **74/74 литерала совпадают**; smoke-выхлоп (test.sh) нормализован байт-идентичен снимку до правок (md5 `46a0245b7d38cdf79d7f2a729c975239`, ИТОГО PASS=127 FAIL=0).
+- `decide_round(round,max_fix,kind) -> RoundDecision{Continue,GiveUp{code}}` в gates.rs — чистая; `#[default]=Continue` на enum'е (FnValue-мутанты убиваемы env/spec-тестами); RED сперва падал в рантайме на 2 из 4 тестов против стаба → реализация.
+- Stage-контракт `devh ps` закрыт ассертами: `stage_names_preserved_for_ps` (все 11 имён стадий) + `run_is_split_into_phases` (по 1 сигнатуре каждой фазы; self-reference обойдён через `split_once("#[cfg(test)]")`).
+- Гейты: unit **147** (141 + 4 `decide_round_*` + 2 структурных run.rs) + integration **54**, fmt/clippy чистые (`-D warnings`; clippy вскрыл 8 needless-borrow в поднятом теле `red_pre_phase` — параметр-пути уже ссылки, убраны двойные `&wt`/`&agent`), аудит дельты **29 мутантов: 27 caught / 2 unviable / 0 missed / 0 timeout** (2 unviable — целые функции `lock_run`/`red_pre_phase`, форма как в A1; аудит-конфиг `/tmp/a1-mutants.toml`).
+- Журнал: docs/rust_build.md §9.17. Следующая: Сессия 3 (`claim_action` + `apply_event` + `fold`, фикс дефекта 2), база — текущий main = `971a245`.
+
 ## Сессия 3 — `state.rs` до правды + фикс дефекта 2 (детально)
 
 Предусловие: сессия 2 в main (claim стал функцией).
@@ -330,4 +338,4 @@ REVIEW-гейт второй моделью; P8-петля (закрыта); bas
 
 ## Порядок исполнения
 
-A1 (сейчас) → merge+push → A2 → merge+push → A3 → merge+push. Каждая сессия — один коммит-рефактор (+ возможность точечных фиксов в той же ветке до мержа).
+A1 ✓ (`b873a18`) → merge+push → A2 ✓ (`971a245`) → merge+push → **A3 (сейчас)** → merge+push. Каждая сессия — один коммит-рефактор (+ возможность точечных фиксов в той же ветке до мержа).
