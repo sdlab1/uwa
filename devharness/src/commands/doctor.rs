@@ -1,11 +1,11 @@
 use std::path::Path;
 use std::time::Instant;
 
-use crate::core::state::Status;
+use crate::core::state::{self, Status};
 use crate::core::types::{ItemId, RunConfig};
 use crate::shell::color::{colors, Colors};
 use crate::shell::git;
-use crate::shell::store::{item_rel, Store};
+use crate::shell::store::{item_rel, Item, Store};
 use crate::shell::worktree;
 
 const SMOKE_TIMEOUT_SECS: u64 = 120;
@@ -272,6 +272,7 @@ pub fn doctor(store: &Store, cfg: &RunConfig, root: &Path) -> anyhow::Result<()>
 
     for it in store.items() {
         orphan_checks(store, cfg, &it, &mut say, &mut warn);
+        replay_checks(store, &it, &mut say, &mut warn);
     }
 
     let active = store.count_active();
@@ -312,6 +313,25 @@ fn orphan_checks(
         say(&format!(
             "WARN {}: worktree есть, статус open — devh run {} продолжит с места обрыва",
             it.id, it.id
+        ));
+        *warn = warn.saturating_add(1);
+    }
+}
+
+/// A3: replay events.log → fold → сверка с файлом status. Рассинхрон —
+/// строка в отчёт (WARN), не смерть doctor'а: status — источник истины для
+/// гейтов, журнал — постмортем для человека.
+fn replay_checks(store: &Store, it: &Item, say: &mut dyn FnMut(&str), warn: &mut u32) {
+    let Some(text) = store.read(item_rel(&it.id, "events.log")) else {
+        return;
+    };
+    let folded = state::fold(&state::events_from_log(&text));
+    if folded != it.status {
+        say(&format!(
+            "WARN {}: events.log replay → {}, статус-файл {} — рассинхрон журнала (правь status вручную или переиграй событие)",
+            it.id.dir_name(),
+            folded.as_str(),
+            it.status.as_str()
         ));
         *warn = warn.saturating_add(1);
     }
@@ -486,5 +506,69 @@ fn say_line(c: Colors, msg: &str) {
         println!("{}{msg}{}", c.y, c.z);
     } else {
         println!("{msg}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::state::Event;
+    use crate::core::types::ItemId;
+
+    fn seed(store: &Store, id: &ItemId, status: Status, events: &[Event]) {
+        std::fs::create_dir_all(store.item_dir(id)).unwrap_or_else(|_| unreachable!());
+        store
+            .set_status(id, status)
+            .unwrap_or_else(|_| unreachable!());
+        let mut log = String::new();
+        for e in events {
+            log.push_str(&format!(
+                "2026-10-19 | {} | {}\n",
+                id.dir_name(),
+                e.as_str()
+            ));
+        }
+        store
+            .append_raw(item_rel(id, "events.log"), &log)
+            .unwrap_or_else(|_| unreachable!());
+    }
+
+    fn run_replay(store: &Store, id: &ItemId) -> (Vec<String>, u32) {
+        let out = std::cell::RefCell::new(Vec::new());
+        let mut warn = 0u32;
+        let it = store
+            .items()
+            .into_iter()
+            .find(|i| i.id == *id)
+            .unwrap_or_else(|| unreachable!());
+        {
+            let mut say = |m: &str| out.borrow_mut().push(m.to_string());
+            replay_checks(store, &it, &mut say, &mut warn);
+        }
+        (out.into_inner(), warn)
+    }
+
+    #[test]
+    fn replay_quiet_on_consistent_journal() {
+        let d = tempfile::TempDir::new().unwrap_or_else(|_| unreachable!());
+        let store = Store::new(d.path());
+        seed(&store, &ItemId(1), Status::Active, &[Event::Claimed]);
+        let (lines, warn) = run_replay(&store, &ItemId(1));
+        assert!(lines.is_empty(), "здоровый журнал молчит: {lines:?}");
+        assert_eq!(warn, 0);
+    }
+
+    #[test]
+    fn replay_warns_on_status_drift() {
+        let d = tempfile::TempDir::new().unwrap_or_else(|_| unreachable!());
+        let store = Store::new(d.path());
+        // журнал говорит Active, файл status Done — рассинхрон (дефект 2 плана).
+        seed(&store, &ItemId(1), Status::Done, &[Event::Claimed]);
+        let (lines, warn) = run_replay(&store, &ItemId(1));
+        assert_eq!(warn, 1);
+        assert_eq!(lines.len(), 1);
+        let line = lines.first().unwrap_or_else(|| unreachable!());
+        assert!(line.contains("WARN"), "{lines:?}");
+        assert!(line.contains("replay → active"), "{lines:?}");
     }
 }

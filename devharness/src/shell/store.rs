@@ -1,7 +1,8 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use crate::core::state::Status;
+use crate::core::state::{self, Event, Status};
+use crate::core::survivors::today_ymd;
 use crate::core::types::ItemId;
 
 pub fn item_rel(id: &ItemId, file: &str) -> PathBuf {
@@ -90,7 +91,23 @@ impl Store {
         }
     }
 
-    pub fn set_status(&self, id: &ItemId, st: Status) -> std::io::Result<()> {
+    /// Единая точка записи статуса (план A3, фикс дефекта 2): status_of →
+    /// state::transition → при Ok — atomic_write(status) + строка events.log.
+    /// Недопустимый переход — Err (run/merge/abort падают, не молчат).
+    pub fn apply_event(&self, id: &ItemId, ev: Event) -> anyhow::Result<Status> {
+        let prev = self.status_of(id);
+        let next = state::transition(prev, ev)
+            .map_err(|e| anyhow::anyhow!("devh: {}: {e}", id.dir_name()))?;
+        self.atomic_write(item_rel(id, "status"), next.as_str())?;
+        let line = format!("{} | {} | {}\n", today_ymd(), id.dir_name(), ev.as_str());
+        self.append_raw(item_rel(id, "events.log"), &line)?;
+        Ok(next)
+    }
+
+    /// Прямая запись статуса — только тестам (обход transition-гарда
+    /// сознательный; в проде пишем через apply_event).
+    #[cfg(test)]
+    pub(crate) fn set_status(&self, id: &ItemId, st: Status) -> std::io::Result<()> {
         self.atomic_write(item_rel(id, "status"), st.as_str())
     }
 

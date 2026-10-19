@@ -4,7 +4,7 @@ use std::time::Duration;
 use crate::core::gates::{
     self, parse_review_verdict, tail_of, Gate, Raw, RedPhase, ReviewVerdict, Verdict,
 };
-use crate::core::state::{self, Status};
+use crate::core::state::{self, ClaimAction, Event};
 use crate::core::types::{CrapCfg, ItemId, MutateCfg, RunConfig};
 use crate::prompt;
 use crate::shell::color::colors;
@@ -138,7 +138,7 @@ pub fn run(store: &Store, cfg: &RunConfig, id: &ItemId) -> anyhow::Result<()> {
     red_post(store, cfg, id, &wt, &red, &mut timing)?;
     red_mutate_phase(store, cfg, id, &wt, &red, &mut timing)?;
     commit_push(store, cfg, id, &wt, round, &mut timing, &root)?;
-    finalize(store, cfg, id, &wt, &timing)?;
+    finalize(cfg, id, &wt, &timing)?;
     drop(lock);
     Ok(())
 }
@@ -189,22 +189,27 @@ fn claim_item(store: &Store, cfg: &RunConfig, id: &ItemId) -> anyhow::Result<()>
     let c = colors();
     let _g = GlobalLock::acquire(&store.dir).map_err(|e| anyhow::anyhow!("flock: {e}"))?;
     let prev_st = store.status_of(id);
-    if prev_st != Status::Active {
-        let active = store.count_active();
-        if !state::can_claim(active, cfg.max_active) {
-            anyhow::bail!(
-                "devh: WIP-лимит — уже {active} active (MAX_ACTIVE={}). Заверши их (devh merge / abort) прежде чем брать новое.",
-                cfg.max_active
-            );
-        }
-        store.set_status(id, Status::Active)?;
-    } else {
-        println!(
+    match state::claim_action(prev_st) {
+        ClaimAction::RejectDone => anyhow::bail!(
+            "devh: {} уже done — создай новый: devh new \"...\"",
+            id.dir_name()
+        ),
+        ClaimAction::Resume => println!(
             "{}OK resume: {} уже active — продолжаем{}",
             c.g,
             id.dir_name(),
             c.z
-        );
+        ),
+        ClaimAction::Claim => {
+            let active = store.count_active();
+            if !state::can_claim(active, cfg.max_active) {
+                anyhow::bail!(
+                    "devh: WIP-лимит — уже {active} active (MAX_ACTIVE={}). Заверши их (devh merge / abort) прежде чем брать новое.",
+                    cfg.max_active
+                );
+            }
+            store.apply_event(id, Event::Claimed)?;
+        }
     }
     Ok(())
 }
@@ -678,20 +683,16 @@ fn commit_push(
 
 /// Хвост run(): сводка тайминга стадий (контракт `devh ps`), статус Active
 /// (прогон завершён — item готов к ревью/merge) и инструкция «дальше».
-fn finalize(
-    store: &Store,
-    cfg: &RunConfig,
-    id: &ItemId,
-    wt: &Path,
-    timing: &Timing,
-) -> anyhow::Result<()> {
+fn finalize(cfg: &RunConfig, id: &ItemId, wt: &Path, timing: &Timing) -> anyhow::Result<()> {
     let c = colors();
     println!();
     println!("{}— тайминг стадий (сек):{}", c.c, c.z);
     for (name, sec) in timing.stages() {
         println!("{}  {name:<24} {sec}s{}", c.d, c.z);
     }
-    store.set_status(id, Status::Active)?;
+    // A3 (фикс дефекта 2): раньше тут стоял set_status(Active) — мёртвая
+    // запись в обход transition (claim уже поставил Active; done Item мог
+    // уползти обратно в active). Пишем статус только через apply_event.
     println!();
     println!(
         "{}ГОТОВО: {} на ветке {}.{} Ревью: git -C {} diff {}..{} — затем: {}devh merge {}{}",

@@ -2,7 +2,7 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::commands::doctor::tail_line;
-use crate::core::state::Status;
+use crate::core::state::{Event, Status};
 use crate::core::types::{ItemId, RunConfig};
 use crate::prompt;
 use crate::shell::color::colors;
@@ -220,7 +220,12 @@ pub fn abort(store: &Store, cfg: &RunConfig, id: &ItemId) -> anyhow::Result<()> 
     if git::has_remote(&root) {
         let _ = git::push_delete(&root, &cfg.remote, &br);
     }
-    store.set_status(id, Status::Open)?;
+    // A3: abort Open-item'а (создан, но не взятый в работу) — transition Open+Aborted
+    // недопустим; статус уже open, в журнал писать нечего. Done+Aborted по-
+    // прежнему Err («смёржено — отмена не имеет смысла»), обхода нет.
+    if store.status_of(id) == Status::Active {
+        store.apply_event(id, Event::Aborted)?;
+    }
     println!("{}OK {id} → open (работа выброшена){}", c.g, c.z);
     Ok(())
 }

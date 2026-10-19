@@ -1,4 +1,4 @@
-use crate::core::state::Status;
+use crate::core::state::{Event, Status};
 use crate::core::types::{ItemId, RunConfig};
 use crate::shell::color::colors;
 use crate::shell::git;
@@ -163,7 +163,7 @@ pub fn merge(store: &Store, cfg: &RunConfig, id: &ItemId) -> anyhow::Result<()> 
         let _ = git::worktree_remove(&root, &wt);
     }
     let _ = git::branch_delete(&root, &br);
-    store.set_status(id, Status::Done)?;
+    store.apply_event(id, Event::Merged)?;
     println!("{}OK {id} → done. Лог: .harness/log.md{}", c.g, c.z);
     println!(
         "{}ГОТОВО: {id} смёржено в {}. next: devh new{}",

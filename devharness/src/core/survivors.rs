@@ -266,7 +266,7 @@ fn append_line(path: &Path, text: &str) -> std::io::Result<()> {
 }
 
 /// Сегодня в YYYY-MM-DD (как в merge.rs — без внешних крейтов).
-fn today_ymd() -> String {
+pub(crate) fn today_ymd() -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()

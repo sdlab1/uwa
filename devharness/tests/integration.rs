@@ -3160,3 +3160,38 @@ echo "Mutants: 1, Killed: 0 (0%)"
         "координат в выводе нет (§8): {out}"
     );
 }
+
+#[test]
+fn section43_run_refuses_done_item() {
+    let sb = Sandbox::new("r43");
+    sb.run_ok(&["init"]);
+    sb.new_item("item one", "спека\n", Some("стаб-сценарий"));
+    let (ok, out) = sb.run_capture(&["run"]);
+    assert!(ok, "run should succeed: {out}");
+    let (ok, _) = sb.run_capture(&["merge"]);
+    assert!(ok);
+    assert_eq!(sb.status("W-001"), "done");
+
+    // A3 (фикс дефекта 2): повторный run done-item'а — отказ rc≠0 + «уже done»,
+    // статус не уползает обратно в active (claim идёт через claim_action).
+    let (ok, out) = sb.run_capture(&["run", "W-001"]);
+    assert!(!ok, "run done-item обязан падать: {out}");
+    assert!(contains(&out, "уже done"), "{out}");
+    assert_eq!(sb.status("W-001"), "done", "статус не тронут");
+
+    // журнал событий: claim → merged, без повторных claim.
+    let ev = fs::read_to_string(sb.harness_file("items/W-001/events.log"))
+        .unwrap_or_else(|_| unreachable!());
+    assert!(contains(&ev, "| claimed"), "{ev}");
+    assert!(contains(&ev, "| merged"), "{ev}");
+    assert_eq!(
+        ev.matches("| claimed").count(),
+        1,
+        "повторного claim нет: {ev}"
+    );
+
+    // doctor: реплей журнала согласован со статусом — WARN'а реплея нет.
+    let (ok, out) = sb.run_capture(&["doctor"]);
+    assert!(ok, "doctor should pass: {out}");
+    assert!(!contains(&out, "рассинхрон"), "{out}");
+}
