@@ -2878,7 +2878,9 @@ fn section41_survivors_distillation_and_rules_log() {
          - `blind:fn-value` Новая pub-fn с логикой получает прямой тест с точным ассертом\n\
          \x20 (значение/None/Some(x)/граница), не is_some/is_ok. Признак в триаже: жанр FnValue.\n\
          - `blind:boundary` Новое if/сравнение/булево покрывается кейсами на оба плеча\n\
-         \x20 и на границу (равенство). Признак: BinaryOperator/ComparisonOperator.\n\n\
+         \x20 и на границу (равенство). Признак: BinaryOperator/ComparisonOperator.\n\
+         - `blind:red-asserts` RED-выстрел = спека без проверяемого ассерта (поток\n\
+         \x20 red-mutation): red-тест пишется из спеки до кода. Признак: жанр FnValue.\n\n\
          ## Session 1 — Первая (2026-09-10)\n- commit: aaa\n\n\
          ## Session 2 — Вторая (2026-09-20)\n- commit: bbb\n",
     )
@@ -2888,7 +2890,8 @@ fn section41_survivors_distillation_and_rules_log() {
         sb.harness_file("survivors.log"),
         "2026-09-01 | mutation | devharness/src/core/load.rs:15 | FnValue | replace load_average -> Option<f64> with Some(0.0)\n\
          2026-09-02 | mutation | devharness/src/core/load.rs:22 | FnValue | replace max_load -> Option<u32> with None\n\
-         2026-09-03 | mutation | devharness/src/core/timing.rs:40 | BinaryOperator | replace == with !=\n",
+         2026-09-03 | mutation | devharness/src/core/timing.rs:40 | BinaryOperator | replace == with !=\n\
+         2026-09-04 | red-mutation load.rs | devharness/src/core/load.rs:15 | FnValue | replace load_average -> Option<f64> with Some(0.0)\n",
     )
     .unwrap_or_else(|_| unreachable!());
     // seen-дедуп живёт рядом: --reset его чистит.
@@ -2917,6 +2920,15 @@ fn section41_survivors_distillation_and_rules_log() {
         !contains(&out, "load.rs:15"),
         "в выводе только basename'ы, без координат (§8): {out}"
     );
+    // §8.6: red-выстрел — своя группа с меткой, в кодовый счёт не идёт.
+    assert!(
+        contains(&out, "red:fn-value 1 (load.rs ×1)"),
+        "красный поток отделён в сводке: {out}"
+    );
+    assert!(
+        contains(&out, "- [red-mutation] fn-value (FnValue) ×1"),
+        "красная группа помечена: {out}"
+    );
 
     // --rules: жанры тега, тишина и порог пенсии. K=3 — тишина 2 < 3 (жив).
     let (ok, out) = sb.run_capture(&["survivors", "--rules", "--sessions", "3"]);
@@ -2929,8 +2941,8 @@ fn section41_survivors_distillation_and_rules_log() {
     assert!(contains(&out, "тишина 2 сессий"), "{out}");
     assert!(!contains(&out, "на пенсию"), "порог 3 не достигнут: {out}");
     assert!(
-        !contains(&out, "load.rs"),
-        "в классах нет координат инстансов (§8): {out}"
+        !contains(&out, "load.rs:"),
+        "в классах нет координат инстансов (§8; basename потока без строки — можно): {out}"
     );
     // K=2 — тишина 2 = порог → строка пенсии с обоснованием.
     let (ok, out) = sb.run_capture(&["survivors", "--rules", "--sessions", "2"]);
@@ -2946,6 +2958,15 @@ fn section41_survivors_distillation_and_rules_log() {
     assert!(
         contains(&out, "ComparisonOperator, BinaryOperator"),
         "{out}"
+    );
+    // Красный класс свой поток объявляет словом — вывод помечен (§8.6).
+    assert!(
+        contains(&out, "[red-mutation] `blind:red-asserts`"),
+        "{out}"
+    );
+    assert!(
+        contains(&out, "red-mutation — fn-value 1 (load.rs ×1)"),
+        "итог по потокам виден и в --rules: {out}"
     );
 
     // --reset: seen удалён, повторная команса не падает.
@@ -3024,4 +3045,118 @@ echo "1 mutants tested in 1s: 0 caught, 1 missed"
     let (ok, out) = sb.run_capture(&["survivors"]);
     assert!(ok, "survivors после merge: {out}");
     assert!(contains(&out, "fn-value 1 (load.rs ×1)"), "{out}");
+}
+
+#[test]
+fn section42_red_survivors_are_a_separate_stream() {
+    // §8.6: red-mutation меряет качество СПЕКИ, не кода. Живой прогон:
+    // красный выживший → очередь и журнал с меткой, строка «[red-mutation]»
+    // в RULES_LOG — и НИ строки в кодовую killmap.
+    let sb = Sandbox::new("r41c");
+    fs::create_dir_all(sb.repo.join("todo")).unwrap_or_else(|_| unreachable!());
+    fs::write(
+        sb.repo.join("todo/report.md"),
+        "# Отчёт\n\n## Железные правила\n1. CI.\n",
+    )
+    .unwrap_or_else(|_| unreachable!());
+    sb.run_ok(&["init"]);
+    install_tests(&sb);
+    write_exec(
+        &sb.stubs.join("mut-redsurv.sh"),
+        r#"#!/usr/bin/env bash
+mkdir -p mutants.out
+cat > mutants.out/outcomes.json <<'JSON'
+{"outcomes":[
+ {"scenario":{"Mutant":{"name":"t/feature_test.sh:3:5: replace marker with other","file":"t/feature_test.sh","span":{"start":{"line":3,"column":5}},"replacement":"other","genre":"FnValue"}},"summary":"MissedMutant"}
+]}
+JSON
+echo "Mutants: 1, Killed: 0 (0%)"
+"#,
+    );
+    sb.new_item(
+        "red-выживый",
+        "спека: опубликуй done.txt с маркером\n",
+        None,
+    );
+    let stub = sb.stubs.join("stub-red.sh");
+    let redmut = format!("{} '{{test}}'", sb.stubs.join("mut-redsurv.sh").display());
+    let mut c = sb.devh(&["run", "W-001"]);
+    c.env("HARNESS_AGENT", stub.to_string_lossy().to_string())
+        .env("HARNESS_VERIFY", "bash scripts/test.sh")
+        .env("HARNESS_RED_MUTATE", redmut)
+        .env("HARNESS_MUTATE", "")
+        .env("HARNESS_MUTATE_SURVIVORS", "1")
+        .env("HARNESS_RED_MIN_KILL", "0")
+        .env("HARNESS_MUTATE_MAX_LOAD", "off");
+    let out = c.output().unwrap_or_else(|_| unreachable!());
+    let all = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.status.success(), "run W-001: {all}");
+    assert!(contains(&all, "OK red-mutation"), "{all}");
+    assert!(
+        contains(&all, "survivors: 1 → observations.md (fn-value 1)"),
+        "{all}"
+    );
+
+    // §8.6: кодовый гейт в сессии не шёл — красный выживший в killmap
+    // (карту кодовых hot-spot'ов) не попадает.
+    assert!(
+        !sb.harness_file("killmap.json").exists(),
+        "red-прогон не пишет в кодовую карту: существует killmap.json"
+    );
+
+    // Очередь и журнал помечают источник выстрела.
+    let queue =
+        fs::read_to_string(sb.harness_file("observations.md")).unwrap_or_else(|_| unreachable!());
+    assert!(
+        contains(
+            &queue,
+            "survivor: replace marker with other [FnValue] [red-mutation]"
+        ),
+        "{queue}"
+    );
+    let journal =
+        fs::read_to_string(sb.harness_file("survivors.log")).unwrap_or_else(|_| unreachable!());
+    assert!(
+        contains(&journal, "| red-mutation | t/feature_test.sh:3 | FnValue |"),
+        "{journal}"
+    );
+
+    sb.run_ok(&["merge", "W-001"]);
+    let report =
+        fs::read_to_string(sb.repo.join("todo/report.md")).unwrap_or_else(|_| unreachable!());
+    assert!(
+        contains(&report, "## Session 1 — red-выживый"),
+        "сессия в RULES_LOG: {report}"
+    );
+    assert!(
+        contains(
+            &report,
+            "- survivors [red-mutation]: fn-value 1 — отдельный поток (§8.6)"
+        ),
+        "{report}"
+    );
+    assert!(
+        !contains(&report, "- survivors: fn-value"),
+        "кодовой строки в сессии нет — потоки не смешиваются: {report}"
+    );
+
+    // survivors: красная группа идёт отдельно с меткой.
+    let (ok, out) = sb.run_capture(&["survivors"]);
+    assert!(ok, "survivors после run: {out}");
+    assert!(
+        contains(&out, "red:fn-value 1 (feature_test.sh ×1)"),
+        "{out}"
+    );
+    assert!(
+        contains(&out, "- [red-mutation] fn-value (FnValue) ×1"),
+        "{out}"
+    );
+    assert!(
+        !contains(&out, "feature_test.sh:3"),
+        "координат в выводе нет (§8): {out}"
+    );
 }

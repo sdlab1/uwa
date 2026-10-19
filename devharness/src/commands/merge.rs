@@ -134,7 +134,8 @@ pub fn merge(store: &Store, cfg: &RunConfig, id: &ItemId) -> anyhow::Result<()> 
             // P8-4: дистилляция — какие классы/жанры выстрелили в этой сессии
             // (логи гейтов item: `<id>-mutate.log`, `<id>-redmut.log`). Нет
             // выживших — строки нет: журнал RULES_LOG не засоряется (§6).
-            if let Some(surv) = crate::core::survivors::session_line(store, id) {
+            // Код и red-mutation (§8.6) уходят разными строками.
+            for surv in crate::core::survivors::session_line(store, id) {
                 rent.push_str(&surv);
                 rent.push('\n');
             }

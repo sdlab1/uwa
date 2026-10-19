@@ -318,13 +318,20 @@ pub fn collect_after_run(wt: &Path, tool: &str, obs: &Path, gate: &str) -> Optio
     if outcomes.is_empty() {
         return None;
     }
-    // killmap — по всем исходам прогона, включая caught (§5).
+    // killmap — по всем исходам прогона, включая caught (§5). red-mutation
+    // меряет качество СПЕКИ, не кода (§8.6): в кодовую карту hot-spot'ов
+    // такие промахи не идут — иначе spec-проблема маскируется под слепое
+    // место модуля. Красные выжившие живут в журнале (метка red-mutation)
+    // и в очереди, а дистиллируются отдельными классами.
     let mut deltas: BTreeMap<String, FileDelta> = BTreeMap::new();
-    for o in &outcomes {
-        if let Some(d) = o.delta() {
-            let e = deltas.entry(o.file.clone()).or_default();
-            e.killed = e.killed.saturating_add(d.killed);
-            e.missed = e.missed.saturating_add(d.missed);
+    let red = is_red(gate);
+    if !red {
+        for o in &outcomes {
+            if let Some(d) = o.delta() {
+                let e = deltas.entry(o.file.clone()).or_default();
+                e.killed = e.killed.saturating_add(d.killed);
+                e.missed = e.missed.saturating_add(d.missed);
+            }
         }
     }
     if !deltas.is_empty() {
@@ -347,7 +354,6 @@ pub fn collect_after_run(wt: &Path, tool: &str, obs: &Path, gate: &str) -> Optio
         return None;
     }
     save_seen(obs, &seen);
-    let red = gate.starts_with("red-mutation");
     let today = today_ymd();
     let mut queue = String::new();
     let mut journal = String::new();
@@ -431,7 +437,20 @@ pub struct Shot {
     pub mutation: String,
 }
 
-/// Разбор журнала. Прощающий: строка без пяти полей или без `файл:строка` —
+impl Shot {
+    /// Поток выстрела (§8.6): red-mutation меряет качество спеки, не кода.
+    /// Гейт-метка — `red-mutation` (label гейта в run.rs; в журнале может
+    /// быть с хвостом «red-mutation src/x.rs»).
+    pub fn is_red(&self) -> bool {
+        is_red(&self.gate)
+    }
+}
+
+/// Поток гейта: красные выжившие отдельный (§8.6).
+pub fn is_red(gate: &str) -> bool {
+    gate.starts_with("red-mutation")
+}
+
 /// не наш формат, молча пропускаем (журнал дописывают люди и инструменты).
 pub fn parse_journal(text: &str) -> Vec<Shot> {
     let mut out: Vec<Shot> = Vec::new();
@@ -496,17 +515,24 @@ pub struct GenreGroup {
     pub last: String,
     /// До трёх различных хвостов мутаций (свежие first).
     pub examples: Vec<String>,
+    /// Поток: red-mutation (§8.6) — отдельные группы, не смешиваются с кодовыми.
+    pub red: bool,
 }
 
-/// Группировка выстрелов по жанру (§6). Порядок: total desc, затем жанр asc.
+/// Группировка выстрелов по жанру (§6). Код и red-mutation (§8.6) — разные
+/// группы; внутри потока: total desc, затем жанр asc.
 pub fn group_by_genre(shots: &[Shot]) -> Vec<GenreGroup> {
-    let mut by: BTreeMap<&str, Vec<&Shot>> = BTreeMap::new();
+    // Поток × жанр (§8.6): red-mutation дистиллируется отдельными классами
+    // (blind:red-asserts), поэтому в группировке не смешивается с кодовыми.
+    let mut by: BTreeMap<(bool, &str), Vec<&Shot>> = BTreeMap::new();
     for s in shots {
-        by.entry(s.genre.as_str()).or_default().push(s);
+        by.entry((s.is_red(), s.genre.as_str()))
+            .or_default()
+            .push(s);
     }
     let mut out: Vec<GenreGroup> = by
         .into_iter()
-        .map(|(genre, list)| {
+        .map(|((red, genre), list)| {
             let mut files: BTreeMap<String, u32> = BTreeMap::new();
             for s in &list {
                 let b = basename(&s.file);
@@ -529,6 +555,7 @@ pub fn group_by_genre(shots: &[Shot]) -> Vec<GenreGroup> {
             GenreGroup {
                 genre: genre.to_string(),
                 tag: genre_tag(genre),
+                red,
                 total: list.len() as u32,
                 files,
                 last: list
@@ -540,7 +567,13 @@ pub fn group_by_genre(shots: &[Shot]) -> Vec<GenreGroup> {
             }
         })
         .collect();
-    out.sort_by(|a, b| b.total.cmp(&a.total).then_with(|| a.genre.cmp(&b.genre)));
+    // Код первым, потом красный поток; внутри — по числу выстрелов.
+    out.sort_by(|a, b| {
+        a.red
+            .cmp(&b.red)
+            .then_with(|| b.total.cmp(&a.total))
+            .then_with(|| a.genre.cmp(&b.genre))
+    });
     out
 }
 
@@ -553,14 +586,26 @@ fn files_inline(files: &[(String, u32)]) -> String {
         .join(", ")
 }
 
-/// Однострочная сводка: «fn-value 4 (load.rs ×3), binop 1 (gates.rs ×1)».
+/// Однострочная сводка: «fn-value 4 (load.rs ×3), red:fn-value 1 (gates.rs ×1)».
+/// Красный поток помечен префиксом `red:` (§8.6).
 pub fn digest_line(groups: &[GenreGroup]) -> Option<String> {
     if groups.is_empty() {
         return None;
     }
     let parts: Vec<String> = groups
         .iter()
-        .map(|g| format!("{} {} ({})", g.tag, g.total, files_inline(&g.files)))
+        .map(|g| {
+            format!(
+                "{} {} ({})",
+                if g.red {
+                    format!("red:{}", g.tag)
+                } else {
+                    g.tag.to_string()
+                },
+                g.total,
+                files_inline(&g.files)
+            )
+        })
         .collect();
     Some(parts.join(", "))
 }
@@ -574,7 +619,8 @@ pub fn group_lines(shots: &[Shot]) -> Vec<String> {
     }
     for g in &groups {
         out.push(format!(
-            "- {} ({}) ×{} — {}; последний {}",
+            "- {}{} ({}) ×{} — {}; последний {}",
+            if g.red { "[red-mutation] " } else { "" },
             g.tag,
             g.genre,
             g.total,
@@ -694,6 +740,9 @@ pub struct ClassRow {
     pub last: String,
     pub silence: u32,
     pub pension: bool,
+    /// Поток класса (§8.6): тег, назвавший в тексте «red-mutation», считает
+    /// только красные выстрелы; иначе — кодовые. Маппинг подтверждает человек.
+    pub red: bool,
 }
 
 /// Сколько сессий прошло после последнего выстрела (даты RULES_LOG'а позже
@@ -727,6 +776,11 @@ pub fn session_dates(rules_log: &str) -> Vec<String> {
 
 /// Маппинг классов RULES на фактуру журнала. `sessions` — даты сессий из
 /// RULES_LOG (для тишины), `k` — порог пенсии.
+///
+/// Поток (§8.6): класс, чей тег назвал в тексте «red-mutation», считает
+/// ТОЛЬКО красные выстрелы; остальные — только кодовые. Красный и кодовой
+/// выстрел одного жанра не складываются: первая петля меряет спеки, вторая —
+/// код, и дистиллируются они разными классами (blind:red-asserts и т.п.).
 pub fn rule_classes(
     rules_text: &str,
     shots: &[Shot],
@@ -736,10 +790,14 @@ pub fn rule_classes(
     rule_blocks(rules_text)
         .into_iter()
         .map(|(tag, block)| {
+            // «red-mutation»/«red-mut» — явное заявление класса на поток.
+            let red = tokens(&block)
+                .iter()
+                .any(|t| t == "red-mutation" || t == "red-mut");
             let genres = genres_in(&block);
             let hits: Vec<&Shot> = shots
                 .iter()
-                .filter(|s| genres.iter().any(|g| g == &s.genre))
+                .filter(|s| s.is_red() == red && genres.iter().any(|g| g == &s.genre))
                 .collect();
             let last = hits
                 .iter()
@@ -756,9 +814,52 @@ pub fn rule_classes(
                 shots: hits.len() as u32,
                 last,
                 silence,
+                red,
             }
         })
         .collect()
+}
+
+/// Потоки журнала одной строкой: «код — fn-value 4 (load.rs ×3); red-mutation —
+/// fn-value 1 (gates.rs ×1)». Только basename'ы (§8). None — журнал пуст.
+/// Итог режима `--rules`: человек видит материал ОБОИХ потоков, даже если
+/// классы названы только на один (§8.6).
+pub fn streams_line(shots: &[Shot]) -> Option<String> {
+    let mut code: BTreeMap<&str, Vec<&Shot>> = BTreeMap::new();
+    let mut red: BTreeMap<&str, Vec<&Shot>> = BTreeMap::new();
+    for s in shots {
+        if s.is_red() {
+            red.entry(s.genre.as_str()).or_default().push(s);
+        } else {
+            code.entry(s.genre.as_str()).or_default().push(s);
+        }
+    }
+    if code.is_empty() && red.is_empty() {
+        return None;
+    }
+    fn part(map: &BTreeMap<&str, Vec<&Shot>>) -> String {
+        map.iter()
+            .map(|(g, list)| {
+                let mut files: BTreeMap<String, u32> = BTreeMap::new();
+                for s in list {
+                    let e = files.entry(basename(&s.file)).or_insert(0);
+                    *e = e.saturating_add(1);
+                }
+                let names: String = files
+                    .iter()
+                    .map(|(f, n)| format!("{f} ×{n}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("{} {} ({})", genre_tag(g), list.len(), names)
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+    let mut out = format!("потоки (§8.6): код — {}", part(&code));
+    if !red.is_empty() {
+        out.push_str(&format!("; red-mutation — {}", part(&red)));
+    }
+    Some(out)
 }
 
 /// Строки режима `--rules` (§6): жанры класса, выстрелы, тишина, пенсия,
@@ -779,8 +880,9 @@ pub fn rules_lines(rows: &[ClassRow]) -> Vec<String> {
         } else {
             r.genres.join(", ")
         };
+        let mark = if r.red { "[red-mutation] " } else { "" };
         out.push(format!(
-            "- `blind:{}` — жанры: {}; выстрелов {}, последний {}",
+            "- {mark}`blind:{}` — жанры: {}; выстрелов {}, последний {}",
             r.tag,
             g,
             r.shots,
@@ -835,10 +937,8 @@ pub fn tags_in_gate_line(line: &str) -> Vec<(String, u32)> {
         .collect()
 }
 
-/// Сумма меток жанров по логам гейтов сессии → строка «- survivors: …» для
-/// RULES_LOG (§6: дистилляция получает журнал по сессиям бесплатно).
-/// None — в сессии выживших не было (строку не пишем, журнал не засоряем).
-pub fn session_survivors_line(logs: &[String]) -> Option<String> {
+/// Сумма меток жанров по одному списку логов → «fn-value 1, boundary 2».
+fn sum_tags(logs: &[String]) -> BTreeMap<String, u32> {
     let mut by: BTreeMap<String, u32> = BTreeMap::new();
     for log in logs {
         for l in log.lines() {
@@ -851,30 +951,54 @@ pub fn session_survivors_line(logs: &[String]) -> Option<String> {
             }
         }
     }
-    if by.is_empty() {
-        return None;
-    }
-    let list = by
-        .iter()
-        .map(|(t, n)| format!("{t} {n}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    Some(format!(
-        "- survivors: {list} — выжившие на триаже в .harness/observations.md, классы называет человек"
-    ))
+    by
 }
 
-/// Строка сессии для RULES_LOG: читает логи гейтов item (`<id>-mutate.log`,
-/// `<id>-redmut.log`) и суммирует выстрелы. None — выживших в сессии не было.
+/// Строки сессии для RULES_LOG (§6): код и red-mutation (§8.6) — разными
+/// строками, с помёткой красного потока. Пустой Vec — выживших не было
+/// (журнал RULES_LOG не засоряем).
+pub fn session_survivors_lines(code_logs: &[String], red_logs: &[String]) -> Vec<String> {
+    let by_code = sum_tags(code_logs);
+    let by_red = sum_tags(red_logs);
+    let mut out: Vec<String> = Vec::new();
+    if !by_code.is_empty() {
+        let list = by_code
+            .iter()
+            .map(|(t, n)| format!("{t} {n}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        out.push(format!(
+            "- survivors: {list} — выжившие на триаже в .harness/observations.md, классы называет человек"
+        ));
+    }
+    if !by_red.is_empty() {
+        let list = by_red
+            .iter()
+            .map(|(t, n)| format!("{t} {n}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        out.push(format!(
+            "- survivors [red-mutation]: {list} — отдельный поток (§8.6): качество спеки, классы вроде blind:red-asserts"
+        ));
+    }
+    out
+}
+
+/// Строки сессии для RULES_LOG: логи гейтов item — `<id>-mutate.log` (код) и
+/// `<id>-redmut.log` (red-mutation, §8.6). Пусто — в сессии выживших не было.
 pub fn session_line(
     store: &crate::shell::store::Store,
     id: &crate::core::types::ItemId,
-) -> Option<String> {
-    let logs: Vec<String> = ["mutate", "redmut"]
-        .iter()
-        .filter_map(|n| std::fs::read_to_string(store.log_file(id, n)).ok())
+) -> Vec<String> {
+    let code: Vec<String> = std::fs::read_to_string(store.log_file(id, "mutate"))
+        .ok()
+        .into_iter()
         .collect();
-    session_survivors_line(&logs)
+    let red: Vec<String> = std::fs::read_to_string(store.log_file(id, "redmut"))
+        .ok()
+        .into_iter()
+        .collect();
+    session_survivors_lines(&code, &red)
 }
 
 /// `devh survivors --reset`: очистить seen-дедуп (ручной инструмент §6).
@@ -1113,6 +1237,14 @@ mod tests {
             queue.contains("[red-mutation]"),
             "RED-выживый помечен источником: {queue}"
         );
+        // §8.6: красный прогон не пишет в кодовую карту hot-spot'ов —
+        // иначе spec-проблема маскируется под слепое место модуля.
+        let km = killmap::Killmap::load(&obs);
+        assert!(
+            km.files.is_empty(),
+            "red-прогон не идёт в killmap: {:?}",
+            km.files
+        );
     }
 
     #[test]
@@ -1125,8 +1257,9 @@ mod tests {
 
     // ---- P8-4: дистилляция (§6) ----
 
-    /// Журнал с датами: 4 выстрела FnValue (load.rs ×4, из них два «вечных» на
-    /// 15-й строке) + 1 binop в timing.rs.
+    /// Журнал с датами: 3 код-выстрела FnValue (load.rs ×3, из них два «вечных» на
+    /// 15-й строке) + 1 binop в timing.rs + 1 red-mutation выстрел FnValue —
+    /// отдельный поток (§8.6).
     const JOURNAL: &str = concat!(
         "2026-10-10 | mutation | devharness/src/core/load.rs:15 | FnValue | replace load_average -> Option<f64> with Some(0.0)\n",
         "2026-10-12 | mutation | devharness/src/core/load.rs:22 | FnValue | replace max_load -> Option<u32> with None\n",
@@ -1148,6 +1281,8 @@ mod tests {
         "- `blind:wrapper` Делегирующая pub-fn с добавленной логикой — контракт-тест на\n",
         "  результат, не на делегирование. Признак: FnValue в тонких модулях.\n",
         "- `blind:pure-fn` Чистая функция с операторами — proptest с инвариантом, не пять юнитов.\n",
+        "- `blind:red-asserts` RED-выстрел = спека без проверяемого ассерта: red-тест пишется\n",
+        "  из спеки до кода (поток red-mutation). Признак в триаже: жанр FnValue из red-гейта.\n",
     );
 
     #[test]
@@ -1155,13 +1290,14 @@ mod tests {
         let shots = parse_journal(JOURNAL);
         assert_eq!(shots.len(), 5, "мусор и строка без координат пропущены");
         let groups = group_by_genre(&shots);
-        assert_eq!(groups.len(), 2, "два жанра");
+        assert_eq!(groups.len(), 3, "два код-жанра + red-группа (§8.6)");
         let fnv = groups.first().unwrap_or_else(|| unreachable!());
         assert_eq!(fnv.tag, "fn-value");
-        assert_eq!(fnv.total, 4);
+        assert!(!fnv.red, "первая группа — код: красный поток идёт отдельно");
+        assert_eq!(fnv.total, 3);
         assert_eq!(fnv.files.len(), 1, "группировка жанр × файл");
         assert_eq!(fnv.files.first().map(|(f, _)| f.as_str()), Some("load.rs"));
-        assert_eq!(fnv.files.first().map(|(_, n)| *n), Some(4));
+        assert_eq!(fnv.files.first().map(|(_, n)| *n), Some(3));
         assert_eq!(fnv.last, "2026-10-16", "самая свежая дата группы");
         assert_eq!(fnv.examples.len(), 3, "примеров не больше трёх");
         assert!(
@@ -1180,13 +1316,29 @@ mod tests {
         );
         assert_eq!(
             digest_line(&groups).as_deref(),
-            Some("fn-value 4 (load.rs ×4), binop 1 (timing.rs ×1)")
+            Some("fn-value 3 (load.rs ×3), binop 1 (timing.rs ×1), red:fn-value 1 (load.rs ×1)")
+        );
+        // §8.6: красный поток — своя группа (жанр тот же, но не суммируется с
+        // кодовым) и префикс `red:` в сводке.
+        let red = groups.get(2).unwrap_or_else(|| unreachable!());
+        assert_eq!((red.tag, red.total), ("fn-value", 1));
+        assert!(red.red, "группа из red-mutation-выстрела");
+        assert_eq!(red.last, "2026-10-15");
+        assert_eq!(
+            red.files.first().map(|(f, n)| (f.as_str(), *n)),
+            Some(("load.rs", 1))
+        );
+        assert!(
+            !groups
+                .iter()
+                .any(|g| !g.red && g.tag == "fn-value" && g.total == 4),
+            "код и red-выстрелы одного жанра не складываются: {groups:?}"
         );
         let lines = group_lines(&shots);
         assert!(
             lines
                 .first()
-                .map(|l| l.starts_with("вот что повторялось: fn-value 4 (load.rs ×4)"))
+                .map(|l| l.starts_with("вот что повторялось: fn-value 3 (load.rs ×3)"))
                 .unwrap_or(false),
             "{lines:?}"
         );
@@ -1194,6 +1346,12 @@ mod tests {
         assert!(
             !lines.join("\n").contains(".rs:"),
             "строки вывода без file:line: {lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.starts_with("- [red-mutation] fn-value (FnValue) ×1")),
+            "красная группа помечена в выводе: {lines:?}"
         );
     }
 
@@ -1204,11 +1362,13 @@ mod tests {
         let mut sessions: Vec<String> = vec!["2026-10-01".into(), "2026-10-09".into()];
         sessions.extend((17..=28).map(|d| format!("2026-10-{d:02}")));
         let rows = rule_classes(RULES, &shots, &sessions, 10);
-        assert_eq!(rows.len(), 4, "четыре blind-тега в RULES");
+        assert_eq!(rows.len(), 5, "пять blind-тегов в RULES");
         let by = |tag: &str| rows.iter().find(|r| r.tag == tag).cloned();
         let fnv = by("fn-value").unwrap_or_else(|| unreachable!());
         assert_eq!(fnv.genres, vec!["FnValue".to_string()]);
-        assert_eq!((fnv.shots, fnv.last.as_str()), (4, "2026-10-16"));
+        assert!(!fnv.red, "кодовый класс считает кодовый поток");
+        // красный выстрел того же жанра НЕ идёт в счёт кодового класса (§8.6)
+        assert_eq!((fnv.shots, fnv.last.as_str()), (3, "2026-10-16"));
         assert_eq!(fnv.silence, 12, "сессии после последнего выстрела");
         assert!(fnv.pension, "тишина ≥ K → пенсия");
         let bnd = by("boundary").unwrap_or_else(|| unreachable!());
@@ -1238,6 +1398,13 @@ mod tests {
             !pure.pension,
             "без маппинга пенсия не предлагается: {pure:?}"
         );
+        // §8.6: класс, назвавший в тексте «red-mutation», считает только
+        // красные выстрелы — свой поток, свои даты и своя пенсия.
+        let rr = by("red-asserts").unwrap_or_else(|| unreachable!());
+        assert!(rr.red, "класс объявил поток словом: {rr:?}");
+        assert_eq!((rr.shots, rr.last.as_str()), (1, "2026-10-15"));
+        assert_eq!(rr.silence, 12, "сессии после красного выстрела");
+        assert!(rr.pension, "тишина ≥ K — пенсия и у красного класса");
         let out = rules_lines(&rows).join("\n");
         assert!(
             out.contains("на пенсию: обоснование — 12 сессий без выстрелов класса"),
@@ -1252,8 +1419,12 @@ mod tests {
             "порог 13 не достигнут: {alive:?}"
         );
         assert!(
-            out.contains("активный слой RULES: 4 классов (бюджет ≤12)"),
+            out.contains("активный слой RULES: 5 классов (бюджет ≤12)"),
             "{out}"
+        );
+        assert!(
+            out.contains("[red-mutation] `blind:red-asserts`"),
+            "красный класс помечен потоком в --rules: {out}"
         );
         assert!(out.contains("маппинг подтверждает человек"), "{out}");
         // §8: слой RULES не получает координат инстансов.
@@ -1300,7 +1471,8 @@ mod tests {
         assert!(group_lines(&[]).is_empty());
         assert!(digest_line(&[]).is_none());
         assert!(rules_lines(&[]).is_empty());
-        assert!(session_survivors_line(&[]).is_none());
+        assert!(session_survivors_lines(&[], &[]).is_empty());
+        assert!(streams_line(&[]).is_none());
         // классы без журнала: тишина = все сессии, пенсии нет (K не достигнут)
         let rows = rule_classes(RULES, &[], &["2026-10-01".into()], 10);
         assert!(!rows.is_empty());
@@ -1320,21 +1492,67 @@ mod tests {
     }
 
     #[test]
-    fn session_survivors_line_sums_gate_logs() {
-        let logs = vec![
+    fn session_survivors_lines_split_streams() {
+        let code = vec![
             String::from("MUTATE: Mutants 10, killed 9 (90%)\nsurvivors: 1 → observations.md (fn-value 1)\n"),
             String::from(
                 "survivors: 2 → observations.md (binop 1, fn-value 1)\n.. survivors: 1 исход(ов) outcomes.json без разбираемого summary — пропущены\n",
             ),
         ];
-        let line = session_survivors_line(&logs).unwrap_or_else(|| unreachable!());
-        assert!(line.starts_with("- survivors: "), "{line}");
-        assert!(line.contains("fn-value 2"), "сумма по логам: {line}");
-        assert!(line.contains("binop 1"), "{line}");
-        assert!(!line.contains("исход"), "WARN хука — не выстрел: {line}");
-        // без выживших строки нет; пустые скобки тоже не выстрел
-        assert!(session_survivors_line(&["MUTATE: Mutants 10, killed 10 (100%)".into()]).is_none());
-        assert!(session_survivors_line(&["survivors: 0 → observations.md ()".into()]).is_none());
+        let red = vec![String::from(
+            "survivors: 1 → observations.md (fn-value 1)\n",
+        )];
+        let lines = session_survivors_lines(&code, &red);
+        assert_eq!(
+            lines.len(),
+            2,
+            "код и red — разными строками (§8.6): {lines:?}"
+        );
+        let cl = lines.first().unwrap_or_else(|| unreachable!());
+        assert!(cl.starts_with("- survivors: "), "{cl}");
+        assert!(cl.contains("fn-value 2"), "сумма по логам: {cl}");
+        assert!(cl.contains("binop 1"), "{cl}");
+        assert!(!cl.contains("исход"), "WARN хука — не выстрел: {cl}");
+        // потоки не смешиваются: жанр красной строки — свой счёт
+        let rl = lines.get(1).unwrap_or_else(|| unreachable!());
+        assert!(rl.starts_with("- survivors [red-mutation]: "), "{rl}");
+        assert!(rl.contains("fn-value 1"), "{rl}");
+        assert!(
+            !rl.contains("binop"),
+            "красный счёт — только красные выстрелы: {rl}"
+        );
+        // без выживших строк нет; пустые скобки тоже не выстрел
+        assert!(session_survivors_lines(&[], &[]).is_empty());
+        assert!(
+            session_survivors_lines(&["MUTATE: Mutants 10, killed 10 (100%)".into()], &[])
+                .is_empty()
+        );
+        assert!(
+            session_survivors_lines(&["survivors: 0 → observations.md ()".into()], &[]).is_empty()
+        );
+        // только red-логи — только красная строка
+        let only_red = session_survivors_lines(&[], &red);
+        assert_eq!(only_red.len(), 1, "{only_red:?}");
+        assert!(only_red
+            .first()
+            .map(|l| l.contains("[red-mutation]"))
+            .unwrap_or(false));
+    }
+
+    #[test]
+    fn streams_line_splits_code_and_red() {
+        let shots = parse_journal(JOURNAL);
+        let s = streams_line(&shots).unwrap_or_else(|| unreachable!());
+        assert!(s.starts_with("потоки (§8.6): код — "), "{s}");
+        assert!(s.contains("binop 1 (timing.rs ×1)"), "{s}");
+        assert!(s.contains("fn-value 3 (load.rs ×3)"), "{s}");
+        assert!(
+            s.contains("; red-mutation — fn-value 1 (load.rs ×1)"),
+            "{s}"
+        );
+        // §8: только basename'ы — ни путей, ни координат
+        assert!(!s.contains("devharness"), "{s}");
+        assert!(!s.contains(".rs:"), "{s}");
     }
 
     #[test]
@@ -1376,7 +1594,7 @@ mod tests {
     #[test]
     fn rule_blocks_split_by_tag_and_headings() {
         let blocks = rule_blocks(RULES);
-        assert_eq!(blocks.len(), 4, "{blocks:?}");
+        assert_eq!(blocks.len(), 5, "{blocks:?}");
         assert_eq!(blocks.first().map(|(t, _)| t.as_str()), Some("fn-value"));
         assert!(
             blocks
