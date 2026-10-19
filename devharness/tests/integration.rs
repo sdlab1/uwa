@@ -2747,3 +2747,118 @@ printf '=== PROMPT ===\n%s\n' "$1" >> "$TRACE"
     );
     assert!(ok2, "doctor мягкий (WARN ≠ FAIL): {out2}");
 }
+
+#[test]
+fn section40_killmap_hotspots_reach_hint_and_prompt() {
+    // Два прогона с РАЗНЫМИ outcomes.json (оба с missed в load.rs) → killmap
+    // сходится к сумме (caught+missed+runs), пул hot-spot виден в devh hint
+    // и в промпте агента. На вердикт гейта ничего не влияет (§8.5).
+    let sb = Sandbox::new("r40");
+    write_exec(
+        &sb.stubs.join("mut-hot.sh"),
+        r#"#!/usr/bin/env bash
+mkdir -p mutants.out
+if [ "$HARNESS_HOT_ROUND" = "2" ]; then
+cat > mutants.out/outcomes.json <<'JSON'
+{"outcomes":[
+ {"scenario":{"Mutant":{"name":"devharness/src/core/load.rs:15:5: replace load_average -> Option<f64> with Some(0.0)","file":"devharness/src/core/load.rs","span":{"start":{"line":15,"column":5}},"replacement":"Some(0.0)","genre":"FnValue"}},"summary":"MissedMutant"},
+ {"scenario":{"Mutant":{"name":"devharness/src/core/timing.rs:40:9: replace == with !=","file":"devharness/src/core/timing.rs","span":{"start":{"line":40,"column":9}},"replacement":"!=","genre":"BinaryOperator"}},"summary":"MissedMutant"},
+ {"scenario":{"Mutant":{"name":"devharness/src/core/load.rs:22:5: replace max_load -> Option<u32> with None","file":"devharness/src/core/load.rs","span":{"start":{"line":22,"column":5}},"replacement":"None","genre":"FnValue"}},"summary":"CaughtMutant"}
+]}
+JSON
+else
+cat > mutants.out/outcomes.json <<'JSON'
+{"outcomes":[
+ {"scenario":{"Mutant":{"name":"devharness/src/core/load.rs:22:5: replace max_load -> Option<u32> with None","file":"devharness/src/core/load.rs","span":{"start":{"line":22,"column":5}},"replacement":"None","genre":"FnValue"}},"summary":"MissedMutant"},
+ {"scenario":{"Mutant":{"name":"devharness/src/core/load.rs:15:5: replace load_average -> Option<f64> with Some(0.0)","file":"devharness/src/core/load.rs","span":{"start":{"line":15,"column":5}},"replacement":"Some(0.0)","genre":"FnValue"}},"summary":"CaughtMutant"}
+]}
+JSON
+fi
+echo "3 mutants tested in 1s: 1 caught, 2 missed"
+"#,
+    );
+    sb.run_ok(&["init"]);
+    sb.new_item("killmap item 1", "спека\nRED: test -f done.txt\n", None);
+    // Раунд прогона стабу мутатора пробрасывает devh: мутатору уходят все
+    // HARNESS_* (run.rs:::run_mut) — исходы второго раунда отличаются.
+    let run_hot = |sb: &Sandbox, id: &str, round: &str| {
+        let mut c = sb.devh(&["run", id]);
+        c.env(
+            "HARNESS_MUTATE",
+            sb.stubs.join("mut-hot.sh").to_string_lossy().to_string(),
+        )
+        .env("HARNESS_MUTATE_SURVIVORS", "1")
+        .env("HARNESS_MIN_KILL", "10")
+        .env("HARNESS_MUTATE_MAX_LOAD", "off")
+        .env("HARNESS_HOT_ROUND", round);
+        let out = c.output().unwrap_or_else(|_| unreachable!());
+        let all = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(out.status.success(), "run {id}: {all}");
+        all
+    };
+    run_hot(&sb, "W-001", "1");
+    // Второй прогон — НОВАЯ задача: после первого `done.txt` закоммичен на
+    // ветке W-001 (run сам в main не мержит), и pre-check «red.cmd уже зелёный
+    // на чистом HEAD» честно остановил бы повтор той же задачи. Ветка W-002
+    // отходит от main, где done.txt нет.
+    sb.new_item("killmap item 2", "спека\nRED: test -f done.txt\n", None);
+    run_hot(&sb, "W-002", "2");
+
+    let km_text = fs::read_to_string(sb.repo.join(".harness/killmap.json"))
+        .unwrap_or_else(|_| unreachable!());
+    let km: serde_json::Value = serde_json::from_str(&km_text).unwrap_or_else(|_| unreachable!());
+    fn stat_of<'a>(km: &'a serde_json::Value, file: &str) -> Option<&'a serde_json::Value> {
+        km.get("files").and_then(|f| f.get(file))
+    }
+    // load.rs: caught 1 (run1) + 1 (run2) = 2, missed 1 + 1 = 2, runs 2
+    assert!(
+        stat_of(&km, "devharness/src/core/load.rs").is_some(),
+        "load.rs в killmap после двух прогонов: {km_text}"
+    );
+    let load = stat_of(&km, "devharness/src/core/load.rs").unwrap_or_else(|| unreachable!());
+    assert_eq!(
+        (
+            load.get("caught").and_then(serde_json::Value::as_u64),
+            load.get("missed").and_then(serde_json::Value::as_u64),
+            load.get("runs").and_then(serde_json::Value::as_u64)
+        ),
+        (Some(2), Some(2), Some(2)),
+        "killmap сходится к сумме двух прогонов: {load}"
+    );
+    assert!(
+        stat_of(&km, "devharness/src/core/timing.rs").is_some(),
+        "файл второго прогона в killmap: {km_text}"
+    );
+    let timing = stat_of(&km, "devharness/src/core/timing.rs").unwrap_or_else(|| unreachable!());
+    assert_eq!(
+        (
+            timing.get("missed").and_then(serde_json::Value::as_u64),
+            timing.get("runs").and_then(serde_json::Value::as_u64)
+        ),
+        (Some(1), Some(1)),
+        "файл второго прогона — один прогон: {timing}"
+    );
+
+    // hint: таблица killmap для человека + пул в промпте (agent_prompt внутри hint)
+    let (ok, hint_out) = sb.run_capture(&["hint", "W-001"]);
+    assert!(ok, "hint: {hint_out}");
+    assert!(
+        contains(&hint_out, "Killmap") && contains(&hint_out, "load.rs: 2/4 (50%)"),
+        "человеческая таблица: {hint_out}"
+    );
+    assert!(
+        contains(&hint_out, "Исторически слабые зоны"),
+        "пул hot-spot в промпте: {hint_out}"
+    );
+    assert!(
+        contains(
+            &hint_out,
+            "- devharness/src/core/load.rs — 2 выживших / 2 прогонов"
+        ),
+        "слабые зоны: файл + счётчики: {hint_out}"
+    );
+}

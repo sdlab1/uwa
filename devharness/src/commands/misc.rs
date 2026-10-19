@@ -47,6 +47,17 @@ pub fn hint(store: &Store, cfg: &RunConfig, id: &ItemId) -> anyhow::Result<()> {
     println!("## Спека:");
     let spec = std::fs::read_to_string(store.item_dir(id).join("spec.md")).unwrap_or_default();
     print!("{spec}");
+    // P8-3: killmap для человека — «прицел» перед взятием спеки (§5).
+    // На вердикты не влияет (§8.5) — отображение, не порог.
+    let km = crate::core::killmap::Killmap::load(&store.dir);
+    let rows = km.table(12);
+    if !rows.is_empty() {
+        println!();
+        println!("## Killmap (история kill-rate; на вердикт гейта не влияет):");
+        for r in rows {
+            println!("- {r}");
+        }
+    }
     println!();
     println!("## Контекст для следующей модели:");
     let root = store.root();
