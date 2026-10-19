@@ -176,7 +176,7 @@ chmod +x "$T"/stub*.sh "$T/sleeper.sh" "$T"/mut-*.sh "$T"/crap-*.sh "$T/redmut.s
 echo "== 0. статика: shellcheck (полный прогон, 4 файла) =="
 if command -v shellcheck >/dev/null 2>&1; then
   sc=0
-  for f in devh test.sh selfmutate.sh examples/check_bench.sh; do
+  for f in devh test.sh selfmutate.sh examples/check_bench.sh stubs/good.sh tests/mk_smoke_repo.sh; do
     shellcheck "$HERE/$f" >/dev/null 2>&1 || { echo "  shellcheck findings в $f"; sc=1; }
   done
   [ "$sc" = 0 ] && pass "shellcheck чист" || fail "shellcheck чист"
@@ -654,6 +654,34 @@ if "$DEVH" run >"$T/out" 2>&1; then
 else
   grep -q "нет шаблона {test}" "$T/out" && pass "RED-MUT: без {test} — отказ с подсказкой" || { fail "RED-MUT: нет подсказки про {test}"; cat "$T/out"; }
 fi
+
+
+echo "== 31. smoke: happy path через стаб-агента (микрорепо, ноль LLM, <60s) =="
+SMOKE_T0=$SECONDS
+# сброс утечек HARNESS_* от предыдущих секций: весь конфиг smoke живёт в репо
+for k in $(env | sed -n 's/^\(HARNESS_[A-Z_]*\)=.*/\1/p'); do unset "$k"; done
+S="$(bash "$HERE/tests/mk_smoke_repo.sh" "$T/s31" "$HERE/stubs/good.sh" "$T/wt")"
+[ -d "$S" ] && pass "smoke: микрорепо сгенерировано" || { fail "smoke: mk_smoke_repo (пусто: '$S')"; exit 1; }
+cd "$S" || exit 1
+printf 'Сделай: валидация нечисловых аргументов add.\nOBSERVE:\n- return: add x 3 -> ERR, rc=1\nRED: bash tests/all.sh\nRED-EXPECT: add_non_numeric\n' \
+  | "$DEVH" new "smoke fix" >/dev/null 2>&1
+grep -q "add_non_numeric" .harness/items/W-001/red-expect && pass "smoke: RED-EXPECT из спеки" || fail "smoke: RED-EXPECT из спеки"
+grep -q "add x 3" .harness/items/W-001/observe.md && pass "smoke: OBSERVE-точки из спеки" || fail "smoke: OBSERVE-точки из спеки"
+"$DEVH" run W-001 >"$T/out" 2>&1 && pass "smoke: run зелёный" || { fail "smoke: run зелёный"; cat "$T/out"; }
+grep -q "| claimed" .harness/items/W-001/events.log && pass "smoke: claim в журнале (A3)" || fail "smoke: claim в журнале (A3)"
+grep -q "calc::add_non_numeric ... FAILED" .harness/logs/W-001-red.log && pass "smoke: RED честный (упавший тест в логе)" || fail "smoke: RED честный"
+grep -q "verify-r1" .harness/logs/W-001-timing.log && pass "smoke: timing verify" || fail "smoke: timing verify"
+grep -q "OBSERVE-точка в промпте" .harness/logs/W-001-agent.log && pass "smoke: OBSERVE инжектится в промпт" || fail "smoke: OBSERVE инжектится"
+[ "$(cat .harness/items/W-001/status)" = "active" ] && pass "smoke: статус active после run" || fail "smoke: статус active"
+"$DEVH" merge W-001 >"$T/out" 2>&1 && pass "smoke: merge" || { fail "smoke: merge"; cat "$T/out"; }
+grep -q "| merged" .harness/items/W-001/events.log && pass "smoke: merged в журнале" || fail "smoke: merged в журнале"
+[ "$(cat .harness/items/W-001/status)" = "done" ] && pass "smoke: статус done" || fail "smoke: статус done"
+[ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ] && pass "smoke: main продвинут" || fail "smoke: main продвинут"
+grep -q "add_non_numeric" "$T/out" 2>/dev/null && fail "smoke: merge не мясо" || pass "smoke: merge без RED-муса"
+"$DEVH" doctor >"$T/out" 2>&1 && pass "smoke: doctor чист" || { fail "smoke: doctor чист"; cat "$T/out"; }
+SMOKE_DT=$((SECONDS - SMOKE_T0))
+echo "  smoke-цикл: ${SMOKE_DT}s"
+[ "$SMOKE_DT" -lt 60 ] && pass "smoke: цикл < 60s" || fail "smoke: цикл < 60s (${SMOKE_DT}s)"
 
 echo
 echo "ИТОГО: PASS=$PASS FAIL=$FAIL"

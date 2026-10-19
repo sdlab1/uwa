@@ -592,3 +592,47 @@ which ld.lld && ld.lld --version # проверка
 - Грабля (clippy): `items_after_test_module` — вставил `#[cfg(test)] mod tests` перед verify_smoke по анкеру; тест-модуль обязан быть в КОНЦЕ файла. `indexing_slicing` — `lines[0]` в тесте → `lines.first().unwrap_or_else(|| unreachable!())`.
 - Мутантный аудит дельты (протокол/конфиг §9.16-9.17): `--in-diff /tmp/a3-delta.diff` (8 файлов, 473 строки диффа) — **22 мутанта: 18 caught / 4 unviable / 0 missed / 0 timeout**. 4 unviable — целые функции (`event_parse`, `events_from_log`, `fold`, `Store::apply_event`), та же форма, что A1/A2 (целые тела в одном мутанте). Пост-аудит протокол чист (без `| head`, маркеров в теле нет).
 - Приёмка сессии: unit **155** (147 + 8) + integration **55** (новый `section43_run_refuses_done_item`: rc≠0 + «уже done», статус не тронут, events.log = claim→merged без повторов, doctor без WARN реплея); test.sh **127 PASS / 0 FAIL**, нормализованный выход = снимку до сессий (md5 `46a0245b…`); fmt/clippy `-D warnings` чисты.
+
+## 9.19 — A4: smoke-скелет (стаб-агенты + микрорепо, devh_advance2)
+
+**Задача (план advance2 §A4):** детерминированный happy-path цикла харнесса без
+LLM и без cargo-mutants: фейковые инструменты говорят на диалектах настоящих
+судей (`parse_mutation_output` / `parse_crap_output` / `parse_review_verdict`),
+поэтому гейты прогоняются по-настоящему.
+
+**Артефакты:**
+- `devharness/tests/mk_smoke_repo.sh <dir> <stub> [wt-root]` — генератор
+  микрорепо: bash-проект (src/calc.sh с HEAD-дефектом: нечисловой аргумент
+  молча уходит в `$(( )`), runner tests/all.sh на диалекте cargo test,
+  стабы-инструменты tools/mutate.sh + tools/crap.sh (режимы через
+  `.smoke/<tool>-mode` — задел A5), полный .harness/config, bare-remote.
+- `devharness/stubs/good.sh` — эталонный стаб-агент: чинит дефект, пишет
+  summary, на REVIEW-промпт отвечает `VERDICT: OK`. Guard инжекции OBSERVE:
+  нет точки в промпте → rc=3 (регрессия agent_prompt→observe.md зелёной
+  smoke-сессию быть не может).
+- `test.sh` секция 31 (smoke happy path): new→run→merge, 17 ассертов, полный
+  цикл ~1s (план: <60s); doctor на smoke-репо rc=0. Секция 0 (shellcheck)
+  расширена двумя новыми файлами — автоматический статический слой.
+
+**Калибровки (все — поправки к черновику плана):**
+1. `gates::failing_tests` требует якорь `::` в test-id — runner обязан печатать
+   `test calc::add_non_numeric ... FAILED`, плоский id (`test add_two`) НЕ
+   выделяется как упавший тест (RED-EXPECT тогда даёт SpecBlock «не дошёл»).
+2. Журнал событий A3 — per-item: `.harness/items/W-001/events.log`, не
+   `.harness/events.log` (apply_event пишет через item_rel).
+3. `agent.log` содержит ВЫВОД агента, не промпт — proof инжекций только через
+   маркер stdout стаба (guard rc=3).
+4. Микрорепо требует скелет `.harness/{items,summaries,logs}` (его создаёт
+   `devh init`, а мы init не зовём — конфиг пишем свой; summary агент пишет
+   САМ в готовый файл).
+5. test.sh: секции экспортят `HARNESS_*` в env, а `load_config` отдаёт env
+   приоритет над файлом — S31 сбрасывает все `HARNESS_*` перед стартом
+   (иначе VERIFY предыдущей секции перебивает конфиг smoke-репо).
+6. `mk_smoke_repo.sh` печатает путь (как `fresh()`): вызывающий ловит в `S=$()`.
+7. `.harness/` в .gitignore микрорепо (как в бою), worktree — вне репо
+   (`WT_ROOT` соседом): иначе untracked-файлы портят `changed_files`/`tree_dirty`.
+
+**Приёмка:** test.sh 143 PASS / 0 FAIL (smoke-цикл ~1s); unit 155 + integration
+55 зелёные (естественный прогон при load<4; каскад env-блокера при load≈8 —
+   известный шум P5, проверено через HARNESS_MUTATE_MAX_LOAD=off); fmt/clippy
+чисты; doctor smoke-репо rc=0. Rust-кода A4 не касается — аудита мутантов нет.
