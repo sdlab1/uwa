@@ -175,6 +175,44 @@ pub fn doctor(store: &Store, cfg: &RunConfig, root: &Path) -> anyhow::Result<()>
         }
     }
 
+    // A8: flaky-дисциплина — повторы VERIFY, прошедшие со 2-го раза.
+    // Не молчание: показываем и состояние ключа, и журнал (частота + хвост).
+    if cfg.verify_retries > 0 {
+        say(&format!(
+            "ok   VERIFY_RETRIES={} (повтор VERIFY под nice при падении в раунде 1; исход пишется в .harness/flaky.md)",
+            cfg.verify_retries
+        ));
+    } else {
+        say("..   VERIFY_RETRIES=0: флейк VERIFY не переигрывается (один прогон — один вердикт)");
+    }
+    let flaky_path = root.join(".harness").join("flaky.md");
+    let flaky_lines: Vec<String> = std::fs::read_to_string(&flaky_path)
+        .map(|t| {
+            t.lines()
+                .map(str::to_string)
+                .filter(|l| !l.trim().is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    if flaky_lines.is_empty() {
+        say("ok   flaky: повторов, прошедших со 2-го раза, не записано");
+    } else {
+        let groups: Vec<String> = crate::core::gates::flaky_groups(&flaky_lines)
+            .into_iter()
+            .map(|(g, n)| format!("{g}: {n}"))
+            .collect();
+        say(&format!(
+            "WARN flaky-suspect: {} повторов прошли со 2-го раза ({}) — хвост .harness/flaky.md",
+            flaky_lines.len(),
+            groups.join(", ")
+        ));
+        warn = warn.saturating_add(1);
+        let tail_n = 3.min(flaky_lines.len());
+        for l in flaky_lines.iter().rev().take(tail_n).rev() {
+            say(&format!("     {l}"));
+        }
+    }
+
     // P3: сам мутатор — версия и общий конфиг параметров.
     if let Some(m) = &cfg.mutate {
         let is_cm = m.tool.contains("cargo mutants") || m.tool.contains("cargo-mutants");

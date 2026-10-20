@@ -903,6 +903,34 @@ pub fn tail_of(log: &str, lines: usize) -> String {
     tail.into_iter().rev().collect::<Vec<_>>().join("\n")
 }
 
+/// A8: строка flaky-журнала (`.harness/flaky.md`). Формат плана:
+/// `дата | W-NNN | verify | round=N | retried-ok` — молчаливого «прошёл»
+/// не существует: имя гейта и раунд записаны, `retried-ok` = прошло со
+/// второго раза под nice. `round` приходит уже 1-based (display-ready):
+/// чистая функция не занимается арифметикой caller'а.
+pub fn flaky_line(date: &str, dir: &str, gate: &str, round: u32) -> String {
+    format!("{date} | {dir} | {gate} | round={round} | retried-ok")
+}
+
+/// A8: группировка flaky-строк по гейту (3-е поле ` | `-разделённой строки):
+/// (gate, count), сортировка count убыв., при равенстве — имя возр. Строка
+/// мусорная (меньше полей) не считается: как fold — пропуск, не паник.
+pub fn flaky_groups(lines: &[String]) -> Vec<(String, usize)> {
+    let mut groups: Vec<(String, usize)> = Vec::new();
+    for l in lines {
+        let gate = match l.split('|').nth(2) {
+            Some(f) if !f.trim().is_empty() => f.trim().to_string(),
+            _ => continue,
+        };
+        match groups.iter_mut().find(|(g, _)| *g == gate) {
+            Some((_, n)) => *n = n.saturating_add(1),
+            None => groups.push((gate, 1)),
+        }
+    }
+    groups.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    groups
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1954,6 +1982,45 @@ test result: FAILED. 1 passed; 1 failed";
         assert_eq!(
             decide_round(0, 3, FailureKind::Spec),
             RoundDecision::GiveUp { code: 1 }
+        );
+    }
+    #[test]
+    fn flaky_line_exact_format() {
+        assert_eq!(
+            flaky_line("2026-10-20", "W-001", "verify", 1),
+            "2026-10-20 | W-001 | verify | round=1 | retried-ok"
+        );
+        assert_eq!(
+            flaky_line("d", "W-009", "lint", 3),
+            "d | W-009 | lint | round=3 | retried-ok"
+        );
+    }
+
+    #[test]
+    fn flaky_groups_counts_and_sort() {
+        let lines: Vec<String> = vec![
+            "2026-10-20 | W-001 | verify | round=1 | retried-ok".into(),
+            "2026-10-20 | W-002 | verify | round=1 | retried-ok".into(),
+            "2026-10-20 | W-003 | lint | round=1 | retried-ok".into(),
+            "мусор без полей".into(),
+            "".into(),
+        ];
+        assert_eq!(
+            flaky_groups(&lines),
+            vec![("verify".to_string(), 2), ("lint".to_string(), 1)]
+        );
+        assert!(flaky_groups(&[]).is_empty());
+    }
+
+    #[test]
+    fn flaky_groups_tie_is_name_asc() {
+        let lines: Vec<String> = vec![
+            "d | W-1 | lint | round=1 | retried-ok".into(),
+            "d | W-2 | verify | round=1 | retried-ok".into(),
+        ];
+        assert_eq!(
+            flaky_groups(&lines),
+            vec![("lint".to_string(), 1), ("verify".to_string(), 1)]
         );
     }
 }

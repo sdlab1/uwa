@@ -108,6 +108,31 @@ EOF
 if [ "${SMOKE_SLOW:-0}" = 1 ]; then
   printf 'slow' > .smoke/mutate-mode
 fi
+
+# A8-нож (env): SMOKE_FLAKY=<путь к файлу-счётчику> — tests/all.sh красный
+# на первых ДВУХ вызовах (их съедают red-pre и первый VERIFY), дальше
+# зелёный: это и есть contention-флейк, который лечит VERIFY_RETRIES.
+# SMOKE_FLAKY_ALWAYS=1 (окружение прогона) — красный каждый вызов:
+# настоящая поломка, ретрай НЕ имеет права её замаскировать.
+# В КОММИТ: tests/all.sh исполняется в worktree (чистый checkout), файл вне
+# коммита там невидим (урок A7/SMOKE_SLOW). Счётчик живёт ВНЕ репо ($T).
+if [ -n "${SMOKE_FLAKY:-}" ]; then
+  cat > tests/all.sh.pro <<EOF
+#!/usr/bin/env bash
+# A8 flaky-пролог: первые два вызова красные (счётчик $SMOKE_FLAKY).
+_f=0
+[ -f "$SMOKE_FLAKY" ] && _f=\$(awk '{gsub(/[ \t]/, ""); print}' "$SMOKE_FLAKY")
+_f=\$((_f + 1)); printf '%s\n' "\$_f" > "$SMOKE_FLAKY"
+if [ "\${SMOKE_FLAKY_ALWAYS:-0}" = 1 ] || [ "\$_f" -lt 3 ]; then
+  echo "test flaky: красная попытка \$_f (контеншен-флейк)"
+  exit 1
+fi
+echo "test flaky: попытка \$_f — зелёная"
+EOF
+  cat tests/all.sh.pro tests/all.sh > tests/all.sh.tmp
+  mv tests/all.sh.tmp tests/all.sh
+  rm tests/all.sh.pro
+fi
 git add -A
 git commit -qm init
 git push -q -u origin main

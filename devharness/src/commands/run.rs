@@ -948,6 +948,31 @@ fn gate_ladder(
     }
 
     let verify_raw = exec_logged(store, wt, id, &cfg.verify, "verify", VERIFY_TIMEOUT);
+    // A8: flaky-suspect. Падение VERIFY в РАНД 1 при включённых повторах —
+    // один повтор под nice + пауза 2с (контеншен — самый частый флейк).
+    // Прошло → сессия живёт, НО строка в flaky.md + предупреждение в консоль:
+    // молчаливого «прошло» не существует. Ретраи в прогодах fix-раундов
+    // (>0) запрещены: там «зелёно» обязано быть честным с первого раза.
+    let verify_raw = if verify_raw.exit != Some(0) && round == 0 && cfg.verify_retries > 0 {
+        println!(
+            "{}.. VERIFY упал в раунде 1 — повтор под nice (VERIFY_RETRIES={}){}",
+            c.y, cfg.verify_retries, c.z
+        );
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        let retry = verify_retry(store, wt, id, &cfg.verify);
+        if retry.exit == Some(0) {
+            println!(
+                "{}⚠ flaky-suspect (retry ok): VERIFY раунда 1 прошёл со 2-го раза — .harness/flaky.md{}",
+                c.y, c.z
+            );
+            append_flaky(store, id, 1);
+            retry
+        } else {
+            verify_raw
+        }
+    } else {
+        verify_raw
+    };
     if verify_raw.exit != Some(0) {
         return Err(GateStop {
             verdict: Verdict::Fail {
@@ -1173,6 +1198,45 @@ fn exec_logged(
             missing_tool: None,
         },
     }
+}
+
+/// A8: повтор VERIFY под nice (контеншен убивает таймаутом, урок P7) — лог
+/// отдельный (`verify-retry`): первый провал остаётся доказательством в
+/// `verify`, ретрай его не перезатирает.
+fn verify_retry(store: &Store, wt: &Path, id: &ItemId, cmd: &str) -> Raw {
+    let nice = format!("nice -n 19 {cmd}");
+    match proc::run_logged(&nice, wt, VERIFY_TIMEOUT, &[]) {
+        Ok(out) => {
+            let log = proc::combined(&out);
+            std::fs::write(store.log_file(id, "verify-retry"), &log).ok();
+            Raw {
+                exit: out.exit,
+                log,
+                missing_tool: None,
+            }
+        }
+        Err(e) => Raw {
+            exit: None,
+            log: e.describe(&nice),
+            missing_tool: None,
+        },
+    }
+}
+
+/// A8: запись строки flaky-журнала (`.harness/flaky.md`) — append через
+/// атомарный хвост-append (create + push строки). Ledger НЕ удаляется
+/// doctor'ом: это доказательство флейка, а не мусор.
+fn append_flaky(store: &Store, id: &ItemId, round: u32) {
+    let date = crate::core::survivors::today_ymd();
+    let line = gates::flaky_line(&date, &id.dir_name(), "verify", round);
+    let path = store.root().join(".harness").join("flaky.md");
+    let mut text = std::fs::read_to_string(&path).unwrap_or_default();
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text.push_str(&line);
+    text.push('\n');
+    let _ = std::fs::write(path, text);
 }
 
 /// Линт-гейт: лог + вердикт. Env-причина (нет shellcheck при изменённых .sh)

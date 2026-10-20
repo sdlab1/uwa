@@ -895,6 +895,59 @@ else
 fi
 grep -q "killed=yes" "$T/chaos.log" && pass "chaos: kill -9 реально убил прогон (spread проверен)" || pass "chaos: kill не понадобился (прогоны успели завершиться — spread)"
 
+echo "== 46. FLAKY (A8): VERIFY_RETRIES — повтор под nice + ledger =="
+# A8: контеншен-флейк VERIFY. Ручка VERIFY_RETRIES (дефолт 0 = поведение как
+# было): падение VERIFY в РАНД 1 — один повтор под nice + sleep 2. Прошло →
+# сессия живёт, НО строка в .harness/flaky.md + '⚠ flaky-suspect': молчаливого
+# «прошло» не существует. Ретраи в fix-раундах запрещены (round==0) — там
+# зелёное честное с первого раза. Модель флейка: SMOKE_FLAKY — tests/all.sh
+# красный на первых ДВУХ вызовах (red-pre + первый verify), дальше зелёный;
+# ALWAYS-режим — красный каждый вызов (настоящая поломка).
+flaky_expect() { # <case> <sub> <retries> <want-rc> <always:0|1>
+  local case=$1 sub=$2 retries=$3 want_rc=$4 always=$5
+  smoke_reset_env
+  export SMOKE_FLAKY="$T/flaky-$case-$sub.cnt"
+  if [ "$always" = 1 ]; then export SMOKE_FLAKY_ALWAYS=1; else unset SMOKE_FLAKY_ALWAYS; fi
+  local S
+  S="$(SMOKE_FLAKY="$T/flaky-$case-$sub.cnt" bash "$HERE/tests/mk_smoke_repo.sh" \
+    "$T/$case-$sub" "$HERE/stubs/flaky-agent.sh" "$T/$case-$sub.wt")"
+  if [ ! -d "$S" ]; then fail "flaky ${case}[${sub}]: mk_smoke_repo упал"; return; fi
+  cd "$S" || return 1
+  printf 'Сделай: валидацию нечисловых аргументов add.\nOBSERVE:\n- return: add x 3 -> ERR, rc=1\nRED: bash tests/all.sh\n' \
+    | "$DEVH" new "$case $sub" >/dev/null 2>&1
+  HARNESS_VERIFY_RETRIES="$retries" "$DEVH" run W-001 >"$T/flk-$case-$sub.log" 2>&1
+  local rc=$?
+  local L="$T/flk-$case-$sub.log"
+  if [ "$rc" = "$want_rc" ]; then pass "flaky ${case}[${sub}]: rc=$want_rc"
+  else fail "flaky ${case}[${sub}]: rc=$rc, ожидался $want_rc"; sed -n '1,20p' "$L"; fi
+  [ -f "$S/.harness/flaky.md" ] && grep -q ' | verify | round=1 | retried-ok' "$S/.harness/flaky.md" \
+    && LED=1 || LED=0
+  [ -f "$S/.harness/logs/W-001-verify.log" ] && [ -f "$S/.harness/logs/W-001-verify-retry.log" ] \
+    && LOGS=1 || LOGS=0
+  return 0
+}
+smoke_reset_env
+# 46a: флейк + VERIFY_RETRIES=1 → зелёная сессия, НО ledger + warning.
+for i in 1 2; do
+  flaky_expect flaky "$i" 1 0 0
+  grep -q "OK гейты" "$T/flk-flaky-$i.log" && pass "flaky 46a[$i]: сессия прошла (OK гейты)" || fail "flaky 46a[$i]: нет OK гейты"
+  grep -qF "⚠ flaky-suspect (retry ok)" "$T/flk-flaky-$i.log" && pass "flaky 46a[$i]: warning в консоли" || fail "flaky 46a[$i]: нет warning"
+  if [ "$LED" = 1 ]; then pass "flaky 46a[$i]: ledger-строка в flaky.md"
+  else fail "flaky 46a[$i]: нет ledger-строки"; fi
+  if [ "$LOGS" = 1 ]; then pass "flaky 46a[$i]: первый провал и ретрай — разные логи"
+  else fail "flaky 46a[$i]: логи verify/verify-retry не разнесены"; fi
+done
+# 46b: тот же флейк без повторов — лечится честным fix-раундом, ledger пуст.
+flaky_expect honest b1 0 0 0
+grep -q "OK гейты" "$T/flk-honest-b1.log" && pass "flaky 46b: честный fix-раунд вылечил (OK гейты)" || fail "flaky 46b: нет OK гейты"
+grep -q "flaky-suspect" "$T/flk-honest-b1.log" && fail "flaky 46b: warning есть — молчаливое прошло" || pass "flaky 46b: без warning"
+[ "$LED" = 0 ] && pass "flaky 46b: ledger пуст" || fail "flaky 46b: ledger не пуст"
+# 46c: настоящая поломка + повторы — ретрай НЕ маскирует: VERIFY красный.
+flaky_expect always c1 1 1 1
+grep -q "VERIFY красный" "$T/flk-always-c1.log" && pass "flaky 46c: маркер VERIFY красный" || fail "flaky 46c: нет маркера"
+grep -q "flaky-suspect" "$T/flk-always-c1.log" && fail "flaky 46c: ledger для настоящей поломки" || pass "flaky 46c: без ledger"
+[ "$LED" = 0 ] && pass "flaky 46c: ledger пуст" || fail "flaky 46c: ledger не пуст"
+
 echo
 echo "ИТОГО: PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" -eq 0 ]

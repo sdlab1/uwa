@@ -17,7 +17,7 @@ use crate::core::types::{CrapCfg, ItemId, MutateCfg, RunConfig};
 use crate::shell::store::{Item, Store};
 use crate::Cmd;
 
-pub const CONFIG_KEYS: [&str; 34] = [
+pub const CONFIG_KEYS: [&str; 35] = [
     "VERIFY",
     "BOOTSTRAP",
     "AGENT",
@@ -49,6 +49,7 @@ pub const CONFIG_KEYS: [&str; 34] = [
     "IGNORED_ALLOWLIST",
     "FREEZE",
     "FREEZE_ALLOW",
+    "VERIFY_RETRIES",
     "LINT",
     "LINT_CMD",
     "REVIEW",
@@ -92,6 +93,7 @@ pub fn load_config(root: &Path) -> anyhow::Result<RunConfig> {
         agent: g("AGENT").unwrap_or_else(|| "goose run --no-session -t".into()),
         agent_timeout: u32v("AGENT_TIMEOUT", 1800),
         max_fix: u32v("MAX_FIX", 3),
+        verify_retries: u32v("VERIFY_RETRIES", 0),
         max_active: u32v("MAX_ACTIVE", 3),
         remote: g("REMOTE").unwrap_or_else(|| "origin".into()),
         main_branch: g("MAIN").unwrap_or_else(|| "main".into()),

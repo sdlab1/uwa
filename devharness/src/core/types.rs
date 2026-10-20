@@ -63,6 +63,9 @@ pub struct RunConfig {
     pub agent: String,
     pub agent_timeout: u32,
     pub max_fix: u32,
+    /// A8: повторов VERIFY при падении в раунде 1 (контеншен-флейк).
+    /// Код-дефолт 0 = текущее поведение; шаблон init ставит 0 с комментарием.
+    pub verify_retries: u32,
     pub max_active: u32,
     pub remote: String,
     pub main_branch: String,
@@ -104,6 +107,7 @@ impl Default for RunConfig {
             agent: "goose run --no-session -t".into(),
             agent_timeout: 1800,
             max_fix: 3,
+            verify_retries: 0,
             max_active: 3,
             remote: "origin".into(),
             main_branch: "main".into(),

@@ -887,3 +887,62 @@ seed 2024; ночной devharness-chaos.yml (cron 03:00, dispatch до 50 ит�
 tee в STEP_SUMMARY). `cargo test -p devh` standalone = 164 unit + 55
 integration зелёные; тот же прогон сразу после bash-сьюты даёт 31/55 —
 контеншн-флейк общего /tmp WT_ROOT (§9.21), ретрай чисто.
+
+## 9.24 — A8: flaky-дисциплина v1 — VERIFY_RETRIES + ledger (2026-10-20, ветка devh/a8-flaky)
+
+**Один повтор VERIFY в раунде 1 — под `nice -n 19` + sleep 2, но НЕ
+молчаливо:** прошёл со 2-го раза → сессия живёт, `.harness/flaky.md`
+получает строку `дата | W-NNN | verify | round=1 | retried-ok`, консоль —
+`⚠ flaky-suspect (retry ok)`. Ключ `VERIFY_RETRIES` (дефолт 0 = поведение
+как до A8).
+
+1. **Ретрай ТОЛЬКО в круг 0 (`round == 0` && `verify_retries > 0`).** В
+   fix-раундах повторов нет принципиально: там «зелёное» — это СЛЕДСТВИЕ
+   лечения, и повтор его бы маскировал (агент «долечил» на 2-й попытке, но
+   расхождение должно было отправить его в ещё один круг, а не списаться
+   во флейк). Настоящая поломка не маскируется тоже: ALWAYS-режим
+   (SMOKE_FLAKY_ALWAYS=1) красный каждый раз → retry красный → наружу
+   идёт ПЕРВЫЙ verify_raw (лог первого провала сохранён в
+   W-001-verify.log, ретрай — отдельный W-001-verify-retry.log), rc=1,
+   строка `VERIFY красный`, ledger пуст. Проверено секцией 46c.
+2. **Почему флейк модельнут ВНУТРИ tests/all.sh, а не отдельным
+   flaky-verify.stub:** RED-LINK-гейт (gates::red_links_verify) требует,
+   чтобы red.cmd и VERIFY бежали одним раннером — отдельный
+   verify-инструмент ломает red-фазу (проверено: `RED-LINK: раннер
+   red.cmd не совпадает`). Ручка SMOKE_FLAKY=<путь> в mk_smoke_repo.sh
+   препендит tests/all.sh пролог: счётный файл ЖИВЁТ ВНЕ репо (в $T),
+   первые ДВА вызова красные (red-pre + первый verify), дальше зелёный.
+   Коммит пролога — обычный `git add -A` (урок A7: SMOKE_SLOW-in-commit).
+   Побочно это честнее стаба: флейк проходит настоящий run_logged-путь,
+   настоящие логи, настоящий leder.
+3. **Стаб flaky-agent.sh = good.sh БЕЗ OBSERVE-guard.** good.sh отказывает
+   fix-round промпту без OBSERVE-точки (rc=3, `стub: в промпте нет
+   OBSERVE-точки`) — а 46b (честное лечение флейка fix-раундом) и 46c
+   (промпт лечения тоже приходит) требуют выживший стаб: VERDICT: OK на
+   ревью + идемпотентный фикс calc.sh.
+4. **Doctor:** строка состояния `VERIFY_RETRIES` (`ok` если >0, иначе `..`
+   — ключевой параметр выключен), далее WARN `flaky-suspect` с числом
+   записей, группировкой gates::flaky_groups (count desc, затем name asc)
+   и хвостом 3 строк. doctor не удалитель ledger'а: это доказательство
+   среды, не мусор. append_flaky — read-modify-write, дата из
+   survivors::today_ymd (общая с observations-очередью машина даты).
+5. **Баш-грабли:** SC1087 — `$case[$sub]` → `${case}[${sub}]` (array
+   expansion без скобок = ошибка shellcheck-оракула); SC2034 —
+   `local_rc=$?` после flaky_expect (функция всегда `return 0` — rc мёртв,
+   проверки едят глобалы LED/LOGS); smoke_reset_env чистит только
+   HARNESS_*, поэтому SMOKE_FLAKY_ALWAYS unset'ится вручную в
+   flaky_expect (иначе 46c отравляет последующие секции).
+
+**Приёмка A8:** `cargo test -p devh` = 167 unit + 55 integration зелёные;
+bash-сьюта PASS=411 FAIL=0 (393 + 18 секции 46: 46a×2 — retries=1 на
+флейке: rc=0, OK гейты, warning, ledger, разнесённые verify/verify-retry
+логи; 46b — retries=0: тот же флейк лечится честным fix-раундом, ledger
+пуст, warning нет; 46c — ALWAYS+retries=1: rc=1, `VERIFY красный`, ledger
+пуст — retry не маскирует); fmt/clippy чистые; мутационный аудит diff'а
+.rs (40 мутантов по --in-diff): 31 caught / 0 missed / 9 unviable,
+kill-rate 100% testable; ночной canary devharness-canary.yml (cron 04:00):
+oracle ×3 подряд с variance-детектом (любое различие rc или `ИТОГО` между
+прогонами = флаг) + chaos ×50 (A7, seed 2024), логи-артефакты при
+покраснении. Живого LLM-агента в canary нет — с реальным агентом canary
+остаётся ручным ритуалом (см. advance2 §A8).
+

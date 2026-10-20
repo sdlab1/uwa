@@ -1,0 +1,77 @@
+name: devharness-canary
+# A8-ночной canary: детект ФЛЕЙКОВ, не регрессий (регрессии ловит
+# devharness-rs.yml на push). Харнесс со стаб-агентами ДЕТЕРМИНИРОВАН: те же
+# ключи, те же сиды → полный oracle обязан печатать битово тот же «ИТОГО».
+# Любые различия rc или «ИТОГО: PASS=F FAIL=…» между прогонами подряд =
+# флаг: на одной и той же машине это может быть только флейк. Красный
+# canary НЕ доказывает поломку кода — он доказывает нестабильность среды:
+# триаж в docs/rust_build.md (запись в .harness/flaky.md после локального
+# повтора). Живого LLM-агента в canary нет и не будет — он локальный;
+# canary с реальным агентом остаётся РУЧНЫМ ритуалом (advance2 §A8).
+on:
+  schedule:
+    - cron: "0 4 * * *" # 04:00 UTC — следом за chaos (03:00), CI свободен
+  workflow_dispatch:
+    inputs:
+      suite_runs:
+        description: "прогонов оракула подряд (variance-детект)"
+        default: "3"
+      chaos_iterations:
+        description: "итераций kill -9 (0 = пропустить)"
+        default: "50"
+      chaos_seed:
+        description: "сид chaos (канонический CI — 2024)"
+        default: "2024"
+
+concurrency:
+  group: devharness-canary
+  cancel-in-progress: false
+
+jobs:
+  canary:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build -p devh
+
+      - name: "oracle ×${{ inputs.suite_runs || 3 }} — детект variance"
+        id: suite
+        run: |
+          N="${{ inputs.suite_runs || 3 }}"
+          FLAKY=0; SUM1=""
+          echo "### oracle ×$N (variance-детект)" >> "$GITHUB_STEP_SUMMARY"
+          for i in $(seq 1 "$N"); do
+            RC=0
+            bash devharness/test.sh > "suite-$i.log" 2>&1 || RC=$?
+            SUM=$(grep '^ИТОГО:' "suite-$i.log" || echo 'ИТОГО: нет строки итога')
+            echo "прогон $i: rc=$RC | $SUM" | tee -a run-summaries.txt
+            echo "- прогон $i: rc=$RC | $SUM" >> "$GITHUB_STEP_SUMMARY"
+            [ "$RC" -eq 0 ] || FLAKY=1
+            if [ -n "$SUM1" ] && [ "$SUM" != "$SUM1" ]; then
+              echo "ФЛЕЙК: «$SUM1» vs «$SUM»" | tee -a run-summaries.txt
+              FLAKY=1
+            fi
+            SUM1="$SUM"
+          done
+          echo "flaky=$FLAKY" >> "$GITHUB_OUTPUT"
+          [ "$FLAKY" = 0 ]
+
+      - name: "chaos ×${{ inputs.chaos_iterations || 50 }} (A7, seed=${{ inputs.chaos_seed || 2024 }})"
+        if: ${{ inputs.chaos_iterations != '0' }}
+        run: |
+          bash devharness/tests/chaos.sh \
+            "${{ inputs.chaos_iterations || 50 }}" \
+            "${{ inputs.chaos_seed || 2024 }}" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: "артефакты: логи подозрительных прогонов"
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: canary-logs
+          path: |
+            suite-*.log
+            run-summaries.txt
+          retention-days: 14
