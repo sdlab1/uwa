@@ -636,3 +636,86 @@ LLM и без cargo-mutants: фейковые инструменты говор�
 55 зелёные (естественный прогон при load<4; каскад env-блокера при load≈8 —
    известный шум P5, проверено через HARNESS_MUTATE_MAX_LOAD=off); fmt/clippy
 чисты; doctor smoke-репо rc=0. Rust-кода A4 не касается — аудита мутантов нет.
+
+## 9.20 — A5a: adversarial-корпус v1 (читеры выхода агента, devh_advance2 §A5)
+
+**Задача (план advance2 §A5a):** 5 стабов-читеров против контракта харнесса
+(кейсы 1–4, 8): каждый ломает РОВНО одно допущение; судьи настоящие (стабы
+инструментов говорят на реальных диалектах — наследие A4). Приёмка: 3 подряд
+одинаковых rc на кейс (детерминированность), корпус ≤3 мин, таблица
+«чит → гейт → rc» тут, kill-rate одной строкой в выводе test.sh (метрика для B1).
+
+**Артефакты:**
+- `devharness/stubs/red-green.sh` — в фазе RED пишет red.cmd
+  `bash tests/all.sh; exit 0` (раннер совпадает с VERIFY, LINK проходит) → RED pre.
+- `devharness/stubs/red-wrong.sh` — red.cmd честный, но в worktree сажает
+  «фикс», ломающий числовой путь: падает add_two вместо add_non_numeric.
+- `devharness/stubs/no-summary.sh` — делает работу, не пишет summary.
+- `devharness/stubs/bad-summary.sh` — summary с первой строкой `Session 9: …`.
+- `devharness/stubs/hang.sh` — `sleep 9999` (watchdog через `HARNESS_AGENT_TIMEOUT=5`).
+- `test.sh` секции 32–36: helpers `adv_run`/`adv_expect` (микрорепо через
+  `mk_smoke_repo.sh` + прогон `devh run W-001`, 3 итерации на кейс), счётчики
+  `ADV_OK`/`ADV_N`, строка «adversarial corpus: поймано N/N»; `smoke_reset_env`
+  вынесен из S31 в общий хелпер (строка 44).
+
+**Таблица kill-rate (чит → гейт → rc):**
+
+| # | стаб | гейт | rc | маркер |
+|---|---|---|---|---|
+| 1 | red-green | RED pre (Fail verdict) | 1 | `red.cmd уже зелёный … это не баг` |
+| 2 | red-wrong | RED pre → SpecBlock | 1 | `RED упал НЕ ПО ТОЙ ПРИЧИНЕ` |
+| 3 | no-summary | commit_push | 1 | `FAIL: агент не написал summary` |
+| 4 | bad-summary | MSG_DENY | 1 | `сообщение коммита нарушает гигиену` |
+| 8 | hang | watchdog (run_agent) | 1 | `FAIL агент … watchdog убил группу после 5s` |
+
+Приёмка: 15/15 прогонов поймано (kill-rate 100%), корпус ~35s в suite, каждая
+секция детерминированна (3 разных свежих микрорепо, одинаковый rc и маркер).
+
+## 9.20.1 — ДЕФЕКТ ГЕЙТА, найденный корпусом: RED-EXPECT матчил ЗЕЛЁНУЮ строку
+
+`judge_red_pre` честный RED проверял `regex.is_match(&raw.log)` по ПОЛНОМУ логу
+red-фазы. Корпусная атака 2 вывела это в SpecBlock-дырку: при
+`RED-EXPECT: add_non_numeric` красный прогон падал по СВОЕЙ причине
+(`test calc::add_two ... FAILED`), но в том же логе проходила зелёная строка
+`test calc::add_non_numeric ... ok` — подписи хватало её, пре-гейт рапортовал
+«честный RED: [calc::add_two] матчит /add_non_numeric/». Диагноз: ложное
+срабатывание regex на не-провал — ровно тот класс, из-за которого P7
+(`red.expect`) вводился.
+
+**Фикс (devharness/src/core/gates.rs):**
+- `is_green_line(line)` — строки результата, не являющиеся доказательством
+  провала: `… ok`, `… ok,`, `… ignored`, `✓`, `PASS [`, `test result: ok`.
+- `failure_stream(log)` — лог без зелёных строк; `judge_red_pre` матчит подпись
+  ТОЛЬКО по нему.
+- SpecBlock получил хинт `(подпись матчит ЗЕЛЁНЫЙ тест — это не падение)`,
+  когда подпись матчит полный лог, но не поток провала — оператору сразу виден
+  класс ошибки спеки.
+- 3 новых unit-теста: `red_pre_spec_block_when_signature_matches_only_green_line`
+  (регресс дефекта), `failure_stream_drops_green_lines`, 
+  `red_pre_passes_when_failure_carries_reason` (честный RED с причиной в потоке
+  провала и зелёными строками рядом — не ломаем ложным SpecBlock).
+
+**Калибровки A5a (поправки к плану):**
+1. Атака 2 требует `RED-EXPECT:` в спеке ПРИ отсутствии строки `RED:` — иначе
+   red.cmd пишет `new` и фаза автора пропускается; подпись берётся из
+   `store.read("red-expect")` через `resolve_red_expect` (маркер `# red-expect:`
+   в red.cmd приоритетнее спеки).
+2. Без RED-EXPECT `judge_red_pre` остаётся лояльным (любой exit≠0 = Pass) —
+   атака 2 в этом режиме ловит УЖЕ пост-гейт (`FAIL: гейт VERIFY красный после
+   2 раундов`), но маркера `НЕ ПО ТОЙ ПРИЧИНЕ` не даёт: подпись причины — ключ
+   pre-детекта (философия P7 «упал ≠ упал по той причине»).
+3. Атаки 3/4 держаются на инварианте «обман не дошёл до main»: `devh run`
+   умирает до `commit_push`'а (3 — до записи summary, 4 — на MSG_DENY),
+   `git rev-parse HEAD == origin/main`; контроль `OK гейты` в логе доказывает,
+   что поймана не лень, а именно финализация.
+4. Висячий агент печатает промпт в TIMEOUT-строку watchdog'а — в ассертах
+   маркер берём как `FAIL агент` + `watchdog`, не по телу промпта.
+5. `adv_*` хелперы повторяют `mk_smoke_repo.sh` на КАЖДУЮ итерацию (свежее
+   микрорепо) — цена ~0.3s, зато исключено contaminated-state (worktree/branch
+   прошлой итерации).
+
+**Приёмка:** test.sh 234 PASS / 0 FAIL (37 секций, корпус ~35s); unit 158 +
+integration 55 зелёные (естественный прогон, load≈1.8); fmt/clippy чистые;
+shellcheck 11 файлов (0 хелперов shellcheck-disabled). Rust-правка gates.rs —
+аудит мутантами: `-f devharness/src/core/gates.rs`, 175 мутантов, in-place +
+nextest + incremental (протокол §9.7–9.11): итог — **175 мутантов, 170 caught / 0 missed / 5 unviable (kill-rate 100% testable)**.

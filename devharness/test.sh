@@ -41,6 +41,12 @@ base_env() {
   unset HARNESS_RED_MUTATE HARNESS_RED_MIN_KILL
 }
 
+smoke_reset_env() { # сброс утечек HARNESS_* между секциями: конфиг smoke-репо живёт в файле
+  local k
+  for k in $(env | sed -n 's/^\(HARNESS_[A-Z_]*\)=.*/\1/p'); do unset "$k"; done
+}
+
+ADV_OK=0; ADV_N=0
 install_tests() { # мини-раннер тестов в текущем temp-репо: RED = прогон тестов, а не grep
   mkdir -p t scripts
   cat > scripts/test.sh <<'EOF'
@@ -173,10 +179,11 @@ echo "CRAP: functions=0"
 S
 chmod +x "$T"/stub*.sh "$T/sleeper.sh" "$T"/mut-*.sh "$T"/crap-*.sh "$T/redmut.sh"
 
-echo "== 0. статика: shellcheck (полный прогон, 4 файла) =="
+echo "== 0. статика: shellcheck (полный прогон, 11 файлов) =="
 if command -v shellcheck >/dev/null 2>&1; then
   sc=0
-  for f in devh test.sh selfmutate.sh examples/check_bench.sh stubs/good.sh tests/mk_smoke_repo.sh; do
+  for f in devh test.sh selfmutate.sh examples/check_bench.sh stubs/good.sh tests/mk_smoke_repo.sh \
+    stubs/red-green.sh stubs/red-wrong.sh stubs/no-summary.sh stubs/bad-summary.sh stubs/hang.sh; do
     shellcheck "$HERE/$f" >/dev/null 2>&1 || { echo "  shellcheck findings в $f"; sc=1; }
   done
   [ "$sc" = 0 ] && pass "shellcheck чист" || fail "shellcheck чист"
@@ -658,8 +665,7 @@ fi
 
 echo "== 31. smoke: happy path через стаб-агента (микрорепо, ноль LLM, <60s) =="
 SMOKE_T0=$SECONDS
-# сброс утечек HARNESS_* от предыдущих секций: весь конфиг smoke живёт в репо
-for k in $(env | sed -n 's/^\(HARNESS_[A-Z_]*\)=.*/\1/p'); do unset "$k"; done
+smoke_reset_env
 S="$(bash "$HERE/tests/mk_smoke_repo.sh" "$T/s31" "$HERE/stubs/good.sh" "$T/wt")"
 [ -d "$S" ] && pass "smoke: микрорепо сгенерировано" || { fail "smoke: mk_smoke_repo (пусто: '$S')"; exit 1; }
 cd "$S" || exit 1
@@ -682,6 +688,106 @@ grep -q "add_non_numeric" "$T/out" 2>/dev/null && fail "smoke: merge не мяс
 SMOKE_DT=$((SECONDS - SMOKE_T0))
 echo "  smoke-цикл: ${SMOKE_DT}s"
 [ "$SMOKE_DT" -lt 60 ] && pass "smoke: цикл < 60s" || fail "smoke: цикл < 60s (${SMOKE_DT}s)"
+
+# ─── A5a: корпус атакующий (adversarial corpus) ───
+# Идея: стабы-читеры говорят на РЕАЛЬНЫХ диалектах гейтов (как good.sh), но
+# ломают РОВНО ОДНО допущение контракта. Судьи настоящие — проверяем, что
+# гейт ловит именно этот обман, а не «случайно упал». Метрика kill-rate для
+# отчёта: ADV_OK/ADV_N (поймано / запусков). Детерминированность: каждую
+# атаку гоняем 3 раза на свежих микрорепо.
+
+# adv_run <case> <stub> <sub> <timeout|-> <red:0|1> <expect:0|1>
+# Микрорепо + один прогон devh run. Глобалы после вызова:
+#   ADV_RC — код выхода прогона, ADV_DT — длительность (сек),
+#   ADV_OUT — путь к логу прогона, ADV_DIR — путь к микрорепо.
+adv_run() {
+  local case=$1 stub=$2 sub=$3 tmo=$4 with_red=$5 with_expect=$6
+  smoke_reset_env
+  local S
+  S="$(bash "$HERE/tests/mk_smoke_repo.sh" "$T/$case-$sub" "$HERE/stubs/$stub" "$T/$case-$sub.wt")"
+  ADV_DIR="$S"
+  if [ ! -d "$S" ]; then ADV_RC=99; ADV_OUT=""; return; fi
+  cd "$S" || { ADV_RC=99; ADV_OUT=""; return; }
+  local spec='Сделай: валидацию нечисловых аргументов add.
+OBSERVE:
+- return: add x 3 -> ERR, rc=1'
+  # RED: в спеке = red.cmd пишет new (фаза автора red пропускается);
+  # без RED: — red.cmd пишет агент в «ФАЗЕ RED» (атаки 32/33).
+  # RED-EXPECT: = подпись причины провала (ключ RED_EXPECT/P7) — в спеке,
+  # независимо от RED: (атака 33: зелёный тест удовлетворяет подпись).
+  if [ "$with_red" = 1 ]; then spec="$spec
+RED: bash tests/all.sh"; fi
+  if [ "$with_expect" = 1 ]; then spec="$spec
+RED-EXPECT: add_non_numeric"; fi
+  printf '%s\n' "$spec" | "$DEVH" new "$case $sub" >/dev/null 2>&1
+  local t0=$SECONDS
+  if [ "$tmo" = "-" ]; then
+    "$DEVH" run W-001 >"$T/adv-$case-$sub.log" 2>&1
+  else
+    HARNESS_AGENT_TIMEOUT="$tmo" "$DEVH" run W-001 >"$T/adv-$case-$sub.log" 2>&1
+  fi
+  ADV_RC=$?
+  ADV_DT=$((SECONDS - t0))
+  ADV_OUT="$T/adv-$case-$sub.log"
+}
+
+# adv_expect <case> <stub> <marker> <timeout|-> <red:0|1> <expect:0|1> [extra-grep] [max-dt]
+# Три последовательных свежих прогона: rc=1 (не env-отговорка), маркер гейта,
+# контрольная строка (extra), инварианты «обман не дошёл до main».
+adv_expect() {
+  local case=$1 stub=$2 marker=$3 tmo=$4 with_red=$5 with_expect=$6
+  local extra=${7:-} maxdt=${8:-}
+  local i
+  for i in 1 2 3; do
+    adv_run "$case" "$stub" "$i" "$tmo" "$with_red" "$with_expect"
+    ADV_N=$((ADV_N+1))
+    if [ "$ADV_RC" = 1 ] && [ -f "$ADV_OUT" ] && grep -q "$marker" "$ADV_OUT"; then
+      ADV_OK=$((ADV_OK+1))
+    fi
+    if [ "$ADV_RC" = 1 ]; then pass "adv ${case}[$i]: обман пойман (rc=1)"; else
+      fail "adv ${case}[$i]: rc=$ADV_RC, ожидался 1"
+      [ -f "$ADV_OUT" ] && sed -n '1,25p' "$ADV_OUT"
+    fi
+    if [ -f "$ADV_OUT" ] && grep -q "$marker" "$ADV_OUT"; then
+      pass "adv ${case}[$i]: маркер «$marker»"
+    else fail "adv ${case}[$i]: нет маркера «$marker»"; fi
+    if [ -n "$extra" ]; then
+      if [ -f "$ADV_OUT" ] && grep -q "$extra" "$ADV_OUT"; then
+        pass "adv ${case}[$i]: контроль «$extra»"
+      else fail "adv ${case}[$i]: нет контроля «$extra»"; fi
+    fi
+    if [ -n "$maxdt" ]; then
+      if [ "$ADV_DT" -lt "$maxdt" ]; then pass "adv ${case}[$i]: watchdog за ${ADV_DT}s (<$maxdt)"
+      else fail "adv ${case}[$i]: dt=${ADV_DT}s, ожидался <$maxdt"; fi
+    fi
+    cd "$ADV_DIR" || exit 1
+    [ "$(cat .harness/items/W-001/status)" != "done" ] && pass "adv ${case}[$i]: статус не done" || fail "adv ${case}[$i]: статус done"
+    if grep -q "| merged" .harness/items/W-001/events.log 2>/dev/null; then
+      fail "adv ${case}[$i]: merged в журнале"
+    else pass "adv ${case}[$i]: без merged"; fi
+    if [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ]; then
+      pass "adv ${case}[$i]: main не сдвинут"
+    else fail "adv ${case}[$i]: main сдвинут (обман ушёл в origin)"; fi
+  done
+}
+
+echo "== 32. АТАКА red-green: red.cmd уже зелёный на чистом HEAD =="
+adv_expect red-green red-green.sh "не баг" - 0 0
+
+echo "== 33. АТАКА red-wrong: red падает НЕ ПО ТОЙ ПРИЧИНЕ =="
+adv_expect red-wrong red-wrong.sh "НЕ ПО ТОЙ ПРИЧИНЕ" - 0 1 "calc::add_two"
+
+echo "== 34. АТАКА no-summary: работа сделана, summary не написан =="
+adv_expect no-summary no-summary.sh "не написал summary" - 1 1 "OK гейты"
+
+echo "== 35. АТАКА bad-summary: summary с 'Session N' vs MSG_DENY =="
+adv_expect bad-summary bad-summary.sh "гигиену" - 1 1 "OK гейты"
+
+echo "== 36. АТАКА hang: висящий агент vs watchdog =="
+adv_expect hang hang.sh "FAIL агент" 5 1 1 "watchdog" 30
+
+echo "  adversarial corpus: поймано $ADV_OK/$ADV_N (kill-rate $(( ADV_N > 0 ? ADV_OK * 100 / ADV_N : 0 ))%)"
+[ "$ADV_OK" = "$ADV_N" ] && pass "adv: все атаки пойманы ($ADV_OK/$ADV_N)" || fail "adv: корпус пойман не полностью ($ADV_OK/$ADV_N)"
 
 echo
 echo "ИТОГО: PASS=$PASS FAIL=$FAIL"

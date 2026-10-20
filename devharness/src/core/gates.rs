@@ -681,7 +681,8 @@ pub fn failing_tests(log: &str) -> Vec<String> {
 /// достаточное условие: «тест упал» ≠ «упал по той причине». Если объявлена
 /// ожидаемая подпись (`expect`, regex), честный RED требует:
 /// 1. в логе есть упавший ТЕСТ (якорь test-id — не обрыв и не компиляция);
-/// 2. лог матчит regex причины.
+/// 2. ПОТОК ПРОВАЛА матчит regex причины (не весь лог — зелёные строки не
+///    доказательство; см. `failure_stream`).
 ///
 /// Иначе — SpecBlock (блокер спеки): это ломает допущения контракта, а не
 /// работу агента, и fix-раундом агента такое не лечится.
@@ -710,21 +711,64 @@ fn judge_red_pre(gate: &Gate, raw: &Raw, expect: Option<&str>) -> Verdict {
         };
     }
     match regex::Regex::new(pattern) {
-        Ok(re) if re.is_match(&raw.log) => Verdict::Pass,
-        Ok(_) => Verdict::SpecBlock {
-            gate: gate.clone(),
-            tail: format!(
-                "RED упал НЕ ПО ТОЙ ПРИЧИНЕ: ожидалось /{pattern}/, а упали тесты [{}] — \
-                 блокер спеки (правь red.cmd / RED-EXPECT), не работа агента\n{}",
-                failed.join(", "),
-                tail_of(&raw.log, 10)
-            ),
-        },
+        Ok(re) if re.is_match(&failure_stream(&raw.log)) => Verdict::Pass,
+        Ok(re) => {
+            // уточнение для оператора: подпись «удовлетворена» ЗЕЛЁНЫМ тестом —
+            // это не падание (найдено корпусом атак A5a, журнал §9.20).
+            let green_hint = if re.is_match(&raw.log) {
+                " (подпись матчит ЗЕЛЁНЫЙ тест — это не падение)"
+            } else {
+                ""
+            };
+            Verdict::SpecBlock {
+                gate: gate.clone(),
+                tail: format!(
+                    "RED упал НЕ ПО ТОЙ ПРИЧИНЕ: ожидалось /{pattern}/, а упали тесты [{}] — \
+                     блокер спеки (правь red.cmd / RED-EXPECT), не работа агента{}\n{}",
+                    failed.join(", "),
+                    green_hint,
+                    tail_of(&raw.log, 10)
+                ),
+            }
+        }
         Err(e) => Verdict::SpecBlock {
             gate: gate.clone(),
             tail: format!("RED-подпись /{pattern}/ — невалидный regex: {e}"),
         },
     }
+}
+
+/// Зелёная строка результата прогона: «... ok», «... ignored», «test result:
+/// ok», «✓» (nextest), «PASS [..]» (nextest). Не доказательство провала:
+/// подпись причины, матчащая такую строку, означает «упал НЕ по той причине».
+fn is_green_line(line: &str) -> bool {
+    let t = line.trim();
+    t.ends_with(" ok")
+        || t.ends_with(" ok,")
+        || t.contains(" ... ok")
+        || t.contains(" ... ignored")
+        || t.starts_with('✓')
+        || t.starts_with("PASS [")
+        || t.contains("test result: ok")
+}
+
+/// ПОТОК ПРОВАЛА: лог без зелёных строк результатов. Всё остальное остаётся
+/// доказательством (FAILED, failures:, panicked, reason-строки).
+///
+/// Зачем: `RED-EXPECT: add_non_numeric` матчил строку «test calc::add_non_numeric
+/// ... ok» в полном логе, и подпись причины «удовлетворялась» проходящим
+/// тестом — обман «red упал по другой причине» прошёл пре-гейт (корпус атак
+/// A5a, журнал §9.20).
+fn failure_stream(log: &str) -> String {
+    let mut out = String::new();
+    for line in log.lines() {
+        if is_green_line(line) {
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
 }
 
 /// Строка-пруф честного RED для консоли/лога: якорь (упавший тест) +
@@ -1161,6 +1205,60 @@ panicked at net.rs:88: connection refused";
             }
             v => unreachable!("ожидался SpecBlock, получил {v:?}"),
         }
+    }
+
+    #[test]
+    fn red_pre_spec_block_when_signature_matches_only_green_line() {
+        // Дефект корпуса атак A5a (§9.20): подпись причины «add_non_numeric»
+        // матчила ЗЕЛЁНУЮ строку «test calc::add_non_numeric ... ok» в полном
+        // логе — пре-гейт принимал «упал по чужой причине» за честный RED.
+        let g = Gate::Red {
+            cmd: "bash tests/all.sh".into(),
+            phase: RedPhase::Pre,
+            expect: Some("add_non_numeric".into()),
+        };
+        let log = "test calc::add_two ... FAILED\n\
+                   test calc::add_non_numeric ... ok\n\
+                   2 passed; 1 failed";
+        match judge(&g, &raw(Some(1), log), &cfg()) {
+            Verdict::SpecBlock { tail, .. } => {
+                assert!(tail.contains("НЕ ПО ТОЙ ПРИЧИНЕ"), "{tail}");
+                assert!(tail.contains("ЗЕЛЁНЫЙ"), "{tail}");
+                assert!(tail.contains("calc::add_two"), "{tail}");
+            }
+            v => unreachable!("ожидался SpecBlock, получил {v:?}"),
+        }
+    }
+
+    #[test]
+    fn failure_stream_drops_green_lines() {
+        let stream = failure_stream(
+            "test calc::add_two ... ok\ntest calc::add_non_numeric ... FAILED\n\
+             test other ... ignored, reason: wip\ntest result: ok. 2 passed;\n\
+             PASS [ 0.001s] crate tests::x\n✓ crate tests::y 0.001s",
+        );
+        assert!(!stream.contains("add_two"), "{stream}");
+        assert!(!stream.contains("ignored"), "{stream}");
+        assert!(!stream.contains("PASS ["), "{stream}");
+        assert!(!stream.contains('✓'), "{stream}");
+        assert!(stream.contains("add_non_numeric ... FAILED"), "{stream}");
+    }
+
+    #[test]
+    fn red_pre_passes_when_failure_carries_reason() {
+        // причина в потоке провала, зелёные строки вокруг — не мешают
+        let g = Gate::Red {
+            cmd: "red.cmd".into(),
+            phase: RedPhase::Pre,
+            expect: Some("add_non_numeric".into()),
+        };
+        let log = "test calc::add_two ... ok\ntest calc::add_non_numeric ... FAILED\n\
+thread 'calc::add_non_numeric' panicked at calc.sh:4: add_non_numeric rejected\n\
+test result: FAILED. 1 passed; 1 failed";
+        assert!(matches!(
+            judge(&g, &raw(Some(101), log), &cfg()),
+            Verdict::Pass
+        ));
     }
 
     #[test]
