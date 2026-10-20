@@ -4,9 +4,9 @@
 # Зачем: аудит зоны/ядра идёт десятки минут; `sleep`-петли в сессии слепы
 # (не видно, сколько осталось) и дороги (каждый poll = отдельный turn).
 # Скрипт ждёт СОБЫТИЕ (inotify: outcomes.json перезаписан / процесс
-# завершился), а не по таймеру, и рисует ОДНУ строку прогресса (как
-# hyperfine/nextest): бар с числами done/total внутри, счётчики исходов,
-# среднее на мутант, ETA, текущий мутант.
+# завершился), а не по таймеру, и рисует ОДНУ строку прогресса:
+# процент готовности, счётчики исходов, среднее на мутант, ETA, текущий
+# мутант. Над строкой — легенда значков (что есть что).
 #
 # Счётчики: ✓ caught (пойман) · ✗ missed (выжил — дыра в тестах) ·
 #           ⏱ timeout (повес) · ⊘ unviable (не компилится — дыра в покрытии)
@@ -16,7 +16,7 @@
 #   tools/mutants-watch.sh --once          # один снимок и выйти
 #   tools/mutants-watch.sh --interval 3    # тик-страховка, сек (по умолчанию 5)
 #   MUTANTS_LOG=/tmp/mut.log tools/…       # откуда читать "Found N mutants to test"
-#   NO_COLOR=1                              # без ANSI; в не-tty — троттлинг вывода
+#   NO_COLOR=1                             # без ANSI; в не-tty — троттлинг вывода
 #
 # Выход: 0 — прогон завершён (или снят снимок); 2 — не найден mutants.out.
 
@@ -34,13 +34,14 @@ INTERVAL="${INTERVAL:-5}"
 STEP="${STEP:-5}"      # в не-tty печатаем каждые STEP готовых мутантов
 ONCE=0
 LAST_PRINTED=0
+LEGEND_DONE=0
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --once)     ONCE=1; shift ;;
         --interval) INTERVAL="$2"; shift 2 ;;
         --step)     STEP="$2"; shift 2 ;;
-        -h|--help)  sed -n '2,32p' "$0"; exit 0 ;;
+        -h|--help)  awk '/^# ---usage---/{f=1;next} /^# ---cut---/{f=0} f' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *)          echo "unknown arg: $1" >&2; exit 64 ;;
     esac
 done
@@ -51,6 +52,31 @@ COLOR=0
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then COLOR=1; fi
 export COLOR
 
+# ---usage---
+#   tools/mutants-watch.sh                 # ждать финиша прогона c прогрессом
+#   tools/mutants-watch.sh --once          # один снимок и выйти
+#   tools/mutants-watch.sh --interval 3    # тик-страховка, сек (по умолчанию 5)
+#   MUTANTS_LOG=/tmp/mut.log tools/…       # откуда читать "Found N mutants to test"
+#   NO_COLOR=1                             # без ANSI; в не-tty — троттлинг вывода
+# ---cut---
+
+# легенда — ОДИН раз, строкой выше прогресса (потом только строка прогресса)
+legend() {
+    if [ "$LEGEND_DONE" = "1" ]; then return 0; fi
+    LEGEND_DONE=1
+    python3 - <<'PY'
+import os
+color = os.environ.get("COLOR") == "1"
+C = {"ok": "\033[32m", "bad": "\033[1;31m", "warn": "\033[33m",
+     "mag": "\033[35m", "dim": "\033[2m", "off": "\033[0m"} if color else \
+    {k: "" for k in ("ok", "bad", "warn", "mag", "dim", "off")}
+pairs = [("\u2713", "ok", "caught"), ("\u2717", "bad", "missed"),
+         ("\u23f1", "warn", "timeout"), ("\u2298", "mag", "unviable")]
+parts = ["%s%s%s %s" % (C[c], s, C["off"], name) for s, c, name in pairs]
+print("%sлегенда:%s %s" % (C["dim"], C["off"], "  ".join(parts)))
+PY
+}
+
 # текущий мутант — самый свежий .diff (появился во время билда/теста)
 current() {
     local f n
@@ -59,9 +85,10 @@ current() {
     [ -n "$f" ] || return 0
     n="$(basename -- "${f##*/}" .diff)"
     n="${n%%_col_*}"
-    n="${n#devharness_src_}"
-    n="${n//__//}"
+    n="${n#*_src_}"                        # devharness_src_ → путь от корня крейта
     n="$(printf '%s' "$n" | sed -E 's/_line_([0-9]+)$/:\1/')"
+    n="${n/_rs:/.rs:}"                     # core_escapes_rs:249 → core_escapes.rs:249
+    n="${n//_//}"                          # core_escapes → core/escapes
     printf '%s' "$n"
 }
 
@@ -103,6 +130,7 @@ PY
 )"
     IFS=$'\t' read -r dn total counts avg_s last_s <<<"$snap"
     cur="$(current)"
+    legend
     python3 - "$dn" "$total" "$counts" "$avg_s" "$last_s" "$cur" <<'PY'
 import os, sys, time
 dn, total, counts_s, avg_s, last, cur = sys.argv[1:7]
@@ -110,54 +138,42 @@ dn = int(dn); total = int(total); avg = float(avg_s)
 counts = eval(counts_s) if counts_s else {}
 color = os.environ.get("COLOR") == "1"
 C = {"ok": "\033[32m", "bad": "\033[1;31m", "warn": "\033[33m",
-     "info": "\033[36m", "dim": "\033[2m", "off": "\033[0m"} if color else \
-    {k: "" for k in ("ok", "bad", "warn", "info", "dim", "off")}
-W = 28
-filled = min(W, dn * W // total) if total else 0
-label = "%d/%d" % (dn, total)
-pad = max(0, (W - len(label)) // 2)
-inner = (" " * pad + label + " " * (W - len(label) - pad))[:W]
-BG = "\033[42m"; FG = "\033[1;97m"; RESET = "\033[0m"
-if not color:
-    BG = FG = RESET = ""
+     "mag": "\033[35m", "info": "\033[36m", "dim": "\033[2m",
+     "off": "\033[0m", "pbg": "\033[44m", "pfg": "\033[1;97m"} if color else \
+    {k: "" for k in ("ok", "bad", "warn", "mag", "info", "dim", "off",
+                     "pbg", "pfg")}
 
+# --- процент готовности: цветная пилюля, вместо прогресс-бара ---
+if total:
+    p = min(100, dn * 100 // total)
+    pct = "%s%s %3d%% %s" % (C["pbg"], C["pfg"], p, C["off"])
+else:
+    pct = C["dim"] + "  —%  " + C["off"]
 
-def seg(text, on):
-    body = ""
-    for ch in text:
-        if ch == " ":
-            body += "\u2588" if on else "\u2591"
-        elif on:
-            body += FG + ch + RESET + BG
-        else:
-            body += ch
-    if on:
-        return BG + body + RESET
-    return C["dim"] + body + C["off"]
+# --- счётчики исходов (unviable всегда, по правилу fast_cycle §P9) ---
+cnt = "%s\u2713%s %d  " % (C["ok"], C["off"], counts.get("CaughtMutant", 0))
+for k, sym_c, col in (("MissedMutant", "\u2717", "bad"),
+                      ("TimeoutMutant", "\u23f1", "warn"),
+                      ("Unviable", "\u2298", "mag")):
+    cnt += "%s%s%s %d  " % (C[col], sym_c, C["off"], counts.get(k, 0))
+cnt = cnt.rstrip()
 
-
-bar = seg(inner[:filled], True) + seg(inner[filled:], False)
-
-eta = "n/a"
+# --- ETA в минутах ---
 if total and dn >= total:
     eta = C["ok"] + "готово" + C["off"]
 elif avg > 0:
     eta = C["info"] + "%.1f мин" % (avg * (total - dn) / 60.0) + C["off"]
-cnt = []
-if counts.get("CaughtMutant", 0) > 0:
-    cnt.append("%s\u2713%s" % (C["ok"], C["off"]))
-for k, sym_c, col in (("MissedMutant", "\u2717", "bad"),
-                      ("TimeoutMutant", "\u23f1", "warn"),
-                      ("Unviable", "\u2298", "warn")):
-    cnt.append("%s%s %d%s" % (C[col], sym_c, counts.get(k, 0), C["off"]))
-cnt = "  ".join(cnt)
+else:
+    eta = C["dim"] + "\u2014" + C["off"]
+
 ts = C["dim"] + time.strftime("%H:%M:%S") + C["off"]
 tail = ""
 if last:
-    tail += "  " + C["dim"] + last + C["off"]
+    tail += "  " + C["mag"] + last + C["off"]
 if cur:
     tail += "  " + C["warn"] + "\u25b8 " + cur + C["off"]
-sys.stdout.write("%s  %s  %s  avg %.1f мин  ETA %s%s\n" % (ts, bar, cnt, avg / 60.0, eta, tail))
+sys.stdout.write("%s %s %s  avg %.1f мин  ETA %s%s\n"
+                 % (ts, pct, cnt, avg / 60.0, eta, tail))
 PY
 }
 
