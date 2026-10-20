@@ -179,11 +179,13 @@ echo "CRAP: functions=0"
 S
 chmod +x "$T"/stub*.sh "$T/sleeper.sh" "$T"/mut-*.sh "$T"/crap-*.sh "$T/redmut.sh"
 
-echo "== 0. статика: shellcheck (полный прогон, 11 файлов) =="
+echo "== 0. статика: shellcheck (полный прогон, 18 файлов) =="
 if command -v shellcheck >/dev/null 2>&1; then
   sc=0
   for f in devh test.sh selfmutate.sh examples/check_bench.sh stubs/good.sh tests/mk_smoke_repo.sh \
-    stubs/red-green.sh stubs/red-wrong.sh stubs/no-summary.sh stubs/bad-summary.sh stubs/hang.sh; do
+    stubs/red-green.sh stubs/red-wrong.sh stubs/no-summary.sh stubs/bad-summary.sh stubs/hang.sh \
+    stubs/ignored-test.sh stubs/lint-dirty.sh stubs/mutate-killer.sh stubs/tool-gone.sh \
+    stubs/crap-violation.sh stubs/review-issues.sh stubs/review-mute.sh; do
     shellcheck "$HERE/$f" >/dev/null 2>&1 || { echo "  shellcheck findings в $f"; sc=1; }
   done
   [ "$sc" = 0 ] && pass "shellcheck чист" || fail "shellcheck чист"
@@ -689,12 +691,16 @@ SMOKE_DT=$((SECONDS - SMOKE_T0))
 echo "  smoke-цикл: ${SMOKE_DT}s"
 [ "$SMOKE_DT" -lt 60 ] && pass "smoke: цикл < 60s" || fail "smoke: цикл < 60s (${SMOKE_DT}s)"
 
-# ─── A5a: корпус атакующий (adversarial corpus) ───
+# ─── A5a/A5b: корпус атакующий (adversarial corpus) ───
 # Идея: стабы-читеры говорят на РЕАЛЬНЫХ диалектах гейтов (как good.sh), но
 # ломают РОВНО ОДНО допущение контракта. Судьи настоящие — проверяем, что
 # гейт ловит именно этот обман, а не «случайно упал». Метрика kill-rate для
 # отчёта: ADV_OK/ADV_N (поймано / запусков). Детерминированность: каждую
 # атаку гоняем 3 раза на свежих микрорепо.
+# A5a (32-36): red/commit-обманы. A5b (37-43): обманы ГЕЙТОВ — NO-IGNORED,
+# LINT, MUTATE (kill-rate), MUTATE (снос инструмента → env rc=2), CRAP,
+# REVIEW (ISSUES) и REVIEW (молчание → env rc=2). Лог-контроль (ctrl_file)
+# доказывает ПРИЧИНУ падения, а не сам факт rc.
 
 # adv_run <case> <stub> <sub> <timeout|-> <red:0|1> <expect:0|1>
 # Микрорепо + один прогон devh run. Глобалы после вызова:
@@ -731,21 +737,23 @@ RED-EXPECT: add_non_numeric"; fi
   ADV_OUT="$T/adv-$case-$sub.log"
 }
 
-# adv_expect <case> <stub> <marker> <timeout|-> <red:0|1> <expect:0|1> [extra-grep] [max-dt]
-# Три последовательных свежих прогона: rc=1 (не env-отговорка), маркер гейта,
-# контрольная строка (extra), инварианты «обман не дошёл до main».
+# adv_expect <case> <stub> <marker> <timeout|-> <red:0|1> <expect:0|1> [extra-grep] [max-dt] [want-rc] [ctrl-file] [ctrl-pat]
+# Три последовательных свежих прогона: rc=want-rc (1 = красный гейт, 2 =
+# env-блокер СРЕДЫ), маркер гейта, контрольная строка (extra — в stdout
+# прогона), лог-контроль (ctrl-file внутри микрорепо : ctrl-pat —
+# доказательство ПРИЧИНЫ), инварианты «обман не дошёл до main».
 adv_expect() {
   local case=$1 stub=$2 marker=$3 tmo=$4 with_red=$5 with_expect=$6
-  local extra=${7:-} maxdt=${8:-}
+  local extra=${7:-} maxdt=${8:-} want_rc=${9:-1} ctrl_file=${10:-} ctrl_pat=${11:-}
   local i
   for i in 1 2 3; do
     adv_run "$case" "$stub" "$i" "$tmo" "$with_red" "$with_expect"
     ADV_N=$((ADV_N+1))
-    if [ "$ADV_RC" = 1 ] && [ -f "$ADV_OUT" ] && grep -q "$marker" "$ADV_OUT"; then
+    if [ "$ADV_RC" = "$want_rc" ] && [ -f "$ADV_OUT" ] && grep -q "$marker" "$ADV_OUT"; then
       ADV_OK=$((ADV_OK+1))
     fi
-    if [ "$ADV_RC" = 1 ]; then pass "adv ${case}[$i]: обман пойман (rc=1)"; else
-      fail "adv ${case}[$i]: rc=$ADV_RC, ожидался 1"
+    if [ "$ADV_RC" = "$want_rc" ]; then pass "adv ${case}[$i]: обман пойман (rc=$want_rc)"; else
+      fail "adv ${case}[$i]: rc=$ADV_RC, ожидался $want_rc"
       [ -f "$ADV_OUT" ] && sed -n '1,25p' "$ADV_OUT"
     fi
     if [ -f "$ADV_OUT" ] && grep -q "$marker" "$ADV_OUT"; then
@@ -759,6 +767,11 @@ adv_expect() {
     if [ -n "$maxdt" ]; then
       if [ "$ADV_DT" -lt "$maxdt" ]; then pass "adv ${case}[$i]: watchdog за ${ADV_DT}s (<$maxdt)"
       else fail "adv ${case}[$i]: dt=${ADV_DT}s, ожидался <$maxdt"; fi
+    fi
+    if [ -n "$ctrl_file" ]; then
+      if [ -f "$ADV_DIR/$ctrl_file" ] && grep -q "$ctrl_pat" "$ADV_DIR/$ctrl_file"; then
+        pass "adv ${case}[$i]: лог-контроль «$ctrl_pat»"
+      else fail "adv ${case}[$i]: нет «$ctrl_pat» в $ctrl_file"; fi
     fi
     cd "$ADV_DIR" || exit 1
     [ "$(cat .harness/items/W-001/status)" != "done" ] && pass "adv ${case}[$i]: статус не done" || fail "adv ${case}[$i]: статус done"
@@ -785,6 +798,46 @@ adv_expect bad-summary bad-summary.sh "гигиену" - 1 1 "OK гейты"
 
 echo "== 36. АТАКА hang: висящий агент vs watchdog =="
 adv_expect hang hang.sh "FAIL агент" 5 1 1 "watchdog" 30
+
+echo "== 37. АТАКА ignored-test: скрытый ignored-тест vs NO-IGNORED =="
+# VERIFY зелёный (фикс настоящий), но в выводе появился ignored:add_extra —
+# «ignored = скрытый красный». Контроль: лог verify действительно содержит
+# строку ignored (гейт падает по причине, не случайно).
+adv_expect ignored ignored-test.sh "NO-IGNORED красный" - 1 0 "" "" 1 \
+  ".harness/logs/W-001-verify.log" "... ignored"
+
+echo "== 38. АТАКА lint-dirty: SC2086 в изменённом .sh vs LINT =="
+# Чинит код, но оставляет нецитируемое $1 в той же calc.sh. Функция не
+# зовётся — VERIFY зелёный; падает именно настоящий shellcheck.
+adv_expect lint lint-dirty.sh "LINT красный" - 1 0 "" "" 1 \
+  ".harness/logs/W-001-lint.log" "SC2086"
+
+echo "== 39. АТАКА mutate-killer: kill-rate 80% < 90% vs MUTATE =="
+# Мутатор микрорепо в режиме weak (1 missed / 5): тесты агента не убивают
+# мутантов. Гейт обязан уронить и пережить 2 раунда фикса. Маркер — из
+# хвоста mutate-лога, который уходит в консоль сразу (run.rs).
+adv_expect mutate mutate-killer.sh "kill-rate 80%" - 1 0 "" "" 1
+
+echo "== 40. АТАКА tool-gone: агент снёс мутатор vs env-блокер (rc=2) =="
+# Сломанный ИНСТРУМЕНТ — блокер среды: rc=2, не «красный гейт агента».
+# Проверяем таксономию вердиктов: env ≠ fail.
+adv_expect toolgone tool-gone.sh "mutation env-блокер" - 1 0 "инструмент не распознан" "" 2
+
+echo "== 41. АТАКА crap-violation: score=130 > CRAP_MAX=12 vs CRAP =="
+# Инструмент микрорепо в режиме violation (cmd C=15 cov=20). Контроль: лог
+# crap содержит строку нарушения — падает сложность, не тесты.
+adv_expect crap crap-violation.sh "CRAP красный" - 1 0 "" "" 1 \
+  ".harness/logs/W-001-crap.log" "crap VIOLATION"
+
+echo "== 42. АТАКА review-issues: ревьюер всё время недоволен vs REVIEW =="
+# Стаб честно работает, но на ревью-промпт отвечает ISSUES и не чинит —
+# REVIEW-гейт обязан уронить (независимый ревьюер — второй барьер).
+adv_expect review review-issues.sh "REVIEW красный" - 1 0 "" "" 1 \
+  ".harness/logs/W-001-review.log" "VERDICT: ISSUES"
+
+echo "== 43. АТАКА review-mute: молчание ревьюера vs env-блокер (rc=2) =="
+# Ревьюер не отдал вердикт — блокер СРЕДЫ (не красный гейт агента).
+adv_expect mute review-mute.sh "FAIL: review env-блокер" - 1 0 "вердикт не распознан" "" 2
 
 echo "  adversarial corpus: поймано $ADV_OK/$ADV_N (kill-rate $(( ADV_N > 0 ? ADV_OK * 100 / ADV_N : 0 ))%)"
 [ "$ADV_OK" = "$ADV_N" ] && pass "adv: все атаки пойманы ($ADV_OK/$ADV_N)" || fail "adv: корпус пойман не полностью ($ADV_OK/$ADV_N)"

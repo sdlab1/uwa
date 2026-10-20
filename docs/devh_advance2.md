@@ -41,6 +41,30 @@ unit 158 + integration 55 зелёные (естественный прогон,
 in-place + nextest + incremental) — итог: 175 мутантов, 170 caught / 0 missed / 5 unviable (kill-rate 100% testable), 65 мин in-place.
 
 
+## A5b — СДАН (сессия a5b-gate-cheaters, ветка devh/a5b-gate-cheaters)
+
+Корпус атак, кейсы 5–7 + 9–12 (читеры против ГЕЙТОВ). Секции test.sh = **37–43**:
+NO-IGNORED (скрытый ignored:add_extra), LINT (настоящий shellcheck ловит SC2086
+в изменённом .sh при зелёном VERIFY), MUTATE (kill-rate 80% < 90%, 2 fix-раунда),
+MUTATE-env (агент снёс инструмент → rc=2 «mutation env-блокер», БЕЗ fix-раундов —
+проверка таксономии env≠fail), CRAP (score=130 > 12), REVIEW («VERDICT: ISSUES»
+каждый раунд → rc=1), REVIEW-env (молчание ревьюера → rc=2 «review env-блокер»).
+`adv_expect` обобщён: 9-й аргумент `want_rc` (1/2), 10–11-й — лог-контроль
+(`ctrl_file:ctrl_pat` в .harness/logs: GiveUp(Fix) печатает в stdout только имя
+гейта — причина живёт в логе). Артефакты — rust_build.md §9.21.
+
+**Итог: 36/36 поймано (kill-rate 100%) — ни одного дефекта гейта не найдено**
+(в отличие от §9.20.1): все семь обязательств устояли без правки .rs. Первая
+итерация стаба 37 дала ЛОЖНЫЙ ЗЕЛЁНЫЙ (worktree = чистый checkout, пустого
+`.smoke/` git не хранит → `touch` молча падал) — поймано ручным прогоном,
+исправление `mkdir -p "$wt/.smoke"` записано в §9.21 факт 1 (урок: атака должна
+проверять, что её артефакт создан). Приёмка: test.sh **357 PASS / 0 FAIL**
+(44 секции, корпус ~55s), unit 158 + integration 55 зелёные, fmt/clippy чистые,
+shellcheck 18 файлов (+7 стабов). Rust-код не тронут — аудит мутантов не нужен.
+Один флейк integration (31 failed на первом прогоне сразу после bash-сьюта —
+contention в общем /tmp WT_ROOT); два ретрая 55/55 чисто — в журнал §9.21.
+
+
 **Ключевая идея, на которой стоит вся серия:** твои гейты парсят *выходные диалекты* инструментов (`"N mutants tested…: M caught"` из `parse_mutation_output`, `"CRAP: functions=N"` из `parse_crap_output`, `"VERDICT: …"` из `parse_review_verdict`). Значит, фейковые инструменты, говорящие на этих диалектах, прогоняют **настоящую** логику судей детерминированно и за секунды — без cargo-mutants (минуты) и без LLM (недетерминизм).
 
 **Новые файлы:**
