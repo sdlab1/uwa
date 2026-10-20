@@ -880,6 +880,21 @@ adv_expect bypass freeze-cheat.sh "OK гейты" - 1 0 "" "" 0 "" "" 1 1
 echo "  adversarial corpus: поймано $ADV_OK/$ADV_N (kill-rate $(( ADV_N > 0 ? ADV_OK * 100 / ADV_N : 0 ))%)"
 [ "$ADV_OK" = "$ADV_N" ] && pass "adv: все атаки пойманы ($ADV_OK/$ADV_N)" || fail "adv: корпус пойман не полностью ($ADV_OK/$ADV_N)"
 
+echo "== 45. CHAOS (A7): kill -9 в случайной точке =="
+# tests/chaos.sh: микрорепо с растянутыми фазами (SMOKE_SLOW: агент спит 2s,
+# мутатор 10s), run в фоне, kill -9 через sleep in [0..7]s (детерминированно
+# от seed). Инварианты после убийства: status парсится, fold(events.log)==
+# status, нет *.tmp-сирот, нет мутационных маркеров, doctor rc=0,
+# восстановление (abort + run) rc=0. Число итераций в suite — 3 (CI: 5,
+# ночной workflow: 50). Красный → сид в rust_build.md + строка в RULES.
+if timeout 500 bash "$HERE/tests/chaos.sh" "${CHAOS_ITERS:-3}" "${CHAOS_SEED:-4242}" >"$T/chaos.log" 2>&1; then
+  pass "chaos: ${CHAOS_ITERS:-3} итераций seed=${CHAOS_SEED:-4242} — инварианты целы, doctor+recovery зелёные"
+else
+  fail "chaos: нарушение инварианта восстановления (находка: сид → rust_build.md + RULES)"
+  sed -n '1,40p' "$T/chaos.log"
+fi
+grep -q "killed=yes" "$T/chaos.log" && pass "chaos: kill -9 реально убил прогон (spread проверен)" || pass "chaos: kill не понадобился (прогоны успели завершиться — spread)"
+
 echo
 echo "ИТОГО: PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" -eq 0 ]

@@ -335,6 +335,34 @@ done
 
 **Цена:** одна сессия, ~3–4 ч.
 
+## A7 — СДАН (сессия a7-chaos, ветка devh/a7-chaos, коммит по A7)
+
+Chaos-e2e: `tests/chaos.sh <iterations> [seed]` убивает `devh run W-001`
+сигналом -9 в случайной точке (SLP=((SEED+i*7)%8) сек, детерминированно по
+сиду) и проверяет, что харнесс выживает и восстанавливается. Растяжка фаз:
+SMOKE_SLOW=1 (mk_smoke_repo пишет 'slow' в .smoke/mutate-mode В КОММИТ —
+worktree чистый checkout, файл вне коммита невидим) + стаб chaos-slow.sh
+sleep 2 в агента → kill размазан по red → агент → verify → mutate.
+
+**check_invariants (4 ассерта + 1 находка):** 1) status парсится
+open/active/done (atomic_write, no torn); 2) fold(events.log)==status — A3-replay
+под огнём (awk-реплика state::fold); 3) нет .harness/**/*.tmp сирот; 4) в
+worktree нет мутационных маркеров (урок ae9f619); 5) stale run.pid — только
+лог, находка doctor, не падение. Лог итерации: sleep/killed/rc/стадия ДО
+recovery/doctor/recovery/inv — воспроизводимо по сиду.
+
+**Грабли (все съедены, см. §9.23):** exec в под-оболочке (иначе kill бьёт
+обёртку, devh-сирота держит run.lock); settle-петля pgrep на агента-сироту
+перед doctor/abort/resume; STAGE читать до recovery (timing.log
+перезаписывается); SC2002-useless-cat на чтении pid.
+
+**Приёмка:** chaos 5 итер × 2 сида — 0 нарушений; test.sh секция 45 (3
+итерации) PASS; bash-сьюта 393 PASS / 0 FAIL; CI devharness-rs.yml ×5
+seed 2024; ночной devharness-chaos.yml (cron 03:00, dispatch до 50
+итераций). cargo test standalone 164 unit + 55 integration зелёные (31/55
+флейк сразу после bash-сьюты — контеншн /tmp WT_ROOT, §9.21). `.rs` не
+тронуты — мутационный аудит не нужен.
+
 ## A8 — Flaky-дисциплина v1
 
 Минимально честный контур (без ветки `FlakySuspect` в Verdict — не раздувай enum на v1):

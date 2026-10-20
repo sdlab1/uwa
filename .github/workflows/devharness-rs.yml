@@ -27,6 +27,8 @@ jobs:
         run: |
           cargo build -p devh
           bash devharness/test.sh # DEVH по умолчанию → devharness/devh → target/debug/devh
+      - name: "chaos-e2e (A7): kill -9 в случайной точке × 5 (seed 2024)"
+        run: bash devharness/tests/chaos.sh 5 2024
       - name: "musl-статик (дистрибуция): полный oracle на статике — flock/fs2/setsid"
         run: |
           rustup target add x86_64-unknown-linux-musl

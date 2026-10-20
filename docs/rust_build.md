@@ -836,3 +836,54 @@ FREEZE=1 при незаявленном scope у всех открытых сп
 Корпус A5 — секции 44/44b/44c: 13-й кейс freeze-cheat **пойман** (kill-rate
 42/42, 100%; 13/13 по плану). test.sh 391 PASS / 0 FAIL (44 секции + 44b/44c),
 unit 164 + integration 55 зелёные, fmt/clippy чистые, shellcheck чист.
+
+## 9.23 — A7: chaos-e2e, kill -9 в случайной точке (2026-10-20, ветка devh/a7-chaos)
+
+**A7 — не Rust-код, а e2e-жгут:** `tests/chaos.sh <iterations> [seed]` +
+стаб `chaos-slow.sh` + ручка SMOKE_SLOW в mk_smoke_repo.sh + секция 45 в
+test.sh + CI-шаги. `.rs` не тронуты → мутационный аудит не требуется;
+fmt/clippy чисты, bash-сьют зелёный.
+
+1. **`kill -9` должен бить в САМ devh, не в subshell-обёртку.** Наивная
+   запись `( cd $S && $DEVH run W-001 ) & RUNPID=$!` даёт в RUNPID PID
+   обёртки: kill -9 убивает обёртку, devh продолжает жить сиротой и держит
+   run.lock → recovery «W-001 сейчас в работе, run отклонён» (rc=1).
+   Лечение: `exec` перед командой в под-оболочке — тогда RUNPID есть devh.
+   Тот же класс, что orphan-settle (§9.12): убитый родитель оставляет
+   живого ребёнка.
+2. **Орфана агента надо дождать.** chaos-slow.sh (good.sh + sleep 2 перед
+   фиксом) — kill -9 в окне агента оставляет sleeping-процесс, который
+   ДОПИСЫВАЕТ файл уже без родителя. Без settle abort/resume лезет в
+   недописанный write → гонка. Лечение: settle-петля
+   `for _ in $(seq 1 16); do pgrep -f $STUB || break; sleep 0.5; done`
+   (8 с бюджет) ПЕРЕД doctor/abort/resume.
+3. **SMOKE_SLOW должен попасть в КОММИТ микрорепо, не после него.** Блок
+   `printf 'slow' > .smoke/mutate-mode` идёт ДО `git add -A`: worktree —
+   чистый checkout, файла вне коммита в нём нет (первая попытка писала блок
+   после commit — worktree видел быстрый режим, kill пришёлся бы в red-pre,
+   и растяжку фаз никто не проверил бы).
+4. **Стадия убийства читается ДО recovery.** recovery-прогон перезаписывает
+   W-001-timing.log — иначе в логе итерации всегда «commit+push» (финальная
+   стадия любого успешного прогона), а не та, на которой прилетел kill -9.
+5. **run.pid: stale = находка doctor, НЕ падение ассерта.** check_invariants
+   печатает CHAOS-PID и не роняет тест: отсутствие процесса при живом
+   pid-файле лечится doctor/recovery, а не ассертом восстановления.
+6. **SC2002 на чтении pid:** `cat f | tr` → useless cat; починено
+   `pid=$(awk '{gsub(/[ \t]/,""); print}' f)`.
+
+**check_invariants = 4 ассерта + 1 находка** (каждый ест механизм харнесса):
+1) status парсится open/active/done (atomic_write, no torn file);
+2) fold(events.log) == status — прямой A3-replay под kill -9 (awk-реплика
+state::fold: claimed→active, merged→done, aborted→open);
+3) нет .harness/**/*.tmp осиротевших атомарных записей;
+4) grep маркера «~ changed by cargo-mutants ~» в $S.wt — урок ae9f619;
+5) stale run.pid — только лог. Размаз: SLP=((SEED+i*7)%8) сек детерминированно
+по стадиям red → агент(sleep 2) → verify → mutate(slow 10).
+
+**Приёмка A7:** chaos.sh 5 итераций × 2 сида (1234: все 5 kill-нуты, 0
+нарушений; 77: те же 5, 0) — зелёные; test.sh секция 45 (3 итерации,
+seed 4242) PASS; вся bash-сьюта PASS=393 FAIL=0; CI devharness-rs.yml ×5
+seed 2024; ночной devharness-chaos.yml (cron 03:00, dispatch до 50 итераций,
+tee в STEP_SUMMARY). `cargo test -p devh` standalone = 164 unit + 55
+integration зелёные; тот же прогон сразу после bash-сьюты даёт 31/55 —
+контеншн-флейк общего /tmp WT_ROOT (§9.21), ретрай чисто.

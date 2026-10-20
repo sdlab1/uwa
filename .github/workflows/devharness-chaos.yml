@@ -1,0 +1,30 @@
+name: devharness-chaos
+# A7-ночной прогон: 50 итераций kill -9 в случайной точке (seed фиксирован —
+# воспроизводимо). Красный → сид в docs/rust_build.md §9.23 + строка в RULES.
+on:
+  schedule:
+    - cron: "0 3 * * *" # 03:00 UTC — тихий час CI
+  workflow_dispatch:
+    inputs:
+      iterations:
+        description: "число итераций"
+        default: "50"
+      seed:
+        description: "сид (пусто = случайный)"
+        default: ""
+
+jobs:
+  chaos:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build -p devh
+      - name: "chaos × ${{ inputs.iterations || 50 }} (seed=${{ inputs.seed || random }})"
+        run: |
+          SEED="${{ inputs.seed }}"
+          [ -n "$SEED" ] || SEED=$RANDOM
+          echo "seed=$SEED" >> "$GITHUB_STEP_SUMMARY"
+          bash devharness/tests/chaos.sh "${{ inputs.iterations || 50 }}" "$SEED" | tee -a "$GITHUB_STEP_SUMMARY"

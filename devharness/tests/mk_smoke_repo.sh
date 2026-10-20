@@ -101,6 +101,13 @@ WT_ROOT=$WT
 LOG_DAYS=7
 EOF
 
+# A7-нож (env): SMOKE_SLOW=1 — режим мутатора slow (sleep 10) в КОММИТ
+# (worktree — чистый checkout origin/main: файла вне коммита в нем нет).
+# Вместе с chaos-slow.sh (сон 2s в агенте) kill -9 в [0..7]s размазан по
+# стадиям red -> агент -> verify -> mutate. Дефолт: режим ok (быстрый).
+if [ "${SMOKE_SLOW:-0}" = 1 ]; then
+  printf 'slow' > .smoke/mutate-mode
+fi
 git add -A
 git commit -qm init
 git push -q -u origin main
@@ -112,6 +119,7 @@ git push -q -u origin main
 if [ "${SMOKE_FREEZE:-0}" = 1 ]; then
   printf 'FREEZE=1\n' >> .harness/config
 fi
+
 
 # печатаем путь — вызывающий ловит: S=$(mk_smoke_repo.sh ...)
 echo "$DIR"
