@@ -65,6 +65,47 @@ pub fn observe_from_spec(spec: &str) -> Option<String> {
     }
 }
 
+/// A6 FREEZE: секция спеки `FILES:` → allowlist глобами (по строке).
+/// Инлайн (`FILES: src/calc.sh`) или буллеты (`FILES:`, далее по строке
+/// `- src/calc.sh`, `- src/*`).
+///
+/// Живёт файлом items/W-NNN/files; run читает его в freeze-гейт вместе с
+/// глобальным FREEZE_ALLOW. Префикс не пересекается с OBSERVE:/RED:/RED-EXPECT:.
+pub fn files_from_spec(spec: &str) -> Option<String> {
+    let mut globs: Vec<&str> = Vec::new();
+    let mut inside = false;
+    for raw in spec.lines() {
+        let l = raw.trim_start();
+        if let Some(rest) = l.strip_prefix("FILES:") {
+            inside = true;
+            let inline = rest.trim();
+            if !inline.is_empty() {
+                globs.push(inline);
+            }
+            continue;
+        }
+        if !inside {
+            continue;
+        }
+        let t = l.trim();
+        if t.is_empty() {
+            continue; // пустая строка внутри блока не рвёт
+        }
+        let Some(rest) = t.strip_prefix("- ") else {
+            break;
+        }; // следующий раздел (RED:, …)
+        let glob = rest.trim();
+        if !glob.is_empty() {
+            globs.push(glob);
+        }
+    }
+    if globs.is_empty() {
+        None
+    } else {
+        Some(globs.join("\n"))
+    }
+}
+
 pub fn new_cmd(
     store: &Store,
     arg: Option<&str>,
@@ -111,6 +152,9 @@ pub fn new_cmd(
             if let Some(points) = observe_from_spec(&spec) {
                 std::fs::write(d.join("observe.md"), &points)?;
             }
+            if let Some(files) = files_from_spec(&spec) {
+                std::fs::write(d.join("files"), &files)?;
+            }
             drop(_g);
             println!(
                 "{}OK {}: {} (спека из todo/{n}.md){}{}{}",
@@ -129,7 +173,7 @@ pub fn new_cmd(
                 "   RED-пруф ОБЯЗАТЕЛЕН (в первую очередь): {} — команда, падающая на чистом HEAD",
                 d.join("red.cmd").display()
             );
-            println!("   Спека (todo/{n}.md): секции OBSERVE: (точки наблюдения — return/side-effect/state/log списком «- …», до RED:) и RED:");
+            println!("   Спека (todo/{n}.md): секции FILES: (allowlist FREEZE-гейта — глобы «- src/*»), OBSERVE: (return/side-effect/state/log, до RED:) и RED:");
             return Ok(());
         }
     }
@@ -156,6 +200,9 @@ pub fn new_cmd(
         if let Some(points) = observe_from_spec(&spec) {
             std::fs::write(d.join("observe.md"), &points)?;
         }
+        if let Some(files) = files_from_spec(&spec) {
+            std::fs::write(d.join("files"), &files)?;
+        }
         (id, d)
     } else {
         let spec = read_spec_stdin()?;
@@ -180,7 +227,7 @@ pub fn new_cmd(
         d.join("red.cmd").display()
     );
     println!(
-        "   Спека (spec.md): секции OBSERVE: (точки наблюдения — return/side-effect/state/log списком «- …», до RED:) и RED:"
+        "   Спека (spec.md): секции FILES: (allowlist FREEZE-гейта — глобы «- src/*»), OBSERVE: (return/side-effect/state/log) и RED:"
     );
     Ok(())
 }
@@ -219,6 +266,9 @@ pub fn create_item(
     if let Some(points) = observe_from_spec(spec) {
         std::fs::write(d.join("observe.md"), &points)?;
     }
+    if let Some(files) = files_from_spec(spec) {
+        std::fs::write(d.join("files"), &files)?;
+    }
     if let Some(reason) = no_crap {
         std::fs::write(d.join("no-crap"), reason)?;
     }
@@ -246,6 +296,9 @@ pub fn create_item_numbered(
     if let Some(points) = observe_from_spec(spec) {
         std::fs::write(item_rel(&id, "observe.md"), &points)?;
     }
+    if let Some(files) = files_from_spec(spec) {
+        std::fs::write(item_rel(&id, "files"), &files)?;
+    }
     Ok(d)
 }
 
@@ -272,6 +325,26 @@ mod tests {
         assert_eq!(
             observe_from_spec(spec).as_deref(),
             Some("return: load_average() → Some(значение) / None при мусоре\nstate: HARNESS_MUTATE_MAX_LOAD читается один раз")
+        );
+    }
+
+    #[test]
+    fn files_from_spec_reads_globs_until_next_section() {
+        let spec = "# Задача\n\nFILES:\n- src/calc.sh\n- src/*\n\nRED: true\n";
+        assert_eq!(files_from_spec(spec).as_deref(), Some("src/calc.sh\nsrc/*"));
+        assert_eq!(
+            files_from_spec("FILES: src/calc.sh\n").as_deref(),
+            Some("src/calc.sh")
+        );
+        assert_eq!(files_from_spec("RED: true\n"), None);
+        assert_eq!(files_from_spec("FILES:\n"), None);
+        assert_eq!(files_from_spec("FILES:   \n"), None);
+        assert_eq!(files_from_spec("FILES:\n- \nRED: true\n"), None);
+        let spec = "FILES:\n\n- a.sh\n\nRED: true\n";
+        assert_eq!(files_from_spec(spec).as_deref(), Some("a.sh"));
+        assert_eq!(
+            files_from_spec("OBSERVE:\n- log: x\nRED-EXPECT: boom\n"),
+            None
         );
     }
 

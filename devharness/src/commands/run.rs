@@ -861,6 +861,66 @@ fn agent_env(id: &ItemId, wt: &Path, store: &Store, cfg: &RunConfig) -> Vec<(Str
     ]
 }
 
+/// A6 FREEZE-гейт: дифф сессии против allowlist (per-item FILES: спеки +
+/// глобальный FREEZE_ALLOW). Первый в лестнице — дешевле всех: git-дифф
+/// вместо прогона тестов, fail-fast до VERIFY. Правка tests/** — только при
+/// записанном обходе items/W-NNN/allow-test-edit (симметрия no-crap: обход
+/// записывают с причиной, а не надеются на «и так пройдёт»). Пустой allowlist
+/// (ни FILES: в спеке, ни FREEZE_ALLOW) — «скоп не заявлен»: пропуск С ЛОГОМ
+/// (не молчаливый Pass, не tripwire на каждую правку). Считает чистый
+/// gates::freeze_violations — IO только на чтении allowlist'а.
+fn freeze_gate(store: &Store, cfg: &RunConfig, wt: &Path, id: &ItemId) -> (String, Verdict) {
+    let changed = git::changed_files(wt);
+    let mut allow = cfg.freeze_allow.clone();
+    if let Some(files) = store.read(item_rel(id, "files")) {
+        allow.extend(
+            files
+                .lines()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from),
+        );
+    }
+    if allow.is_empty() {
+        return (
+            "freeze: scope не задан (нет FILES: в спеке и FREEZE_ALLOW) — гейт пропущен\n".into(),
+            Verdict::Pass,
+        );
+    }
+    let test_edit = store
+        .read(item_rel(id, "allow-test-edit"))
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false);
+    let mut log = format!(
+        "freeze: allowlist [{}]; обход allow-test-edit: {}; дифф: {}\n",
+        allow.join(", "),
+        if test_edit {
+            "записан"
+        } else {
+            "нет"
+        },
+        if changed.is_empty() {
+            "пусто".to_string()
+        } else {
+            changed.join(", ")
+        }
+    );
+    let violations = gates::freeze_violations(&changed, &allow, test_edit);
+    let verdict = if violations.is_empty() {
+        Verdict::Pass
+    } else {
+        // причины — и в лог, и в tail: give_up печатает только имя гейта,
+        // поэтому доказательство нарушения живёт в logs/W-NNN-freeze.log
+        log.push_str(&violations.join("\n"));
+        log.push('\n');
+        Verdict::Fail {
+            gate: Gate::Freeze,
+            tail: violations.join("\n"),
+        }
+    };
+    (log, verdict)
+}
+
 fn gate_ladder(
     store: &Store,
     cfg: &RunConfig,
@@ -870,6 +930,22 @@ fn gate_ladder(
     round: u32,
 ) -> Result<(), GateStop> {
     let c = colors();
+
+    // A6: FREEZE — первым (дешевле всех): git-дифф до любого прогона.
+    if cfg.freeze {
+        let (flog, verdict) = freeze_gate(store, cfg, wt, id);
+        std::fs::write(store.log_file(id, "freeze"), &flog).ok();
+        timing.stage("freeze", store, id);
+        match verdict {
+            Verdict::Fail { .. } => return Err(GateStop { verdict, log: flog }),
+            Verdict::Pass => {}
+            // freeze_gate считает чистую функцию по диффу: команд нет —
+            // env/spec-блокеры априори невозможны (иначе это дефект гейта).
+            Verdict::EnvBlocked { .. } | Verdict::SpecBlock { .. } => {
+                unreachable!("freeze_gate не отдаёт Env/Spec")
+            }
+        }
+    }
 
     let verify_raw = exec_logged(store, wt, id, &cfg.verify, "verify", VERIFY_TIMEOUT);
     if verify_raw.exit != Some(0) {

@@ -17,7 +17,7 @@ use crate::core::types::{CrapCfg, ItemId, MutateCfg, RunConfig};
 use crate::shell::store::{Item, Store};
 use crate::Cmd;
 
-pub const CONFIG_KEYS: [&str; 32] = [
+pub const CONFIG_KEYS: [&str; 34] = [
     "VERIFY",
     "BOOTSTRAP",
     "AGENT",
@@ -47,6 +47,8 @@ pub const CONFIG_KEYS: [&str; 32] = [
     "MSG_DENY",
     "NO_IGNORED",
     "IGNORED_ALLOWLIST",
+    "FREEZE",
+    "FREEZE_ALLOW",
     "LINT",
     "LINT_CMD",
     "REVIEW",
@@ -129,6 +131,16 @@ pub fn load_config(root: &Path) -> anyhow::Result<RunConfig> {
         bench: g("BENCH").filter(|s| !s.trim().is_empty()),
         no_ignored: boolv("NO_IGNORED", true),
         ignored_allowlist,
+        freeze: boolv("FREEZE", false),
+        freeze_allow: g("FREEZE_ALLOW")
+            .map(|v| {
+                v.split_whitespace()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(String::from)
+                    .collect()
+            })
+            .unwrap_or_default(),
         lint: boolv("LINT", true),
         lint_cmd: g("LINT_CMD").unwrap_or_default(),
         review: boolv("REVIEW", true),

@@ -105,5 +105,13 @@ git add -A
 git commit -qm init
 git push -q -u origin main
 
+# A6-нож (env): SMOKE_FREEZE=1 — FREEZE-гейт включён в конфиге микрорепо
+# (код-дефолт false; adv_run умеет и выключить обратно через HARNESS_FREEZE=0).
+# Обход allow-test-edit сюда НЕ кладётся: next_id = max(items)+1 — каталог
+# W-001 до devh new сдвинул бы item на W-002; adv_run пишет обход ПОСЛЕ new.
+if [ "${SMOKE_FREEZE:-0}" = 1 ]; then
+  printf 'FREEZE=1\n' >> .harness/config
+fi
+
 # печатаем путь — вызывающий ловит: S=$(mk_smoke_repo.sh ...)
 echo "$DIR"

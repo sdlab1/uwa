@@ -777,3 +777,62 @@ unit 158 + integration 55 зелёные; fmt/clippy чистые; shellcheck 18
 bash-сьюта — contention/остаточные процессы в общем /tmp WT_ROOT); два
 подряд ретрая — 55/55 чисто. Плана на K1/B1 это не меняет: метрика kill-rate
 корпуса (36/36) теперь доступна для B1 «autonomy metric».
+
+## 9.22 — A6: FREEZE-гейт — смерть дыры №1 (2026-10-20, ветка devh/a6-freeze, коммит 597d448)
+
+Документированная дыра №1 плана advance2 (§A6): агент честно чинит HEAD-дефект
+и попутно ослабляет `tests/all.sh` — **проходит всё** (verify зелёный, red.post
+зелёный: red.cmd = тот же tests/all.sh). FREEZE-гейт закрывает класс: дифф
+сессии не выходит за заявленные файлы. Позиция — **первый в gate_ladder**,
+дешевле всех (git-дифф вместо прогона тестов), fail-fast до VERIFY.
+
+**Allowlist** = секция спеки `FILES:` (new.rs `files_from_spec` →
+items/W-NNN/files, инлайн или буллеты `- …` до следующей секции) + глобальный
+`FREEZE_ALLOW` (пробел-разделённые глобы). Матчер (`freeze_glob`, gates.rs):
+`*`-суффикс = каталог целиком (`src/*`), `*`-префикс = расширение (`*.md`),
+иначе точное совпадение; серединный `*` спека не обещает — тесты пинят
+near-miss'ы (`src2/`, `src`, `README.mdx`). Правка `tests/**` — только через
+записанный обход items/W-NNN/allow-test-edit с причиной (симметрия no-crap:
+обход записывают, а не надеются «и так пройдёт»). Пустой allowlist (нет
+`FILES:`, нет FREEZE_ALLOW) — **пропуск С ЛОГОМ** («freeze: scope не задан…»),
+не молчаливый Pass и не tripwire на каждую правку; doctor soft-warn, если
+FREEZE=1 при незаявленном scope у всех открытых спек. `judge(Gate::Freeze)`
+= **Fail**, намеренно: гейт считается по диффу (чистая функция, команд нет),
+через judge() потеря гейта должна быть красной, а не тихим проходом (урок A1).
+
+Ключевые факты механики (грабли сессии):
+
+1. **`--in-diff` в cargo-mutants 27.1.0 — это ФАЙЛ диффа, а не ref**: без
+   подготовки `ERROR Failed to open diff file`. Рецепт: `git diff HEAD~1 >
+   /tmp/a6mut.diff && cargo mutants --in-diff /tmp/a6mut.diff -p devh`. Скоуп
+   = только тронутые строки (43 мутанта), при этом commands/** в скоупе —
+   в отличие от `devharness/cargo-mutants.toml`, который их исключает (а для
+   A6 нельзя: `files_from_spec` живёт в commands/new.rs).
+2. **Worktree без `.harness/config` = 31/55 integration красных**: микрорепо
+   тестов получает дефолтный шаблон MUTATE (gobot muex) → «инструмент не
+   распознан» → env-блокер. Лечение: `cp` конфига из main-репо (gitignored,
+   ручной копир, как в W-041). Не дефект A6 — ловушка любой новой worktree-сессии.
+3. **next_id = max(items)+1**: обход allow-test-edit, положенный в mk-скрипт
+   ДО `devh new`, сдвигает item на W-002. adv_run пишет обход ПОСЛЕ new.
+4. **Мутационный аудит (--in-diff, 43 мутанта, 17 мин, incremental=true):**
+   34 caught / 9 unviable / **0 missed** / 0 timeout. Kill-rate 34/34 testable
+   = 100%. Unviable — граница мутатора, не дыра тестов: 8× замена `+=` на
+   `-=`/`*=` в init.rs (String не импл SubAssign/MulAssign) + 1× fn-replace
+   create_item (ItemId не Default). Вся freeze-поверхность поймана:
+   freeze_violations ×4 (vec![]/vec![new]/xyzzy/delete !), freeze_allowed ×3
+   (true/false/&&→||), freeze_glob ×3 (true/false/==→!=).
+5. **GiveUp(Fix) печатает только имя гейта** (факт 3 из §9.21) — поэтому
+   причины freeze идут и в logs/W-NNN-freeze.log, и в tail; лог-контроль
+   (`ctrl_file:ctrl_pat`) доказывает ПРИЧИНУ: «правка вне scope: tests/all.sh
+   (обход: allow-test-edit)».
+6. **Стаб 44 переживает fix-раунды FREEZE** (маркер `*FREEZE*` в case, как
+   стабы 37–43 в §9.21): иначе корпус видел бы смерть агента (rc=3), а не
+   отработку гейтом ровно max_fix=2. Расширение stub-промпта — как стаб
+   отличил fix-промпт от рабочего: в fix-промпте нет OBSERVE-точки, зато есть
+   FREEZE-хвост.
+
+**Приёмка A6:** ручная 3-сторонняя проверка — дыра (freeze-off → rc=0,
+`OK гейты`), поимка (FREEZE=1 + FILES: src/calc.sh → rc=1, маркер `FREEZE красный после 2 раундов фикса` + лог-контроль), обход (allow-test-edit → rc=0).
+Корпус A5 — секции 44/44b/44c: 13-й кейс freeze-cheat **пойман** (kill-rate
+42/42, 100%; 13/13 по плану). test.sh 391 PASS / 0 FAIL (44 секции + 44b/44c),
+unit 164 + integration 55 зелёные, fmt/clippy чистые, shellcheck чист.

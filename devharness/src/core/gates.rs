@@ -9,6 +9,9 @@ pub enum Gate {
         /// `None` = старое поведение: любой exit≠0 на pre считается RED.
         expect: Option<String>,
     },
+    /// A6: правки сессии вышли за заявленный scope (spec FILES: + FREEZE_ALLOW).
+    /// Первый гейт лестницы — дешевле всех, fail-fast до VERIFY.
+    Freeze,
     Verify,
     NoIgnored,
     Lint,
@@ -28,6 +31,7 @@ impl Gate {
     pub fn name(&self) -> &'static str {
         match self {
             Gate::Red { .. } => "RED",
+            Gate::Freeze => "FREEZE",
             Gate::Verify => "VERIFY",
             Gate::NoIgnored => "NO-IGNORED",
             Gate::Lint => "LINT",
@@ -314,6 +318,49 @@ pub fn unexpected_ignores(log: &str, allowlist: &[String]) -> Vec<String> {
         .collect()
 }
 
+/// A6 FREEZE-гейт: чистая функция (без IO) — правки сессии вышли за
+/// заявленные файлы? `allow` — глобы спеки (items/W-NNN/files) + глобальный
+/// FREEZE_ALLOW: `*`-суффикс (директория целиком), `*`-префикс (расширение),
+/// иначе точное совпадение. Правка `tests/**` — только при записанном обходе
+/// allow-test-edit (симметрия no-crap: обход записывают, а не надеются).
+/// Пустой `allow` сюда не заходит — «скоп не заявлен» вызывающий решает сам
+/// (run.rs пропускает гейт с логом, иначе FREEZE=1 ронял бы любую работу).
+/// Сообщение несёт лечебный хинт: куда идти за обходом.
+pub fn freeze_violations(changed: &[String], allow: &[String], test_edit: bool) -> Vec<String> {
+    changed
+        .iter()
+        .filter(|f| !freeze_allowed(f, allow, test_edit))
+        .map(|f| {
+            let hint = if f.starts_with("tests/") {
+                "обход: allow-test-edit"
+            } else {
+                "добавь в FILES: спеки или FREEZE_ALLOW"
+            };
+            format!("FREEZE: правка вне scope: {f} ({hint})")
+        })
+        .collect()
+}
+
+fn freeze_allowed(file: &str, allow: &[String], test_edit: bool) -> bool {
+    if allow.iter().any(|pat| freeze_glob(pat, file)) {
+        return true;
+    }
+    test_edit && file.starts_with("tests/")
+}
+
+/// Глоб allowlist'а: `*` только на концах (суффикс/префикс), иначе точное.
+/// `src/*` = весь каталог; `*.md` = все markdown; серединный `*` не
+/// поддерживается — спека ставит глобы на границах, а не внутри имён.
+fn freeze_glob(pat: &str, file: &str) -> bool {
+    match pat.strip_suffix('*') {
+        Some(prefix) => file.starts_with(prefix),
+        None => match pat.strip_prefix('*') {
+            Some(suffix) => file.ends_with(suffix),
+            None => file == pat,
+        },
+    }
+}
+
 fn regex_matches(pat: &str, name: &str) -> bool {
     match regex::Regex::new(pat) {
         Ok(re) => re.is_match(name),
@@ -578,6 +625,12 @@ pub fn judge(gate: &Gate, raw: &Raw, cfg: &RunConfig) -> Verdict {
                 },
             }
         }
+        // A6: FREEZE считается по диффу (run.rs, до VERIFY), а не по Raw —
+        // через judge() он означал бы «гейт потерян» (тихий Pass = дыра).
+        Gate::Freeze => Verdict::Fail {
+            gate: gate.clone(),
+            tail: "freeze: гейт считается по диффу в run.rs, не по выводу команды".into(),
+        },
         Gate::Verify | Gate::Bench => exit_or_fail(gate, raw),
         Gate::NoIgnored if !cfg.no_ignored => Verdict::Pass,
         Gate::NoIgnored => {
@@ -1383,6 +1436,95 @@ test result: FAILED. 1 passed; 1 failed";
             judge(&Gate::NoIgnored, &raw(Some(0), allowlisted), &empty_cfg),
             Verdict::Fail { .. }
         ));
+    }
+
+    // ── A6 FREEZE-гейт: дифф сессии не выходит за заявленные файлы ──
+
+    #[test]
+    fn freeze_violations_flags_test_edit() {
+        // RED-EXPECT спеки A6: правка tests/** без записанного обхода —
+        // нарушение с лечебным хинтом (куда идти за обходом).
+        let v = freeze_violations(&["tests/all.sh".into()], &["src/calc.sh".into()], false);
+        assert_eq!(
+            v,
+            vec!["FREEZE: правка вне scope: tests/all.sh (обход: allow-test-edit)"]
+        );
+    }
+
+    #[test]
+    fn freeze_violations_respects_recorded_bypass() {
+        // Записанный обход (items/W-NNN/allow-test-edit) легитимирует ТОЛЬКО
+        // tests/**: тот же tests/all.sh проходит, а README.md — всё ещё нет.
+        let allow = vec!["src/calc.sh".into()];
+        assert!(freeze_violations(&["tests/all.sh".into()], &allow, true).is_empty());
+        assert_eq!(
+            freeze_violations(&["README.md".into()], &allow, true),
+            vec!["FREEZE: правка вне scope: README.md (добавь в FILES: спеки или FREEZE_ALLOW)"]
+        );
+    }
+
+    #[test]
+    fn freeze_violations_matches_globs() {
+        // Глобы спеки ровно по контракту A6: точное / *-суффикс / *-префикс.
+        // `src/*` — каталог целиком; `*.md` — все markdown; серединный `*`
+        // спека не обещает (пользователь пишет глобы на границах).
+        let allow = vec!["src/calc.sh".into(), "src/*".into(), "*.md".into()];
+        assert!(freeze_violations(
+            &[
+                "src/calc.sh".into(),
+                "src/db.py".into(),
+                "src/deep/x.sh".into(),
+                "README.md".into(),
+            ],
+            &allow,
+            false
+        )
+        .is_empty());
+        // near-miss'ы: точность матчера — тоже поверхность для мутаций.
+        // (src/* накрывает весь src/, *.md — все markdown; ловим стыки
+        // границ: src2/, src без слеша, .mdx — не .md)
+        for out in ["src2/calc.sh", "src", "README.mdx"] {
+            assert_eq!(
+                freeze_violations(&[out.into()], &allow, false).len(),
+                1,
+                "{out} не должен матчиться ни одним глобом"
+            );
+        }
+    }
+
+    #[test]
+    fn freeze_violations_clean_diff_passes() {
+        // Нет диффа или весь дифф в scope — гейт зелёный (пустой allowlist
+        // сюда не заходит: пропуск решает вызывающий, см. run.rs).
+        assert!(freeze_violations(&[], &["src/".into()], false).is_empty());
+        assert!(freeze_violations(
+            &["src/a.sh".into(), "src/a.py".into()],
+            &["src/*".into()],
+            false
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn freeze_violations_lists_every_violation() {
+        // Не «первый нарушенный», а все:(fix-раунд агента должен увидеть
+        // полный список лишнего).
+        let v = freeze_violations(
+            &[
+                "tests/all.sh".into(),
+                "docs/x.md".into(),
+                "src/calc.sh".into(),
+            ],
+            &["src/calc.sh".into()],
+            false,
+        );
+        assert_eq!(v.len(), 2, "{v:?}");
+        assert!(v.iter().any(|m| m.contains("tests/all.sh")), "{v:?}");
+        assert!(v.iter().any(|m| m.contains("docs/x.md")), "{v:?}");
+        assert!(
+            v.iter().all(|m| m.starts_with("FREEZE: правка вне scope:")),
+            "{v:?}"
+        );
     }
 
     #[test]

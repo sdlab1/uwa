@@ -64,6 +64,45 @@ shellcheck 18 файлов (+7 стабов). Rust-код не тронут — 
 Один флейк integration (31 failed на первом прогоне сразу после bash-сьюта —
 contention в общем /tmp WT_ROOT); два ретрая 55/55 чисто — в журнал §9.21.
 
+## A6 — СДАН (сессия a6-freeze, ветка devh/a6-freeze, коммит 597d448)
+
+Дыра №1 закрыта: FREEZE-гейт — дифф сессии не выходит за заявленные файлы.
+Первый в gate_ladder (дешевле всех: git-дифф до любого прогона, fail-fast).
+Allowlist = секция спеки `FILES:` → items/W-NNN/files (глобы по строке) +
+глобальный FREEZE_ALLOW (`*` только на концах: суффикс = каталог, префикс =
+расширение). Правка tests/** — только через записанный обход
+items/W-NNN/allow-test-edit с причиной (симметрия no-crap). Пустой allowlist
+= пропуск С ЛОГОМ, не молчаливый Pass и не tripwire; doctor soft-warn при
+FREEZE=1 и незаявленном scope у всех открытых спек. judge(Gate::Freeze) =
+Fail: потеря гейта = красный (урок A1), а не тихий проход.
+
+Механика: `freeze_violations`/`freeze_allowed`/`freeze_glob` — чистые функции
+gates.rs (5 unit-тестов: hint на tests/**, записанный обход легитимирует
+ТОЛЬКО tests/**, глобы + near-miss'ы `src2/`/`src`/`.mdx`, чистый дифф,
+список ВСЕХ нарушений). `files_from_spec` (new.rs) — инлайн или буллеты до
+следующей секции; 4 сайта создания item пишут items/W-NNN/files. run:
+`freeze_gate` (allowlist + allow-test-edit → Fail с причинами в лог и tail;
+первым в лестнице, timing.stage("freeze"), logs/W-NNN-freeze.log).
+prompt fix: лечение = убрать лишнее из диффа или попросить человека записать
+обход; сам ослаблять проверки запрещено. Конфиг: FREEZE (код-дефолт false,
+шаблон init 1) + FREEZE_ALLOW; CONFIG_KEYS 34.
+
+Корпус A5 получил 13-й кейс: freeze-cheat.sh (честно чинит HEAD-дефект И
+ослабляет tests/all.sh — убирает add_non_numeric). Секции 44 (FREEZE=1 +
+FILES: src/calc.sh → rc=1, лог-контроль «правка вне scope: tests/all.sh
+(обход: allow-test-edit)»), 44b (freeze-off → rc=0 «OK гейты» — дыра
+подтверждена как РЕАЛЬНАЯ: гейт не декорация), 44c (обход allow-test-edit →
+rc=0 — FREEZE не tripwire, а allowlist). Стаб выживает на fix-раундах FREEZE
+(маркер *FREEZE* в case, как стабы 37–43) — отрабатывает ровно max_fix=2.
+
+**Итог: корпус 42/42 (kill-rate 100%); 13/13 по плану A6.** Приёмка:
+test.sh 391 PASS / 0 FAIL (44 секции + 44b/44c), unit 164 + integration 55
+зелёные, fmt/clippy чистые. Аудит мутантов (--in-diff, 43 мутанта): 34
+caught / 9 unviable (8× `+=`→`-=`/`*=` в init.rs: String не импл
+SubAssign/MulAssign; 1× fn-replace create_item: ItemId не Default) /
+**0 missed** — вся freeze-поверхность поймана. Артефакты — rust_build.md §9.22.
+
+
 
 **Ключевая идея, на которой стоит вся серия:** твои гейты парсят *выходные диалекты* инструментов (`"N mutants tested…: M caught"` из `parse_mutation_output`, `"CRAP: functions=N"` из `parse_crap_output`, `"VERDICT: …"` из `parse_review_verdict`). Значит, фейковые инструменты, говорящие на этих диалектах, прогоняют **настоящую** логику судей детерминированно и за секунды — без cargo-mutants (минуты) и без LLM (недетерминизм).
 

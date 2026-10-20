@@ -81,6 +81,13 @@ pub struct RunConfig {
     pub bench: Option<String>,
     pub no_ignored: bool,
     pub ignored_allowlist: Vec<String>,
+    /// A6 FREEZE-гейт: дифф сессии не выходит за заявленные файлы.
+    /// Код-дефолт false (шаблон init ставит 1): гейт первым в лестнице,
+    /// считается по диффу, allowlist = spec FILES: + FREEZE_ALLOW.
+    pub freeze: bool,
+    /// Глобальный allowlist FREEZE (пробел-разделённые глобы), поверх
+    /// per-item items/W-NNN/files из спеки.
+    pub freeze_allow: Vec<String>,
     pub lint: bool,
     pub lint_cmd: String,
     pub review: bool,
@@ -110,6 +117,8 @@ impl Default for RunConfig {
             bench: None,
             no_ignored: true,
             ignored_allowlist: Vec::new(),
+            freeze: false,
+            freeze_allow: Vec::new(),
             lint: true,
             lint_cmd: String::new(),
             review: true,

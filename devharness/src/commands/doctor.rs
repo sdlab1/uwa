@@ -143,6 +143,38 @@ pub fn doctor(store: &Store, cfg: &RunConfig, root: &Path) -> anyhow::Result<()>
         say("ok   mutation-гейт выключен");
     }
 
+    // A6: FREEZE без заявленного scope — не tripwire, а пропуск (см.
+    // run::freeze_gate). Пустой allowlist у ВСЕХ открытых item'ов = сигнал,
+    // что гейт включён вхолостую: спека должна объявить FILES:.
+    if cfg.freeze {
+        let unscoped: Vec<ItemId> = store
+            .items()
+            .into_iter()
+            .filter(|i| i.status != Status::Done)
+            .filter(|i| {
+                store
+                    .read(item_rel(&i.id, "spec.md"))
+                    .as_deref()
+                    .and_then(crate::commands::new::files_from_spec)
+                    .is_none()
+            })
+            .map(|i| i.id)
+            .collect();
+        if !cfg.freeze_allow.is_empty() {
+            say("ok   FREEZE: глобальный FREEZE_ALLOW задан (плюс FILES: у спек — что её не пересекают)");
+        } else if unscoped.is_empty() {
+            say("ok   FREEZE: у всех открытых спек есть FILES: (scope заявлен)");
+        } else {
+            let names: Vec<String> = unscoped.iter().map(|i| i.dir_name()).collect();
+            say(&format!(
+                "WARN FREEZE=1, но scope не заявлен: {} ({}) — гейт будет пропущен с логом; добавь секцию FILES: в спеку (глобы по строке) или FREEZE_ALLOW",
+                unscoped.len(),
+                names.join(", ")
+            ));
+            warn = warn.saturating_add(1);
+        }
+    }
+
     // P3: сам мутатор — версия и общий конфиг параметров.
     if let Some(m) = &cfg.mutate {
         let is_cm = m.tool.contains("cargo mutants") || m.tool.contains("cargo-mutants");

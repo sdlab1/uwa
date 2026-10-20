@@ -109,6 +109,8 @@ pub fn init(root: &Path) -> anyhow::Result<()> {
     let lint = env_num_or("LINT", 1);
     let lint_cmd = env_or("LINT_CMD", "");
     let review = env_num_or("REVIEW", 1);
+    let freeze = env_num_or("FREEZE", 1);
+    let freeze_allow = env_or("FREEZE_ALLOW", "");
 
     let mut c = String::new();
     c += "# devh config (source-ится bash'ем). Env-переменные HARNESS_* перекрывают.\n";
@@ -161,6 +163,10 @@ pub fn init(root: &Path) -> anyhow::Result<()> {
     c += &format!("LINT={lint}                      # 1 = авто-shellcheck изменённых *.sh\n");
     c += &format!("LINT_CMD='{lint_cmd}'         # проектный линтер (напр. cargo clippy -- -D warnings); пусто = выкл\n");
     c += &format!("REVIEW={review}                  # 1 = self-review диффа вторым запросом агенту (VERDICT: OK|ISSUES)\n");
+    c += &format!("FREEZE={freeze}                    # 1 = A6: дифф сессии не выходит за заявленные файлы (первый гейт, дешевле VERIFY)\n");
+    c += &format!("FREEZE_ALLOW='{freeze_allow}'          # глобальный allowlist FREEZE: глобы через пробел ('src/* *.md'; per-item — секция FILES: в спеке)\n");
+    c += "#   FREEZE: allowlist = FILES: спеки (items/W-NNN/files, глобы по строке) + FREEZE_ALLOW; пусто у обоих = гейт пропущен с логом\n";
+    c += "#   правка tests/** — только через записанный обход items/W-NNN/allow-test-edit (симметрия no-crap): devh run остановится и попросит причину\n";
 
     std::fs::create_dir_all(root.join(".harness/items"))?;
     std::fs::create_dir_all(root.join(".harness/summaries"))?;
