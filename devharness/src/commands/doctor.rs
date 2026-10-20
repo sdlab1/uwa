@@ -111,10 +111,10 @@ pub fn doctor(store: &Store, cfg: &RunConfig, root: &Path) -> anyhow::Result<()>
             ));
             warn = warn.saturating_add(1);
         }
-        // P8-5: спека без точек наблюдения (OBSERVE) рискует породить слепые
-        // тесты — мутанты там выживут. Мягкая проверка (не гейт): вратами
-        // остаётся RED, а OBSERVE — про то, что автор до кода назвал, ЧЕМ
-        // фича проверяется (план third_loop §7).
+        // P8-5→C1: спека без точек наблюдения (OBSERVE) рискует породить
+        // слепые тесты — мутанты там выживут. Мягкая проверка (не гейт):
+        // вратами остаётся RED, а OBSERVE — про то, что автор до кода назвал,
+        // ЧЕМ фича проверяется (план third_loop §7, живёт в contract.toml §C1).
         let blind: Vec<ItemId> = store
             .items()
             .into_iter()
@@ -123,7 +123,8 @@ pub fn doctor(store: &Store, cfg: &RunConfig, root: &Path) -> anyhow::Result<()>
                 store
                     .read(item_rel(&i.id, "spec.md"))
                     .as_deref()
-                    .and_then(crate::commands::new::observe_from_spec)
+                    .map(|spec| crate::commands::new::observe_points(spec))
+                    .filter(|p| !p.is_empty())
                     .is_none()
             })
             .map(|i| i.id)
@@ -155,7 +156,8 @@ pub fn doctor(store: &Store, cfg: &RunConfig, root: &Path) -> anyhow::Result<()>
                 store
                     .read(item_rel(&i.id, "spec.md"))
                     .as_deref()
-                    .and_then(crate::commands::new::files_from_spec)
+                    .map(|spec| crate::commands::new::file_globs(spec))
+                    .filter(|g| !g.is_empty())
                     .is_none()
             })
             .map(|i| i.id)
@@ -173,6 +175,28 @@ pub fn doctor(store: &Store, cfg: &RunConfig, root: &Path) -> anyhow::Result<()>
             ));
             warn = warn.saturating_add(1);
         }
+    }
+
+    // C1: контракт задачи — items/W-NNN/contract.toml у всех открытых item
+    // (devh new пишет его из спеки; старые item'ы живы без него — мягкий WARN,
+    // не гейт: контракт инжектится в промпт, а вердикты двигают FREEZE/RED/MUTATE).
+    let no_contract: Vec<ItemId> = store
+        .items()
+        .into_iter()
+        .filter(|i| i.status != Status::Done)
+        .filter(|i| store.read(item_rel(&i.id, "contract.toml")).is_none())
+        .map(|i| i.id)
+        .collect();
+    if no_contract.is_empty() {
+        say("ok   contract.toml у всех открытых item (C1)");
+    } else {
+        let names: Vec<String> = no_contract.iter().map(|i| i.dir_name()).collect();
+        say(&format!(
+            "WARN без contract.toml: {} ({}) — goal/observe/touch/red.expect живут одним артефактом; пересоздай item через devh new (advance2 §C1)",
+            no_contract.len(),
+            names.join(", ")
+        ));
+        warn = warn.saturating_add(1);
     }
 
     // A8: flaky-дисциплина — повторы VERIFY, прошедшие со 2-го раза.

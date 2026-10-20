@@ -21,45 +21,43 @@ pub fn agent_prompt(
 ) -> String {
     let mut extra = String::new();
     if store.read(item_rel(id, "red.cmd")).is_some() {
-        extra += "Есть RED-пруф: поведение, которое сейчас падает, после твоих правок обязано проходить.\n";
+        extra.push_str("Есть RED-пруф: поведение, которое сейчас падает, после твоих правок обязано проходить.\n");
     }
-    // P8-5: точки наблюдения спеки (OBSERVE), сформулированы до RED. Каждый
-    // пункт обязан иметь ассерт в тестах агента — тест, не проверяющий ни
-    // одной точки, тестом фичи не считается (план third_loop §7).
-    if let Some(points) = store.read(item_rel(id, "observe.md")) {
-        let points = points.trim();
-        if !points.is_empty() {
-            extra += &format!(
-                "Точки наблюдения фичи (OBSERVE спеки, сформулированы до RED):\n{points}\nКаждый пункт обязан иметь ассерт в твоих тестах; тест, не проверяющий ни одной точки, тестом фичи не считается.\n"
-            );
+    // C1: контракт задачи целиком (поглотил P8-5/OBSERVE): цель, точки
+    // наблюдения, заявленные файлы, ожидаемая подпись RED. Каждый раунд
+    // перечитывает АРТЕФАКТ, а не историю — «контракт переживает fix-раунды».
+    // Промпт остаётся ускорителем; вратами остаются гейты (advance2 §C1).
+    if let Some(text) = store.read(item_rel(id, "contract.toml")) {
+        if let Some(block) = crate::core::contract::Contract::parse(&text).block() {
+            extra.push_str(&block);
         }
     }
     if let Some(rules) = &cfg.rules {
-        extra += &format!(
+        extra.push_str(&format!(
             "Справочник проекта: {} — прочитай целиком. Это база известных граблей и уроков (технические знания: как здесь пишется код). Процессные правила уже вшиты в гейты харнесса. В тексте работы и в summary НЕ упоминай этот файл и todo/.\n",
             root.join(rules).display()
-        );
+        ));
     }
     if cfg.mutate.is_some() {
         let min_kill = cfg.mutate.as_ref().map(|m| m.min_kill).unwrap_or(90);
-        extra += &format!(
+        extra.push_str(&format!(
             "Тесты будут проверены мутационным гейтом: они обязаны УБИВАТЬ мутантов (kill-rate ≥ {min_kill}%). Пиши точные ассерты на реальное поведение; толерантные/тривиальные тесты гейт не пропустит.\n"
-        );
+        ));
     }
     // P8-3: пул исторически слабых зон из .harness/killmap.json (store'а
     // главного репо, не worktree) — прицел агенту. На вердикт гейта и
     // MIN_KILL не влияет (§8.5): killmap не карает.
     if let Some(block) = crate::core::killmap::Killmap::load(&store.dir).hotspot_block() {
-        extra += block.as_str();
+        extra.push_str(block.as_str());
     }
-    extra += "ON-FLY ANALYSIS: каждый файл, который открываешь/читаешь/правишь, анализируй ПОПУТНО — ни одно чтение в пустую: неоптимальность, избыточность, мёртвый код, дыра в тестах, подозрительный контракт → это ТИКЕТ (НЕ чинить — вне спеки!). Дописывай строкой в {hdir}/observations.md: <файл>:<строка> | <подозрение> | red-тест: <идея>. Тикет без red-теста не считается.\n";
-    extra += &format!(
+    extra.push_str("ON-FLY ANALYSIS: каждый файл, который открываешь/читаешь/правишь, анализируй ПОПУТНО — ни одно чтение в пустую: неоптимальность, избыточность, мёртвый код, дыра в тестах, подозрительный контракт → это ТИКЕТ (НЕ чинить — вне спеки!). Дописывай строкой в {hdir}/observations.md: <файл>:<строка> | <подозрение> | red-тест: <идея>. Тикет без red-теста не считается.\n");
+    extra.push_str(&format!(
         "## Контракт\n\
 - работа сделана только в worktree, git не трогаешь;\n\
 - verify ({}) проходит;\n\
 - summary написан, первая строка = сообщение коммита.\n",
         cfg.verify
-    );
+    ));
     extra = extra.replace("{hdir}", &store.dir.display().to_string());
 
     let ctx = git::log_oneline(root, 3);

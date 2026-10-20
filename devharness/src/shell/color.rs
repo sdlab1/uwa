@@ -3,30 +3,40 @@ pub struct Colors {
     pub g: &'static str,
     pub r: &'static str,
     pub y: &'static str,
+    pub m: &'static str, // magenta — счётчик unviable (⊘)
     pub c: &'static str,
     pub b: &'static str,
     pub d: &'static str,
     pub z: &'static str,
+    /// синий фон + яркий цифры: пилюля процента готовности (tui::pill).
+    pub pbg: &'static str,
+    pub pfg: &'static str,
 }
 
 const ON: Colors = Colors {
     g: "\x1b[32m",
     r: "\x1b[31m",
     y: "\x1b[33m",
+    m: "\x1b[35m",
     c: "\x1b[36m",
     b: "\x1b[1m",
     d: "\x1b[2m",
     z: "\x1b[0m",
+    pbg: "\x1b[44m",
+    pfg: "\x1b[1;97m",
 };
 
 const OFF: Colors = Colors {
     g: "",
     r: "",
     y: "",
+    m: "",
     c: "",
     b: "",
     d: "",
     z: "",
+    pbg: "",
+    pfg: "",
 };
 
 pub fn colors() -> Colors {

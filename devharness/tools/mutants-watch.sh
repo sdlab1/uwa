@@ -85,16 +85,16 @@ current() {
     [ -n "$f" ] || return 0
     n="$(basename -- "${f##*/}" .diff)"
     n="${n%%_col_*}"
-    n="${n#*_src_}"                        # devharness_src_ → путь от корня крейта
+    n="${n//__/_}"                         # cargo-mutants 27: кодирует / как __
+    n="${n#*_src_}"                        # devharness_src_ → от корня крейта
     n="$(printf '%s' "$n" | sed -E 's/_line_([0-9]+)$/:\1/')"
-    n="${n/_rs:/.rs:}"                     # core_escapes_rs:249 → core_escapes.rs:249
-    n="${n//_//}"                          # core_escapes → core/escapes
+    n="${n//_//}"                          # вложенные каталоги через _
     printf '%s' "$n"
 }
 
 render() {
     local snap dn total counts avg_s last_s cur
-    snap="$(python3 - "$OUTCOMES" "$MUTANTS_JSON" "$LOG" <<'PY'
+    snap="$(python3 -u - "$OUTCOMES" "$MUTANTS_JSON" "$LOG" <<'PY'
 import json, re, sys, collections
 outcomes_p, mutants_p, log_p = sys.argv[1:4]
 dn = 0; counts = collections.Counter(); avg = 0.0; last = ""
@@ -131,7 +131,7 @@ PY
     IFS=$'\t' read -r dn total counts avg_s last_s <<<"$snap"
     cur="$(current)"
     legend
-    python3 - "$dn" "$total" "$counts" "$avg_s" "$last_s" "$cur" <<'PY'
+    python3 -u - "$dn" "$total" "$counts" "$avg_s" "$last_s" "$cur" <<'PY'
 import os, sys, time
 dn, total, counts_s, avg_s, last, cur = sys.argv[1:7]
 dn = int(dn); total = int(total); avg = float(avg_s)
@@ -172,17 +172,17 @@ if last:
     tail += "  " + C["mag"] + last + C["off"]
 if cur:
     tail += "  " + C["warn"] + "\u25b8 " + cur + C["off"]
-sys.stdout.write("%s %s %s  avg %.1f мин  ETA %s%s\n"
-                 % (ts, pct, cnt, avg / 60.0, eta, tail))
+end = "\r\033[K" if os.environ.get("LIVE") == "1" else "\n"
+sys.stdout.write("%s %s %s  avg %.1f мин  ETA %s%s%s"
+                 % (ts, pct, cnt, avg / 60.0, eta, tail, end))
 PY
 }
 
 # в tty — каждая строка; в pipe/логе — каждые STEP готовых мутантов (иначе шум)
 render_throttled() {
     local dn
-    dn="$(cut -f1 <<<"$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1])).get("outcomes",[])))' "$OUTCOMES" 2>/dev/null || echo 0)")"
-    if [ -t 1 ]; then render; return 0; fi
-    if [ "$(( dn - LAST_PRINTED ))" -ge "$STEP" ]; then
+    dn="$(cut -f1 <<<"$(python3 -u -c 'import json,sys; print(len(json.load(open(sys.argv[1])).get("outcomes",[])))' "$OUTCOMES" 2>/dev/null || echo 0)")"
+    if [ "$LAST_PRINTED" = "-1" ] || [ "$(( dn - LAST_PRINTED ))" -ge "$STEP" ]; then
         LAST_PRINTED="$dn"
         render
     fi
@@ -194,6 +194,10 @@ if [ "$ONCE" = "1" ]; then
     render
     exit 0
 fi
+# ЖИВОЙ режим: одна строка, обновляемая \r на месте; первая — сразу.
+LIVE=1
+export LIVE
+LAST_PRINTED=-1
 
 while pgrep -x cargo-mutants >/dev/null; do
     render_throttled
@@ -205,3 +209,4 @@ while pgrep -x cargo-mutants >/dev/null; do
 done
 
 render
+echo
