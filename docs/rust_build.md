@@ -946,3 +946,87 @@ oracle ×3 подряд с variance-детектом (любое различи�
 покраснении. Живого LLM-агента в canary нет — с реальным агентом canary
 остаётся ручным ритуалом (см. advance2 §A8).
 
+\n
+## 9.25 — B1: ledger побегов + уровень автономии (2026-10-20, ветка devh/b1-autonomy)
+1. **Ledger правит человек, тулинг только читает.** `.harness/escapes.md`
+   рядом с observations.md — оба вне git (`.harness/`), оба руками.
+   Формат строки: `дата | W-NNN | найдено: … | класс: blind:* | реакция: …`
+   (пять ` | `-полей, префиксы `найдено:`/`класс:`/`реакция:` снимаются
+   л tossedо). Парсер (core/escapes.rs::parse_escape_line) — как
+   flaky_groups: просеивающий. Мусор без структуры пропускается, дата
+   обязана выглядеть датой (10 символов, дефисы на 5/8), сессия —
+   начинаться с W, класс — быть непустым. Реакция по умолчанию пуста
+   (4 поля — валидная строка) = debt.
+2. **Уровень — чистая функция, не настроение.** `autonomy_level(escapes,
+   streak, corpus_kill)`: любой долг (реакция пусто/`-`/`—`/`нет`) → L0
+   ВСЕГДА (непогашенный урок не поднимает autonomию); далее L1 = streak≥10
+   && kill≥1.0, L2 = streak≥30 && kill≥1.0, иначе L0. Границы закреплены
+   юнит-тестами (streak 9/10 → L0, streak 29 → L1, kill 0.99 → L0,
+   долг+streak 40 → L0) и мутантами аудита.
+3. **Streak — сессии log.md ПОСЛЕ последнего побега.** `streak_of`
+   парсит заголовки `## W-… — title (YYYY-MM-DD)` (общая с survivors
+   механика `date_in_parens`), берёт `max(даты побегов)` и считает сессии
+   с датой СТРОГО больше (строковое сравнение ISO-дат). Сессия без даты
+   не считается (ленивая арифметика хуже честной неизвестности). Важно:
+   это счётчик ЗАГОЛОВКОВ, не календарных дней — две сессии в один день
+   дают +2, а пустая неделя между сессиями — ничего.
+4. **Корпус пишет сам suitescript.** После adversarial-раздела test.sh
+   пишет `.harness/corpus.json` = `{"caught":ADV_OK,"total":ADV_N,
+   "date":...}` — доля ПОЙМАННЫХ атак, не самооценка агента. Пустой
+   прогон (ADV_N=0) → total 0 → `kill_rate` = 0.0, уровень невозможен:
+   «нет данных» не даёт 100%. Ключ `AUTONOMY` — только голосование
+   отображением (дефолт 1): `devh merge` допечатывает `level_line`
+   (`автономия L1 (streak 13, корпус 13/13): ревью выборочное — 2 из 3
+   можно пропустить`), механических запретов уровень не создаёт — для
+   solo это был бы театр. `AUTONOMY=0` — полная тишина.
+5. **CONFIG_KEYS 35→36** — fixed-size массив, ключ `AUTONOMY` (как
+   RED_MUTATE/VERIFY_RETRIES: код-дефолт + строка в init-шаблоне).
+   Команда `devh escapes` — чистый ридер: агрегирует ledger + streak +
+   корпус, показывает группы классов (count desc, name asc — зеркало
+   flaky_groups), долг списком, итоговую строку уровня.
+6. **Баш-грабли:** 47d — `devh run` НЕ мержит (в happy-path это две
+   команды: run → merge): строка уровня печатает merge, и ретраить надо
+   её вывод; seed-ножи SMOKE_ESCAPE/SMOKE_SESSIONS/SMOKE_CORPUS в
+   mk_smoke_repo.sh кладут файлы в .harness/ и делают `git add -f`
+   (`.harness/` в .gitignore — обычный `git add -A` их не возьмёт; урок
+   A7: сессия бежит в worktree = чистый checkout origin/main, вне коммита
+   файлов там нет); пустой ledger (47a) — нож с reaction=none вообще не
+   отдаёт SMOKE_ESCAPE.
+
+**Приёмка B1:** `cargo test -p devh` = 175 unit + 55 integration зелёные
+(core/escapes.rs: 8 юнитов — parse полный/debt/мусор, границы уровня,
+streak, группы классов, corpus json + rate, формат level_line);
+bash-сьюта секция 47 = 15 проверок (47a пустой ledger → L0 без данных;
+47b погашенный побег + streak 12 + корпус 13/13 → L1; 47c долг `-` → L0
+при любом streak/корпусе; 47d AUTONOMY=1 merge печатает уровень (streak
++1 от сессии), AUTONOMY=0 — тишина, merge дописал `## W-001` в log.md;
+47e мусор отсеян); fmt/clippy чистые; полный сьют — PASS=425 FAIL=0
+(411 A8 + 14 B1); мутационный аудит diff'а — 0 missed на границах
+(autonomy_level 9/10 и 0.99/1.0, streak_of строгое сравнение,
+class_groups сортировка, parse_escape_line восстановление префиксов).
+
+### 9.25.1 — аудит зоны B1 + правило про unviable (2026-10-20)
+
+Скоп: только новые файлы B1 (`core/escapes.rs` + `commands/escapes.rs`),
+`cargo mutants --in-place --test-tool nextest --baseline=skip --timeout-multiplier 2`
+(профиль incremental=true, `~50с/мутант`):
+
+- **Прогон 1: 130 мутантов → 129 caught / 0 missed / 1 unviable** (kill-rate
+  99.2% testable). Единственный unviable — `escapes.rs:98 replace
+  autonomy_level -> Default::default()` (genre FnValue): у `Level` не было
+  `Default` → билд падал (process_status Failure 101).
+- **Лечение (правило заказчика): unviable = дыра в покрытии, лечим КОД** —
+  `#[derive(Default)]` + `#[default] L0` на `Level`. Повторный прогон с
+  `--iterate` (85 мутантов — пере-бежались все, кроме ранее пойманных):
+  **85/85 caught, 0 missed, 0 unviable**. Итог по зоне — чисто.
+- Instrument-факт по cargo-mutants 27.1.0 (`--help`): лечения/замены
+  мутантов НЕТ; есть только скрытие — `-e/--exclude <GLOB>`,
+  `-E/--exclude-re <RE>` (регексп по именам из `--list`), `--skip-calls`,
+  `--list`/`--list-files`; в конфиге — `exclude_globs`/`exclude_re`/
+  `skip_calls`. Рабочий «ремоунт» — правка кода + `--iterate`.
+- Инструмент наблюдения: `devharness/tools/mutants-watch.sh` (в коммите B1) —
+  event-based (inotify на outcomes.json, таймаут-тик 5с как страховка),
+  одна строка прогресса: бар с `done/total` внутри (заливка фоном, цифры
+  ярким), `✓ ✗ ⏱ ⊘` (caught / missed / timeout / unviable), среднее на
+  мутант, ETA в «мин», текущий мутант из свежего `.diff`. `NO_COLOR`, `--once`,
+  троттлинг в не-tty. Заменяет слепые sleep-петли (каждый poll = turn).

@@ -59,6 +59,8 @@ pub enum Cmd {
         /// очистить `.harness/survivors-seen.json` (ручной инструмент §6).
         reset: bool,
     },
+    /// B1: агрегация ledger'а побегов (только чтение — файл правится руками).
+    Escapes,
 }
 
 impl Cmd {
@@ -133,6 +135,8 @@ impl Cmd {
                         .action(ArgAction::SetTrue)
                         .help("очистить .harness/survivors-seen.json (ручной инструмент)"),
                 ),
+            Command::new("escapes")
+                .about("ledger побегов: классы, streak, корпус, уровень автономии (чтение)"),
         ]
     }
 
@@ -245,6 +249,7 @@ impl Cmd {
                     reset,
                 })
             }
+            Some("escapes") => Ok(Cmd::Escapes),
             _ => Err("unknown subcommand".to_string()),
         }
     }

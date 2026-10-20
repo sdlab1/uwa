@@ -94,6 +94,10 @@ pub struct RunConfig {
     pub lint: bool,
     pub lint_cmd: String,
     pub review: bool,
+    /// B1: печатать строку уровня автономии в конце `devh merge`
+    /// (и в `devh escapes`). Только отображение: механических запретов
+    /// уровень не создаёт — решения человека, цифры машинные.
+    pub autonomy: bool,
     pub msg_deny: Option<String>,
     pub rules: Option<PathBuf>,
     pub rules_log: Option<PathBuf>,
@@ -126,6 +130,7 @@ impl Default for RunConfig {
             lint: true,
             lint_cmd: String::new(),
             review: true,
+            autonomy: true,
             msg_deny: None,
             rules: None,
             rules_log: None,

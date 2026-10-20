@@ -2,6 +2,7 @@ pub mod auto;
 pub mod bg;
 pub mod commit;
 pub mod doctor;
+pub mod escapes;
 pub mod init;
 pub mod merge;
 pub mod misc;
@@ -17,7 +18,7 @@ use crate::core::types::{CrapCfg, ItemId, MutateCfg, RunConfig};
 use crate::shell::store::{Item, Store};
 use crate::Cmd;
 
-pub const CONFIG_KEYS: [&str; 35] = [
+pub const CONFIG_KEYS: [&str; 36] = [
     "VERIFY",
     "BOOTSTRAP",
     "AGENT",
@@ -53,6 +54,7 @@ pub const CONFIG_KEYS: [&str; 35] = [
     "LINT",
     "LINT_CMD",
     "REVIEW",
+    "AUTONOMY",
 ];
 
 pub fn load_config(root: &Path) -> anyhow::Result<RunConfig> {
@@ -146,6 +148,7 @@ pub fn load_config(root: &Path) -> anyhow::Result<RunConfig> {
         lint: boolv("LINT", true),
         lint_cmd: g("LINT_CMD").unwrap_or_default(),
         review: boolv("REVIEW", true),
+        autonomy: boolv("AUTONOMY", true),
         msg_deny: g("MSG_DENY").filter(|s| !s.trim().is_empty()),
         rules: g("RULES").filter(|s| !s.trim().is_empty()).map(Into::into),
         rules_log: g("RULES_LOG")
@@ -287,6 +290,7 @@ pub fn dispatch(cmd: &Cmd, root: &Path) -> anyhow::Result<()> {
             sessions.unwrap_or(crate::core::survivors::SILENCE_DEFAULT),
             *reset,
         )?,
+        Cmd::Escapes => escapes::escapes(&store, &cfg, root)?,
     }
     Ok(())
 }

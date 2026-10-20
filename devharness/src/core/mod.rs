@@ -1,5 +1,6 @@
 pub mod coverage;
 pub mod early;
+pub mod escapes;
 pub mod gates;
 pub mod killmap;
 pub mod load;

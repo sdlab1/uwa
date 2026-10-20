@@ -3195,3 +3195,82 @@ fn section43_run_refuses_done_item() {
     assert!(ok, "doctor should pass: {out}");
     assert!(!contains(&out, "рассинхрон"), "{out}");
 }
+
+// B1: `devh escapes` — агрегация ledger'а побегов ЦЕЛИКОМ через CLI: печать
+// — единственный способ убить мутанта «тело => Ok(())» (stdout не
+// видят cargo-юниты). Пустой ledger подсказывает формат; погашенный побег +
+// streak 12 + корпус 13/13 → L1; долг (`-`) топит до L0.
+#[test]
+fn section47_escapes_ledger_and_level() {
+    let mut log = String::new();
+    for i in 1..=12 {
+        log.push_str(&format!(
+            "## W-{i:03} — сессия-{i} (2026-10-19)\n\n- commit: deadbee\n"
+        ));
+    }
+    let corpus = r#"{"caught":13,"total":13,"date":"2026-10-19"}"#;
+
+    // пустой ledger — подсказка формата + L0 без данных.
+    let sb = Sandbox::new("s47a");
+    sb.devh(&["init"])
+        .status()
+        .unwrap_or_else(|_| unreachable!());
+    let (ok, out) = sb.run_capture(&["escapes"]);
+    assert!(ok, "escapes обязан быть rc=0: {out}");
+    assert!(contains(&out, "нет данных:"), "{out}");
+    assert!(contains(&out, "дата | W-NNN"), "{out}");
+    assert!(contains(&out, "streak: 0 сессий без побегов"), "{out}");
+    assert!(
+        contains(&out, "автономия L0 (streak 0, корпус нет данных)"),
+        "{out}"
+    );
+
+    // погашенные побеги двух классов + streak 12 + корпус 13/13 → L1.
+    let sb = Sandbox::new("s47b");
+    sb.devh(&["init"])
+        .status()
+        .unwrap_or_else(|_| unreachable!());
+    fs::create_dir_all(sb.harness_file("items")).unwrap_or_else(|_| unreachable!());
+    fs::write(
+        sb.harness_file("escapes.md"),
+        "2026-10-17 | W-095 | найдено: ручной дифф после merge | класс: blind:boundary | реакция: стаб-кандидат №14\n\
+         2026-10-17 | W-096 | найдено: env вне контракта | класс: blind:env-var | реакция: гейт\n",
+    )
+    .unwrap_or_else(|_| unreachable!());
+    fs::write(sb.harness_file("log.md"), &log).unwrap_or_else(|_| unreachable!());
+    fs::write(sb.harness_file("corpus.json"), corpus).unwrap_or_else(|_| unreachable!());
+    let (ok, out) = sb.run_capture(&["escapes"]);
+    assert!(ok, "escapes rc=0: {out}");
+    assert!(contains(&out, "## Побеги:"), "{out}");
+    assert!(contains(&out, "- blind:boundary ×1"), "{out}");
+    assert!(contains(&out, "- blind:env-var ×1"), "{out}");
+    assert!(contains(&out, "streak: 12 сессий без побегов"), "{out}");
+    assert!(contains(&out, "13/13 (2026-10-19"), "{out}");
+    assert!(
+        contains(&out, "автономия L1 (streak 12, корпус 13/13)"),
+        "{out}"
+    );
+
+    // долг — уровень невозможен ни при каких streak/корпусе.
+    let sb = Sandbox::new("s47c");
+    sb.devh(&["init"])
+        .status()
+        .unwrap_or_else(|_| unreachable!());
+    fs::create_dir_all(sb.harness_file("items")).unwrap_or_else(|_| unreachable!());
+    fs::write(
+        sb.harness_file("escapes.md"),
+        "2026-10-17 | W-095 | найдено: ручной дифф | класс: blind:boundary | реакция: -\n",
+    )
+    .unwrap_or_else(|_| unreachable!());
+    fs::write(sb.harness_file("log.md"), &log).unwrap_or_else(|_| unreachable!());
+    fs::write(sb.harness_file("corpus.json"), corpus).unwrap_or_else(|_| unreachable!());
+    let (ok, out) = sb.run_capture(&["escapes"]);
+    assert!(ok, "escapes rc=0: {out}");
+    assert!(contains(&out, "долг (побег без конвертации"), "{out}");
+    assert!(
+        contains(&out, "2026-10-17 — blind:boundary (ручной дифф)"),
+        "{out}"
+    );
+    assert!(contains(&out, "автономия L0"), "{out}");
+    assert!(!contains(&out, "автономия L1"), "{out}");
+}

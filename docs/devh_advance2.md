@@ -421,6 +421,63 @@ FAIL=0 (46a×2 / 46b / 46c); fmt/clippy чистые; --in-diff аудит = 40
 
 # Серия B: побеги и автономия (docs/devh_autonomy.md)
 
+## B1 — СДАН (ветка devh/b1-autonomy)
+
+Ledger побегов + машинный уровень автономии. Побег = момент, где харнесс
+не поймал то, что должен был (или человек починил мимо гейтов).
+`.harness/escapes.md` правится РУКАМИ (как observations): строка формата
+`дата | W-NNN | найдено: … | класс: blind:* | реакция: …`, побег без
+конвертации (пусто/`-`) = debt. Тулинг только читает — `devh escapes`
+(агрегация: группы классов, долг списком, streak, корпус, итоговая
+строка), `--add` намеренно нет.
+
+**Что вошло (код):** core/escapes.rs — `Escape`, `parse_escape_line`
+(просеивающий: мусор/дата-не-дата/сессия-не-W/пустой класс → None;
+4 поля без реакции = валидная строка-debt), `autonomy_level` — чистая:
+любой долг → L0 ВСЕГДА; L1 = streak≥10 && kill≥1.0; L2 = streak≥30 &&
+kill≥1.0; иначе L0. `streak_of` — заголовки `## W-… (ISO-дата)` из
+log.md с датой строго после последнего побега (общая с survivors
+механика date_in_parens; сессия без даты не считается).
+`class_groups` (count desc, name asc — зеркало flaky_groups),
+`corpus_kill`/`kill_rate` ({"caught":N,"total":N,"date":…}; total 0 →
+0.0 — «нет данных» не даёт 100%), `level_line`. commands/escapes.rs —
+read-only команда. CONFIG_KEYS 35→36 (`AUTONOMY`, дефолт 1 — только
+голосование отображением: `devh merge` допечатывает
+`автономия L1 (streak 13, корпус 13/13): ревью выборочное — 2 из 3
+можно пропустить`; механических запретов нет — решение человека,
+цифры машинные). RunConfig.autonomy + init-шаблон.
+
+**Корпус пишет suitescript, не агент:** после adversarial-раздела
+test.sh кладёт `.harness/corpus.json` = {"caught":ADV_OK,"total":ADV_N,
+"date":…} — доля пойманных атак. Без прогона → total 0 → L0: уровень
+нельзя получить «из воздуха».
+
+**Баш-секция 47 (14 проверок):** ножи SMOKE_ESCAPE/SMOKE_SESSIONS/
+SMOKE_CORPUS в mk_smoke_repo.sh — файлы в .harness/ через `git add -f`
+(.harness/ в .gitignore; сессия бежит в worktree = чистый checkout —
+урок A7); 47a пустой ledger → L0 без данных; 47b погашенный побег +
+streak 12 + корпус 13/13 → L1; 47c долг (`-`) → L0 при любом
+streak/корпусе; 47d `devh run` НЕ мержит (happy-path: run → merge) —
+merge печатает строку при AUTONOMY=1 и молчит при 0, streak растёт на
+сессию из log.md; 47e мусор в ledger'е отсеян.
+
+**Приёмка:** unit 179 + integration 56 зелёные (8 юнитов core/escapes.rs:
+parse полный/debt/мусор, границы уровня, streak, группы классов,
+corpus json+rate, формат level_line + 4 юнита `report()`: пустой
+ledger/группы+L1/долг режет уровень/нет корпуса ≠ 100%); bash-сьюта
+PASS=425 FAIL=0 (411 A8 + 14 B1); fmt/clippy чистые; мутационный
+аудит зоны B1 = 130 мутантов in-place → **129 caught / 0 missed /
+1 unviable** (kill-rate 99.2% testable, ~50с/мутант).
+
+**Правило unviable (жёсткое, заказчика — детали fast_cycle §P9):**
+unviable — это дыра в покрытии (строка без kill-truth), а не
+«не считается». Лечим КОД, чтобы мутант компилировался, — не
+объясняем инструментом. Кейс B1: `autonomy_level ->
+Default::default()` не собирался, у `Level` не было `Default` →
+дерив + `#[default] L0`, повторный прогон с `--iterate` → Caught.
+Экраны (`exclude_re`/`skip_calls`) = прокрастинация, допустимы
+только с записанной причиной.
+
 ## B1 — Ledger побегов + уровень автономии
 
 - **`.harness/escapes.md`**, строка: `2026-10-19 | W-042 | найдено: ручной дифф после merge | класс: blind:boundary | реакция: стаб-кандидат №14`. Правило (твоё, «обход только записанный»): каждый побег обязан конвертироваться — стаб / гейт / записанное «принял риск». Ledger без конвертации = debt.

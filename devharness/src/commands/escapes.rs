@@ -1,0 +1,146 @@
+//! B1: `devh escapes` — агрегация ledger'а побегов (ТОЛЬКО чтение).
+//!
+//! Файл `.harness/escapes.md` правится руками (как observations): тулинг не
+//! пишет в него и не добавляет побегов сам (`--add` намеренно нет) — побег
+//! признаёт человек, инструмент лишь показывает долг, streak и уровень.
+//!
+//! Отчёт собирается ЧИСТОЙ функцией `report(store) -> String` (мультилайн),
+//! а `escapes` только печатает его. Почему так: мутант «тело функции →
+//! Ok(())» и мутанты `println!` не ловятся cargo-тестами (стdemandout не
+//! ассертится) — но строку убивает любой assert. Пустой ledger печатает
+//! подсказку формата, не молчание: человек должен знать, КАК записывать.
+//! Никаких `+=` на String в сборке (мутации оператора дадут unviable) —
+//! только `Vec<String>` + join.
+
+use std::path::Path;
+
+use crate::core::escapes;
+use crate::core::types::RunConfig;
+use crate::shell::store::Store;
+
+/// Отчёт целиком (мультилайн, без завершающего `\n`): ветки пустого
+/// ledger'а, групп классов, долга, streak + корпуса, итоговой строки
+/// уровня. Всё, что печатает `devh escapes` и допечатывает `devh merge`
+/// (общий формат), живёт здесь одним куском.
+pub fn report(store: &Store) -> String {
+    let ledger = escapes::ledger_path(store);
+    let (list, streak, corpus) = escapes::aggregate(store);
+    let mut lines: Vec<String> = Vec::new();
+    if list.is_empty() {
+        lines.push(format!(
+            "нет данных: {} пуст — побег записывает человек (дата | W-NNN | найдено: … | класс: blind:* | реакция: …)",
+            ledger.display()
+        ));
+    } else {
+        lines.push(format!("## Побеги: {}", ledger.display()));
+        for (class, n) in escapes::class_groups(&list) {
+            lines.push(format!("- {class} ×{n}"));
+        }
+        let debt: Vec<&escapes::Escape> = list.iter().filter(|e| e.is_debt()).collect();
+        if !debt.is_empty() {
+            lines.push(format!(
+                "долг (побег без конвертации — стаб/гейт/принятый риск): {}",
+                debt.len()
+            ));
+            for e in debt {
+                lines.push(format!("  {} — {} ({})", e.date, e.class, e.found));
+            }
+        }
+    }
+    let corpus_s = match &corpus {
+        Some((caught, total, d)) if *total > 0 => {
+            format!("{caught}/{total} ({} из последнего прогона test.sh)", d)
+        }
+        _ => "нет данных (прогони bash devharness/test.sh)".to_string(),
+    };
+    lines.push(format!(
+        "streak: {streak} сессий без побегов; корпус: {corpus_s}"
+    ));
+    lines.push(escapes::level_line(&list, streak, corpus));
+    lines.join("\n")
+}
+
+/// `devh escapes` — классы, streak, корпус, уровень автономии. Печатает
+/// то же, что `devh merge` дописывает в конце сессии (общий format-line).
+pub fn escapes(store: &Store, _cfg: &RunConfig, _root: &Path) -> anyhow::Result<()> {
+    println!("{}", report(store));
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn seed(store: &Store, escapes_md: &str, log_md: &str, corpus_json: &str) {
+        assert!(std::fs::create_dir_all(&store.dir).is_ok());
+        assert!(std::fs::write(escapes::ledger_path(store), escapes_md).is_ok());
+        assert!(std::fs::write(store.dir.join("log.md"), log_md).is_ok());
+        assert!(std::fs::write(escapes::corpus_path(store), corpus_json).is_ok());
+    }
+
+    // 12 сессий после побега (2026-10-17) — streak≥10 = право на L1.
+    const LOG12: &str = "## W-001 — a (2026-10-18)\n## W-002 — b (2026-10-18)\n## W-003 — c (2026-10-18)\n## W-004 — d (2026-10-19)\n## W-005 — e (2026-10-19)\n## W-006 — f (2026-10-19)\n## W-007 — g (2026-10-19)\n## W-008 — h (2026-10-19)\n## W-009 — i (2026-10-19)\n## W-010 — j (2026-10-19)\n## W-011 — k (2026-10-19)\n## W-012 — l (2026-10-19)\n";
+
+    #[test]
+    fn report_empty_ledger_hints_format() {
+        let td = tempfile::TempDir::new().unwrap_or_else(|_| unreachable!());
+        let store = Store::new(td.path());
+        let r = report(&store);
+        assert!(r.contains("нет данных:"), "{r}");
+        assert!(r.contains("дата | W-NNN"), "{r}");
+        assert!(r.contains("streak: 0 сессий без побегов"), "{r}");
+        assert!(r.contains("автономия L0"), "{r}");
+    }
+
+    #[test]
+    fn report_groups_and_level_l1() {
+        let td = tempfile::TempDir::new().unwrap_or_else(|_| unreachable!());
+        let store = Store::new(td.path());
+        seed(
+            &store,
+            "2026-10-17 | W-095 | найдено: ручной дифф после merge | класс: blind:boundary | реакция: стаб-кандидат №14\n",
+            LOG12,
+            r#"{"caught":13,"total":13,"date":"2026-10-19"}"#,
+        );
+        let r = report(&store);
+        assert!(r.contains("## Побеги:"), "{r}");
+        assert!(r.contains("- blind:boundary ×1"), "{r}");
+        assert!(r.contains("streak: 12 сессий без побегов"), "{r}");
+        assert!(r.contains("корпус: 13/13 (2026-10-19"), "{r}");
+        assert!(r.contains("автономия L1 (streak 12, корпус 13/13)"), "{r}");
+    }
+
+    #[test]
+    fn report_debt_lists_and_kills_level() {
+        let td = tempfile::TempDir::new().unwrap_or_else(|_| unreachable!());
+        let store = Store::new(td.path());
+        seed(
+            &store,
+            "2026-10-17 | W-095 | найдено: ручной дифф | класс: blind:boundary | реакция: -\n",
+            LOG12,
+            r#"{"caught":13,"total":13,"date":"2026-10-19"}"#,
+        );
+        let r = report(&store);
+        assert!(r.contains("долг (побег без конвертации"), "{r}");
+        assert!(
+            r.contains("2026-10-17 — blind:boundary (ручной дифф)"),
+            "{r}"
+        );
+        assert!(r.contains("автономия L0"), "{r}");
+        assert!(!r.contains("автономия L1"), "{r}");
+    }
+
+    #[test]
+    fn report_no_corpus_is_no_data_not_hundred() {
+        let td = tempfile::TempDir::new().unwrap_or_else(|_| unreachable!());
+        let store = Store::new(td.path());
+        seed(&store, "", LOG12, "");
+        let r = report(&store);
+        assert!(
+            r.contains("нет данных (прогони bash devharness/test.sh)"),
+            "{r}"
+        );
+        assert!(r.contains("автономия L0"), "{r}");
+        assert!(!r.contains("L1"), "{r}");
+    }
+}

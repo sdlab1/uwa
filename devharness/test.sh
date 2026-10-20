@@ -8,6 +8,7 @@
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 DEVH="${DEVH:-$HERE/devh}"
+ROOT="$(cd "$HERE/.." && pwd)"
 # CI-раннеры без git-identity; фиксируем тестовую — suite environment-независим
 export GIT_AUTHOR_NAME=devh-test GIT_AUTHOR_EMAIL=devh-test@localhost
 export GIT_COMMITTER_NAME=devh-test GIT_COMMITTER_EMAIL=devh-test@localhost
@@ -41,9 +42,14 @@ base_env() {
   unset HARNESS_RED_MUTATE HARNESS_RED_MIN_KILL
 }
 
-smoke_reset_env() { # сброс утечек HARNESS_* между секциями: конфиг smoke-репо живёт в файле
+smoke_reset_env() { # сброс утечек HARNESS_* и SMOKE_* между секциями: конфиг
+  # smoke-репо живёт в файле, ручки ножей — в окружении ПРОГОНА (export в
+  # flaky_expect: SMOKE_FLAKY/SMOKE_FLAKY_ALWAYS переживают функцию и
+  # отравляют следующие секции — 47d гоняла полную сессию, red получал
+  # флейк-пролог с устаревшим счётным файлом. Чистим ВСЕ SMOKE_*-ручки.
   local k
   for k in $(env | sed -n 's/^\(HARNESS_[A-Z_]*\)=.*/\1/p'); do unset "$k"; done
+  for k in $(env | sed -n 's/^\(SMOKE_[A-Z_]*\)=.*/\1/p'); do unset "$k"; done
 }
 
 ADV_OK=0; ADV_N=0
@@ -179,10 +185,11 @@ echo "CRAP: functions=0"
 S
 chmod +x "$T"/stub*.sh "$T/sleeper.sh" "$T"/mut-*.sh "$T"/crap-*.sh "$T/redmut.sh"
 
-echo "== 0. статика: shellcheck (полный прогон, 18 файлов) =="
+echo "== 0. статика: shellcheck (полный прогон, 19 файлов) =="
 if command -v shellcheck >/dev/null 2>&1; then
   sc=0
   for f in devh test.sh selfmutate.sh examples/check_bench.sh stubs/good.sh tests/mk_smoke_repo.sh \
+    tools/mutants-watch.sh \
     stubs/red-green.sh stubs/red-wrong.sh stubs/no-summary.sh stubs/bad-summary.sh stubs/hang.sh \
     stubs/ignored-test.sh stubs/lint-dirty.sh stubs/mutate-killer.sh stubs/tool-gone.sh \
     stubs/crap-violation.sh stubs/review-issues.sh stubs/review-mute.sh; do
@@ -878,6 +885,15 @@ echo "== 44c. ОБХОД freeze-bypass: allow-test-edit легитимирует
 adv_expect bypass freeze-cheat.sh "OK гейты" - 1 0 "" "" 0 "" "" 1 1
 
 echo "  adversarial corpus: поймано $ADV_OK/$ADV_N (kill-rate $(( ADV_N > 0 ? ADV_OK * 100 / ADV_N : 0 ))%)"
+
+# B1: корпус этого прогона → .harness/corpus.json (gitignored, железо машины).
+# Пишет САМ suitescript: `devh escapes` и уровень автономии в merge читают
+# {"caught":N,"total":N,"date":"..."} — доля пойманных атак, не молчаливая
+# самооценка. Пустой прогон (ADV_N=0) → total 0 → «нет данных», не 100%.
+# Пишем в корень ХАРНЕСС-репо ($ROOT), не в cwd: adv-секции cd'ят в
+# smoke-репо и не возвращаются (44c оставляла corpus.json в bypass-3).
+mkdir -p "$ROOT/.harness"
+printf '{"caught":%d,"total":%d,"date":"%s"}\n' "$ADV_OK" "$ADV_N" "$(date +%F)" > "$ROOT/.harness/corpus.json"
 [ "$ADV_OK" = "$ADV_N" ] && pass "adv: все атаки пойманы ($ADV_OK/$ADV_N)" || fail "adv: корпус пойман не полностью ($ADV_OK/$ADV_N)"
 
 echo "== 45. CHAOS (A7): kill -9 в случайной точке =="
@@ -947,6 +963,100 @@ flaky_expect always c1 1 1 1
 grep -q "VERIFY красный" "$T/flk-always-c1.log" && pass "flaky 46c: маркер VERIFY красный" || fail "flaky 46c: нет маркера"
 grep -q "flaky-suspect" "$T/flk-always-c1.log" && fail "flaky 46c: ledger для настоящей поломки" || pass "flaky 46c: без ledger"
 [ "$LED" = 0 ] && pass "flaky 46c: ledger пуст" || fail "flaky 46c: ledger не пуст"
+
+echo "== 47. AUTONOMY (B1): ledger побегов + уровень =="
+# B1: .harness/escapes.md правится РУКАМИ (как observations) — тулинг только
+# читает. Формат: 'дата | W-NNN | найдено: … | класс: blind:* | реакция: …'.
+# Пустая/прочерковая реакция = долг → уровень L0 всегда. Уровень — чистая
+# функция (streak из log.md + корпус из corpus.json), закреплена юнит-тестами
+# и граничными мутантами (streak 9/10, kill 0.99/1.0). AUTONOMY — только
+# голосование отображением: merge печатает строку, запретов не создаёт.
+esc_seed() { # <case> <reaction|-> <nsessions>; reaction=none — ledger'а нет
+  local case=$1 reaction=$2 n=$3
+  local d_esc d_ses i
+  d_esc="$(date -d '3 days ago' +%F)"
+  d_ses="$(date -d '2 days ago' +%F)"
+  if [ "$reaction" = "none" ]; then
+    rm -f "$T/esc-$case.md"
+  else
+    if [ "$reaction" = "-" ]; then
+      printf '%s | W-099 | найдено: ручной дифф после merge | класс: blind:boundary | реакция: -\n' \
+        "$d_esc" > "$T/esc-$case.md"
+    else
+      printf '%s | W-099 | найдено: ручной дифф после merge | класс: blind:boundary | реакция: %s\n' \
+        "$d_esc" "$reaction" > "$T/esc-$case.md"
+    fi
+  fi
+  : > "$T/ses-$case.md"
+  i=0
+  while [ "$i" -lt "$n" ]; do
+    i=$((i+1))
+    printf '## W-1%02d — сессия-%02d (%s)\n\n- commit: deadbee\n' "$i" "$i" "$d_ses" >> "$T/ses-$case.md"
+  done
+  [ "$n" -gt 0 ] && printf '{"caught":13,"total":13,"date":"%s"}\n' "$(date +%F)" > "$T/cor-$case.json" \
+    || rm -f "$T/cor-$case.json"
+}
+aut_check() { # <case> <sub> <реакция|-> <nsessions> — прогон devh escapes в свежем микрорепо
+  local case=$1 sub=$2 reaction=$3 n=$4
+  smoke_reset_env
+  esc_seed "$case" "$reaction" "$n"
+  local envs=()
+  [ -f "$T/esc-$case.md" ] && envs+=("SMOKE_ESCAPE=$T/esc-$case.md")
+  [ -f "$T/ses-$case.md" ] && [ -s "$T/ses-$case.md" ] && envs+=("SMOKE_SESSIONS=$T/ses-$case.md")
+  [ -f "$T/cor-$case.json" ] && envs+=("SMOKE_CORPUS=$T/cor-$case.json")
+  local S
+  S="$(env "${envs[@]}" \
+    bash "$HERE/tests/mk_smoke_repo.sh" "$T/$case-$sub" "$HERE/stubs/good.sh" "$T/$case-$sub.wt")"
+  if [ ! -d "$S" ]; then fail "autonomy ${case}[${sub}]: mk_smoke_repo упал"; return; fi
+  (cd "$S" && "$DEVH" escapes) >"$T/aut-$case-$sub.log" 2>&1
+  return 0
+}
+# 47a: пустой ledger — честная неизвестность, не 100% из воздуха.
+aut_check empty a none 0
+grep -q "нет данных" "$T/aut-empty-a.log" && pass "autonomy 47a: пустой ledger — 'нет данных'" || fail "autonomy 47a: нет 'нет данных'"
+grep -q "автономия L0 (streak 0, корпус нет данных)" "$T/aut-empty-a.log" && pass "autonomy 47a: L0 без данных" || fail "autonomy 47a: нет L0-строки: $(cat "$T/aut-empty-a.log")"
+# 47b: погашенный побег + streak 12 + корпус 13/13 → L1 (ревью выборочное).
+aut_check conv b "гейт: стаб-кандидат №14" 12
+grep -q "blind:boundary ×1" "$T/aut-conv-b.log" && pass "autonomy 47b: группа класса" || fail "autonomy 47b: нет группы класса"
+grep -q "streak: 12 сессий без побегов" "$T/aut-conv-b.log" && pass "autonomy 47b: streak 12" || fail "autonomy 47b: streak не 12"
+grep -q "автономия L1 (streak 12, корпус 13/13): ревью выборочное" "$T/aut-conv-b.log" && pass "autonomy 47b: L1-строка" || fail "autonomy 47b: нет L1-строки: $(cat "$T/aut-conv-b.log")"
+# 47c: долг (реакция '-') топит до L0 при любом streak и корпусе.
+aut_check debt c - 12
+grep -q "долг (побег без конвертации" "$T/aut-debt-c.log" && pass "autonomy 47c: долг показан" || fail "autonomy 47c: нет раздела долга"
+grep -q "автономия L0" "$T/aut-debt-c.log" && pass "autonomy 47c: долг → L0" || fail "autonomy 47c: долг не остановил уровень"
+grep -q "автономия L1" "$T/aut-debt-c.log" && fail "autonomy 47c: уровень поднят despite долга" || pass "autonomy 47c: L1 не выдан"
+# 47e: мусор в ledger'е не парсится (просеивающий парсер) — как observations.
+smoke_reset_env
+printf 'мусор без полей\n19.10.2026 | W-042 | a | blind:x | r\n' > "$T/esc-junk.md"
+S="$(SMOKE_ESCAPE="$T/esc-junk.md" bash "$HERE/tests/mk_smoke_repo.sh" "$T/junk-e" "$HERE/stubs/good.sh" "$T/junk-e.wt")"
+(cd "$S" && "$DEVH" escapes) >"$T/aut-junk-e.log" 2>&1
+grep -q "нет данных" "$T/aut-junk-e.log" && pass "autonomy 47e: мусор отсеян — ledger пуст" || fail "autonomy 47e: мусор пролез в парсер: $(cat "$T/aut-junk-e.log")"
+# 47d: AUTONOMY — голосование отображением. Полная сессия: 1 — строка в конце
+# run, 0 — тишина. Механических запретов уровень не создаёт (решение человека).
+merge_vote() { # <case> <flag>
+  local case=$1 flag=$2
+  smoke_reset_env
+  esc_seed "vote-$case" "гейт: стаб-кандидат №14" 12
+  local S
+  S="$(SMOKE_AUTONOMY="$flag" SMOKE_ESCAPE="$T/esc-vote-$case.md" SMOKE_SESSIONS="$T/ses-vote-$case.md" \
+    SMOKE_CORPUS="$T/cor-vote-$case.json" bash "$HERE/tests/mk_smoke_repo.sh" "$T/vote-$case" \
+    "$HERE/stubs/good.sh" "$T/vote-$case.wt")"
+  if [ ! -d "$S" ]; then fail "autonomy 47d[$case]: mk_smoke_repo упал"; return; fi
+  cd "$S" || return 1
+  printf 'Сделай: валидацию нечисловых аргументов add.\nOBSERVE:\n- return: add x 3 -> ERR, rc=1\nRED: bash tests/all.sh\n' \
+    | "$DEVH" new "vote $case" >/dev/null 2>&1
+  "$DEVH" run W-001 >"$T/aut-vote-$case.log" 2>&1
+  "$DEVH" merge W-001 >>"$T/aut-vote-$case.log" 2>&1
+  return 0
+}
+merge_vote d1 1
+grep -q "OK гейты" "$T/aut-vote-d1.log" && pass "autonomy 47d[1]: сессия прошла" || fail "autonomy 47d[1]: нет OK гейты"
+grep -q "автономия L1 (streak 13, корпус 13/13)" "$T/aut-vote-d1.log" && pass "autonomy 47d[1]: merge напечатал уровень (streak вырос на 1)" || fail "autonomy 47d[1]: нет строки уровня: $(grep -c 'автономия' "$T/aut-vote-d1.log") совпадений"
+merge_vote d2 0
+grep -q "OK гейты" "$T/aut-vote-d2.log" && pass "autonomy 47d[0]: сессия прошла" || fail "autonomy 47d[0]: нет OK гейты"
+grep -q "автономия" "$T/aut-vote-d2.log" && fail "autonomy 47d[0]: строка уровня при AUTONOMY=0" || pass "autonomy 47d[0]: AUTONOMY=0 молчит"
+# streak растёт именно в log.md репо (merge дописывает заголовок сессии)
+grep -q "## W-001" "$T/vote-d1/.harness/log.md" && pass "autonomy 47d: merge дописал сессию в log.md (источник streak)" || fail "autonomy 47d: log.md без нового заголовка"
 
 echo
 echo "ИТОГО: PASS=$PASS FAIL=$FAIL"

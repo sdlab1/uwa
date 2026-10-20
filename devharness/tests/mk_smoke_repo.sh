@@ -99,6 +99,8 @@ NO_IGNORED=1
 MSG_DENY=Session [0-9]+
 WT_ROOT=$WT
 LOG_DAYS=7
+# B1: AUTONOMY — только показ строки уровня в merge (0 = молчать)
+AUTONOMY=${SMOKE_AUTONOMY:-1}
 EOF
 
 # A7-нож (env): SMOKE_SLOW=1 — режим мутатора slow (sleep 10) в КОММИТ
@@ -132,6 +134,23 @@ EOF
   cat tests/all.sh.pro tests/all.sh > tests/all.sh.tmp
   mv tests/all.sh.tmp tests/all.sh
   rm tests/all.sh.pro
+fi
+# B1-ножи (env): SMOKE_ESCAPE=<файл> — ledger побегов в .harness/escapes.md,
+# SMOKE_SESSIONS=<файл> — заголовки сессий в .harness/log.md,
+# SMOKE_CORPUS=<файл> — corpus.json последнего прогона test.sh. Все три — в
+# КОММИТ (git add -f: .harness/ в .gitignore): сессия бежит в worktree, а это
+# чистый checkout origin/main — вне коммита файлов там нет (урок A7).
+if [ -n "${SMOKE_ESCAPE:-}" ]; then
+  cp "$SMOKE_ESCAPE" .harness/escapes.md
+  git add -f .harness/escapes.md
+fi
+if [ -n "${SMOKE_SESSIONS:-}" ]; then
+  cp "$SMOKE_SESSIONS" .harness/log.md
+  git add -f .harness/log.md
+fi
+if [ -n "${SMOKE_CORPUS:-}" ]; then
+  cp "$SMOKE_CORPUS" .harness/corpus.json
+  git add -f .harness/corpus.json
 fi
 git add -A
 git commit -qm init

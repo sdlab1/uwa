@@ -165,6 +165,19 @@ pub fn merge(store: &Store, cfg: &RunConfig, id: &ItemId) -> anyhow::Result<()> 
     let _ = git::branch_delete(&root, &br);
     store.apply_event(id, Event::Merged)?;
     println!("{}OK {id} → done. Лог: .harness/log.md{}", c.g, c.z);
+    // B1: уровень автономии — только показ (голосование отображением):
+    // агрегация ledger'а побегов + streak + корпуса в одну строку. Ключ
+    // AUTONOMY=0 молчит; механических запретов уровень не создаёт —
+    // решения человека, цифры машинные.
+    if cfg.autonomy {
+        let (esc_list, streak, corpus) = crate::core::escapes::aggregate(store);
+        println!(
+            "{}{}{}",
+            c.b,
+            crate::core::escapes::level_line(&esc_list, streak, corpus),
+            c.z
+        );
+    }
     println!(
         "{}ГОТОВО: {id} смёржено в {}. next: devh new{}",
         c.b, cfg.main_branch, c.z

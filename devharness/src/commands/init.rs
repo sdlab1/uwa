@@ -170,6 +170,12 @@ pub fn init(root: &Path) -> anyhow::Result<()> {
     c += "#   прошёл -> сессия продолжается, но .harness/flaky.md + '⚠ flaky-suspect':\n";
     c += "#   молчаливого «прошёл» не существует. 0 = поведение как было.\n";
     c += "VERIFY_RETRIES=0\n";
+    c += "# B1: уровень автономии — только показ: devh merge печатает строку агрегата\n";
+    c += "#   ('автономия L1 (streak 12, корпус 13/13): ревью выборочное …'). 0 = молчать.\n";
+    c += "#   Ledger побегов .harness/escapes.md правится РУКАМИ (как observations):\n";
+    c += "#   дата | W-NNN | найдено: … | класс: blind:* | реакция: <стаб|гейт|принятый риск>\n";
+    c += "#   (побег без конвертации = долг, он топит уровень до L0). Смотр: devh escapes\n";
+    c += "AUTONOMY=1\n";
 
     std::fs::create_dir_all(root.join(".harness/items"))?;
     std::fs::create_dir_all(root.join(".harness/summaries"))?;
