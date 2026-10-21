@@ -65,6 +65,15 @@ export COLOR
 #   tools/mutants-watch.sh --interval 3    # тик-страховка, сек (по умолчанию 5)
 #   MUTANTS_LOG=/tmp/mut.log tools/…       # откуда читать "Found N mutants to test"
 #   NO_COLOR=1                             # без ANSI; в не-tty — троттлинг вывода
+#
+# ЖИВОЙ CLI (одна строка обновляется на месте, \r\033[K ПЕРЕД строкой) —
+# канон для агента: setsid отвязывает от timeout-обёртки тула (~470с),
+# иначе watcher умирает через 8 минут и оператор снова «ничего не видит»:
+#   setsid nohup env LIVE=1 HARNESS_COLOR=always STEP=1 INTERVAL=5 \
+#     MUTANTS_LOG=/tmp/c1c_audit.log \
+#     devharness/tools/mutants-watch.sh > /tmp/live.log 2>&1 < /dev/null &
+# Показ текущего кадра одной строкой (tool отдаёт вывод после завершения):
+#   python3 -c "import re;s=open('/tmp/live.log','rb').read().decode('utf-8','replace');print(re.sub(r'\x1b\[[0-9;]*[A-Za-z]','',s.split('\r')[-1]))"
 # ---cut---
 
 # легенда — ОДИН раз, строкой выше прогресса (потом только строка прогресса)
