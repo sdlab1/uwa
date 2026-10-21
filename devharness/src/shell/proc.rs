@@ -40,6 +40,21 @@ impl ProcError {
     }
 }
 
+/// F-0.4 (N8): добить процессную группу после того, как лидер вышел САМ.
+/// `try_wait` собирает только прямого ребёнка (`bash -c`); агент, ушедший в
+/// фон (демон, `... &`, `disown`, double-fork), остаётся в той же группе и
+/// переживает выход лидера — висящий потомок продолжает писать в worktree
+/// уже после того, как гейт посчитал дифф. Группа в норме пуста → `kill`
+/// отвечает ESRCH и это не ошибка; в аномалии добивает осиротевших.
+/// Гонка переиспользования pgid теоретична (PID мог стать другой группой),
+/// но в харнессе группы создаются только здесь же (`process_group(0)`), и
+/// между `try_wait` и `kill` новых групп не появляется.
+fn reap_group(pgid: i32) {
+    unsafe {
+        libc::kill(pgid.wrapping_neg(), libc::SIGKILL);
+    }
+}
+
 pub fn run_logged(
     cmd_line: &str,
     cwd: &Path,
@@ -84,6 +99,13 @@ pub fn run_logged(
         }
         std::thread::sleep(POLL);
     };
+
+    // F-0.4 (N8): нормальный выход ≠ «группа пуста» — демон-потомок агента
+    // жив, и без добивания группы он переживает сессию (и продолжает писать
+    // в worktree уже ПОСЛЕ того, как гейты посчитали дифф). Побочная
+    // выгода: потомок-демон держал открытыми stdout/stderr, и join чтения
+    // мог повиснуть до его смерти; здесь она гарантирована.
+    reap_group(pgid);
 
     Ok(ProcOutcome {
         exit: status.code(),
@@ -301,6 +323,10 @@ pub fn run_monitored<T>(
     let st = final_status;
     let stopped = stopped_reason;
     let _ = std::fs::remove_file(&log_path);
+    // F-0.4 (N8): и на ранней остановке — группа могла оставить потомков
+    // (cargo-mutants/demon'ы агента). На hard_killed-пути группа уже убита,
+    // повторный SIGKILL безопасен (ESRCH).
+    reap_group(pgid);
     Ok(MonitoredOutcome {
         outcome: ProcOutcome {
             exit: st.and_then(|s| s.code()),

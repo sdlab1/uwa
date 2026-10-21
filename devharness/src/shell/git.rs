@@ -736,10 +736,8 @@ mod f0_gitparse_tests {
     fn f01_parse_basic_and_terminating_nul() {
         let v = parse_name_status_z("M\0a.rs\0A\0b.rs\0").unwrap_or_else(|_| unreachable!());
         assert_eq!(v.len(), 2);
-        assert_eq!(v[0].kind, ChangeKind::Modified);
-        assert_eq!(v[0].path, "a.rs");
-        assert_eq!(v[1].kind, ChangeKind::Added);
-        assert_eq!(v[1].path, "b.rs");
+        assert!(matches!(v.first(), Some(c) if c.kind == ChangeKind::Modified && c.path == "a.rs"));
+        assert!(matches!(v.get(1), Some(c) if c.kind == ChangeKind::Added && c.path == "b.rs"));
     }
 
     #[test]
@@ -747,8 +745,12 @@ mod f0_gitparse_tests {
         let v = parse_name_status_z("R100\0src/old.rs\0tests/new.rs\0")
             .unwrap_or_else(|_| unreachable!());
         assert_eq!(v.len(), 2);
-        assert!(matches!(v[0].kind, ChangeKind::Deleted) && v[0].path == "src/old.rs");
-        assert!(matches!(v[1].kind, ChangeKind::Added) && v[1].path == "tests/new.rs");
+        assert!(
+            matches!(v.first(), Some(c) if c.kind == ChangeKind::Deleted && c.path == "src/old.rs")
+        );
+        assert!(
+            matches!(v.get(1), Some(c) if c.kind == ChangeKind::Added && c.path == "tests/new.rs")
+        );
     }
 
     #[test]
@@ -761,7 +763,7 @@ mod f0_gitparse_tests {
     #[test]
     fn f01_parse_cyrillic_and_space_path_intact() {
         let v = parse_name_status_z("M\0src/я тут.rs\0").unwrap_or_else(|_| unreachable!());
-        assert_eq!(v[0].path, "src/я тут.rs");
+        assert!(matches!(v.first(), Some(c) if c.path == "src/я тут.rs"));
     }
 
     #[test]

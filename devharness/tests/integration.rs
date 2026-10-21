@@ -3574,3 +3574,49 @@ fn section48b_lint_git_unreadable_is_env_blocked() {
     assert_eq!(code, 2, "lint: нечитаемый дифф = rc=2: {out}");
     assert!(contains(&out, "список изменений нечитаем"), "{out}");
 }
+
+// F-0.4 (N8): `run_logged` собирает только прямого ребёнка — демон-потомок
+// агента (`... &` в той же группе) переживает нормальный выход лидера и
+// продолжает писать в worktree уже после вердиктов гейтов. Проверяем на
+// живом процессе: лидер выходит сам (exit 0), а его фоновый ребёнок обязан
+// быть мёртв сразу после возврата run_logged.
+#[test]
+fn section49_run_logged_reaps_daemon_group_after_exit() {
+    let tmp = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+    let pidfile = tmp.path().join("daemon.pid");
+    let q = format!("'{}'", pidfile.display());
+    // лидер: форк фонового sleep'а (пишет свой pid) и САМ выходит 0
+    let cmd = format!("sleep 300 & echo $! > {q}; exit 0");
+    let t0 = std::time::Instant::now();
+    let out =
+        devh::shell::proc::run_logged(&cmd, tmp.path(), std::time::Duration::from_secs(30), &[])
+            .unwrap_or_else(|_| unreachable!("run_logged упал"));
+    let dt = t0.elapsed();
+    // ДВА красных условия (оба проверяли A/B с выключенным reap):
+    // 1) время: без reap'а демон держит stdout открытым и join чтения
+    //    висает на все 300 секунд жизни sleep'а — тест ждёт 300s вместо 0.1s;
+    // 2) сам факт: pid потомка мёртв сразу после возврата.
+    assert!(
+        dt < std::time::Duration::from_secs(10),
+        "run_logged завис на потомке ({dt:?}) — потомок держит pipe, reap группы не сработал (N8)"
+    );
+    assert_eq!(out.exit, Some(0), "лидер обязан выйти сам");
+    let daemon = std::fs::read_to_string(&pidfile)
+        .unwrap_or_else(|_| unreachable!())
+        .trim()
+        .parse::<u32>()
+        .unwrap_or_else(|_| unreachable!());
+    assert_ne!(daemon, 0, "pid демона записан");
+    assert!(
+        matches!(
+            wait_pid_for(daemon, || false, std::time::Duration::from_secs(3)),
+            WaitPid::Dead
+        ),
+        "демон-потомок пережил выход лидера (N8): pid {daemon} жив"
+    );
+    // страховка окружения: если тест красный и потомок уцелел — не тащим его за собой.
+    let _ = std::process::Command::new("kill")
+        .arg("-9")
+        .arg(daemon.to_string())
+        .output();
+}
