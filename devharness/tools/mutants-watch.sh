@@ -17,6 +17,7 @@
 #   tools/mutants-watch.sh --interval 3    # тик-страховка, сек (по умолчанию 5)
 #   MUTANTS_LOG=/tmp/mut.log tools/…       # откуда читать "Found N mutants to test"
 #   NO_COLOR=1                             # без ANSI; в не-tty — троттлинг вывода
+#   WATCH_WIDTH=120 tools/…                # ширина кадра; в pipe консоль не видна
 #
 # Выход: 0 — прогон завершён (или снят снимок); 2 — не найден mutants.out.
 
@@ -116,6 +117,7 @@ export COLOR
 #   tools/mutants-watch.sh --interval 3    # тик-страховка, сек (по умолчанию 5)
 #   MUTANTS_LOG=/tmp/mut.log tools/…       # откуда читать "Found N mutants to test"
 #   NO_COLOR=1                             # без ANSI; в не-tty — троттлинг вывода
+#   WATCH_WIDTH=140 tools/…                # ширина кадра (в pipe консоль не видна)
 #
 # ЖИВОЙ CLI (одна строка обновляется на месте, \r\033[K ПЕРЕД строкой) —
 # канон для агента: БЕЗ лог-файла и БЕЗ setsid/nohup. stdout watcher'а
@@ -181,8 +183,11 @@ try:
     for o in outs:
         if o["summary"] in ("MissedMutant", "Unviable"):
             m = o["scenario"]["Mutant"]
+            f = m["file"]
+            if f.startswith("devharness/src/"):
+                f = f[len("devharness/src/"):]   # короткий путь, как в current()
             last = "%s %s:%s" % (o["summary"].replace("Mutant", ""),
-                                 m["file"], m["span"]["start"]["line"])
+                                 f, m["span"]["start"]["line"])
 except Exception:
     dn = 0
 total = 0
@@ -204,7 +209,7 @@ PY
     cur="$(current)"
     legend
     python3 -u - "$dn" "$total" "$counts" "$avg_s" "$last_s" "$cur" <<'PY'
-import os, sys, time
+import os, re, sys, time
 dn, total, counts_s, avg_s, last, cur = sys.argv[1:7]
 dn = int(dn); total = int(total); avg = float(avg_s)
 counts = eval(counts_s) if counts_s else {}
@@ -214,6 +219,40 @@ C = {"ok": "\033[32m", "bad": "\033[1;31m", "warn": "\033[33m",
      "off": "\033[0m", "pbg": "\033[44m", "pfg": "\033[1;97m"} if color else \
     {k: "" for k in ("ok", "bad", "warn", "mag", "info", "dim", "off",
                      "pbg", "pfg")}
+
+# --- одна физическая строка: кадр обязан влезть до автопереноса терминала ---
+def term_width():
+    # WATCH_WIDTH (явный override) > COLUMNS > tty-ioctl > 80. В pipe реальную
+    # консоль не видно — берём 80: не влезает — обрежем хвост, а не переносим.
+    for v in (os.environ.get("WATCH_WIDTH", ""), os.environ.get("COLUMNS", "")):
+        if v.isdigit() and int(v) >= 20:
+            return int(v)
+    try:
+        import shutil
+        return shutil.get_terminal_size().columns
+    except Exception:
+        return 80
+
+_ANSI = re.compile(r"\033\[[0-9;]*m")
+
+def vis_len(s):
+    # видимая длина: ANSI-коды не в счёт
+    return len(_ANSI.sub("", s))
+
+def clip(s, width):
+    # гасим видимую часть до width; разрез при активном цвете закрываем reset
+    if vis_len(s) <= width:
+        return s
+    out, vis, i, n, cut = [], 0, 0, len(s), False
+    while i < n:
+        if s[i] == "\033" and i + 1 < n and s[i + 1] == "[":
+            j = s.find("m", i)
+            if j != -1:
+                out.append(s[i:j + 1]); i = j + 1; continue
+        if vis >= width:
+            cut = True; break
+        out.append(s[i]); vis += 1; i += 1
+    return "".join(out) + (C["off"] if cut else "")
 
 # --- процент готовности: цветная пилюля, вместо прогресс-бара ---
 if total:
@@ -239,19 +278,28 @@ else:
     eta = C["dim"] + "\u2014" + C["off"]
 
 ts = C["dim"] + time.strftime("%H:%M:%S") + C["off"]
-tail = ""
-if last:
-    tail += "  " + C["mag"] + last + C["off"]
-if cur:
-    tail += "  " + C["warn"] + "\u25b8 " + cur + C["off"]
 if os.environ.get("LIVE") == "1":
     # ЖИВОЙ кадр: стираем строку ПЕРЕД записью. Грабля (было): end="\r\033[K"
     # после строки — кадр стирал сам себя, на экране оставалась одна легенда.
     lead, end = "\r\033[K", ""
+    width = term_width()
 else:
     lead, end = "", "\n"
-sys.stdout.write("%s%s %s %s  avg %.1f мин  ETA %s%s%s"
-                 % (lead, ts, pct, cnt, avg / 60.0, eta, tail, end))
+    width = 0
+frame = "%s %s %s  avg %.1f мин  ETA %s" % (ts, pct, cnt, avg / 60.0, eta)
+
+# Хвост: текущий файл (живое) важнее последнего проблемного — он и в отчёте.
+# Грабля переноса (её исправили): кадр был 146 символов при консоли 80 —
+# переносился на вторую физическую строку, \r\033[K стирал только её нижнюю
+# половину, и «одна строка на месте» превращалась в лестницу старых кадров.
+# Правило: хвост добавляем, только если ВЕСЬ кадр влезает; иначе гасим жёстко.
+for seg in (C["warn"] + "\u25b8 " + cur + C["off"] if cur else "",
+            C["mag"] + last + C["off"] if last else ""):
+    if seg and (width == 0 or vis_len(frame) + 2 + vis_len(seg) <= width - 1):
+        frame += "  " + seg
+if width:
+    frame = clip(frame, width - 1)
+sys.stdout.write(lead + frame + end)
 PY
 }
 
@@ -277,37 +325,73 @@ render_throttled() {
 report() {
     [ "${REPORT_DONE:-0}" = "1" ] && return 0
     REPORT_DONE=1
-    python3 -u - "$OUTCOMES" <<'PY' || true
-import json, sys
+    local alive=0
+    pgrep -x cargo-mutants >/dev/null 2>&1 && alive=1
+    python3 -u - "$OUTCOMES" "$MUTANTS_JSON" "$LOG" "$alive" <<'PY' || true
+import json, re, sys
 try:
     outs = json.load(open(sys.argv[1])).get("outcomes", [])
 except Exception:
     sys.exit(0)
 if not outs:
     sys.exit(0)
+alive = sys.argv[4] == "1"
+total = 0
+try:
+    total = len(json.load(open(sys.argv[2])))
+except Exception:
+    pass
+try:
+    for line in open(sys.argv[3], errors="replace"):
+        m = re.search(r"Found (\d+) mutants to test", line)
+        if m:
+            total = int(m.group(1))
+except Exception:
+    pass
+dn = len(outs)
+done = not alive          # процесс умер — outcomes.json финален
 SYM = {"MissedMutant": "\u2717", "TimeoutMutant": "\u23f1", "Unviable": "\u2298"}
 LABEL = {"MissedMutant": "выжил — дыра в тестах",
          "TimeoutMutant": "мутант повис — таймаут тест-фазы мутанта",
          "Unviable": "не компилится — дыра в покрытии"}
 bad = [o for o in outs if o["summary"] != "CaughtMutant"]
 print()
-print("\u2500\u2500 отчёт: проблемные мутанты (по ним дальняя работа) \u2500\u2500")
+# Грабля «ложный финиш» (её исправили): снимок на 28% выдавал
+# «итог: 33 ... kill-rate 97%» как финальный вердикт. Итог — только когда
+# прогон завершён; иначе — промежуточная строка с «прогон идёт».
+print("\u2500\u2500 отчёт: проблемные мутанты (%s) \u2500\u2500"
+      % ("финиш" if done else "промежуточно \u2014 прогон идёт"))
 if not bad:
-    print("   нет — все пойманы")
+    print("   нет \u2014 %s" % ("все пойманы" if done
+                                else "все проверенные пойманы"))
 for o in bad:
     m = o["scenario"]["Mutant"]
+    f = m["file"]
+    if f.startswith("devharness/src/"):
+        f = f[len("devharness/src/"):]
     print("   %s %s:%s \u2014 %s [%s]" % (SYM.get(o["summary"], "?"),
-          m["file"], m["span"]["start"]["line"], m["name"],
+          f, m["span"]["start"]["line"], m["name"],
           LABEL.get(o["summary"], "")))
 counts = {}
 for o in outs:
     counts[o["summary"]] = counts.get(o["summary"], 0) + 1
-tot = len(outs)
-kr = 100.0 * (counts.get("CaughtMutant", 0) +
-              counts.get("TimeoutMutant", 0)) / tot if tot else 0.0
-print("   итог: %d мутантов \u2014 \u2713 %d  \u2717 %d  \u23f1 %d  \u2298 %d  | kill-rate %.1f%%"
-      % (tot, counts.get("CaughtMutant", 0), counts.get("MissedMutant", 0),
-         counts.get("TimeoutMutant", 0), counts.get("Unviable", 0), kr))
+# kill-rate по ТЕСТИРУЕМЫМ: unviable в знаменатель не входит — как в gates.rs
+# judge_mutation (testable = mutants - unviable). Грабля: было деление на все
+# dn — аудит с 0 missed печатался как «kill-rate 36%» (73 unviable из 114),
+# и оператор читал это как провал гейта.
+testable = dn - counts.get("Unviable", 0)
+ok = counts.get("CaughtMutant", 0) + counts.get("TimeoutMutant", 0)
+kr = 100.0 * ok / testable if testable else 0.0
+line = "\u2713 %d  \u2717 %d  \u23f1 %d  \u2298 %d" % (
+    counts.get("CaughtMutant", 0), counts.get("MissedMutant", 0),
+    counts.get("TimeoutMutant", 0), counts.get("Unviable", 0))
+if done:
+    print("   итог: %d мутантов \u2014 %s  | kill-rate %.1f%% (%d тестируемых)"
+          % (dn, line, kr, testable))
+else:
+    of = (" из %d" % total) if total else ""
+    print("   промежуточно: %d%s \u2014 %s  | kill-rate %.1f%% (%d тестируемых)"
+          % (dn, of, line, kr, testable))
 PY
 }
 
