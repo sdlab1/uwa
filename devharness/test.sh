@@ -15,8 +15,31 @@ export GIT_COMMITTER_NAME=devh-test GIT_COMMITTER_EMAIL=devh-test@localhost
 T="$(mktemp -d /tmp/devh-test-XXXXXX)"
 trap 'rm -rf "$T"' EXIT
 PASS=0; FAIL=0
+FAIL_NAMES=()
+# ПОЛНЫЙ ЛОГ ПРОГОНА (урок хвоста tail -15: 11 FAIL'ов ушли в терминал
+# безымянными). Логирование сделано ре-экзеком через pipe в подоболочке:
+# `exec > >(tee ...)` в bash 5.2 регистрирует tee как job, и ПЕРВЫЙ же
+# голый `wait` (секция 8, параллельные new) ждёт его вечно — прогон вис
+# на 30 минут. Свои потоки не трогаем: `wait` честный, rc через PIPESTATUS.
+if [ "${SUITE_REEXEC:-}" != "1" ]; then
+  SUITE_REEXEC=1; export SUITE_REEXEC
+  SUITE_LOG_DIR="${TEST_LOG_DIR:-$ROOT/.harness/logs}"; export SUITE_LOG_DIR
+  mkdir -p "$SUITE_LOG_DIR"
+  TEST_LOG_TS="$(date -u +%Y%m%dT%H%M%SZ)"; export TEST_LOG_TS
+  SUITE_LOG="$SUITE_LOG_DIR/test-$TEST_LOG_TS.log"; export SUITE_LOG
+  : > "$SUITE_LOG_DIR/test-failures.log"
+  ln -sfn "test-$TEST_LOG_TS.log" "$SUITE_LOG_DIR/test-latest.log"
+  echo "=== suite старт $(date -u +%H:%M:%SZ) лог: $SUITE_LOG" | tee -a "$SUITE_LOG"
+  "$0" | tee -a "$SUITE_LOG"
+  exit "${PIPESTATUS[0]}"
+fi
 pass() { PASS=$((PASS+1)); echo "  PASS: $1"; }
-fail() { FAIL=$((FAIL+1)); echo "  FAIL: $1"; }
+fail() {
+  FAIL=$((FAIL+1)); FAIL_NAMES+=("$1")
+  echo "  FAIL: $1"
+  # синхронно, без pipe-гонок: имя + UTC-время — каждый провал поименован
+  echo "$(date -u +%H:%M:%SZ) $1" >> "${SUITE_LOG_DIR:-$ROOT/.harness/logs}/test-failures.log"
+}
 
 fresh() { # $1=имя → путь к новому репо с bare-remote и одним коммитом
   local R="$T/$1"
@@ -1120,7 +1143,10 @@ grep -q "OK гейты" "$T/aut-vote-d2.log" && pass "autonomy 47d[0]: сесс�
 grep -q "автономия" "$T/aut-vote-d2.log" && fail "autonomy 47d[0]: строка уровня при AUTONOMY=0" || pass "autonomy 47d[0]: AUTONOMY=0 молчит"
 # streak растёт именно в log.md репо (merge дописывает заголовок сессии)
 grep -q "## W-001" "$T/vote-d1/.harness/log.md" && pass "autonomy 47d: merge дописал сессию в log.md (источник streak)" || fail "autonomy 47d: log.md без нового заголовка"
-
 echo
-echo "ИТОГО: PASS=$PASS FAIL=$FAIL"
+if [ "$FAIL" -gt 0 ]; then
+  echo "ПАДЕНИЯ (${#FAIL_NAMES[@]}):"
+  printf '  - %s\n' "${FAIL_NAMES[@]}"
+fi
+echo "ИТОГ: PASS=$PASS FAIL=$FAIL (лог: $SUITE_LOG)"
 [ "$FAIL" -eq 0 ]
