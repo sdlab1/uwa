@@ -738,6 +738,20 @@ ENOSPC, частичная запись, git-ошибка — вне `kill -9`-�
 новых тестах были неверны (заголовок без даты — заголовок; 1/2 без даты —
 ровно половина, доверие целое) — исправлены ожидания, не код.
 
+**Мутационный аудит зоны E-1 — СДАН (2026-10-21):** дифф сессии
+`git diff 4c55bfa beef7f4` (8 файлов) → `/tmp/e1.diff`; прогон
+`cargo mutants --in-place --test-tool nextest --baseline=skip
+--timeout-multiplier 2 --in-diff /tmp/e1.diff -p devh
+--config devharness/cargo-mutants.toml`, лог `/tmp/e1_audit.log`
+(**96 мутантов**, `Found 96 mutants to test`). Итог по `outcomes.json`
+(`o['summary']`): **96 CaughtMutant / 0 Missed / 0 Timeout / 0 Unviable —
+kill-rate 100.0%**, вся зона = `devharness/src/core/escapes.rs`. Критичные
+мутанты убиты: `is_debt → true` и `→ false`, `undated*2 > headers` ↔ `>=`
+(граница 50% — тестом), `saturating_*` в streak/distrust. Средняя скорость
+0.4 мин/мутант (прогон ~60 мин, in-place, warm worktree). Live-CLI
+(`tools/mutants-watch.sh`, LIVE=1 одним вызовом) отработал полный сеанс до
+100% + отчёт «нет проблемных» на EXIT; дерево после in-place чистое.
+
 **Дальше по нарезке:** E-2 (E3 — свежесть корпуса, Hinnant
 `days_from_civil`, `CORPUS_FRESH_DAYS=14`) → E-3 (E1 — петля фальсификации,
 `AUTONOMY_SAMPLE=3`) → E-4 (E6 — chaos фаза 2, state-corruption) → C2 = E5

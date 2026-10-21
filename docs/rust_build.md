@@ -1062,7 +1062,15 @@ flaky — чистые функции общие).
 (+6 проверок в 47); fmt `-p devh` чистый. Clippy: 11 ошибок expect() в
 `run.rs`-тестах — предсуществующие (песочница с forbid-линтами, не гейт).
 
-**Мутационный аудит зоны E-1 — следующий шаг:** дифф сессии,
-`--in-diff`, nextest, in-place; цель 100% testable kill-rate
-(в частности: мутанты `is_debt → true/false`, `>` ↔ `>=` в distrust,
-`saturating_mul` ↔ `mul` — граница 50% обязана быть убита тестом).
+**Мутационный аудит зоны E-1 — СДАН (2026-10-21):** дифф
+`git diff 4c55bfa beef7f4` (8 файлов, лог `/tmp/e1_audit.log`), прогон
+`cargo mutants --in-place --test-tool nextest --baseline=skip
+--timeout-multiplier 2 --in-diff /tmp/e1.diff -p devh
+--config devharness/cargo-mutants.toml` → **96 мутантов** (`Found 96
+mutants to test`). Счёт по `outcomes.json` (`o['summary']`): **96
+CaughtMutant / 0 Missed / 0 Timeout / 0 Unviable, kill-rate 100.0%** —
+вся зона = `core/escapes.rs`, мутанты `is_debt → true/false`, `>` ↔ `>=`
+и граница 50% distrust убиты тестами. Средняя скорость 0.4 мин/мутант.
+Грабля сессии: `outcomes.json` пишется инкрементально (`total_mutants`
+растёт по мере тестов) — «96 mutants» берём из строки `Found N mutants to
+test` в логе, не из джейсона.
