@@ -361,6 +361,66 @@ mod tests {
     }
 
     #[test]
+    fn paths_join_store_dir() {
+        // Пути ledger/corpus: мутант `-> Default::default()` (пустой PathBuf)
+        // иначе никого не ловит — функция в тестах не вызывалась.
+        let store = Store {
+            dir: std::path::PathBuf::from("/tmp/devh-store-test/.harness"),
+        };
+        assert_eq!(
+            ledger_path(&store),
+            std::path::PathBuf::from("/tmp/devh-store-test/.harness/escapes.md")
+        );
+        assert_eq!(
+            corpus_path(&store),
+            std::path::PathBuf::from("/tmp/devh-store-test/.harness/corpus.json")
+        );
+    }
+
+    #[test]
+    fn aggregate_reads_floor_files() {
+        // Агрегация «с пола»: 24 мутанта кортежа (вектор побегов, streak,
+        // corpus) ловятся только живой сборкой из файлов.
+        let dir = std::env::temp_dir().join(format!("devh-agg-{}", std::process::id()));
+        let store = Store {
+            dir: dir.join(".harness"),
+        };
+        std::fs::create_dir_all(&store.dir).unwrap_or_else(|e| unreachable!("mkdir: {e}"));
+        std::fs::write(
+            ledger_path(&store),
+            format!("{}\n\n# комментарий\nмусор без полей\n", line("стаб")),
+        )
+        .unwrap_or_else(|e| unreachable!("ledger: {e}"));
+        std::fs::write(
+            store.dir.join("log.md"),
+            "## W-001 — a (2026-10-01)\n## W-002 — b (2026-10-20)\n",
+        )
+        .unwrap_or_else(|e| unreachable!("log: {e}"));
+        std::fs::write(
+            corpus_path(&store),
+            r#"{"caught":13,"total":13,"date":"2026-10-19"}"#,
+        )
+        .unwrap_or_else(|e| unreachable!("corpus: {e}"));
+
+        let (escapes, streak, corpus) = aggregate(&store);
+        // точное равенство, не len: vec![Default::default()] тоже даст 1
+        assert_eq!(
+            escapes,
+            vec![Escape {
+                date: "2026-10-19".to_string(),
+                session: "W-042".to_string(),
+                found: "ручной дифф после merge".to_string(),
+                class: "blind:boundary".to_string(),
+                reaction: "стаб".to_string(),
+            }]
+        );
+        assert_eq!(streak, 1); // W-002 (2026-10-20) после побега 2026-10-19
+        assert_eq!(corpus, Some((13, 13, "2026-10-19".to_string())));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn level_line_shape() {
         let esc = parse_escapes(&line("стаб"));
         let l = level_line(&esc, 12, Some((13, 13, String::new())));

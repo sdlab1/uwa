@@ -63,6 +63,17 @@ pub enum Cmd {
     Escapes,
 }
 
+impl Default for Cmd {
+    /// Нейтральный дефолт диспетчера — чтение списка (побочных эффектов нет).
+    /// Кроме смысла — мутационная гигиена: fn-replace мутант
+    /// `replace Cmd::from_matches -> Ok(Default::default())` без `Cmd: Default`
+    /// не компилируется (unviable = спрятанная дыра, fast_cycle §P9); с
+    /// дефолтом он viable, и его ловит from_matches_dispatches_subcommands.
+    fn default() -> Self {
+        Cmd::List
+    }
+}
+
 impl Cmd {
     pub fn clap_subcommands() -> Vec<clap::Command> {
         vec![
@@ -252,5 +263,37 @@ impl Cmd {
             Some("escapes") => Ok(Cmd::Escapes),
             _ => Err("unknown subcommand".to_string()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dispatch(argv: &[&str]) -> Cmd {
+        let mut args = vec!["devh"];
+        args.extend_from_slice(argv);
+        let matches = clap::Command::new("devh")
+            .subcommands(Cmd::clap_subcommands())
+            .get_matches_from(args);
+        Cmd::from_matches(&matches).unwrap_or_else(|e| unreachable!("dispatch: {e}"))
+    }
+
+    #[test]
+    fn from_matches_dispatches_subcommands() {
+        // Ловит мутанта `from_matches -> Ok(Default::default())`: любая из
+        // этих команд отличается от дефолта Cmd::List.
+        assert!(matches!(dispatch(&["init"]), Cmd::Init));
+        assert!(matches!(dispatch(&["list"]), Cmd::List));
+        assert!(matches!(dispatch(&["clean"]), Cmd::Clean));
+        assert!(matches!(dispatch(&["escapes"]), Cmd::Escapes));
+    }
+
+    #[test]
+    fn from_matches_unknown_subcommand_is_err() {
+        // Защитная ветка `_ => Err`: clap режет неизвестное на парсинге,
+        // но контракт from_matches — Err, а не паника.
+        let empty = clap::ArgMatches::default();
+        assert!(Cmd::from_matches(&empty).is_err());
     }
 }
