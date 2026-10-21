@@ -784,3 +784,9 @@ devharness/tools/capture-fixtures.sh
 7. **Модель пока не отличает провал гейта от нарушения Tripwire.** Для теста этого достаточно, но в боевой версии нужен отдельный счётчик раундов.
 
 Файлы лежат в `/tmp/work/` (`hard_parts_3.rs`, обновлённые `hard_parts_2.rs` и `hard_parts.rs`).
+---
+
+**Прогресс 2026-10-21 (коммит в main):**
+- F-0.1 СДАН: `changes_strict` + `parse_name_status_z` (ChangeKind/Change) в `shell/git.rs` — fail-closed (N1: ошибка git = Err, не пустой список) + `-z`/`--no-renames`/разворот rename (N5); 6 unit-тестов, lib 222/222 зелёные. Старые `changed_files`/`names_scoped` пока не тронуты — миграция вызовов в F-0.2.
+- Осталось F-0: 0.2 `freeze_gate → Result` (источник файлов — `changes_strict`, ошибка → EnvBlocked rc=2; убрать `unreachable!`), 0.3 ревью (`REVIEW_DIFF_MAX=2000` вместо take(400), `diff_text` один на ревью+детектор, `tree_digest` до/после ревью), 0.4 `run_logged` добивает группу SIGKILL после нормального try_wait.
+- Ядро для них уже лежит проверенным в `docs/hard_parts*.rs` (138 тестов): `tree_digest` с length-prefix, строгий JSON (torn-write отсекается), nonce для review-вердикта.

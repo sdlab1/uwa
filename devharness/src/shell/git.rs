@@ -233,6 +233,96 @@ pub fn changed_files(wt: &Path) -> Vec<String> {
     all
 }
 
+// ────────────────── F-0.1: строгий список изменений (N1, N5) ──────────────────
+// Fail-closed: ошибка git или неизвестный статус = Err (вызывающий делает
+// EnvBlocked), а НЕ пустой список. Прежний путь `git_out(...).unwrap_or_default()`
+// давал fail-open: сбой git → «дифф пуст» → FREEZE проходит на грязном дереве.
+// `-z` убирает кавычки вокруг не-ASCII путей, `--no-renames` + разворот
+// rename в две записи закрывает обход глобов (`src/a.rs -> tests/b.rs`).
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChangeKind {
+    Added,
+    Modified,
+    Deleted,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Change {
+    pub kind: ChangeKind,
+    pub path: String,
+}
+
+fn next_path<'a, I: Iterator<Item = &'a str>>(it: &mut I, st: &str) -> anyhow::Result<&'a str> {
+    it.next()
+        .filter(|p| !p.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("нет пути после статуса {st:?}"))
+}
+
+/// Разбор вывода `git diff --name-status -z`. Тотальный и fail-closed:
+/// любой неизвестный статус или обрыв потока — Err, а не «пусто».
+/// Rename/copy разворачиваются в Deleted(old)+Added(new), даже если
+/// `--no-renames` забыли (закрывает N5 на уровне парсера).
+pub fn parse_name_status_z(raw: &str) -> anyhow::Result<Vec<Change>> {
+    let mut out = Vec::new();
+    let mut it = raw.split('\0').peekable();
+    while let Some(st) = it.next() {
+        if st.is_empty() {
+            if it.peek().is_none() {
+                break; // завершающий NUL
+            }
+            return Err(anyhow::anyhow!("пустой статус посреди потока"));
+        }
+        let mk = |kind: ChangeKind, p: &str| Change {
+            kind,
+            path: p.to_string(),
+        };
+        match st.as_bytes().first() {
+            Some(b'A') => out.push(mk(ChangeKind::Added, next_path(&mut it, st)?)),
+            Some(b'D') => out.push(mk(ChangeKind::Deleted, next_path(&mut it, st)?)),
+            Some(b'M' | b'T' | b'U') => out.push(mk(ChangeKind::Modified, next_path(&mut it, st)?)),
+            Some(b'R') => {
+                let old = next_path(&mut it, st)?;
+                let new = next_path(&mut it, st)?;
+                out.push(mk(ChangeKind::Deleted, old));
+                out.push(mk(ChangeKind::Added, new));
+            }
+            Some(b'C') => {
+                let _src = next_path(&mut it, st)?;
+                out.push(mk(ChangeKind::Added, next_path(&mut it, st)?));
+            }
+            _ => return Err(anyhow::anyhow!("неизвестный статус git: {st:?}")),
+        }
+    }
+    Ok(out)
+}
+
+/// Строгие изменённые файлы worktree: tracked-diff + untracked.
+/// Ошибка любого вызова git — Err (не пустой вектор).
+pub fn changes_strict(wt: &Path) -> anyhow::Result<Vec<Change>> {
+    let tracked = git(
+        wt,
+        &[
+            "-c",
+            "core.quotepath=off",
+            "diff",
+            "--name-status",
+            "-z",
+            "--no-renames",
+            "HEAD",
+        ],
+    )?;
+    let mut v = parse_name_status_z(&tracked)?;
+    let untracked = git(wt, &["ls-files", "-z", "--others", "--exclude-standard"])?;
+    for p in untracked.split('\0').filter(|p| !p.is_empty()) {
+        v.push(Change {
+            kind: ChangeKind::Added,
+            path: p.to_string(),
+        });
+    }
+    Ok(v)
+}
+
 fn names_scoped(wt: &Path, kind: &str, scope: &str) -> Vec<String> {
     let mut args: Vec<String> = if kind == "diff" {
         vec!["diff".into(), "--name-only".into(), "HEAD".into()]
@@ -623,5 +713,75 @@ mod tests {
         write_mutate_diff(d.path(), "src.rs", &out2).unwrap_or_else(|_| unreachable!());
         let text2 = std::fs::read_to_string(&out2).unwrap_or_else(|_| unreachable!());
         assert!(!text2.contains("b/new.rs"), "scope не применился: {text2}");
+    }
+}
+
+#[cfg(test)]
+mod f0_gitparse_tests {
+    use super::*;
+
+    fn repo() -> tempfile::TempDir {
+        let d = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let _ = git(d.path(), &["init", "-q"]);
+        let _ = git(d.path(), &["config", "user.email", "t@example.com"]);
+        let _ = git(d.path(), &["config", "user.name", "T"]);
+        d
+    }
+
+    #[test]
+    fn f01_parse_basic_and_terminating_nul() {
+        let v = parse_name_status_z("M\0a.rs\0A\0b.rs\0").unwrap_or_else(|_| unreachable!());
+        assert_eq!(v.len(), 2);
+        assert_eq!(v[0].kind, ChangeKind::Modified);
+        assert_eq!(v[0].path, "a.rs");
+        assert_eq!(v[1].kind, ChangeKind::Added);
+        assert_eq!(v[1].path, "b.rs");
+    }
+
+    #[test]
+    fn f01_parse_rename_unfolds_even_without_flag() {
+        let v = parse_name_status_z("R100\0src/old.rs\0tests/new.rs\0")
+            .unwrap_or_else(|_| unreachable!());
+        assert_eq!(v.len(), 2);
+        assert!(matches!(v[0].kind, ChangeKind::Deleted) && v[0].path == "src/old.rs");
+        assert!(matches!(v[1].kind, ChangeKind::Added) && v[1].path == "tests/new.rs");
+    }
+
+    #[test]
+    fn f01_parse_unknown_status_is_err_not_empty() {
+        assert!(parse_name_status_z("Z\0x.rs\0").is_err());
+        assert!(parse_name_status_z("M\0").is_err());
+        assert!(parse_name_status_z("M\0\0a.rs\0").is_err());
+    }
+
+    #[test]
+    fn f01_parse_cyrillic_and_space_path_intact() {
+        let v = parse_name_status_z("M\0src/я тут.rs\0").unwrap_or_else(|_| unreachable!());
+        assert_eq!(v[0].path, "src/я тут.rs");
+    }
+
+    #[test]
+    fn f01_changes_strict_sees_all_three_kinds() {
+        let d = repo();
+        let _ = git(d.path(), &["add", "-A"]);
+        std::fs::write(d.path().join("old.rs"), b"1").unwrap_or_else(|_| unreachable!());
+        let _ = git(d.path(), &["add", "-A"]);
+        let _ = git(d.path(), &["commit", "-qm", "base"]);
+        std::fs::write(d.path().join("old.rs"), b"2").unwrap_or_else(|_| unreachable!());
+        std::fs::write(d.path().join("new.rs"), b"x").unwrap_or_else(|_| unreachable!());
+        let _ = git(d.path(), &["rm", "-q", "-f", "old.rs"]);
+        let v = changes_strict(d.path()).unwrap_or_else(|_| unreachable!());
+        assert!(v
+            .iter()
+            .any(|c| c.path == "old.rs" && c.kind == ChangeKind::Deleted));
+        assert!(v
+            .iter()
+            .any(|c| c.path == "new.rs" && c.kind == ChangeKind::Added));
+    }
+
+    #[test]
+    fn f01_changes_strict_non_repo_is_err_fail_closed() {
+        let d = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        assert!(changes_strict(d.path()).is_err());
     }
 }
