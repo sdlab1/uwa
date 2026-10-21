@@ -1174,7 +1174,17 @@ fn gate_ladder(
                 })
             }
             Verdict::Pass => {}
-            Verdict::SpecBlock { .. } => unreachable!("review_gate не отдаёт SpecBlock"),
+            // F-0.3: дифф больше REVIEW_DIFF_MAX — блокер СПЕКИ (дроби
+            // задачу), а не работа агента: fix-раунды его не размельчат.
+            Verdict::SpecBlock { tail, .. } => {
+                return Err(GateStop {
+                    verdict: Verdict::SpecBlock {
+                        gate: Gate::Review,
+                        tail,
+                    },
+                    log: review_log,
+                })
+            }
         }
     }
 
@@ -1412,12 +1422,85 @@ fn lint_gate(cfg: &RunConfig, wt: &Path) -> (String, Verdict) {
     (log, Verdict::Pass)
 }
 
+/// F-0.3: размер диффа для ревью. Чистая развилка (тестируется без git):
+/// `max == 0` — без лимита (аварийный клапан), `lines <= max` — Pass,
+/// иначе SpecBlock REVIEW: «дроби задачу» — это спека велика, чинит её
+/// человек, а не агент fix-раундами (rc=1).
+fn review_size_verdict(lines: usize, max: u32) -> Verdict {
+    if max != 0 && lines > max as usize {
+        return Verdict::SpecBlock {
+            gate: Gate::Review,
+            tail: format!("дифф {lines} строк > REVIEW_DIFF_MAX={max}"),
+        };
+    }
+    Verdict::Pass
+}
+
+/// F-0.3: дерево после ревьюера. Расхождение дайджестов = `EnvBlocked`
+/// «ревьюер изменил дерево»: ревьюер — второй запрос ТОМУ ЖЕ агенту, и
+/// правка файлов «заодно с ревью» — это работа мимо гейтов (серия F:
+/// гейты не обходятся молча). Нечитаемое дерево после ревью — тоже
+/// env-блокер: без этого проверка вслепую превращалась бы в «чисто».
+fn post_review_guard(before: &str, wt: &Path) -> Option<Verdict> {
+    let after = match git::tree_digest(wt) {
+        Ok(a) => a,
+        Err(e) => {
+            return Some(Verdict::EnvBlocked {
+                missing: format!("дайджест дерева после ревью не читается ({e})"),
+            })
+        }
+    };
+    (after != before).then(|| Verdict::EnvBlocked {
+        missing: "ревьюер изменил дерево".into(),
+    })
+}
+
 /// Ревью-гейт: лог + вердикт (Ok→Pass, Issues→Fix, всё остальное — среда).
+///
+/// F-0.3, три новых свойства:
+/// 1) дифф читается единым `git::diff_text` — ошибка git роняет гейт в
+///    `EnvBlocked`, а не в «диффа нет — пропуск» (слепота);
+/// 2) дифф больше `REVIEW_DIFF_MAX` строк → `SpecBlock` (дроби задачу);
+/// 3) дайджест дерева до и после запроса ревьюеру — правка файлов из
+///    ревью ловится (`post_review_guard`).
 fn review_gate(store: &Store, cfg: &RunConfig, wt: &Path, id: &ItemId) -> (String, Verdict) {
-    let diff = git::review_diff(wt);
+    let diff = match git::diff_text(wt, "") {
+        Ok(d) => d,
+        Err(e) => {
+            return (
+                format!("review: diff не читается ({e})\n"),
+                Verdict::EnvBlocked {
+                    missing: format!("git diff не читается ({e}) — не «чисто», а слепота"),
+                },
+            )
+        }
+    };
     if diff.trim().is_empty() {
         return ("review: диффа нет — пропуск".into(), Verdict::Pass);
     }
+    let lines = diff.lines().count();
+    match review_size_verdict(lines, cfg.review_diff_max) {
+        Verdict::Pass => {}
+        spec => {
+            let log = format!(
+                "review: дифф {lines} строк > REVIEW_DIFF_MAX={} — ревьюер прочитал бы его вслепую.\n\
+                 Дроби задачу: этот дифф — признак спеки, которая велика, а не работы агента.\n",
+                cfg.review_diff_max
+            );
+            return (log, spec);
+        }
+    }
+    let before = match git::tree_digest(wt) {
+        Ok(d) => d,
+        Err(e) => {
+            return (
+                format!("review: дерево не читается ({e})\n"),
+                Verdict::EnvBlocked {
+                    missing: format!("дайджест дерева не читается ({e})"),
+                },
+            )
+        }
+    };
     let agent = store
         .read(item_rel(id, "agent"))
         .filter(|a| !a.trim().is_empty())
@@ -1434,28 +1517,29 @@ fn review_gate(store: &Store, cfg: &RunConfig, wt: &Path, id: &ItemId) -> (Strin
         Duration::from_secs(cfg.agent_timeout as u64),
         &envs,
     );
-    match out {
+    let (log, verdict) = match out {
         Ok(out) => {
             let log = proc::combined(&out);
             if out.exit != Some(0) {
-                return (
+                (
                     format!("{log}\nreview: агент-ревьюер упал (API/timeout)\n"),
                     Verdict::EnvBlocked {
                         missing: "агент-ревьюер упал (API/timeout)".into(),
                     },
-                );
+                )
+            } else {
+                let outcome = match parse_review_verdict(&log) {
+                    ReviewVerdict::Ok => Verdict::Pass,
+                    ReviewVerdict::Issues(_) => Verdict::Fail {
+                        gate: Gate::Review,
+                        tail: tail_of(&log, 5),
+                    },
+                    ReviewVerdict::Unrecognized => Verdict::EnvBlocked {
+                        missing: "вердикт не распознан (нужна строка VERDICT: …)".into(),
+                    },
+                };
+                (log, outcome)
             }
-            let outcome = match parse_review_verdict(&log) {
-                ReviewVerdict::Ok => Verdict::Pass,
-                ReviewVerdict::Issues(_) => Verdict::Fail {
-                    gate: Gate::Review,
-                    tail: tail_of(&log, 5),
-                },
-                ReviewVerdict::Unrecognized => Verdict::EnvBlocked {
-                    missing: "вердикт не распознан (нужна строка VERDICT: …)".into(),
-                },
-            };
-            (log, outcome)
         }
         Err(e) => (
             format!("review: агент-ревьюер упал: {}\n", e.describe(&full)),
@@ -1463,6 +1547,18 @@ fn review_gate(store: &Store, cfg: &RunConfig, wt: &Path, id: &ItemId) -> (Strin
                 missing: "агент-ревьюер упал (API/timeout)".into(),
             },
         ),
+    };
+    // Дайджест ПОСЛЕ — сильнее любого вердикта ревьюера: молчаливая правка
+    // дерева перебивает даже «VERDICT: OK».
+    match post_review_guard(&before, wt) {
+        Some(v) => {
+            let why = match &v {
+                Verdict::EnvBlocked { missing } => missing.clone(),
+                _ => unreachable!("post_review_guard отдаёт только EnvBlocked"),
+            };
+            (format!("{log}review: {why}\n"), v)
+        }
+        None => (log, verdict),
     }
 }
 
@@ -2432,8 +2528,9 @@ pub fn which(bin: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{freeze_verdict, TuiProgress};
+    use super::{freeze_verdict, post_review_guard, review_size_verdict, TuiProgress};
     use crate::core::gates::{Gate, Verdict};
+    use crate::shell::git;
     use std::path::Path;
 
     /// Парс-контракт `devh ps`: имена стадий тайминга печатаются дословно.
@@ -2647,5 +2744,63 @@ mod tests {
         let tui = tui_in(tmp.path());
         assert_eq!(tui.avg_secs(0), 0.0, "нет деления на ноль в ETA");
         assert!(tui.avg_secs(2).is_finite() && tui.avg_secs(2) >= 0.0);
+    }
+
+    // ─── F-0.3: размер диффа и неизменность дерева при ревью ───
+
+    #[test]
+    fn review_diff_over_max_is_specblock() {
+        // Граница: ровно MAX — ещё ревью (Pass), MAX+1 — SpecBlock REVIEW.
+        // Без границы мутант `<=` → `>=` выживает, и спека любого размера
+        // молча проходит «ревью».
+        assert_eq!(review_size_verdict(2000, 2000), Verdict::Pass);
+        // MAX+1 — не Fail (не работа агента) и не Env (не среда): SpecBlock,
+        // его чинит человек, дробя задачу.
+        match review_size_verdict(2001, 2000) {
+            Verdict::SpecBlock { gate, .. } => assert_eq!(gate, Gate::Review),
+            other => panic!("превышение лимита не SpecBlock: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn review_size_zero_max_is_no_limit() {
+        // Аварийный клапан откатки: 0 = без лимита (не «ничего не ревьюить»).
+        assert_eq!(review_size_verdict(50_000, 0), Verdict::Pass);
+        assert_eq!(review_size_verdict(0, 2000), Verdict::Pass);
+    }
+
+    #[test]
+    fn post_review_guard_flags_tree_change() {
+        // Ревьюер — второй запрос ТОМУ ЖЕ агенту: правка файлов из него
+        // (стаб-атака review-writes.sh) обязана дать EnvBlocked rc=2.
+        let d = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let g = |args: &[&str]| {
+            let _ = std::process::Command::new("git")
+                .args(args)
+                .current_dir(d.path())
+                .output();
+        };
+        g(&["init", "-q"]);
+        g(&["config", "user.email", "t@example.com"]);
+        g(&["config", "user.name", "T"]);
+        std::fs::write(d.path().join("a.txt"), b"1").unwrap_or_else(|_| unreachable!());
+        g(&["add", "-A"]);
+        g(&["commit", "-qm", "base"]);
+        let before = git::tree_digest(d.path()).unwrap_or_else(|_| unreachable!());
+        assert!(
+            post_review_guard(&before, d.path()).is_none(),
+            "честное ревью (дерево не тронуто) — не блокер"
+        );
+        std::fs::write(d.path().join("a.txt"), b"2").unwrap_or_else(|_| unreachable!());
+        let got = post_review_guard(&before, d.path());
+        match got {
+            Some(Verdict::EnvBlocked { missing }) => {
+                assert!(
+                    missing.contains("ревьюер изменил дерево"),
+                    "причина названа: {missing}"
+                );
+            }
+            other => panic!("правка дерева из ревью не поймана: {other:?}"),
+        }
     }
 }

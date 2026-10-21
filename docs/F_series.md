@@ -154,6 +154,8 @@ pub fn parse_name_status_z(raw: &str) -> Vec<Change>; // чистая, тест�
 
 ### F-0.3 Ревью: размер и неизменность дерева (N2, N3)
 
+> ✅ **СДАН** (см. `rust_build.md` §9.24). Реализовано чуть шире плана: `diff_text(wt, scope) -> Result<String>` (общий источник и для ревью, и для F-2; заменил `review_diff` с его молчаливым `take(400)`), чистое ядро `core/digest.rs` (`tree_digest`, `parse_ls_files_z`, `mode_from_permissions` — length-prefix-кадрирование sha256, дедуп путей, fail-closed `Err` на дубле), `git::tree_entries/tree_digest` (ls-files `-z -c -o --exclude-standard`, симлинки через `symlink_metadata`). Размер → `review_size_verdict` = `SpecBlock Gate::Review` rc=1 (==MAX Pass, MAX+1 Spec; 0 = без лимита); правка дерева из ревью → `post_review_guard` дайджест до/после = `EnvBlocked «ревьюер изменил дерево»` rc=2 (сильнее любого `VERDICT`). Конфиг `REVIEW_DIFF_MAX` (+`HARNESS_REVIEW_DIFF_MAX`, CONFIG_KEYS 37→38). Приёмка: test.sh **477 PASS / 0 FAIL**, стаб-атака 44f `review-writes.sh` поймана (rc=2), корпус 48/48, дельта-мутаудит F-0.3 = 0 missed.
+
 - `REVIEW_DIFF_MAX` (дефолт 2000 строк) вместо `take(400)`. Превышение даёт `SpecBlock` («дифф слишком велик для ревью — дроби задачу»): это сигнал о слишком большой спеке, а не работа агента.
 - Один `diff_text(wt) -> Result<String>` кормит и ревьюера, и детектор F-2.
 - Дайджест дерева до и после ревью:

@@ -377,24 +377,19 @@ fn scoped_names(wt: &Path, scope: &str) -> Vec<String> {
     files
 }
 
-/// P7-2.2: diff для `--in-diff` cargo-mutants («только мутанты на строках,
-/// затронутых этим diff'ом» — `-D, --in-diff <IN_DIFF>`). Пишем в
-/// `.harness/mutate.diff` (вне git: `.git/info/exclude`, значит и вне
-/// отпечатка kill-cache) и отдаём путь в шаблон как `{diff}`.
+/// Общий diff сессии (`git diff HEAD`) — ЕДИНЫЙ источник для ревьюера
+/// (F-0.3) и будущего детектора ослабления тестов (F-2), чтобы их взгляды
+/// на «что агент менял» не расходились.
 ///
 /// Почему `git add -N .` перед `git diff HEAD`: без intent-to-add новые
-/// файлы агента в `git diff HEAD` не видны, и их мутанты выпали бы из
-/// скоупа — а это самый ценный для гейта код. Тот же приём уже
-/// используется в `review_diff`. Побочный эффект безопасен: intent-to-add
-/// только переводит untracked в staged-new, содержимое не меняется.
+/// файлы агента в `git diff HEAD` не видны, и они выпали бы из ревью —
+/// а это самый ценный для гейта код. Побочный эффект безопасен:
+/// intent-to-add только переводит untracked в staged-new, содержимое не
+/// меняется (и на дайджест дерева не влияет — он читает файлы, не индекс).
 ///
-/// Взгляд на «изменённое» тот же, что у `changed_files_scoped_all`
-/// (`git diff HEAD` + scope-pathspec) — скоуп `-f {files}` и скоуп
-/// `--in-diff` не расходятся.
-///
-/// Пустой diff — не ошибка: cargo-mutants печатает «Diff file is empty»
-/// и выходит 0 (0 мутантов), эту ветку гейт отличает от Env.
-pub fn write_mutate_diff(wt: &Path, scope: &str, out: &Path) -> anyhow::Result<bool> {
+/// Ошибка git → `Err` (fail-closed): вызывающий гейт превращает её в
+/// `EnvBlocked`, а не в «диффа нет, пропуск».
+pub fn diff_text(wt: &Path, scope: &str) -> anyhow::Result<String> {
     let _ = git_ok(wt, &["add", "-N", "."]);
     let mut args: Vec<&str> = vec!["diff", "HEAD"];
     let scopes: Vec<&str> = scope.split_whitespace().collect();
@@ -413,7 +408,22 @@ pub fn write_mutate_diff(wt: &Path, scope: &str, out: &Path) -> anyhow::Result<b
             String::from_utf8_lossy(&o.stderr).trim()
         );
     }
-    let text = String::from_utf8_lossy(&o.stdout).to_string();
+    Ok(String::from_utf8_lossy(&o.stdout).to_string())
+}
+
+/// P7-2.2: diff для `--in-diff` cargo-mutants («только мутанты на строках,
+/// затронутых этим diff'ом» — `-D, --in-diff <IN_DIFF>`). Пишем в
+/// `.harness/mutate.diff` (вне git: `.git/info/exclude`, значит и вне
+/// отпечатка kill-cache) и отдаём путь в шаблон как `{diff}`.
+///
+/// Взгляд на «изменённое» тот же, что у `changed_files_scoped_all`
+/// (`git diff HEAD` + scope-pathspec) — скоуп `-f {files}` и скоуп
+/// `--in-diff` не расходятся.
+///
+/// Пустой diff — не ошибка: cargo-mutants печатает «Diff file is empty»
+/// и выходит 0 (0 мутантов), эту ветку гейт отличает от Env.
+pub fn write_mutate_diff(wt: &Path, scope: &str, out: &Path) -> anyhow::Result<bool> {
+    let text = diff_text(wt, scope)?;
     if let Some(par) = out.parent() {
         std::fs::create_dir_all(par).ok();
     }
@@ -427,17 +437,58 @@ pub fn current_branch(wt: &Path) -> Option<String> {
     (!b.trim().is_empty()).then(|| b.trim().to_string())
 }
 
-pub fn review_diff(wt: &Path) -> String {
-    let _ = git_ok(wt, &["add", "-N", "."]);
-    let out = Command::new("git")
-        .args(["diff", "HEAD"])
-        .current_dir(wt)
+/// F-0.3: полный список файлов дерева worktree для дайджеста.
+/// cached (`-c`) + untracked-not-ignored (`-o --exclude-standard`):
+/// агент мог класть логику и в новый файл, и в игнорируемый путь — первое
+/// видим, второе нет (граница модели, записано в rust_build.md).
+pub fn tree_entries(wt: &Path) -> anyhow::Result<Vec<crate::core::digest::Entry>> {
+    use crate::core::digest::{mode_from_permissions, parse_ls_files_z, Entry};
+    use std::os::unix::fs::PermissionsExt;
+    let mut c = Command::new("git");
+    c.args(["ls-files", "-z", "-c", "-o", "--exclude-standard"])
+        .current_dir(wt);
+    let o = c
         .output()
-        .ok();
-    let text = out
-        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
-        .unwrap_or_default();
-    text.lines().take(400).collect::<Vec<_>>().join("\n")
+        .map_err(|e| anyhow::anyhow!("devh: git ls-files не запустился ({e})"))?;
+    if !o.status.success() {
+        anyhow::bail!(
+            "git ls-files: {}",
+            String::from_utf8_lossy(&o.stderr).trim()
+        );
+    }
+    let mut out: Vec<Entry> = Vec::new();
+    for rel in parse_ls_files_z(&String::from_utf8_lossy(&o.stdout)) {
+        let p = wt.join(&rel);
+        // symlink_metadata, не metadata: симлинк не разыменовывается, у него
+        // свой режим 0o120000 и «содержимое» = цель.
+        let meta = std::fs::symlink_metadata(&p)
+            .map_err(|e| anyhow::anyhow!("дерево: не читать {} ({e})", p.display()))?;
+        if meta.file_type().is_dir() {
+            continue;
+        }
+        let (mode, content) = if meta.file_type().is_symlink() {
+            let target = std::fs::read_link(&p)
+                .map_err(|e| anyhow::anyhow!("дерево: не читать ссылку {} ({e})", p.display()))?;
+            (0o120000u32, target.to_string_lossy().as_bytes().to_vec())
+        } else {
+            let bytes = std::fs::read(&p)
+                .map_err(|e| anyhow::anyhow!("дерево: не читать {} ({e})", p.display()))?;
+            (mode_from_permissions(meta.permissions().mode()), bytes)
+        };
+        out.push(Entry {
+            path: rel,
+            mode,
+            content,
+        });
+    }
+    Ok(out)
+}
+
+/// F-0.3: sha256 дайджест дерева worktree (содержимое + режим + путь).
+/// Сравнение до/после ревью: разошлось → ревьюер правил дерево.
+pub fn tree_digest(wt: &Path) -> anyhow::Result<String> {
+    let entries = tree_entries(wt)?;
+    crate::core::digest::tree_digest(&entries).map_err(|e| anyhow::anyhow!("дайджест дерева: {e}"))
 }
 
 pub fn short_head(wt: &Path) -> String {
@@ -789,5 +840,102 @@ mod f0_gitparse_tests {
     fn f01_changes_strict_non_repo_is_err_fail_closed() {
         let d = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
         assert!(changes_strict(d.path()).is_err());
+    }
+
+    // ─── F-0.3: дайджест дерева и единый diff ───
+
+    fn commit_here(d: &tempfile::TempDir) {
+        let _ = git(d.path(), &["add", "-A"]);
+        let _ = git(d.path(), &["commit", "-qm", "base"]);
+    }
+
+    #[test]
+    fn f03_tree_digest_changes_on_edit_and_on_untracked() {
+        let d = repo();
+        std::fs::write(d.path().join("a.txt"), b"1").unwrap_or_else(|_| unreachable!());
+        commit_here(&d);
+        let base = tree_digest(d.path()).unwrap_or_else(|_| unreachable!());
+        assert_eq!(
+            base,
+            tree_digest(d.path()).unwrap_or_else(|_| unreachable!()),
+            "дайджест обязан быть стабилен на неизменном дереве"
+        );
+        // правка tracked
+        std::fs::write(d.path().join("a.txt"), b"2").unwrap_or_else(|_| unreachable!());
+        assert_ne!(
+            base,
+            tree_digest(d.path()).unwrap_or_else(|_| unreachable!())
+        );
+        // откат возвращает тот же дайджест
+        std::fs::write(d.path().join("a.txt"), b"1").unwrap_or_else(|_| unreachable!());
+        assert_eq!(
+            base,
+            tree_digest(d.path()).unwrap_or_else(|_| unreachable!())
+        );
+        // untracked-файл — тоже часть дерева (агент мог положить логику туда)
+        std::fs::write(d.path().join("new.txt"), b"x").unwrap_or_else(|_| unreachable!());
+        assert_ne!(
+            base,
+            tree_digest(d.path()).unwrap_or_else(|_| unreachable!())
+        );
+        // chmod +x меняет режим — без режима подмена невозможна
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perm = std::fs::metadata(d.path().join("new.txt"))
+                .unwrap_or_else(|_| unreachable!())
+                .permissions();
+            perm.set_mode(0o755);
+            std::fs::set_permissions(d.path().join("new.txt"), perm)
+                .unwrap_or_else(|_| unreachable!());
+            assert_ne!(
+                base,
+                tree_digest(d.path()).unwrap_or_else(|_| unreachable!()),
+                "chmod +x обязан менять дайджест"
+            );
+        }
+    }
+
+    #[test]
+    fn f03_tree_digest_ignores_intent_to_add_index_noise() {
+        // review_gate вызывает diff_text (тот делает `git add -N .`) ДО
+        // дайджеста: если intent-to-add менял бы дайджест, честное ревью
+        // стало бы env-блокером.
+        let d = repo();
+        std::fs::write(d.path().join("a.txt"), b"1").unwrap_or_else(|_| unreachable!());
+        commit_here(&d);
+        let before = tree_digest(d.path()).unwrap_or_else(|_| unreachable!());
+        std::fs::write(d.path().join("new.txt"), b"x").unwrap_or_else(|_| unreachable!());
+        let _ = git_ok(d.path(), &["add", "-N", "."]);
+        let after = tree_digest(d.path()).unwrap_or_else(|_| unreachable!());
+        assert_ne!(before, after, "новый файл виден (ls-files -o)");
+        let text = diff_text(d.path(), "").unwrap_or_else(|_| unreachable!());
+        assert!(text.contains("new.txt"), "untracked попал в diff: {text}");
+        // повторный add -N тот же дайджест (дубль пути не валит дайджест)
+        assert_eq!(
+            after,
+            tree_digest(d.path()).unwrap_or_else(|_| unreachable!()),
+            "дубль пути из ls-files -c -o не должен ломать дайджест"
+        );
+    }
+
+    #[test]
+    fn f03_diff_text_non_repo_is_err_not_empty() {
+        let d = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        assert!(diff_text(d.path(), "").is_err());
+    }
+
+    #[test]
+    fn f03_diff_text_scoped_sees_only_scope() {
+        let d = repo();
+        std::fs::create_dir_all(d.path().join("src")).unwrap_or_else(|_| unreachable!());
+        std::fs::write(d.path().join("src/a.rs"), b"1").unwrap_or_else(|_| unreachable!());
+        std::fs::write(d.path().join("other.txt"), b"1").unwrap_or_else(|_| unreachable!());
+        commit_here(&d);
+        std::fs::write(d.path().join("src/a.rs"), b"2").unwrap_or_else(|_| unreachable!());
+        std::fs::write(d.path().join("other.txt"), b"2").unwrap_or_else(|_| unreachable!());
+        let scoped = diff_text(d.path(), "src/*").unwrap_or_else(|_| unreachable!());
+        assert!(scoped.contains("src/a.rs"));
+        assert!(!scoped.contains("other.txt"), "скоуп нарушен: {scoped}");
     }
 }

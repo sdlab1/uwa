@@ -1,5 +1,6 @@
 pub mod contract;
 pub mod coverage;
+pub mod digest;
 pub mod early;
 pub mod escapes;
 pub mod gates;

@@ -94,6 +94,11 @@ pub struct RunConfig {
     pub lint: bool,
     pub lint_cmd: String,
     pub review: bool,
+    /// F-0.3: предел размера диффа (строк) для REVIEW-гейта. Превышение —
+    /// `SpecBlock`: это спека слишком велика, её дробит человек, а не
+    /// агент fix-раундами и не ревьюер на половине диффа. `0` = без лимита
+    /// (аварийный клапан).
+    pub review_diff_max: u32,
     /// B1: печатать строку уровня автономии в конце `devh merge`
     /// (и в `devh escapes`). Только отображение: механических запретов
     /// уровень не создаёт — решения человека, цифры машинные.
@@ -134,6 +139,7 @@ impl Default for RunConfig {
             lint: true,
             lint_cmd: String::new(),
             review: true,
+            review_diff_max: 2000,
             autonomy: true,
             corpus_fresh_days: crate::core::escapes::CORPUS_FRESH_DAYS,
             msg_deny: None,

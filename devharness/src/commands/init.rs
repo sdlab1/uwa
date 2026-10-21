@@ -162,6 +162,7 @@ pub fn init(root: &Path) -> anyhow::Result<()> {
     c += &format!("LINT={lint}                      # 1 = авто-shellcheck изменённых *.sh\n");
     c += &format!("LINT_CMD='{lint_cmd}'         # проектный линтер (напр. cargo clippy -- -D warnings); пусто = выкл\n");
     c += &format!("REVIEW={review}                  # 1 = self-review диффа вторым запросом агенту (VERDICT: OK|ISSUES)\n");
+    c += "REVIEW_DIFF_MAX=2000        # F-0.3: порог строк диффа для ревью; превышение = SpecBlock (дроби задачу, это спека, не агент). 0 = без лимита\n";
     c += &format!("FREEZE={freeze}                    # 1 = A6: дифф сессии не выходит за заявленные файлы (первый гейт, дешевле VERIFY)\n");
     c += &format!("FREEZE_ALLOW='{freeze_allow}'          # глобальный allowlist FREEZE: глобы через пробел ('src/* *.md'; per-item — секция FILES: в спеке)\n");
     c += "#   FREEZE: allowlist = FILES: спеки (items/W-NNN/files, глобы по строке) + FREEZE_ALLOW; пусто у обоих = гейт пропущен с логом\n";

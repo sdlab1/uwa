@@ -18,7 +18,7 @@ use crate::core::types::{CrapCfg, ItemId, MutateCfg, RunConfig};
 use crate::shell::store::{Item, Store};
 use crate::Cmd;
 
-pub const CONFIG_KEYS: [&str; 37] = [
+pub const CONFIG_KEYS: [&str; 38] = [
     "VERIFY",
     "BOOTSTRAP",
     "AGENT",
@@ -54,6 +54,7 @@ pub const CONFIG_KEYS: [&str; 37] = [
     "LINT",
     "LINT_CMD",
     "REVIEW",
+    "REVIEW_DIFF_MAX",
     "AUTONOMY",
     "CORPUS_FRESH_DAYS",
 ];
@@ -149,6 +150,7 @@ pub fn load_config(root: &Path) -> anyhow::Result<RunConfig> {
         lint: boolv("LINT", true),
         lint_cmd: g("LINT_CMD").unwrap_or_default(),
         review: boolv("REVIEW", true),
+        review_diff_max: u32v("REVIEW_DIFF_MAX", 2000),
         autonomy: boolv("AUTONOMY", true),
         corpus_fresh_days: u32v("CORPUS_FRESH_DAYS", crate::core::escapes::CORPUS_FRESH_DAYS),
         msg_deny: g("MSG_DENY").filter(|s| !s.trim().is_empty()),
@@ -299,4 +301,51 @@ pub fn dispatch(cmd: &Cmd, root: &Path) -> anyhow::Result<()> {
 
 pub fn die(code: i32) -> ! {
     std::process::exit(code)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn config_keys_are_unique_and_sorted_by_theme() {
+        // Дубль ключа = две HARNESS_*-переменные пишут в одну настройку
+        // (одна из них молча не работает). Длину массива держит компилятор.
+        let mut seen: Vec<&str> = Vec::new();
+        for k in CONFIG_KEYS {
+            assert!(!seen.contains(&k), "дубль ключа {k} в CONFIG_KEYS");
+            seen.push(k);
+        }
+        assert!(seen.contains(&"REVIEW"), "ключ REVIEW потерян");
+        assert!(
+            seen.contains(&"REVIEW_DIFF_MAX"),
+            "F-0.3: ключ REVIEW_DIFF_MAX потерян — гейт размера диффа не настраивается"
+        );
+    }
+
+    #[test]
+    fn f03_review_diff_max_defaults_to_2000_and_env_overrides() {
+        let d = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        std::fs::create_dir_all(d.path().join(".harness")).unwrap_or_else(|_| unreachable!());
+        std::fs::write(d.path().join(".harness/config"), "VERIFY='true'\n")
+            .unwrap_or_else(|_| unreachable!());
+        // код-дефолт — не 0: 0 = аварийный клапан «без лимита».
+        let cfg = load_config(d.path()).unwrap_or_else(|_| unreachable!());
+        assert_eq!(cfg.review_diff_max, 2000);
+        assert_eq!(
+            crate::core::types::RunConfig::default().review_diff_max,
+            2000
+        );
+        std::env::remove_var("HARNESS_REVIEW_DIFF_MAX");
+        // Порог из конфига/шаблона init перекрывает дефолт. Env-перекрытие
+        // (HARNESS_REVIEW_DIFF_MAX) здесь НЕ мутируем — установка env в
+        // юнит-тесте гоняет с параллельными load_config'ами других тестов.
+        std::fs::write(
+            d.path().join(".harness/config"),
+            "VERIFY='true'\nREVIEW_DIFF_MAX=7\n",
+        )
+        .unwrap_or_else(|_| unreachable!());
+        let over = load_config(d.path()).unwrap_or_else(|_| unreachable!());
+        assert_eq!(over.review_diff_max, 7, "REVIEW_DIFF_MAX из конфига");
+    }
 }
