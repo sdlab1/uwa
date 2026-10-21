@@ -513,6 +513,8 @@ expect = "add_non_numeric"                          # из RED-EXPECT: (P7 — �
 
 **Цена:** ~3 ч.
 
+**Приёмка C1 (2026-10-21):** аудит зоны коммита `991095c` (`cargo-mutants --in-diff`, nextest, `--baseline=skip`, in-place): **76/76 ✓ caught, 0 ✗ missed / 0 ⏱ timeout / 0 ⊘ unviable — kill-rate 100.0%** (contract.rs 43, tui.rs 29, prompt.rs 2, gates.rs 2; сумма фаз 37.4 мин, средняя фаза 14.7 с). Сьюты на main: unit 202 + integration 56 — зелёные, fmt чистый. Watcher заодо: singleton (flock `.harness/mutants-watch.lock` + sweep + pid-файл — «перезапустил, а старое живёт» невозможно), orphan-guard (PPID сменился → выходим, мёртвый pipe не копим), отчёт по проблемным МУТАНТАМ сразу после live-CLI. Гейт дрейфа `section00b` вернулся в main мержем `devh/b1-autonomy` (главная грязь сессии: C1-код жил в worktree-ветке, main его не видел — первая приёмка 125/125 шла по B1-диффу escapes-ledger и сертифицировала не ту зону; корректная зона C1 = дифф самого коммита C1).
+
 ## C2 — REVIEW против контракта + вторая модель
 
 - **Ключ `REVIEW_AGENT`** (дефолт: наследует `AGENT` — обратная совместимость; в шаблоне init — комментарий с примером другой модели). `review_gate` использует его вместо `store.read(agent)`. Это самый дешёвый способ закрыть «self-review тем же агентом»: один ключ.

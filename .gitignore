@@ -56,3 +56,4 @@ crates/uwa-api/static/.playwright/
 # бинарь devh у корня (старые копии); канонический вход — tracked обёртка devharness/devh
 devh
 !/devharness/devh
+.goose/memory/

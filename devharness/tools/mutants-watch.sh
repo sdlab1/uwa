@@ -73,7 +73,7 @@ fi
 echo "$$" >"$PIDF"
 sweep_watchers                      # и левые экземпляры (ручной запуск и пр.)
 
-trap 'if [ "$(cat "$PIDF" 2>/dev/null)" = "$$" ]; then rm -f "$PIDF"; fi' EXIT
+trap 'if [ "$(cat "$PIDF" 2>/dev/null)" = "$$" ]; then rm -f "$PIDF"; fi; report' EXIT
 trap 'exit 0' TERM INT              # дать отработать EXIT-хуку
 
 OUT="${MUTANTS_OUT:-mutants.out}"
@@ -268,6 +268,49 @@ render_throttled() {
     fi
 }
 
+# ------------------------------------------------------------------ отчёт
+# После live-cli — СРАЗУ отчёт «по которому идёт дальшая работа»: список
+# проблемных МУТАНТОВ (✗ MissedMutant — выжил, дыра в тестах; ⏱ TimeoutMutant
+# — мутант повис, его тест-фаза не уложилась в таймаут; ⊘ Unviable — мутант
+# не компилится). ⏱/⊘ относятся ИМЕННО к мутантам, не к тулу и не к watcher'у.
+# Итоговые строки — вход следующих действий: чинить тесты/тайминги/покрытие.
+report() {
+    [ "${REPORT_DONE:-0}" = "1" ] && return 0
+    REPORT_DONE=1
+    python3 -u - "$OUTCOMES" <<'PY' || true
+import json, sys
+try:
+    outs = json.load(open(sys.argv[1])).get("outcomes", [])
+except Exception:
+    sys.exit(0)
+if not outs:
+    sys.exit(0)
+SYM = {"MissedMutant": "\u2717", "TimeoutMutant": "\u23f1", "Unviable": "\u2298"}
+LABEL = {"MissedMutant": "выжил — дыра в тестах",
+         "TimeoutMutant": "мутант повис — таймаут тест-фазы мутанта",
+         "Unviable": "не компилится — дыра в покрытии"}
+bad = [o for o in outs if o["summary"] != "CaughtMutant"]
+print()
+print("\u2500\u2500 отчёт: проблемные мутанты (по ним дальняя работа) \u2500\u2500")
+if not bad:
+    print("   нет — все пойманы")
+for o in bad:
+    m = o["scenario"]["Mutant"]
+    print("   %s %s:%s \u2014 %s [%s]" % (SYM.get(o["summary"], "?"),
+          m["file"], m["span"]["start"]["line"], m["name"],
+          LABEL.get(o["summary"], "")))
+counts = {}
+for o in outs:
+    counts[o["summary"]] = counts.get(o["summary"], 0) + 1
+tot = len(outs)
+kr = 100.0 * (counts.get("CaughtMutant", 0) +
+              counts.get("TimeoutMutant", 0)) / tot if tot else 0.0
+print("   итог: %d мутантов \u2014 \u2713 %d  \u2717 %d  \u23f1 %d  \u2298 %d  | kill-rate %.1f%%"
+      % (tot, counts.get("CaughtMutant", 0), counts.get("MissedMutant", 0),
+         counts.get("TimeoutMutant", 0), counts.get("Unviable", 0), kr))
+PY
+}
+
 # --- рецепт запуска ЖИВОГО CLI: ТОЛЬКО в --help и в этом комментарии. ---
 # В КОНСОЛЬ НЕ ПЕЧАТАЕМ (оператор: «сразу вывод live cli, без простыни
 # текста выше»): первый кадр = легенда + строка прогресса, ничего кроме.
@@ -278,6 +321,7 @@ render_throttled() {
 if [ "$ONCE" = "1" ]; then
     if pgrep -x cargo-mutants >/dev/null; then echo "(прогон идёт)"; fi
     render
+    report
     exit 0
 fi
 # ЖИВОЙ режим: одна строка, обновляемая \r на месте; первая — сразу.
