@@ -98,6 +98,10 @@ pub struct RunConfig {
     /// (и в `devh escapes`). Только отображение: механических запретов
     /// уровень не создаёт — решения человека, цифры машинные.
     pub autonomy: bool,
+    /// E3: порог свежести корпуса — снимок прогона test.sh старше N дней
+    /// не даёт права на уровень (уровень растёт только по свежему 100%).
+    /// Референс — дата последней сессии log.md, НЕ wall clock.
+    pub corpus_fresh_days: u32,
     pub msg_deny: Option<String>,
     pub rules: Option<PathBuf>,
     pub rules_log: Option<PathBuf>,
@@ -131,6 +135,7 @@ impl Default for RunConfig {
             lint_cmd: String::new(),
             review: true,
             autonomy: true,
+            corpus_fresh_days: crate::core::escapes::CORPUS_FRESH_DAYS,
             msg_deny: None,
             rules: None,
             rules_log: None,

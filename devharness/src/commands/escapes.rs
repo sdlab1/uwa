@@ -22,9 +22,9 @@ use crate::shell::store::Store;
 /// ledger'а, групп классов, долга, streak + корпуса, итоговой строки
 /// уровня. Всё, что печатает `devh escapes` и допечатывает `devh merge`
 /// (общий формат), живёт здесь одним куском.
-pub fn report(store: &Store) -> String {
+pub fn report(store: &Store, corpus_fresh_days: u32) -> String {
     let ledger = escapes::ledger_path(store);
-    let (list, streak, distrust, corpus) = escapes::aggregate(store);
+    let (list, streak, distrust, corpus, fresh) = escapes::aggregate(store, corpus_fresh_days);
     let mut lines: Vec<String> = Vec::new();
     if list.is_empty() {
         lines.push(format!(
@@ -67,14 +67,26 @@ pub fn report(store: &Store) -> String {
             .undated()
         ));
     }
-    lines.push(escapes::level_line(&list, streak, corpus));
+    // E3: свежесть корпуса решает право на уровень внутри level_line
+    // («корпус 13/13 (2026-10-01, устарел 21д > 14)»), а здесь печатаем
+    // одну строку причины: снимок ЕСТЬ, права нет — перепрогон нужен.
+    // Нет снимка вовсе — не предупреждение: «нет данных» уже сказано
+    // строкой выше, вторая строка с тем же смыслом = шум.
+    if corpus.is_some() {
+        if let Some(n) = fresh.note() {
+            lines.push(format!(
+                "⚠ корпус: {n} (CORPUS_FRESH_DAYS={corpus_fresh_days}) — уровень не растёт (перепрогон bash devharness/test.sh)"
+            ));
+        }
+    }
+    lines.push(escapes::level_line(&list, streak, corpus, fresh));
     lines.join("\n")
 }
 
 /// `devh escapes` — классы, streak, корпус, уровень автономии. Печатает
 /// то же, что `devh merge` дописывает в конце сессии (общий format-line).
-pub fn escapes(store: &Store, _cfg: &RunConfig, _root: &Path) -> anyhow::Result<()> {
-    println!("{}", report(store));
+pub fn escapes(store: &Store, cfg: &RunConfig, _root: &Path) -> anyhow::Result<()> {
+    println!("{}", report(store, cfg.corpus_fresh_days));
     Ok(())
 }
 
@@ -96,7 +108,7 @@ mod tests {
     fn report_empty_ledger_hints_format() {
         let td = tempfile::TempDir::new().unwrap_or_else(|_| unreachable!());
         let store = Store::new(td.path());
-        let r = report(&store);
+        let r = report(&store, 14);
         assert!(r.contains("нет данных:"), "{r}");
         assert!(r.contains("дата | W-NNN"), "{r}");
         assert!(r.contains("streak: 0 сессий без побегов"), "{r}");
@@ -113,7 +125,7 @@ mod tests {
             LOG12,
             r#"{"caught":13,"total":13,"date":"2026-10-19"}"#,
         );
-        let r = report(&store);
+        let r = report(&store, 14);
         assert!(r.contains("## Побеги:"), "{r}");
         assert!(r.contains("- blind:boundary ×1"), "{r}");
         assert!(r.contains("streak: 12 сессий без побегов"), "{r}");
@@ -131,7 +143,7 @@ mod tests {
             LOG12,
             r#"{"caught":13,"total":13,"date":"2026-10-19"}"#,
         );
-        let r = report(&store);
+        let r = report(&store, 14);
         assert!(r.contains("долг (побег без конвертации"), "{r}");
         assert!(
             r.contains("2026-10-17 — blind:boundary (ручной дифф)"),
@@ -154,7 +166,7 @@ mod tests {
             LOG12,
             r#"{"caught":13,"total":13,"date":"2026-10-19"}"#,
         );
-        let r = report(&store);
+        let r = report(&store, 14);
         assert!(r.contains("долг (побег без конвертации"), "{r}");
         assert!(r.contains("2026-10-17 — blind:env-var"), "{r}");
         assert!(r.contains("автономия L0"), "{r}");
@@ -167,10 +179,30 @@ mod tests {
         // человек пишет «ок» и не понимает, почему уровень не вырос.
         let td = tempfile::TempDir::new().unwrap_or_else(|_| unreachable!());
         let store = Store::new(td.path());
-        let r = report(&store);
+        let r = report(&store, 14);
         assert!(r.contains("гейт:"), "{r}");
         assert!(r.contains("стаб:"), "{r}");
         assert!(r.contains("принял риск:"), "{r}");
+    }
+
+    #[test]
+    fn report_stale_corpus_blocks_level() {
+        // E3: корпус старше порога — цифры реальные (13/13), но уровень
+        // не растёт, и причина названа строкой. Без пометки «почему L0»
+        /// оператор видит только «не выросло» без причины.
+        let td = tempfile::TempDir::new().unwrap_or_else(|_| unreachable!());
+        let store = Store::new(td.path());
+        seed(
+            &store,
+            "2026-10-17 | W-095 | найдено: ручной дифф | класс: blind:boundary | реакция: стаб: кандидат №14\n",
+            LOG12,
+            r#"{"caught":13,"total":13,"date":"2026-09-01"}"#,
+        );
+        let r = report(&store, 14);
+        assert!(r.contains("устарел 48д > 14"), "{r}");
+        assert!(r.contains("корпус 13/13 (2026-09-01, устарел"), "{r}");
+        assert!(r.contains("автономия L0"), "{r}");
+        assert!(!r.contains("автономии L1"), "{r}");
     }
 
     #[test]
@@ -178,7 +210,7 @@ mod tests {
         let td = tempfile::TempDir::new().unwrap_or_else(|_| unreachable!());
         let store = Store::new(td.path());
         seed(&store, "", LOG12, "");
-        let r = report(&store);
+        let r = report(&store, 14);
         assert!(
             r.contains("нет данных (прогони bash devharness/test.sh)"),
             "{r}"

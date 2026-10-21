@@ -3413,4 +3413,63 @@ fn section47_escapes_ledger_and_level() {
         ),
         "{out}"
     );
+
+    // E3: свежесть корпуса. Снимок 13/13 старше порога — цифры реальные,
+    // но уровень не растёт, и причина названа. Референс — дата последней
+    // сессии log.md (2026-10-19), НЕ wall clock. age==15 → Stale.
+    let sb = Sandbox::new("s47h");
+    sb.devh(&["init"])
+        .status()
+        .unwrap_or_else(|_| unreachable!());
+    fs::create_dir_all(sb.harness_file("items")).unwrap_or_else(|_| unreachable!());
+    fs::write(
+        sb.harness_file("escapes.md"),
+        "2026-10-17 | W-095 | найдено: ручной дифф после merge | класс: blind:boundary | реакция: стаб: кандидат №14\n",
+    )
+    .unwrap_or_else(|_| unreachable!());
+    fs::write(sb.harness_file("log.md"), &log).unwrap_or_else(|_| unreachable!());
+    fs::write(
+        sb.harness_file("corpus.json"),
+        r#"{"caught":13,"total":13,"date":"2026-10-04"}"#,
+    )
+    .unwrap_or_else(|_| unreachable!());
+    let (ok, out) = sb.run_capture(&["escapes"]);
+    assert!(ok, "escapes rc=0: {out}");
+    assert!(contains(&out, "streak: 12 сессий без побегов"), "{out}");
+    assert!(contains(&out, "⚠ корпус: устарел 15д > 14"), "{out}");
+    assert!(
+        contains(&out, "корпус 13/13 (2026-10-04, устарел 15д > 14)"),
+        "{out}"
+    );
+    assert!(
+        contains(&out, "автономия L0 (streak 12, корпус 13/13"),
+        "{out}"
+    );
+
+    // Ровно порог (age==14) — ещё Fresh, уровень растёт: граница `>`↔`>=`
+    // порога обязана быть убита тестом, иначе уровень «не растёт» молча.
+    let sb = Sandbox::new("s47i");
+    sb.devh(&["init"])
+        .status()
+        .unwrap_or_else(|_| unreachable!());
+    fs::create_dir_all(sb.harness_file("items")).unwrap_or_else(|_| unreachable!());
+    fs::write(
+        sb.harness_file("escapes.md"),
+        "2026-10-17 | W-095 | найдено: ручной дифф после merge | класс: blind:boundary | реакция: стаб: кандидат №14\n",
+    )
+    .unwrap_or_else(|_| unreachable!());
+    fs::write(sb.harness_file("log.md"), &log).unwrap_or_else(|_| unreachable!());
+    fs::write(
+        sb.harness_file("corpus.json"),
+        r#"{"caught":13,"total":13,"date":"2026-10-05"}"#,
+    )
+    .unwrap_or_else(|_| unreachable!());
+    let (ok, out) = sb.run_capture(&["escapes"]);
+    assert!(ok, "escapes rc=0: {out}");
+    assert!(!contains(&out, "⚠ корпус:"), "{out}");
+    assert!(!contains(&out, "устарел"), "{out}");
+    assert!(
+        contains(&out, "автономия L1 (streak 12, корпус 13/13)"),
+        "{out}"
+    );
 }

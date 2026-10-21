@@ -259,6 +259,40 @@ pub fn doctor(store: &Store, cfg: &RunConfig, root: &Path) -> anyhow::Result<()>
         say("..   журнал: log.md пуст — streak не из чего мерить (первая сессия)");
     }
 
+    // E3: свежесть корпуса — уровень меряется последним ПОЛНЫМ прогоном
+    // test.sh; снимок старше CORPUS_FRESH_DAYS (или без даты) права не
+    // даёт. Референс — дата последней сессии log.md, не wall clock: иначе
+    // уровень падал бы от того, что оператор давно не заходил. Stale/
+    // Unknown — WARN (не FAIL: цифры реальные, решение за человеком).
+    let corpus_json =
+        std::fs::read_to_string(crate::core::escapes::corpus_path(store)).unwrap_or_default();
+    match crate::core::escapes::corpus_kill(&corpus_json) {
+        None => say(
+            "..   корпус: corpus.json нет или не читается — уровень растёт только по streak (прогони bash devharness/test.sh)",
+        ),
+        Some((caught, total, date)) => {
+            let ref_date = crate::core::escapes::latest_session_date(&log_md).unwrap_or_default();
+            match crate::core::escapes::corpus_freshness(&date, &ref_date, cfg.corpus_fresh_days) {
+                crate::core::escapes::Freshness::Fresh => say(&format!(
+                    "ok   корпус: {caught}/{total} ({date}) — свежий (порог {}д)",
+                    cfg.corpus_fresh_days
+                )),
+                crate::core::escapes::Freshness::Stale { age_days, max_days } => {
+                    say(&format!(
+                        "WARN корпус: {caught}/{total} ({date}) — устарел {age_days}д > {max_days} — уровень не растёт (перепрогон bash devharness/test.sh)"
+                    ));
+                    warn = warn.saturating_add(1);
+                }
+                crate::core::escapes::Freshness::Unknown => {
+                    say(&format!(
+                        "WARN корпус: {caught}/{total} — дата снимка или последней сессии не читается ({date:?} / {ref_date:?}) — уровень не растёт (даты «YYYY-MM-DD» в corpus.json и ## W-…)"
+                    ));
+                    warn = warn.saturating_add(1);
+                }
+            }
+        }
+    }
+
     // P3: сам мутатор — версия и общий конфиг параметров.
     if let Some(m) = &cfg.mutate {
         let is_cm = m.tool.contains("cargo mutants") || m.tool.contains("cargo-mutants");

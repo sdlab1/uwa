@@ -170,7 +170,8 @@ pub fn merge(store: &Store, cfg: &RunConfig, id: &ItemId) -> anyhow::Result<()> 
     // AUTONOMY=0 молчит; механических запретов уровень не создаёт —
     // решения человека, цифры машинные.
     if cfg.autonomy {
-        let (esc_list, streak, distrust, corpus) = crate::core::escapes::aggregate(store);
+        let (esc_list, streak, distrust, corpus, fresh) =
+            crate::core::escapes::aggregate(store, cfg.corpus_fresh_days);
         // E4: журнал сессий без дат — streak занижен молча; печатаем рядом
         // с уровнем (не понижая его: мера остаётся консервативной).
         if distrust {
@@ -184,10 +185,21 @@ pub fn merge(store: &Store, cfg: &RunConfig, id: &ItemId) -> anyhow::Result<()> 
                 c.z
             );
         }
+        // E3: корпус устарел/без даты — уровень не растёт; называем причину
+        // струкой (цифры при этом реальные — их печатает сама level_line).
+        // Снимка нет вовсе — молчим: «нет данных» уже в самой level_line.
+        if corpus.is_some() {
+            if let Some(n) = fresh.note() {
+                println!(
+                    "{}⚠ корпус: {n} (CORPUS_FRESH_DAYS={}) — уровень не растёт{}",
+                    c.b, cfg.corpus_fresh_days, c.z
+                );
+            }
+        }
         println!(
             "{}{}{}",
             c.b,
-            crate::core::escapes::level_line(&esc_list, streak, corpus),
+            crate::core::escapes::level_line(&esc_list, streak, corpus, fresh),
             c.z
         );
     }

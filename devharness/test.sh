@@ -1058,6 +1058,19 @@ grep -q "автономия L1 (streak 12, корпус 13/13)" "$T/aut-caps-g.l
 # подсказка пустого ledger'а раскрывает грамматику — иначе человек пишет
 # «ок» и не понимает, почему уровень не растёт.
 grep -q "принял риск:" "$T/aut-empty-a.log" && pass "autonomy 47f: подсказка раскрывает грамматику" || fail "autonomy 47f: подсказка без грамматики: $(cat "$T/aut-empty-a.log")"
+# 47g: E3 — свежесть корпуса. Референс — дата последней сессии log.md
+# (esc_seed ставит сессии на сегодня-2д), НЕ wall clock: уровень зависит
+# от того, что сделано, не от того, когда оператор смотрит. Снимок старше
+# CORPUS_FRESH_DAYS=14 → цифры реальные, уровень не растёт, причина
+# названа; ровно порог (age==14) — ещё Fresh (граница `>`↔`>=`).
+aut_check stale h "гейт: X" 12
+(cd "$T/stale-h" && printf '{"caught":13,"total":13,"date":"%s"}\n' "$(date -d '17 days ago' +%F)" > .harness/corpus.json \
+  && "$DEVH" escapes) > "$T/aut-stale-h.log" 2>&1
+grep -q "устарел 15д > 14" "$T/aut-stale-h.log" && pass "autonomy 47g: устаревший корпус назван (15д > 14)" || fail "autonomy 47g: нет пометки свежести: $(cat "$T/aut-stale-h.log")"
+grep -q "автономия L0 (streak 12, корпус 13/13" "$T/aut-stale-h.log" && pass "autonomy 47g: устаревание режет уровень" || fail "autonomy 47g: уровень вырос на старом корпусе: $(cat "$T/aut-stale-h.log")"
+(cd "$T/stale-h" && printf '{"caught":13,"total":13,"date":"%s"}\n' "$(date -d '16 days ago' +%F)" > .harness/corpus.json \
+  && "$DEVH" escapes) > "$T/aut-fresh-h.log" 2>&1
+grep -q "автономия L1 (streak 12, корпус 13/13)" "$T/aut-fresh-h.log" && pass "autonomy 47g: ровно порог (age==14) — ещё свежо" || fail "autonomy 47g: граница порога съехала: $(cat "$T/aut-fresh-h.log")"
 # 47d: AUTONOMY — голосование отображением. Полная сессия: 1 — строка в конце
 # run, 0 — тишина. Механических запретов уровень не создаёт (решение человека).
 merge_vote() { # <case> <flag>

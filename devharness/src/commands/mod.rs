@@ -18,7 +18,7 @@ use crate::core::types::{CrapCfg, ItemId, MutateCfg, RunConfig};
 use crate::shell::store::{Item, Store};
 use crate::Cmd;
 
-pub const CONFIG_KEYS: [&str; 36] = [
+pub const CONFIG_KEYS: [&str; 37] = [
     "VERIFY",
     "BOOTSTRAP",
     "AGENT",
@@ -55,6 +55,7 @@ pub const CONFIG_KEYS: [&str; 36] = [
     "LINT_CMD",
     "REVIEW",
     "AUTONOMY",
+    "CORPUS_FRESH_DAYS",
 ];
 
 pub fn load_config(root: &Path) -> anyhow::Result<RunConfig> {
@@ -149,6 +150,7 @@ pub fn load_config(root: &Path) -> anyhow::Result<RunConfig> {
         lint_cmd: g("LINT_CMD").unwrap_or_default(),
         review: boolv("REVIEW", true),
         autonomy: boolv("AUTONOMY", true),
+        corpus_fresh_days: u32v("CORPUS_FRESH_DAYS", crate::core::escapes::CORPUS_FRESH_DAYS),
         msg_deny: g("MSG_DENY").filter(|s| !s.trim().is_empty()),
         rules: g("RULES").filter(|s| !s.trim().is_empty()).map(Into::into),
         rules_log: g("RULES_LOG")

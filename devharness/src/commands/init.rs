@@ -176,6 +176,10 @@ pub fn init(root: &Path) -> anyhow::Result<()> {
     c += "#   дата | W-NNN | найдено: … | класс: blind:* | реакция: <стаб|гейт|принятый риск>\n";
     c += "#   (побег без конвертации = долг, он топит уровень до L0). Смотр: devh escapes\n";
     c += "AUTONOMY=1\n";
+    c += "# E3: свежесть корпуса — снимок прогона test.sh старше N дней права на\n";
+    c += "#   уровень не даёт ('устарел 48д > 14'). Референс — дата последней сессии\n";
+    c += "#   в .harness/log.md, НЕ wall clock (уровень зависит от дел, не от захода).\n";
+    c += "CORPUS_FRESH_DAYS=14\n";
 
     std::fs::create_dir_all(root.join(".harness/items"))?;
     std::fs::create_dir_all(root.join(".harness/summaries"))?;
