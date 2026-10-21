@@ -345,10 +345,21 @@ pub fn parse_date_days(s: &str) -> Option<i64> {
 /// E3: свежесть корпуса. Корпус — СНИМОК прогона test.sh; старый снимок
 /// (ровно как отсутствующий) права на уровень не даёт: «мы были
 /// идеальны две недели назад» ≠ «мы идеальны сейчас».
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// `Default = Unknown` осознанно: «свежесть не доказана» — честный дефолт.
+/// Практический смысл derive: без него cargo-mutants генерировал на каждой
+/// функции, возвращающей Freshness (или кортеж с ним), мутант
+/// `… -> Default::default()`, который НЕ КОМПИЛИРОВАЛСЯ (73 unviable из
+/// 114 — невидимая зона аудита). С derive они компилируются и обязаны
+/// убиваться тестами (иначе MISSED — настоящая дыра).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Freshness {
     Fresh,
-    Stale { age_days: i64, max_days: u32 },
+    Stale {
+        age_days: i64,
+        max_days: u32,
+    },
+    #[default]
     Unknown,
 }
 
