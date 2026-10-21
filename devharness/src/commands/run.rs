@@ -869,28 +869,26 @@ fn agent_env(id: &ItemId, wt: &Path, store: &Store, cfg: &RunConfig) -> Vec<(Str
 /// (ни FILES: в спеке, ни FREEZE_ALLOW) — «скоп не заявлен»: пропуск С ЛОГОМ
 /// (не молчаливый Pass, не tripwire на каждую правку). Считает чистый
 /// gates::freeze_violations — IO только на чтении allowlist'а.
-fn freeze_gate(store: &Store, cfg: &RunConfig, wt: &Path, id: &ItemId) -> (String, Verdict) {
-    let changed = git::changed_files(wt);
-    let mut allow = cfg.freeze_allow.clone();
-    if let Some(files) = store.read(item_rel(id, "files")) {
-        allow.extend(
-            files
-                .lines()
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(String::from),
-        );
-    }
+///
+/// F-0.2 (N1): источник списка — fail-closed `git::changes_strict` (F-0.1).
+/// Ошибка git (не репо, битый HEAD, сломанный индекс, нечитаемый конфиг) —
+/// это НЕ «дифф пуст»: молчаливое «чисто» пропустило бы сессию мимо гейта
+/// ровно тогда, когда гейт не смог посмотреть. Поэтому вместо fail-open
+/// `changed_files()` берём Result и отдаём `EnvBlocked` (rc=2, блокер среды
+/// чинит человек), а `gate_ladder` перестаёт гарантировать «Free не отдаёт
+/// Env/Spec» — та ветка стала легальной, и `unreachable!` убран.
+/// Чистая часть FREEZE-гейта (F-0.2): allowlist + список файлов → лог и
+/// вердикт. Вынесена из `freeze_gate`, чтобы решение тестировалось без
+/// Store/worktree: пустой allowlist, записанный обход и правка вне scope —
+/// три разных судьбы, и мутант в любой из них обязан быть CAUGHT.
+/// `git`-ошибка сюда НЕ входит: она решается раньше и даёт `EnvBlocked`.
+fn freeze_verdict(changed: &[String], allow: &[String], test_edit: bool) -> (String, Verdict) {
     if allow.is_empty() {
         return (
             "freeze: scope не задан (нет FILES: в спеке и FREEZE_ALLOW) — гейт пропущен\n".into(),
             Verdict::Pass,
         );
     }
-    let test_edit = store
-        .read(item_rel(id, "allow-test-edit"))
-        .map(|s| !s.trim().is_empty())
-        .unwrap_or(false);
     let mut log = format!(
         "freeze: allowlist [{}]; обход allow-test-edit: {}; дифф: {}\n",
         allow.join(", "),
@@ -905,7 +903,7 @@ fn freeze_gate(store: &Store, cfg: &RunConfig, wt: &Path, id: &ItemId) -> (Strin
             changed.join(", ")
         }
     );
-    let violations = gates::freeze_violations(&changed, &allow, test_edit);
+    let violations = gates::freeze_violations(changed, allow, test_edit);
     let verdict = if violations.is_empty() {
         Verdict::Pass
     } else {
@@ -921,6 +919,36 @@ fn freeze_gate(store: &Store, cfg: &RunConfig, wt: &Path, id: &ItemId) -> (Strin
     (log, verdict)
 }
 
+fn freeze_gate(store: &Store, cfg: &RunConfig, wt: &Path, id: &ItemId) -> (String, Verdict) {
+    let changed: Vec<String> = match git::changes_strict(wt) {
+        Ok(v) => v.into_iter().map(|c| c.path).collect(),
+        Err(e) => {
+            let missing = format!(
+                "FREEZE: список изменений нечитаем ({e}) — гейт не может сравнить дифф со scope"
+            );
+            return (
+                format!("freeze: {missing}\n"),
+                Verdict::EnvBlocked { missing },
+            );
+        }
+    };
+    let mut allow = cfg.freeze_allow.clone();
+    if let Some(files) = store.read(item_rel(id, "files")) {
+        allow.extend(
+            files
+                .lines()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from),
+        );
+    }
+    let test_edit = store
+        .read(item_rel(id, "allow-test-edit"))
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false);
+    freeze_verdict(&changed, &allow, test_edit)
+}
+
 /// C1: контракт задачи — МЯГКАЯ проверка по диффу (НЕ гейт): goal/observe
 /// заполнены, red.cmd имеет red.expect (P7), дифф внутри/вне files.touch
 /// (FREEZE гейтит жёстко — A6; здесь только предупреждение и «заявлено,
@@ -933,7 +961,21 @@ fn contract_note(store: &Store, wt: &Path, id: &ItemId) -> Option<String> {
         return None;
     }
     let has_red = store.read(item_rel(id, "red.cmd")).is_some();
-    let findings = crate::core::contract::contract_check(&c, &git::changed_files(wt), has_red);
+    // F-0.2 (N1): проверка мягкая, но и она не делает вид, что смотрела:
+    // нечитаемый дифф ≠ замечаний нет. FREEZE уже остановил бы такой прогон
+    // (EnvBlocked), поэтому сюда доходит только FREEZE=0 — предупреждение
+    // заменяет молчание, вердикт по-прежнему не двигается.
+    let changed: Vec<String> = match git::changes_strict(wt) {
+        Ok(v) => v.into_iter().map(|c| c.path).collect(),
+        Err(e) => {
+            return Some(format!(
+                "контракт {} (МЯГКО, вердикт не двигает)\nконтракт: дифф нечитаем ({e}) — \
+                 сверка touch/touched не выполнена\n",
+                id.dir_name(),
+            ));
+        }
+    };
+    let findings = crate::core::contract::contract_check(&c, &changed, has_red);
     if findings.is_empty() {
         return None;
     }
@@ -960,12 +1002,16 @@ fn gate_ladder(
         std::fs::write(store.log_file(id, "freeze"), &flog).ok();
         timing.stage("freeze", store, id);
         match verdict {
-            Verdict::Fail { .. } => return Err(GateStop { verdict, log: flog }),
             Verdict::Pass => {}
-            // freeze_gate считает чистую функцию по диффу: команд нет —
-            // env/spec-блокеры априори невозможны (иначе это дефект гейта).
-            Verdict::EnvBlocked { .. } | Verdict::SpecBlock { .. } => {
-                unreachable!("freeze_gate не отдаёт Env/Spec")
+            // F-0.2: freeze_gate читает git (changes_strict) — значит env-ветка
+            // легальна: нечитаемый дифф = блокер среды (rc=2), а не «чисто».
+            // Fail-closed: любой не-Pass вердикт останавливает лестницу, и
+            // новый вариант Verdict не превращается в панику harness'а.
+            other => {
+                return Err(GateStop {
+                    verdict: other,
+                    log: flog,
+                })
             }
         }
     }
@@ -1279,7 +1325,19 @@ fn append_flaky(store: &Store, id: &ItemId, round: u32) {
 fn lint_gate(cfg: &RunConfig, wt: &Path) -> (String, Verdict) {
     let mut log = String::new();
     let mut bad = false;
-    let files = git::changed_files(wt);
+    // F-0.2 (N1): тот же fail-closed источник, что у FREEZE. Раньше ошибка git
+    // давала пустой `files` → «изменённых .sh нет» → shellcheck пропускался
+    // молча: гейт ослаблялся ровно тогда, когда дерево не читалось.
+    let files: Vec<String> = match git::changes_strict(wt) {
+        Ok(v) => v.into_iter().map(|c| c.path).collect(),
+        Err(e) => {
+            let missing = format!("lint: список изменений нечитаем ({e}) — гейт не может решить");
+            return (
+                format!("lint: {missing}\n"),
+                Verdict::EnvBlocked { missing },
+            );
+        }
+    };
     if cfg.lint {
         let has_sh = files.iter().any(|f| f.ends_with(".sh"));
         if has_sh && !which("shellcheck") {
@@ -2374,7 +2432,8 @@ pub fn which(bin: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::TuiProgress;
+    use super::{freeze_verdict, TuiProgress};
+    use crate::core::gates::{Gate, Verdict};
     use std::path::Path;
 
     /// Парс-контракт `devh ps`: имена стадий тайминга печатаются дословно.
@@ -2431,6 +2490,70 @@ mod tests {
                 "фаза {phase} исчезла/раздвоилась в run.rs"
             );
         }
+    }
+
+    // ---- F-0.2: fail-closed git-слой FREEZE/lint (N1) ----
+    // RED-цепочка плана F-0: `cargo test -p devh --lib failclosed_`.
+    // Чистая часть гейта и требование «нечитаемый git ≠ чисто» — без Store и
+    // worktree, поэтому решения проверяются точно, а не через полную сессию.
+
+    #[test]
+    fn failclosed_freeze_empty_scope_is_a_logged_pass_not_a_silent_one() {
+        let (log, v) = freeze_verdict(&["src/calc.sh".into()], &[], false);
+        assert_eq!(v, Verdict::Pass);
+        assert!(log.contains("scope не задан"), "{log}");
+    }
+
+    #[test]
+    fn failclosed_freeze_out_of_scope_is_fail_with_reason_in_tail() {
+        let (log, v) = freeze_verdict(&["tests/all.sh".into()], &["src/calc.sh".into()], false);
+        match v {
+            Verdict::Fail { gate, tail } => {
+                assert_eq!(gate, Gate::Freeze);
+                assert!(tail.contains("правка вне scope: tests/all.sh"), "{tail}");
+            }
+            other => unreachable!("ожидался Fail, получено {other:?}"),
+        }
+        assert!(
+            log.contains("обход: allow-test-edit"),
+            "лечебный хинт в логе гейта: {log}"
+        );
+    }
+
+    #[test]
+    fn failclosed_freeze_recorded_bypass_legitimizes_tests() {
+        let (_, v) = freeze_verdict(&["tests/all.sh".into()], &["src/calc.sh".into()], true);
+        assert_eq!(
+            v,
+            Verdict::Pass,
+            "записанный обход законен (симметрия no-crap)"
+        );
+    }
+
+    /// ГЛАВНЫЙ тест F-0.2: `gate_ladder` обязан иметь легальную env-ветку.
+    /// Прежний `unreachable!("freeze_gate не отдаёт Env/Spec")` ронял процесс
+    /// паникой на первом же сбое git; теперь источник fail-closed, и Err
+    /// превращается в `EnvBlocked { .. }`. Проверяем исходник: если
+    /// `unreachable!` вернётся (или вердикт начнут игнорировать), тест краснеет.
+    #[test]
+    fn failclosed_gate_ladder_has_no_unreachable_on_git_verdict() {
+        let src = include_str!("run.rs");
+        let (code, _) = src.split_once("#[cfg(test)]").unwrap_or((src, ""));
+        assert!(
+            !code.contains("freeze_gate не отдаёт"),
+            "в gate_ladder снова запрещена env-ветка — сбой git уронит харнесс паникой"
+        );
+        // fail-closed: любой не-Pass вердикт FREEZE останавливает лестницу,
+        // а не проваливается сквозь неё.
+        assert!(
+            code.contains("verdict: other") && code.contains("log: flog"),
+            "лестница обязана тормозить на ЛЮБОМ не-Pass вердикте FREEZE"
+        );
+        // и сам источник — fail-closed changes_strict, не changed_files.
+        assert!(
+            code.contains("git::changes_strict(wt)"),
+            "FREEZE берёт файлы из changes_strict, а не из fail-open changed_files"
+        );
     }
 
     // ---- TuiProgress::tick: фирменная строка прогресса (C1) ----

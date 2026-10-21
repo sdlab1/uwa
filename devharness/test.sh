@@ -192,7 +192,8 @@ if command -v shellcheck >/dev/null 2>&1; then
     tools/mutants-watch.sh \
     stubs/red-green.sh stubs/red-wrong.sh stubs/no-summary.sh stubs/bad-summary.sh stubs/hang.sh \
     stubs/ignored-test.sh stubs/lint-dirty.sh stubs/mutate-killer.sh stubs/tool-gone.sh \
-    stubs/crap-violation.sh stubs/review-issues.sh stubs/review-mute.sh; do
+    stubs/crap-violation.sh stubs/review-issues.sh stubs/review-mute.sh \
+    stubs/freeze-cheat.sh stubs/freeze-gitless.sh; do
     shellcheck "$HERE/$f" >/dev/null 2>&1 || { echo "  shellcheck findings в $f"; sc=1; }
   done
   [ "$sc" = 0 ] && pass "shellcheck чист" || fail "shellcheck чист"
@@ -896,6 +897,28 @@ echo "== 44c. ОБХОД freeze-bypass: allow-test-edit легитимирует
 # та же правка tests/all.sh проходит все гейты. Доказывает, что FREEZE не
 # tripwire, а именно allowlist + записанный обход.
 adv_expect bypass freeze-cheat.sh "OK гейты" - 1 0 "" "" 0 "" "" 1 1
+
+echo "== 44d. АТАКА freeze-gitless: нечитаемый дифф = блокер СРЕДЫ (rc=2) =="
+# F-0.2 (N1): стаб делает РАБОТУ В SCOPE и одновременно ломает .git-link
+# worktree (любой git в дереве падает). До F-0.2 гейты читали дифф через
+# `git_out(...).unwrap_or_default()`: ошибка git = пустой список = «чисто»,
+# то есть решение принималось по диффу, который никто не прочитал. Теперь
+# fail-closed changes_strict отдаёт Err → EnvBlocked rc=2, причина в логе гейта.
+adv_expect gitless freeze-gitless.sh "список изменений нечитаем" - 1 0 "" "" 2 \
+  ".harness/logs/W-001-freeze.log" "нечитаем" 1
+
+echo "== 44e. КОНТРОЛЬ freeze-gitless без FREEZE: тот же источник у LINT =="
+# Дыра показана control'ом: с FREEZE=0 та же атака раньше проходила ВСЕ гейты
+# (пустой список .sh → shellcheck пропущен молча) и падала только на commit
+# непонятной ошибкой. F-0.2 перевёл и lint на тот же fail-closed источник —
+# rc=2 приходит и от него. Убрать гейт = атака сидит в прогоне.
+adv_run gitless2 freeze-gitless.sh 1 - 1 0 0
+if [ "$ADV_RC" = 2 ] && grep -q "список изменений нечитаем" "$ADV_OUT"; then
+  pass "adv gitless[off]: без FREEZE атаку ловит LINT (общий fail-closed источник)"
+else
+  fail "adv gitless[off]: rc=$ADV_RC — lint обязан заблокировать среду (rc=2)"
+  sed -n '1,25p' "$ADV_OUT"
+fi
 
 echo "  adversarial corpus: поймано $ADV_OK/$ADV_N (kill-rate $(( ADV_N > 0 ? ADV_OK * 100 / ADV_N : 0 ))%)"
 

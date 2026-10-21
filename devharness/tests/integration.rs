@@ -65,6 +65,20 @@ printf 'feat: маркер-файл создан\n\nдетали: стаб\n' > 
 printf 'BLOCKED: не хватает данных\n' > "$HARNESS_SUMMARY"
 "#,
         );
+        // F-0.2 (N1): стаб-атака на fail-open git-слой. Работает В SCOPE
+        // (done.txt + legit.sh) и одновременно ЛОМАЕТ чтение диффа: .git-link
+        // worktree отправляется в никуда, любой git в дереве теперь падает.
+        // Уязвимый harness (ошибка git = пустой список файлов) видел «чисто» →
+        // FREEZE/lint проходили на дереве, которое так и не прочитали.
+        write_exec(
+            &self.stubs.join("stub-break-git.sh"),
+            r#"#!/usr/bin/env bash
+echo marker > "$HARNESS_WORKTREE/done.txt"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$HARNESS_WORKTREE/legit.sh"
+echo "gitdir: /nonexistent/f02-broken" > "$HARNESS_WORKTREE/.git"
+printf 'feat: маркер + сломанный git-link\n\nдетали: стаб-атака F-0.2\n' > "$HARNESS_SUMMARY"
+"#,
+        );
         write_exec(
             &self.stubs.join("stub-noop.sh"),
             r#"#!/usr/bin/env bash
@@ -204,6 +218,19 @@ echo "CRAP: functions=2"
         let mut all = String::from_utf8_lossy(&out.stdout).to_string();
         all.push_str(&String::from_utf8_lossy(&out.stderr));
         (out.status.success(), all)
+    }
+
+    /// Код выхода (F-0.2): rc=2 — блокер СРЕДЫ, rc=1 — бюджет/спека,
+    /// 0 — зелено. `bool` теряет это различие, а именно оно и проверяется.
+    fn run_exit_env(&self, args: &[&str], envs: &[(&str, &str)]) -> (i32, String) {
+        let mut c = self.devh(args);
+        for (k, v) in envs {
+            c.env(k, v);
+        }
+        let out = c.output().unwrap_or_else(|_| unreachable!());
+        let mut all = String::from_utf8_lossy(&out.stdout).to_string();
+        all.push_str(&String::from_utf8_lossy(&out.stderr));
+        (out.status.code().unwrap_or(-1), all)
     }
 
     fn new_item(&self, title: &str, spec: &str, no_red: Option<&str>) {
@@ -2833,6 +2860,11 @@ printf '=== PROMPT ===\n%s\n' "$1" >> "$TRACE"
     assert!(ok2, "doctor мягкий (WARN ≠ FAIL): {out2}");
 }
 
+// ПРИМЕЧАНИЕ (найдено при F-0.2): у этой функции потерялся `#[test]` —
+// она компилировалась мёртвым кодом и НЕ запускалась (класс слепоты
+// «тест, которого нет»). Возвращаем атрибут: killmap/hot-spot поверхность
+// обязана проверяться на каждом прогоне.
+#[test]
 fn section40_killmap_hotspots_reach_hint_and_prompt() {
     // Два прогона с РАЗНЫМИ outcomes.json (оба с missed в load.rs) → killmap
     // сходится к сумме (caught+missed+runs), пул hot-spot виден в devh hint
@@ -3472,4 +3504,73 @@ fn section47_escapes_ledger_and_level() {
         contains(&out, "автономия L1 (streak 12, корпус 13/13)"),
         "{out}"
     );
+}
+
+// F-0.2 (N1): git-слой гейтов fail-closed. Стаб ломает чтение диффа
+// (.git-link → /nonexistent) ПОСЛЕ честной работы в scope. Прежний путь
+// `git_out(...).unwrap_or_default()` превращал ошибку git в «дифф пуст»:
+// FREEZE проходил, lint пропускал shellcheck — гейт ослаблялся ровно тогда,
+// когда дерево не читалось. Теперь это EnvBlocked rc=2 (блокер среды).
+#[test]
+fn section48_freeze_git_unreadable_is_env_blocked() {
+    let sb = Sandbox::new("s48");
+    sb.run_ok(&["init"]);
+    sb.new_item(
+        "scope + сломанный git",
+        "спека: сделай done.txt\n",
+        Some("x"),
+    );
+
+    // контроль: целый git — тот же scope и та же задача проходят зелено.
+    // Без этого прогона дыра «падает ВСЕГДА» прошла бы незамеченной.
+    let (ok, out) = sb.run_capture_env(
+        &["run", "W-001"],
+        &[
+            (
+                "HARNESS_AGENT",
+                sb.stubs.join("stub.sh").display().to_string().as_str(),
+            ),
+            ("HARNESS_FREEZE", "1"),
+            ("HARNESS_FREEZE_ALLOW", "done.txt"),
+        ],
+    );
+    assert!(ok, "контроль (целый git) обязан быть зелёным: {out}");
+    let flog = fs::read_to_string(sb.log_file("W-001-freeze.log")).unwrap_or_default();
+    assert!(contains(&flog, "done.txt"), "{flog}");
+
+    // атака: работа в scope + нечитаемый дифф.
+    let stub = sb.stubs.join("stub-break-git.sh").display().to_string();
+    let (code, out) = sb.run_exit_env(
+        &["run", "W-001"],
+        &[
+            ("HARNESS_AGENT", stub.as_str()),
+            ("HARNESS_FREEZE", "1"),
+            ("HARNESS_FREEZE_ALLOW", "done.txt legit.sh"),
+        ],
+    );
+    assert_eq!(code, 2, "нечитаемый дифф = блокер среды (rc=2): {out}");
+    assert!(contains(&out, "FREEZE: список изменений нечитаем"), "{out}");
+    let flog = fs::read_to_string(sb.log_file("W-001-freeze.log")).unwrap_or_default();
+    assert!(contains(&flog, "нечитаем"), "{flog}");
+}
+
+// F-0.2: тот же fail-closed источник у lint-гейта (второй вердикт-несущий
+// вызыватель `changed_files`). Пустой список файлов при ошибке git раньше
+// значил «изменённых .sh нет» → shellcheck пропущен молча.
+#[test]
+fn section48b_lint_git_unreadable_is_env_blocked() {
+    let sb = Sandbox::new("s48b");
+    sb.run_ok(&["init"]);
+    sb.new_item("lint + сломанный git", "спека\n", Some("x"));
+    let stub = sb.stubs.join("stub-break-git.sh").display().to_string();
+    let (code, out) = sb.run_exit_env(
+        &["run", "W-001"],
+        &[
+            ("HARNESS_AGENT", stub.as_str()),
+            ("HARNESS_LINT", "1"),
+            ("HARNESS_VERIFY", "test -f done.txt"),
+        ],
+    );
+    assert_eq!(code, 2, "lint: нечитаемый дифф = rc=2: {out}");
+    assert!(contains(&out, "список изменений нечитаем"), "{out}");
 }

@@ -225,6 +225,10 @@ pub fn status_names(wt: &Path) -> Vec<String> {
         .collect()
 }
 
+/// УСТАРЕВШИЙ fail-open путь (N1): ошибка git даёт пустой список, то есть
+/// «диффа нет» там, где дерево не прочитано. Гейты (FREEZE, lint, контракт)
+/// переведены на `changes_strict` в F-0.2; остаётся для тестов и вызовов,
+/// где пустой список безобиден. Новым кодом не пользоваться.
 pub fn changed_files(wt: &Path) -> Vec<String> {
     let mut all = diff_names(wt);
     all.extend(status_names(wt));

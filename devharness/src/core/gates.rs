@@ -1506,6 +1506,7 @@ test result: FAILED. 1 passed; 1 failed";
         assert!(!freeze_glob("src/*", "tests/a.rs"));
     }
 
+    #[test]
     fn freeze_violations_matches_globs() {
         // Глобы спеки ровно по контракту A6: точное / *-суффикс / *-префикс.
         // `src/*` — каталог целиком; `*.md` — все markdown; серединный `*`

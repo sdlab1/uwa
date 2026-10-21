@@ -349,12 +349,14 @@ mod tests {
         );
     }
 
+    #[test]
     fn goal_from_spec_strips_heading() {
         assert_eq!(goal_from_spec("# Цель\nтело"), "Цель");
         assert_eq!(goal_from_spec("\n\n  Без решётки  "), "Без решётки");
         assert_eq!(goal_from_spec(""), "");
     }
 
+    #[test]
     fn file_globs_reads_globs_until_next_section() {
         let spec = "# Задача\n\nFILES:\n- src/calc.sh\n- src/*\n\nRED: true\n";
         assert_eq!(file_globs(spec), vec!["src/calc.sh", "src/*"]);
@@ -368,6 +370,7 @@ mod tests {
         assert!(file_globs("OBSERVE:\n- log: x\nRED-EXPECT: boom\n").is_empty());
     }
 
+    #[test]
     fn observe_points_prefixes_do_not_collide_with_red() {
         // спека без OBSERVE → точек нет (не падает)
         assert!(observe_points("RED: true\n").is_empty());
@@ -385,6 +388,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn red_and_red_expect_prefixes_do_not_collide() {
         // строка RED: не должна читаться как RED-EXPECT: и наоборот
         let only_red = "RED: true\n";
