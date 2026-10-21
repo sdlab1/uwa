@@ -33,12 +33,22 @@ pub struct Escape {
     pub reaction: String,
 }
 
+/// E2: грамматика конвертации — реакция гасит долг ТОЛЬКО явным фактом:
+/// `гейт:` (что закрыло), `стаб:` (за каким стабом живёт), `принял риск:`
+/// (сформулированный риск с причиной). Всё остальное — долг: «ок», «потом»,
+/// «стаб-кандидат №14» (без двоеточия) = намерение, не конвертация.
+/// Инверсия дефолта (default-free-text-is-debt), а не эвристика по символам:
+/// молчание и вольное слово должны давать L0, иначе уровень поднимается
+/// болтовнёй в ledger'е.
+const CONVERTS: [&str; 3] = ["гейт:", "стаб:", "принял риск:"];
+
 impl Escape {
-    /// Побег без конвертации = debt: реакция пуста или прочерк. Долг
+    /// Побег без конвертации = debt: реакция не начинается ни с одного
+    /// префикса `CONVERTS` (регистр не важен, пробелы сжимаются). Долг
     /// блокирует оба уровня: непогашенный урок не может поднимать autonomию.
     pub fn is_debt(&self) -> bool {
-        let r = self.reaction.trim();
-        r.is_empty() || r == "-" || r == "—" || r == "нет"
+        let r = self.reaction.trim().to_lowercase();
+        !CONVERTS.iter().any(|p| r.starts_with(p))
     }
 }
 
@@ -168,15 +178,68 @@ pub fn sessions_in(log_md: &str) -> Vec<String> {
         .collect()
 }
 
+/// E4: здоровье журнала сессий — сколько ЗАГОЛОВКОВ `## W-…` в log.md и
+/// сколько из них с читаемой датой. Дрейф формата (заголовок без даты)
+/// молча выкидывает сессию из streak: без этого счётчика дыра невидима.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct LogHealth {
+    pub headers: u32,
+    pub dated: u32,
+}
+
+impl LogHealth {
+    /// Заголовки без даты — они не посчитаны в streak.
+    pub fn undated(&self) -> u32 {
+        self.headers.saturating_sub(self.dated)
+    }
+    /// Доверие к streak: без даты СТРОГО больше половины заголовков.
+    /// Ровно половина — ещё достоверно (граница намеренно мягкая, но
+    /// зафиксирована тестом: мутант `>`↔`>=` обязан умереть). Пустой лог
+    /// → false: «нет данных» ≠ «ложь».
+    pub fn distrust(&self) -> bool {
+        self.headers > 0 && self.undated().saturating_mul(2) > self.headers
+    }
+}
+
+/// Разбор журнала на заголовки сессий (та же механика отбора, что
+/// `sessions_in`) + счёт датированных. Не молчит: undated()/distrust()
+/// показывают дрейф формата, а не «красивый» streak.
+pub fn log_health(log_md: &str) -> LogHealth {
+    let mut headers: u32 = 0;
+    let mut dated: u32 = 0;
+    for l in log_md.lines() {
+        let t = l.trim();
+        let Some(rest) = t.strip_prefix("## ") else {
+            continue;
+        };
+        let id = rest.split(" — ").next().unwrap_or(rest).trim();
+        if !id.starts_with('W') {
+            continue;
+        }
+        headers = headers.saturating_add(1);
+        if date_in_parens(t).is_some() {
+            dated = dated.saturating_add(1);
+        }
+    }
+    LogHealth { headers, dated }
+}
+
 /// Streak = сессий с log.md ПОСЛЕ последнего побега (по дате). Пустой
 /// ledger → все сессии: набрано с нуля. Сессия без даты не считается —
 /// ленивая арифметика хуже честной неизвестности.
-pub fn streak_of(log_md: &str, escapes: &[Escape]) -> u32 {
+///
+/// E4: второй элемент кортежа — доверие к самой мере: если сессий без даты
+/// больше половины, streak занижен молча (меряли «до» — не знаем, сколько
+/// «после» спряталось). Отчёт печатает предупреждение; уровень при этом
+/// НЕ понижает — консервативная мера остаётся консервативной, решение за
+/// человеком.
+pub fn streak_of(log_md: &str, escapes: &[Escape]) -> (u32, bool) {
     let last_escape = escapes.iter().map(|e| e.date.as_str()).max().unwrap_or("");
-    sessions_in(log_md)
-        .iter()
+    let sessions = sessions_in(log_md)
+        .into_iter()
         .filter(|d| last_escape.is_empty() || d.as_str() > last_escape)
-        .count() as u32
+        .count() as u32;
+    (sessions, log_health(log_md).distrust())
 }
 
 /// Группировка побегов по классу: (класс, count), count убыв., при равенстве
@@ -245,17 +308,21 @@ pub fn corpus_path(store: &Store) -> std::path::PathBuf {
 
 /// Агрегация «с пола»: ledger + log.md + corpus.json → строка уровня.
 /// Читает через store: никакой логики уровня в команде не остаётся.
-pub fn aggregate(store: &Store) -> (Vec<Escape>, u32, Option<(u32, u32, String)>) {
+///
+/// E4: третий элемент кортежа — distrust журнала (см. [`LogHealth`]): он
+/// про ФОРМАТ log.md (даты заголовков), не про побеги, и печатается
+/// рядом со streak. Пустой/нечитаемый лог → (0, false).
+pub fn aggregate(store: &Store) -> (Vec<Escape>, u32, bool, Option<(u32, u32, String)>) {
     let text = std::fs::read_to_string(ledger_path(store)).unwrap_or_default();
     let escapes = parse_escapes(&text);
-    let streak = streak_of(
+    let (streak, distrust) = streak_of(
         &std::fs::read_to_string(store.dir.join("log.md")).unwrap_or_default(),
         &escapes,
     );
     let corpus = std::fs::read_to_string(corpus_path(store))
         .ok()
         .and_then(|t| corpus_kill(&t));
-    (escapes, streak, corpus)
+    (escapes, streak, distrust, corpus)
 }
 
 #[cfg(test)]
@@ -269,13 +336,13 @@ mod tests {
     #[test]
     fn parse_full_line() {
         assert_eq!(
-            parse_escape_line(&line("стаб-кандидат №14")),
+            parse_escape_line(&line("стаб: кандидат №14")),
             Some(Escape {
                 date: "2026-10-19".to_string(),
                 session: "W-042".to_string(),
                 found: "ручной дифф после merge".to_string(),
                 class: "blind:boundary".to_string(),
-                reaction: "стаб-кандидат №14".to_string(),
+                reaction: "стаб: кандидат №14".to_string(),
             })
         );
     }
@@ -294,6 +361,34 @@ mod tests {
     }
 
     #[test]
+    fn debt_is_default_free_text_is_debt() {
+        // E2: инверсия дефолта — конвертация ТОЛЬКО явная грамматика
+        // (гейт:/стаб:/принял риск:, регистр не важен). Вольная реакция
+        // («ок», «стаб-кандидат №14» без двоеточия) = непогашенный долг:
+        // человек записал намерение, а не факт.
+        for r in [
+            "ок",
+            "later",
+            "wontfix",
+            "починил руками",
+            "стаб-кандидат №14",
+            "гейт NO-IGNORED",
+        ] {
+            let e = parse_escape_line(&line(r)).unwrap_or_else(|| unreachable!("{r}"));
+            assert!(e.is_debt(), "«{r}» без грамматики = долг");
+        }
+        for r in [
+            "гейт: NO-IGNORED",
+            "стаб: кандидат №14",
+            "принял риск: env-переменные вне контракта",
+            "ГЕЙТ: X",
+        ] {
+            let e = parse_escape_line(&line(r)).unwrap_or_else(|| unreachable!("{r}"));
+            assert!(!e.is_debt(), "«{r}» = конвертация по грамматике");
+        }
+    }
+
+    #[test]
     fn parse_rejects_garbage() {
         assert!(parse_escape_line("").is_none());
         assert!(parse_escape_line("мусор без полей").is_none());
@@ -304,7 +399,7 @@ mod tests {
 
     #[test]
     fn level_needs_clean_debt() {
-        let ok = parse_escapes(&line("гейт NO-IGNORED"));
+        let ok = parse_escapes(&line("гейт: NO-IGNORED"));
         assert_eq!(ok.len(), 1);
         assert_eq!(autonomy_level(&ok, 10, 1.0), Level::L1);
         assert_eq!(autonomy_level(&ok, 30, 1.0), Level::L2);
@@ -322,23 +417,75 @@ mod tests {
     fn streak_counts_sessions_after_last_escape() {
         let log =
             "## W-001 — a (2026-10-01)\n## W-002 — b (2026-10-19)\n## W-003 — c (2026-10-20)\n";
-        let esc = parse_escapes(&line("стаб"));
-        assert_eq!(streak_of(log, &esc), 1);
-        assert_eq!(streak_of(log, &[]), 3);
-        let esc2 = parse_escapes("2026-10-18 | W-000 | a | blind:x | стаб");
-        assert_eq!(streak_of(log, &esc2), 2);
+        let esc = parse_escapes(&line("стаб: правлю руками"));
+        assert_eq!(streak_of(log, &esc), (1, false));
+        assert_eq!(streak_of(log, &[]), (3, false));
+        let esc2 = parse_escapes("2026-10-18 | W-000 | a | blind:x | стаб: правлю руками");
+        assert_eq!(streak_of(log, &esc2), (2, false));
         // сессия без даты не в счёт
         let log2 = "## W-001 — a (2026-10-01)\n## W-002 — без даты\n";
-        assert_eq!(streak_of(log2, &[]), 1);
+        // W-002 без даты не считается в streak, но 1/2 без даты — ровно
+        // половина: доверие целое (E4 ломает СТРОГО больше половины).
+        assert_eq!(streak_of(log2, &[]), (1, false));
+    }
+
+    #[test]
+    fn log_health_counts_headers_and_dated() {
+        // E4: здоровье журнала — ЗАГОЛОВКИ vs ДАТИРУЕМЫЕ. Сессия без даты
+        // молча выпадает из streak: счётчик обязан видеть эту дыру.
+        let log = "## W-001 — a (2026-10-01)\n## W-002 — b\nтекст\n## X-9 — c (2026-10-02)\n## W-003 — d (2026-10-03)\n";
+        let h = log_health(log);
+        // 3 заголовка W-… (X-9 не сессия); из них 1 без даты — undated=1,
+        // ровно треть: доверие целое.
+        assert_eq!((h.headers, h.dated), (3, 2));
+        assert_eq!(h.undated(), 1);
+        assert!(!h.distrust());
+        let h0 = log_health("нет заголовков");
+        assert_eq!((h0.headers, h0.dated), (0, 0));
+        // пустой лог → false: «нет данных» ≠ «ложь»
+        assert!(!h0.distrust());
+    }
+
+    #[test]
+    fn log_health_distrust_boundary_half_and_above() {
+        // Граница 50%: ровно половина без даты — ещё достоверно (доверие
+        // ломает СТРОГО больше половины; мутант `>`↔`>=` должен умереть).
+        let dated: String = (1..=5)
+            .map(|i| format!("## W-1{i:02} — a (2026-10-0{i})\n"))
+            .collect();
+        let undated: String = (1..=5).map(|i| format!("## W-2{i:02} — b\n")).collect();
+        let half = format!("{dated}{undated}");
+        let h = log_health(&half);
+        assert_eq!((h.headers, h.dated), (10, 5));
+        assert!(!h.distrust(), "ровно 50% без даты — streak ещё достоверен");
+        let above = format!("{undated}## W-999 — c\n{dated}");
+        let h2 = log_health(&above);
+        assert_eq!((h2.headers, h2.dated), (11, 5));
+        assert!(h2.distrust(), "6/11 без даты — streak недоверенный");
+    }
+
+    #[test]
+    fn streak_of_returns_streak_and_distrust() {
+        // Контракт E4: streak пакуется с флагом доверия — отчёт печатает
+        // оба, иначе заниженный streak молча украшает уровень.
+        let log =
+            "## W-001 — a (2026-10-01)\n## W-002 — b (2026-10-19)\n## W-003 — c (2026-10-20)\n";
+        let esc = parse_escapes(&line("стаб: правлю руками"));
+        assert_eq!(streak_of(log, &esc), (1, false));
+        assert_eq!(streak_of(log, &[]), (3, false));
+        let no_dates = "## W-001 — a\n## W-002 — b\n## W-003 — c\n";
+        let (n, distrust) = streak_of(no_dates, &[]);
+        assert_eq!(n, 0);
+        assert!(distrust);
     }
 
     #[test]
     fn class_groups_count_desc_then_name_asc() {
         let esc = parse_escapes(&format!(
             "{}\n{}\n{}",
-            line("стаб"),
-            "2026-10-20 | W-043 | a | blind:env-var | гейт",
-            "2026-10-20 | W-044 | b | blind:boundary | стаб",
+            line("стаб: правлю руками"),
+            "2026-10-20 | W-043 | a | blind:env-var | гейт: NO-IGNORED",
+            "2026-10-20 | W-044 | b | blind:boundary | стаб: правлю руками",
         ));
         assert_eq!(
             class_groups(&esc),
@@ -388,7 +535,10 @@ mod tests {
         std::fs::create_dir_all(&store.dir).unwrap_or_else(|e| unreachable!("mkdir: {e}"));
         std::fs::write(
             ledger_path(&store),
-            format!("{}\n\n# комментарий\nмусор без полей\n", line("стаб")),
+            format!(
+                "{}\n\n# комментарий\nмусор без полей\n",
+                line("стаб: правлю руками")
+            ),
         )
         .unwrap_or_else(|e| unreachable!("ledger: {e}"));
         std::fs::write(
@@ -402,7 +552,7 @@ mod tests {
         )
         .unwrap_or_else(|e| unreachable!("corpus: {e}"));
 
-        let (escapes, streak, corpus) = aggregate(&store);
+        let (escapes, streak, distrust, corpus) = aggregate(&store);
         // точное равенство, не len: vec![Default::default()] тоже даст 1
         assert_eq!(
             escapes,
@@ -411,10 +561,11 @@ mod tests {
                 session: "W-042".to_string(),
                 found: "ручной дифф после merge".to_string(),
                 class: "blind:boundary".to_string(),
-                reaction: "стаб".to_string(),
+                reaction: "стаб: правлю руками".to_string(),
             }]
         );
         assert_eq!(streak, 1); // W-002 (2026-10-20) после побега 2026-10-19
+        assert!(!distrust); // оба заголовка с датой — журнал достоверен
         assert_eq!(corpus, Some((13, 13, "2026-10-19".to_string())));
 
         std::fs::remove_dir_all(&dir).ok();
@@ -422,7 +573,7 @@ mod tests {
 
     #[test]
     fn level_line_shape() {
-        let esc = parse_escapes(&line("стаб"));
+        let esc = parse_escapes(&line("стаб: правлю руками"));
         let l = level_line(&esc, 12, Some((13, 13, String::new())));
         assert!(
             l.starts_with("автономия L1 (streak 12, корпус 13/13): "),

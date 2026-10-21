@@ -237,6 +237,28 @@ pub fn doctor(store: &Store, cfg: &RunConfig, root: &Path) -> anyhow::Result<()>
         }
     }
 
+    // E4: здоровье журнала сессий — streak меряется ДАТАМИ заголовков
+    // log.md, и сессия без даты молча выпадает из счёта. Если таких
+    // больше половины, streak занижен: WARN (не FAIL — число остаётся
+    // консервативным, решение дописывать даты за человеком).
+    let log_md = std::fs::read_to_string(store.dir.join("log.md")).unwrap_or_default();
+    let health = crate::core::escapes::log_health(&log_md);
+    if health.distrust() {
+        say(&format!(
+            "WARN журнал: {}/{} заголовков log.md без даты — streak сессий занижен (даты «(YYYY-MM-DD)» в ## W-…)",
+            health.undated(),
+            health.headers
+        ));
+        warn = warn.saturating_add(1);
+    } else if health.headers > 0 {
+        say(&format!(
+            "ok   журнал: даты {} из {} сессий читаемы — streak достоверен",
+            health.dated, health.headers
+        ));
+    } else {
+        say("..   журнал: log.md пуст — streak не из чего мерить (первая сессия)");
+    }
+
     // P3: сам мутатор — версия и общий конфиг параметров.
     if let Some(m) = &cfg.mutate {
         let is_cm = m.tool.contains("cargo mutants") || m.tool.contains("cargo-mutants");

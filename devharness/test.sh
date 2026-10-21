@@ -1044,6 +1044,20 @@ printf 'мусор без полей\n19.10.2026 | W-042 | a | blind:x | r\n' > 
 S="$(SMOKE_ESCAPE="$T/esc-junk.md" bash "$HERE/tests/mk_smoke_repo.sh" "$T/junk-e" "$HERE/stubs/good.sh" "$T/junk-e.wt")"
 (cd "$S" && "$DEVH" escapes) >"$T/aut-junk-e.log" 2>&1
 grep -q "нет данных" "$T/aut-junk-e.log" && pass "autonomy 47e: мусор отсеян — ledger пуст" || fail "autonomy 47e: мусор пролез в парсер: $(cat "$T/aut-junk-e.log")"
+# 47f: E2 — грамматика конвертации (инверсия дефолта). Погасить долг может
+# ТОЛЬКО явная грамматика: гейт:/стаб:/принял риск: (регистр не важен).
+# Вольная реакция («ок», «стаб-кандидат №14» без двоеточия) = долг →
+# уровень L0 при любом streak/корпусе. Раньше debt был только у пустой и
+# прочерковой реакции — уровень поднимался болтовнёй в ledger'е.
+aut_check free f "ок" 12
+grep -q "долг (побег без конвертации — реакция без префикса" "$T/aut-free-f.log" && pass "autonomy 47f: вольная реакция 'ок' = долг" || fail "autonomy 47f: 'ок' не в долге: $(cat "$T/aut-free-f.log")"
+grep -q "автономия L0 (streak 12" "$T/aut-free-f.log" && pass "autonomy 47f: долг топит до L0 при streak 12" || fail "autonomy 47f: уровень не упал: $(cat "$T/aut-free-f.log")"
+grep -q "автономия L1" "$T/aut-free-f.log" && fail "autonomy 47f: L1 выдан despite долга" || pass "autonomy 47f: L1 не выдан"
+aut_check caps g "ГЕЙТ: X" 12
+grep -q "автономия L1 (streak 12, корпус 13/13)" "$T/aut-caps-g.log" && pass "autonomy 47f: 'ГЕЙТ:' (регистр) = конвертация" || fail "autonomy 47f: регистр сломал грамматику: $(cat "$T/aut-caps-g.log")"
+# подсказка пустого ledger'а раскрывает грамматику — иначе человек пишет
+# «ок» и не понимает, почему уровень не растёт.
+grep -q "принял риск:" "$T/aut-empty-a.log" && pass "autonomy 47f: подсказка раскрывает грамматику" || fail "autonomy 47f: подсказка без грамматики: $(cat "$T/aut-empty-a.log")"
 # 47d: AUTONOMY — голосование отображением. Полная сессия: 1 — строка в конце
 # run, 0 — тишина. Механических запретов уровень не создаёт (решение человека).
 merge_vote() { # <case> <flag>

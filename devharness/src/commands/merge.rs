@@ -170,7 +170,20 @@ pub fn merge(store: &Store, cfg: &RunConfig, id: &ItemId) -> anyhow::Result<()> 
     // AUTONOMY=0 молчит; механических запретов уровень не создаёт —
     // решения человека, цифры машинные.
     if cfg.autonomy {
-        let (esc_list, streak, corpus) = crate::core::escapes::aggregate(store);
+        let (esc_list, streak, distrust, corpus) = crate::core::escapes::aggregate(store);
+        // E4: журнал сессий без дат — streak занижен молча; печатаем рядом
+        // с уровнем (не понижая его: мера остаётся консервативной).
+        if distrust {
+            println!(
+                "{}⚠ журнал: {} заголовков log.md без даты — streak занижен{}",
+                c.b,
+                crate::core::escapes::log_health(
+                    &std::fs::read_to_string(store.dir.join("log.md")).unwrap_or_default()
+                )
+                .undated(),
+                c.z
+            );
+        }
         println!(
             "{}{}{}",
             c.b,

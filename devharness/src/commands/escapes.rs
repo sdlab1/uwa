@@ -24,11 +24,11 @@ use crate::shell::store::Store;
 /// (общий формат), живёт здесь одним куском.
 pub fn report(store: &Store) -> String {
     let ledger = escapes::ledger_path(store);
-    let (list, streak, corpus) = escapes::aggregate(store);
+    let (list, streak, distrust, corpus) = escapes::aggregate(store);
     let mut lines: Vec<String> = Vec::new();
     if list.is_empty() {
         lines.push(format!(
-            "нет данных: {} пуст — побег записывает человек (дата | W-NNN | найдено: … | класс: blind:* | реакция: …)",
+            "нет данных: {} пуст — побег записывает человек (дата | W-NNN | найдено: … | класс: blind:* | реакция: гейт:…/стаб:…/принял риск:…)",
             ledger.display()
         ));
     } else {
@@ -39,7 +39,7 @@ pub fn report(store: &Store) -> String {
         let debt: Vec<&escapes::Escape> = list.iter().filter(|e| e.is_debt()).collect();
         if !debt.is_empty() {
             lines.push(format!(
-                "долг (побег без конвертации — стаб/гейт/принятый риск): {}",
+                "долг (побег без конвертации — реакция без префикса гейт:/стаб:/принял риск:): {}",
                 debt.len()
             ));
             for e in debt {
@@ -56,6 +56,17 @@ pub fn report(store: &Store) -> String {
     lines.push(format!(
         "streak: {streak} сессий без побегов; корпус: {corpus_s}"
     ));
+    // E4: журнал без дат считает streak молча меньше — человек обязан
+    // видеть, что мера занижена, иначе уровень «не растёт» без причины.
+    if distrust {
+        lines.push(format!(
+            "⚠ журнал: {} заголовков log.md без даты — streak занижен (даты в формате «(YYYY-MM-DD)» в заголовках ## W-…)",
+            escapes::log_health(
+                &std::fs::read_to_string(store.dir.join("log.md")).unwrap_or_default()
+            )
+            .undated()
+        ));
+    }
     lines.push(escapes::level_line(&list, streak, corpus));
     lines.join("\n")
 }
@@ -98,7 +109,7 @@ mod tests {
         let store = Store::new(td.path());
         seed(
             &store,
-            "2026-10-17 | W-095 | найдено: ручной дифф после merge | класс: blind:boundary | реакция: стаб-кандидат №14\n",
+            "2026-10-17 | W-095 | найдено: ручной дифф после merge | класс: blind:boundary | реакция: стаб: кандидат №14\n",
             LOG12,
             r#"{"caught":13,"total":13,"date":"2026-10-19"}"#,
         );
@@ -128,6 +139,38 @@ mod tests {
         );
         assert!(r.contains("автономия L0"), "{r}");
         assert!(!r.contains("автономия L1"), "{r}");
+    }
+
+    #[test]
+    fn report_free_text_reaction_is_debt() {
+        // E2: вольный слова («ок», «стаб-кандидат №14» без двоеточия) —
+        // не конвертация. Раньше debt был только у пустой/прочерковой
+        // реакции: уровень поднимался болтовнёй. Теперь — только грамматика.
+        let td = tempfile::TempDir::new().unwrap_or_else(|_| unreachable!());
+        let store = Store::new(td.path());
+        seed(
+            &store,
+            "2026-10-17 | W-095 | найдено: гейт промолчал | класс: blind:env-var | реакция: ок\n",
+            LOG12,
+            r#"{"caught":13,"total":13,"date":"2026-10-19"}"#,
+        );
+        let r = report(&store);
+        assert!(r.contains("долг (побег без конвертации"), "{r}");
+        assert!(r.contains("2026-10-17 — blind:env-var"), "{r}");
+        assert!(r.contains("автономия L0"), "{r}");
+        assert!(!r.contains("автономия L1"), "{r}");
+    }
+
+    #[test]
+    fn report_hint_reveals_grammar() {
+        // Подсказка пустого ledger'а обязана раскрывать грамматику — иначе
+        // человек пишет «ок» и не понимает, почему уровень не вырос.
+        let td = tempfile::TempDir::new().unwrap_or_else(|_| unreachable!());
+        let store = Store::new(td.path());
+        let r = report(&store);
+        assert!(r.contains("гейт:"), "{r}");
+        assert!(r.contains("стаб:"), "{r}");
+        assert!(r.contains("принял риск:"), "{r}");
     }
 
     #[test]

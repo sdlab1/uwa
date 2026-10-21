@@ -1030,3 +1030,39 @@ class_groups сортировка, parse_escape_line восстановлени�
   ярким), `✓ ✗ ⏱ ⊘` (caught / missed / timeout / unviable), среднее на
   мутант, ETA в «мин», текущий мутант из свежего `.diff`. `NO_COLOR`, `--once`,
   троттлинг в не-tty. Заменяет слепые sleep-петли (каждый poll = turn).
+
+---
+
+## 9.26 — E-1: E2 (грамматика конвертации) + E4 (здоровье журнала) (2026-10-21, main)
+
+Зона: `core/escapes.rs`, `commands/escapes.rs`, `commands/merge.rs`,
+`commands/doctor.rs`, `tests/integration.rs` (s47b-фикстура + s47f/s47g),
+`devharness/test.sh` (47f + проверка подсказки в 47a).
+
+**E2.** `const CONVERTS: [&str; 3] = ["гейт:", "стаб:", "принял риск:"]`,
+`is_debt = !CONVERTS.iter().any(|p| r.starts_with(p))` после `trim() +
+to_lowercase()`. RED: `debt_is_default_free_text_is_debt` — падал на «ок»
+(старый контракт: debt только у пустой/прочерковой/«нет»). Грабля плана
+№1 сработала буквально: фикстуры `"стаб"`, `"гейт NO-IGNORED"`,
+`"стаб-кандидат №14"` молча стали долгом → 2 теста ушли в L0; миграция —
+замена в фикстурах на грамматику (зафиксировано как смена контракта).
+
+**E4.** `LogHealth{headers, dated}` + `log_health()` + `undated()` +
+`distrust()` (undated*2 > headers, строго; пустой лог → false).
+`streak_of -> (u32, bool)`, `aggregate -> 4-элементный кортеж`.
+Предупреждение в трёх местах одной строкой: `devh escapes` (⚠ строка после
+streak), `devh merge` (перед `level_line`), `devh doctor` (soft-warn в блоке
+flaky — чистые функции общие).
+
+**Две ошибки моих ожиданий (не кода):** заголовок `## W-002 — b` без даты —
+заголовок (headers++), undated=1; и 1/2 без даты — ровно половина = доверие
+целое. Правило: ожидания писать ПО границе, а не по наитию.
+
+**Числа приёмки:** unit 208 + integration 56; test.sh 437 PASS / 0 FAIL
+(+6 проверок в 47); fmt `-p devh` чистый. Clippy: 11 ошибок expect() в
+`run.rs`-тестах — предсуществующие (песочница с forbid-линтами, не гейт).
+
+**Мутационный аудит зоны E-1 — следующий шаг:** дифф сессии,
+`--in-diff`, nextest, in-place; цель 100% testable kill-rate
+(в частности: мутанты `is_debt → true/false`, `>` ↔ `>=` в distrust,
+`saturating_mul` ↔ `mul` — граница 50% обязана быть убита тестом).

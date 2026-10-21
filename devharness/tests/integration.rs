@@ -3317,8 +3317,8 @@ fn section47_escapes_ledger_and_level() {
     fs::create_dir_all(sb.harness_file("items")).unwrap_or_else(|_| unreachable!());
     fs::write(
         sb.harness_file("escapes.md"),
-        "2026-10-17 | W-095 | найдено: ручной дифф после merge | класс: blind:boundary | реакция: стаб-кандидат №14\n\
-         2026-10-17 | W-096 | найдено: env вне контракта | класс: blind:env-var | реакция: гейт\n",
+        "2026-10-17 | W-095 | найдено: ручной дифф после merge | класс: blind:boundary | реакция: стаб: кандидат №14\n\
+         2026-10-17 | W-096 | найдено: env вне контракта | класс: blind:env-var | реакция: гейт: X\n",
     )
     .unwrap_or_else(|_| unreachable!());
     fs::write(sb.harness_file("log.md"), &log).unwrap_or_else(|_| unreachable!());
@@ -3357,4 +3357,60 @@ fn section47_escapes_ledger_and_level() {
     );
     assert!(contains(&out, "автономия L0"), "{out}");
     assert!(!contains(&out, "автономия L1"), "{out}");
+
+    // E2: грамматика конвертации. Вольная реакция («ок», «стаб-кандидат
+    // №14» без двоеточия) = долг → L0 при любом streak/корпусе. Раньше
+    // debt был только у пустой/прочерковой реакции — уровень поднимался
+    // болтовнёй в ledger'е.
+    let sb = Sandbox::new("s47f");
+    sb.devh(&["init"])
+        .status()
+        .unwrap_or_else(|_| unreachable!());
+    fs::create_dir_all(sb.harness_file("items")).unwrap_or_else(|_| unreachable!());
+    fs::write(
+        sb.harness_file("escapes.md"),
+        "2026-10-17 | W-095 | найдено: гейт промолчал | класс: blind:env-var | реакция: ок\n         2026-10-17 | W-096 | найдено: тот же класс | класс: blind:env-var | реакция: ГЕЙТ: X\n",
+    )
+    .unwrap_or_else(|_| unreachable!());
+    fs::write(sb.harness_file("log.md"), &log).unwrap_or_else(|_| unreachable!());
+    fs::write(sb.harness_file("corpus.json"), corpus).unwrap_or_else(|_| unreachable!());
+    let (ok, out) = sb.run_capture(&["escapes"]);
+    assert!(ok, "escapes rc=0: {out}");
+    assert!(
+        contains(&out, "долг (побег без конвертации — реакция без префикса"),
+        "{out}"
+    );
+    assert!(
+        contains(&out, "2026-10-17 — blind:env-var (гейт промолчал)"),
+        "{out}"
+    );
+    assert!(contains(&out, "автономия L0"), "{out}");
+
+    // E4: журнал сессий без дат — streak занижен молча; отчёт обязан
+    // предупредить (уровень при этом НЕ понижен — мера консервативна).
+    let sb = Sandbox::new("s47g");
+    sb.devh(&["init"])
+        .status()
+        .unwrap_or_else(|_| unreachable!());
+    fs::create_dir_all(sb.harness_file("items")).unwrap_or_else(|_| unreachable!());
+    fs::write(
+        sb.harness_file("escapes.md"),
+        "2026-10-17 | W-095 | найдено: ручной дифф после merge | класс: blind:boundary | реакция: стаб: кандидат №14\n",
+    )
+    .unwrap_or_else(|_| unreachable!());
+    let undated: String = (1..=4)
+        .map(|i| format!("## W-{i:03} — сессия без даты\n\n- commit: deadbee\n"))
+        .collect();
+    fs::write(sb.harness_file("log.md"), &undated).unwrap_or_else(|_| unreachable!());
+    fs::write(sb.harness_file("corpus.json"), corpus).unwrap_or_else(|_| unreachable!());
+    let (ok, out) = sb.run_capture(&["escapes"]);
+    assert!(ok, "escapes rc=0: {out}");
+    assert!(contains(&out, "streak: 0 сессий без побегов"), "{out}");
+    assert!(
+        contains(
+            &out,
+            "⚠ журнал: 4 заголовков log.md без даты — streak занижен"
+        ),
+        "{out}"
+    );
 }
