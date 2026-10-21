@@ -1812,6 +1812,52 @@ fn section00_shellcheck_oracle_files() {
     assert!(bad.is_empty(), "shellcheck findings:\n{}", bad.join("\n"));
 }
 
+#[test]
+fn section00b_branded_audit_cli_present() {
+    // Фирменный CLI вывода аудита: watcher обязан быть БЕЗ прогресс-бара и с
+    // пилюлей процента + легендой строкой выше. Дрейф («в main-репо осталась
+    // старая версия, оператор не видит фирменный вывод») замечаем здесь.
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let src = std::fs::read_to_string(manifest.join("tools/mutants-watch.sh"))
+        .unwrap_or_else(|_| unreachable!());
+    assert!(
+        contains(&src, "pbg"),
+        "пилюля процента (pbg) обязана быть: {src}"
+    );
+    assert!(!contains(&src, "###"), "прогресс-бар удалён: {src}");
+    // Наблюдение за прогоном = ЖИВОЙ прогресс: watcher без флага циклит,
+    // пока cargo-mutants жив. Если дрейф сделает из watcher одноразовый
+    // снимок — оператор снова останется без вывода (ругань «одноразовая
+    // хуета»), поэтому режим ожидания под этим гейтом.
+    assert!(
+        contains(&src, "while pgrep -x cargo-mutants"),
+        "watcher обязан жить циклом ожидания (без --once): {src}"
+    );
+    assert!(contains(&src, "--once"), "точечный снимок --once остаётся");
+    // ЖИВОЙ режим: одна строка, обновляемая \r на месте (не снапшоты!)
+    assert!(
+        contains(&src, "LIVE=1"),
+        "живой режим: watcher сам обновляет строку: {src}"
+    );
+    assert!(contains(&src, "\\r\\033[K"), "обновление \\r + clear строки");
+    assert!(
+        contains(&src, "легенда"),
+        "легенда значков строкой выше: {src}"
+    );
+    // Rust-часть фирменного вывода — общий модуль для всего харнесса.
+    assert!(
+        manifest.join("src/core/tui.rs").exists(),
+        "core/tui.rs — единая рисовка процентов (run.rs + watcher)"
+    );
+    let tui = std::fs::read_to_string(manifest.join("src/core/tui.rs"))
+        .unwrap_or_else(|_| unreachable!());
+    assert!(contains(&tui, "pub fn pill"), "tui::pill — процент пилюлей");
+    assert!(
+        contains(&tui, "pub fn legend"),
+        "tui::legend — легенда значков"
+    );
+}
+
 /// Кэш вердиктов shellcheck'а: target/ (в .gitignore), уезжает с `cargo clean`.
 fn shellcheck_cache_dir(manifest: &Path) -> Option<PathBuf> {
     let d = manifest.join("target").join(".shellcheck-cache");
@@ -2678,25 +2724,47 @@ echo "2 mutants tested in 1s: 1 caught, 1 missed"
 }
 
 #[test]
-fn section39_observe_points_reach_prompt_and_doctor() {
-    // Спека с OBSERVE → items/W-NNN/observe.md (одна точка на строку) и точки
-    // в промпте агента; спека без OBSERVE → промпт без блока (не падает).
+fn section39_contract_absorbs_observe_and_reaches_prompt() {
+    // C1: спека с OBSERVE/FILES/RED-EXPECT → items/W-NNN/contract.toml
+    // (единый артефакт вместо observe.md); prompt инжектит контракт целиком;
+    // спека без OBSERVE → промпт без блока точек, doctor мягко ругается.
     let sb = Sandbox::new("r39");
     sb.run_ok(&["init"]);
     // RED раннит тем же раннером, что и VERIFY (иначе RED-LINK уведёт в фазу
     // автора red.cmd и основной промпт построится только после зелёного RED).
-    let spec = "# Задача\nOBSERVE:\n- return: load_average() → Some(значение)/None при мусоре\n- state: HARNESS_MUTATE_MAX_LOAD читается один раз\nRED: test -f done.txt\n";
+    // done.txt для стуба не будет: red-команда всёравно красная.
+    // RED-подпись честная: red.cmd падает тестом с panic-текстом «load boom» — гейт пропускает в фазу агента; позеленеет только с done.txt, который стуб не создаёт → run останавливается.
+    let spec = "# Задача\nOBSERVE:\n- return: load_average() → Some(значение)/None при мусоре\n- state: HARNESS_MUTATE_MAX_LOAD читается один раз\nFILES:\n- devharness/src/*\nRED: test -f done.txt || { printf 'running 1 test\\ntest spec::reason ... FAILED\\nfailures:\\n    spec::reason\\npanicked at lib.rs:1: load boom\\n'; exit 1; }\nRED-EXPECT: load boom\n";
     sb.new_item("observe item 1", spec, None);
-    let obs = sb.item_dir("W-001").join("observe.md");
-    let points = fs::read_to_string(&obs).unwrap_or_else(|_| unreachable!());
+    let cpath = sb.item_dir("W-001").join("contract.toml");
+    let text = fs::read_to_string(&cpath).unwrap_or_else(|_| unreachable!());
+    // integration — отдельный крейт (бинарь), Contract недоступен: проверяем
+    // сериализованный TOML текстом (round-trip держат юниты contract.rs).
     assert!(
-        contains(&points, "- return: load_average()")
-            || contains(&points, "return: load_average()"),
-        "точки наблюдения записаны без маркера: {points}"
+        contains(&text, "goal = \"Задача\""),
+        "goal из первой строки спеки: {text}"
     );
     assert!(
-        contains(&points, "state: HARNESS_MUTATE_MAX_LOAD"),
-        "{points}"
+        contains(
+            &text,
+            "\"return: load_average() → Some(значение)/None при мусоре\""
+        ),
+        "OBSERVE-точки в контракте: {text}"
+    );
+    assert!(
+        contains(
+            &text,
+            "\"state: HARNESS_MUTATE_MAX_LOAD читается один раз\""
+        ),
+        "вторая точка наблюдения: {text}"
+    );
+    assert!(
+        contains(&text, "\"devharness/src/*\""),
+        "FILES-скоуп в контракте: {text}"
+    );
+    assert!(
+        contains(&text, "expect = \"load boom\""),
+        "RED-EXPECT в контракте: {text}"
     );
 
     // агент-стаб сохраняет промпт в spec-дире соседа; проверяем инжект.
@@ -2719,7 +2787,7 @@ printf '=== PROMPT ===\n%s\n' "$1" >> "$TRACE"
         ],
     );
     assert!(!ok, "run останавливается на красном RED: {out}");
-    let prompt = fs::read_to_string(&trace).unwrap_or_else(|_| unreachable!());
+    let prompt = fs::read_to_string(&trace).unwrap_or_default();
     // первый блок трейса — промпт фазы реализации (не fix-раунд)
     let first_prompt = prompt.split("=== PROMPT ===").nth(1).unwrap_or_default();
     assert!(
@@ -2731,15 +2799,29 @@ printf '=== PROMPT ===\n%s\n' "$1" >> "$TRACE"
         contains(&prompt, "тестом фичи не считается"),
         "требование ассерта на каждую точку: {prompt}"
     );
+    assert!(
+        contains(first_prompt, "Цель: Задача"),
+        "контракт целиком в промпте: {prompt}"
+    );
     sb.run_ok(&["abort"]);
 
-    // спека без OBSERVE → observe.md нет, блок отсутствует, doctor не блокирует.
+    // спека без OBSERVE → контракт без точек (файл есть — goal спеки),
+    // блок точек отсутствует, doctor не блокирует.
     sb.new_item(
         "observe item 2",
         "спека без точек\nRED: test -f done.txt\n",
         None,
     );
-    assert!(!sb.item_dir("W-002").join("observe.md").exists());
+    let text2 = fs::read_to_string(sb.item_dir("W-002").join("contract.toml"))
+        .unwrap_or_else(|_| unreachable!());
+    assert!(
+        contains(&text2, "goal = \"спека без точек\""),
+        "goal даже без секций (первая строка): {text2}"
+    );
+    assert!(
+        contains(&text2, "points = []"),
+        "точек наблюдения нет: {text2}"
+    );
     let (ok2, out2) = sb.run_capture(&["doctor"]);
     assert!(
         contains(&out2, "спеки без точек наблюдения"),
@@ -2748,7 +2830,6 @@ printf '=== PROMPT ===\n%s\n' "$1" >> "$TRACE"
     assert!(ok2, "doctor мягкий (WARN ≠ FAIL): {out2}");
 }
 
-#[test]
 fn section40_killmap_hotspots_reach_hint_and_prompt() {
     // Два прогона с РАЗНЫМИ outcomes.json (оба с missed в load.rs) → killmap
     // сходится к сумме (caught+missed+runs), пул hot-spot виден в devh hint

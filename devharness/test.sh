@@ -681,7 +681,9 @@ cd "$S" || exit 1
 printf 'Сделай: валидация нечисловых аргументов add.\nOBSERVE:\n- return: add x 3 -> ERR, rc=1\nRED: bash tests/all.sh\nRED-EXPECT: add_non_numeric\n' \
   | "$DEVH" new "smoke fix" >/dev/null 2>&1
 grep -q "add_non_numeric" .harness/items/W-001/red-expect && pass "smoke: RED-EXPECT из спеки" || fail "smoke: RED-EXPECT из спеки"
-grep -q "add x 3" .harness/items/W-001/observe.md && pass "smoke: OBSERVE-точки из спеки" || fail "smoke: OBSERVE-точки из спеки"
+grep -q "add x 3" .harness/items/W-001/contract.toml && pass "smoke: OBSERVE-точки в контракте (C1)" || fail "smoke: OBSERVE-точки в контракте"
+grep -q 'goal = "Сделай: валидация нечисловых аргументов add."' .harness/items/W-001/contract.toml && pass "smoke: goal в контракте" || fail "smoke: goal в контракте"
+grep -q 'add_non_numeric' .harness/items/W-001/contract.toml && pass "smoke: red.expect в контракте" || fail "smoke: red.expect в контракте"
 "$DEVH" run W-001 >"$T/out" 2>&1 && pass "smoke: run зелёный" || { fail "smoke: run зелёный"; cat "$T/out"; }
 grep -q "| claimed" .harness/items/W-001/events.log && pass "smoke: claim в журнале (A3)" || fail "smoke: claim в журнале (A3)"
 grep -q "calc::add_non_numeric ... FAILED" .harness/logs/W-001-red.log && pass "smoke: RED честный (упавший тест в логе)" || fail "smoke: RED честный"
@@ -697,6 +699,17 @@ grep -q "add_non_numeric" "$T/out" 2>/dev/null && fail "smoke: merge не мяс
 SMOKE_DT=$((SECONDS - SMOKE_T0))
 echo "  smoke-цикл: ${SMOKE_DT}s"
 [ "$SMOKE_DT" -lt 60 ] && pass "smoke: цикл < 60s" || fail "smoke: цикл < 60s (${SMOKE_DT}s)"
+
+echo "== 31b. C1: contract.toml — мягкая проверка по диффу (не гейт) =="
+smoke_reset_env
+S2="$(bash "$HERE/tests/mk_smoke_repo.sh" "$T/s31b" "$HERE/stubs/good.sh" "$T/wt2")"
+cd "$S2" || exit 1
+printf 'Сделай: валидация add.\nFILES:\n- tests/**\nOBSERVE:\n- return: add x 3 -> ERR\nRED: bash tests/all.sh\nRED-EXPECT: add_non_numeric\n' | "$DEVH" new "c1 scope" >/dev/null 2>&1
+"$DEVH" run W-001 >"$T/out" 2>&1 && pass "C1: run зелёный несмотря на замечания контракта" || { fail "C1: run зелёный (контракт МЯГКИЙ)"; cat "$T/out"; }
+grep -q "незаявленная правка src/calc.sh" .harness/logs/W-001-contract.log && pass "C1: soft-warn в логе (правка вне touch)" || { fail "C1: soft-warn в contract.log"; cat .harness/logs/W-001-contract.log 2>/dev/null; }
+grep -q "заявлено, не тронуто: tests/**" .harness/logs/W-001-contract.log && pass "C1: «заявлено, не тронуто» в логе" || fail "C1: «заявлено, не тронуто» в логе"
+grep -q "contract" "$T/out" && pass "C1: soft-warn виден в консоли run" || fail "C1: soft-warn в консоли run"
+"$DEVH" doctor >"$T/out" 2>&1 && pass "C1: doctor чист (контракт у всех item)" || { fail "C1: doctor чист"; cat "$T/out"; }
 
 # ─── A5a/A5b: корпус атакующий (adversarial corpus) ───
 # Идея: стабы-читеры говорят на РЕАЛЬНЫХ диалектах гейтов (как good.sh), но

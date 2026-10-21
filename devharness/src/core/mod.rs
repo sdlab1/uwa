@@ -1,3 +1,4 @@
+pub mod contract;
 pub mod coverage;
 pub mod early;
 pub mod escapes;
@@ -7,4 +8,5 @@ pub mod load;
 pub mod plan;
 pub mod state;
 pub mod survivors;
+pub mod tui;
 pub mod types;

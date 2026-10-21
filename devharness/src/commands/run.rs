@@ -921,6 +921,29 @@ fn freeze_gate(store: &Store, cfg: &RunConfig, wt: &Path, id: &ItemId) -> (Strin
     (log, verdict)
 }
 
+/// C1: контракт задачи — МЯГКАЯ проверка по диффу (НЕ гейт): goal/observe
+/// заполнены, red.cmd имеет red.expect (P7), дифф внутри/вне files.touch
+/// (FREEZE гейтит жёстко — A6; здесь только предупреждение и «заявлено,
+/// не тронуто»). Никогда не двигает вердикт: пишет logs/W-NNN-contract.log
+/// и печатает жёлтым. Читает items/W-NNN/contract.toml.
+fn contract_note(store: &Store, wt: &Path, id: &ItemId) -> Option<String> {
+    let text = store.read(item_rel(id, "contract.toml"))?;
+    let c = crate::core::contract::Contract::parse(&text);
+    if c.is_empty() {
+        return None;
+    }
+    let has_red = store.read(item_rel(id, "red.cmd")).is_some();
+    let findings = crate::core::contract::contract_check(&c, &git::changed_files(wt), has_red);
+    if findings.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "контракт {} (МЯГКО, вердикт не двигает)\n{}\n",
+        id.dir_name(),
+        findings.join("\n")
+    ))
+}
+
 fn gate_ladder(
     store: &Store,
     cfg: &RunConfig,
@@ -944,6 +967,18 @@ fn gate_ladder(
             Verdict::EnvBlocked { .. } | Verdict::SpecBlock { .. } => {
                 unreachable!("freeze_gate не отдаёт Env/Spec")
             }
+        }
+    }
+
+    // C1: контракт — мягкая проверка ПОСЛЕ жёсткой FREEZE (дифф уже известен).
+    // Предупреждение, не вердикт: и заявленные-не тронутые, и незаявленные
+    // правки видны в логе/консоли, пока гейты решают жёстко (advance2 §C1).
+    if let Some(note) = contract_note(store, wt, id) {
+        // в лог — одной строкой (grep-дружественно), в консоль — построчно:
+        // замечания читаются списком, а не сбиваются в «:; …; …»
+        std::fs::write(store.log_file(id, "contract"), note.replace('\n', "; ")).ok();
+        for l in note.lines() {
+            println!("{}.. {l}{}", c.y, c.z);
         }
     }
 
@@ -2045,6 +2080,18 @@ enum MutRun {
     Env,
 }
 
+/// fn-replace мутант (Default::default()) обязан быть VIABLE: cargo-mutants
+/// подменяет тело run_mut/run_mut_watched этим значением — без Default
+/// инструмент помечал бы их Unviable («не собирается» = дыра в отчёте, а не
+/// пойманный мутант). Blocked — единственный вариант, который ломает любой
+/// вызывающий гейт мутации (он ждёт Fail/Pass/Stats, а не Env-blocked), так
+/// что подмена тела немедленно красная.
+impl Default for MutRun {
+    fn default() -> Self {
+        MutRun::Blocked("mutant: function replaced by Default".into())
+    }
+}
+
 fn run_mut(wt: &Path, cmd: &str, m: &MutateCfg) -> MutRun {
     // P5.5: под контенцией мутации стоят ×2–4 (load 24 в логах; §9.10).
     // Один замер перед запуском: порог max(4, 2×CPU) либо
@@ -2061,13 +2108,93 @@ fn run_mut(wt: &Path, cmd: &str, m: &MutateCfg) -> MutRun {
     let envs: Vec<(String, String)> = std::env::vars()
         .filter(|(k, _)| k.starts_with("HARNESS_"))
         .collect();
-    if !m.early {
-        return match proc::run_logged(cmd, wt, MUTATE_TIMEOUT, &envs) {
-            Ok(out) => classify(&proc::combined(&out)),
-            Err(_) => MutRun::Env,
-        };
-    }
+    // ФИРМЕННЫЙ ВЫВОД (tui.rs): прогон всегда monitored — watcher рисует
+    // процент-пилюлю + счётчики исходов строкой прогресса (легенда один раз
+    // выше). Раньше так жил только MUTATE_EARLY=1, и оператор в обычном
+    // аудите смотрел в сырой бар cargo-mutants — два разных «фирменных»
+    // вывода, о чём приходило напоминание каждую сессию. Ранний выход
+    // остался опциональным (MUTATE_EARLY) — печать отделена от остановки.
     run_mut_watched(wt, cmd, m, &envs)
+}
+
+/// Брендированный прогресс мутационного прогона: раз в ~1с (частота
+/// `proc::run_monitored`) читает счётчики ` mutants.out` дельтой от базлайна
+/// и печатает строку `tui::line`. В tty — каждую sekunda; в pipe/лог —
+/// каждые STEP готовых исходов (иначе простыня в логах гейта).
+struct TuiProgress {
+    dir: std::path::PathBuf,
+    /// Базлайн списков mutants.out ДО старта прогона: прошлый/`--iterate`
+    /// оставил строки, текущий считаем дельтой (как в run_mut_watched).
+    base: crate::core::early::LiveCounts,
+    c: crate::shell::color::Colors,
+    legend_done: bool,
+    last_printed: u32,
+    last_row: String,
+    started: std::time::Instant,
+}
+
+impl TuiProgress {
+    fn new(wt: &Path, cmd: &str) -> Self {
+        let d = wt.join(crate::core::early::mutants_out_dir(cmd));
+        let base = crate::core::early::read_live(&d);
+        TuiProgress {
+            dir: d,
+            base,
+            c: crate::shell::color::colors(),
+            started: std::time::Instant::now(),
+            legend_done: false,
+            last_printed: 0,
+            last_row: String::new(),
+        }
+    }
+
+    /// Снимок + печать (если пора). `avg` — средняя длительность мутанта,
+    /// сек (для ETA); `log` — вывод мутатора (fallback total).
+    /// Снимок + РЕШЕНИЕ о печати: печать — у вызывающего (run_mut_watched),
+    /// поэтому логику тика гоняют юнит-тесты без перенаправления stdout
+    /// (гейт: мутанты throttle/dedup/легенды обязаны быть CAUGHT — иначе
+    /// фирменная строка врёт про прогресс, а тесты молчат).
+    /// `step` = HARNESS_MUTATE_STEP, `tty` = isatty(1) — читает вызывающий.
+    /// None — молчок (троттлинг в pipe либо дубль строки).
+    /// Some((row, legend)) — строка прогресса + флаг «сначала легенду».
+    fn tick(&mut self, log: &str, step: u32, tty: bool) -> Option<(String, bool)> {
+        let mut live = crate::core::early::read_live(&self.dir);
+        live.sub_base(&self.base);
+        let total = live
+            .total
+            .or_else(|| crate::core::early::parse_discovered(log));
+        let counts = crate::core::tui::Counts {
+            caught: live.caught,
+            missed: live.missed,
+            timeout: live.timeout,
+            unviable: live.unviable,
+        };
+        let done = counts.done();
+        // троттлинг: tty — каждый тик; pipe — каждые STEP исходов
+        if !tty && done < self.last_printed.saturating_add(step) && self.last_printed > 0 {
+            return None;
+        }
+        self.last_printed = done;
+        let row =
+            crate::core::tui::line(done, total, &counts, self.avg_secs(done), "", "", &self.c);
+        if row == self.last_row {
+            return None; // ничего не изменилось — не зеркалим одну строку
+        }
+        let need_legend = !self.legend_done;
+        self.legend_done = true;
+        self.last_row = row.clone();
+        Some((row, need_legend))
+    }
+
+    /// Средняя длительность мутанта, сек: прошедшее / готовые исходы.
+    /// Честная оценка (включая сборку) — ETA строки не врёт.
+    fn avg_secs(&self, done: u32) -> f64 {
+        if done == 0 {
+            0.0
+        } else {
+            self.started.elapsed().as_secs_f64() / f64::from(done)
+        }
+    }
 }
 
 /// Вывод мутатора → MutRun (классификация общая для run_logged/run_monitored).
@@ -2101,13 +2228,38 @@ fn run_mut_watched(wt: &Path, cmd: &str, m: &MutateCfg, envs: &[(String, String)
     let base = early::read_live(&dir);
     let shuffled = cmd.split_whitespace().any(|w| w == "--shuffle");
     let min_kill = m.min_kill;
+    let m_early = m.early;
     let dir_clone = dir.clone();
     let base_clone = base;
+    // Фирменная строка прогресса живёт здесь: тик watcher'а = печать + (при
+    // MUTATE_EARLY) решение об остановке. Печать отделена от остановки.
+    // tty/step — свойства вывода процесса: читаем один раз (не в тике),
+    // иначе юнит-тесты тика зависели бы от окружения прогона.
+    let step: u32 = std::env::var("HARNESS_MUTATE_STEP")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(5);
+    let tty = unsafe { libc::isatty(1) == 1 };
+    let tui = std::cell::RefCell::new(TuiProgress::new(wt, cmd));
     match proc::run_monitored(cmd, wt, MUTATE_TIMEOUT, envs, move |log_text| {
         let mut live = early::read_live(&dir_clone);
         live.sub_base(&base_clone);
+        // borrow_mut() не живёт в условии if let (clippy::borrow_interior_mutable_const + паника повторного borrow)
+        let ticked = tui.borrow_mut().tick(log_text, step, tty);
+        if let Some((row, need_legend)) = ticked {
+            let t = tui.borrow();
+            if need_legend {
+                println!("{}", crate::core::tui::legend(&t.c));
+            }
+            drop(t);
+            println!("{row}");
+        }
         let total = live.total.or_else(|| early::parse_discovered(log_text));
-        early::evaluate(&live, total, min_kill, shuffled)
+        if m_early {
+            early::evaluate(&live, total, min_kill, shuffled)
+        } else {
+            None
+        }
     }) {
         Ok(mn) => {
             let log = proc::combined(&mn.outcome);
@@ -2222,6 +2374,9 @@ pub fn which(bin: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::TuiProgress;
+    use std::path::Path;
+
     /// Парс-контракт `devh ps`: имена стадий тайминга печатаются дословно.
     /// Разрез run() по фазам (A2) переносит вызовы между функциями, но не
     /// имена — ассерт ловит любое переименование или потерю стадии.
@@ -2276,5 +2431,98 @@ mod tests {
                 "фаза {phase} исчезла/раздвоилась в run.rs"
             );
         }
+    }
+
+    // ---- TuiProgress::tick: фирменная строка прогресса (C1) ----
+    // Мутанты тика throttle/dedup/легенда обязаны быть CAUGHT: строка
+    // прогресса — единственный вывод аудита, и гейт её не проверяет.
+
+    fn tick_fixture(dir: &Path, caught: u32, missed: u32, unviable: u32, timeout: u32) {
+        // read_live читает mutants.out/<списки> — пишем туда же, куда смотрит
+        // TuiProgress::new (mutants_out_dir по умолчанию).
+        let out = dir.join(crate::core::early::OUT_DIR);
+        std::fs::create_dir_all(&out).expect("mkdir mutants.out");
+        let write = |name: &str, n: u32| {
+            let body: String = (0..n).map(|i| format!("mutant-{i}\n")).collect();
+            std::fs::write(out.join(name), body).expect("fixture list");
+        };
+        write("caught.txt", caught);
+        write("missed.txt", missed);
+        write("unviable.txt", unviable);
+        write("timeout.txt", timeout);
+    }
+
+    fn tui_in(dir: &Path) -> TuiProgress {
+        TuiProgress::new(dir, "cargo mutants")
+    }
+
+    #[test]
+    fn tick_first_row_prints_with_legend() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let mut tui = tui_in(tmp.path());
+        let (row, legend) = tui.tick("", 5, false).expect("первый тик печатает всегда");
+        assert!(legend, "первая строка идёт ПОСЛЕ легенды");
+        assert!(row.contains('%'), "строка несёт процент-пилюлю: {row}");
+    }
+
+    #[test]
+    fn tick_throttles_in_pipe_until_step() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let out = tmp.path();
+        let mut tui = tui_in(out); // base снят ДО фикстур, иначе done=0
+        tick_fixture(out, 2, 0, 0, 0);
+        assert!(tui.tick("", 2, false).is_some(), "первый тик: печать");
+        tick_fixture(out, 3, 0, 0, 0);
+        assert!(
+            tui.tick("", 2, false).is_none(),
+            "3 < 2+2 — молчок (троттлинг)"
+        );
+        tick_fixture(out, 4, 0, 0, 0);
+        assert!(tui.tick("", 2, false).is_some(), "4 >= 2+2 — печать");
+    }
+
+    #[test]
+    fn tick_tty_ignores_step() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let out = tmp.path();
+        let mut tui = tui_in(out); // base пустой
+        tick_fixture(out, 1, 0, 0, 0);
+        assert!(tui.tick("", 100, true).is_some(), "tty: первый тик");
+        tick_fixture(out, 2, 0, 0, 0);
+        assert!(
+            tui.tick("", 100, true).is_some(),
+            "tty: печатаем каждый шаг"
+        );
+    }
+
+    #[test]
+    fn tick_dedups_identical_row() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let out = tmp.path();
+        let mut tui = tui_in(out); // base пустой
+        tick_fixture(out, 1, 0, 0, 0);
+        assert!(tui.tick("", 1, false).is_some(), "первый тик печатает");
+        assert!(tui.tick("", 1, false).is_none(), "та же строка — молчок");
+    }
+
+    #[test]
+    fn tick_legend_printed_once() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let out = tmp.path();
+        let mut tui = tui_in(out); // base пустой
+        tick_fixture(out, 1, 0, 0, 0);
+        let (_, l1) = tui.tick("", 1, false).expect("первый тик");
+        tick_fixture(out, 2, 0, 0, 0);
+        let (_, l2) = tui.tick("", 1, false).expect("второй тик");
+        assert!(l1, "первая строка просит легенду");
+        assert!(!l2, "легенда — ровно один раз");
+    }
+
+    #[test]
+    fn avg_secs_zero_done_is_zero_not_nan() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let tui = tui_in(tmp.path());
+        assert_eq!(tui.avg_secs(0), 0.0, "нет деления на ноль в ETA");
+        assert!(tui.avg_secs(2).is_finite() && tui.avg_secs(2) >= 0.0);
     }
 }

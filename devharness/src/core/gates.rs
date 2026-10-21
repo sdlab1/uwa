@@ -349,13 +349,18 @@ fn freeze_allowed(file: &str, allow: &[String], test_edit: bool) -> bool {
 }
 
 /// Глоб allowlist'а: `*` только на концах (суффикс/префикс), иначе точное.
+/// `**` на конце = тот же каталог (`src/**` ≡ `src/*` — plan C1 так и пишет).
+/// Общий матчер харнесса: FREEZE-гейт (A6) и contract.toml (C1) — одна
+/// грамматика на весь скоуп, иначе контракт и гейт разъедутся.
 /// `src/*` = весь каталог; `*.md` = все markdown; серединный `*` не
 /// поддерживается — спека ставит глобы на границах, а не внутри имён.
-fn freeze_glob(pat: &str, file: &str) -> bool {
+pub(crate) fn freeze_glob(pat: &str, file: &str) -> bool {
+    // серия `**` на конце (её пишет и план C1: touch = ["src/**"]) схлопывается
+    // в обычный `*`-суффикс: `src/**` = `src/*` = весь каталог.
     match pat.strip_suffix('*') {
-        Some(prefix) => file.starts_with(prefix),
+        Some(prefix) => file.starts_with(prefix.trim_end_matches('*')),
         None => match pat.strip_prefix('*') {
-            Some(suffix) => file.ends_with(suffix),
+            Some(suffix) => file.ends_with(suffix.trim_start_matches('*')),
             None => file == pat,
         },
     }
@@ -1492,6 +1497,15 @@ test result: FAILED. 1 passed; 1 failed";
     }
 
     #[test]
+    fn freeze_glob_tolerates_double_star() {
+        // план C1 пишет touch = ["src/**"] — диалект обязан это понимать
+        assert!(freeze_glob("src/**", "src/a/b.rs"));
+        assert!(freeze_glob("src/*", "src/a/b.rs"));
+        assert!(freeze_glob("*.md", "docs/x.md"));
+        assert!(freeze_glob("src/calc.rs", "src/calc.rs"));
+        assert!(!freeze_glob("src/*", "tests/a.rs"));
+    }
+
     fn freeze_violations_matches_globs() {
         // Глобы спеки ровно по контракту A6: точное / *-суффикс / *-префикс.
         // `src/*` — каталог целиком; `*.md` — все markdown; серединный `*`
