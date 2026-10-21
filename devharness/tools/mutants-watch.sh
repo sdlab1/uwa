@@ -209,6 +209,12 @@ render_throttled() {
     fi
 }
 
+# --- подсказка запуска ЖИВОГО CLI — один раз при старте, до легенды ---
+# Чтобы оператор НИКОГДА не спрашивал «где cli / как запускать»: каждый
+# старт watcher'а печатает точную команду перезапуска живой строки.
+printf 'live-cli: строка ниже обновляется на месте (\\r\\033[K). Перезапустить/дублировать из %s:\n  setsid nohup env LIVE=1 HARNESS_COLOR=always STEP=1 INTERVAL=5 MUTANTS_LOG=%s devharness/tools/mutants-watch.sh > /tmp/live.log 2>&1 < /dev/null &\n' \
+    "$(pwd)" "${MUTANTS_LOG:-$OUT/debug.log}"
+
 # ------------------------------------------------------------------- цикл
 if [ "$ONCE" = "1" ]; then
     if pgrep -x cargo-mutants >/dev/null; then echo "(прогон идёт)"; fi
