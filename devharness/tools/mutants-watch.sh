@@ -25,6 +25,57 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$HERE/../.."
 
+# --- singleton: живой CLI ровно один, копить watcher'ы невозможно ----------
+# Грабля, из которой вырос блок: каждый «дай live cli» поднимал новый watcher,
+# старые продолжали жить и печатать в мёртвые пайпы — оператор видел чушь или
+# пустоту, а 'pkill -f mutants-watch' настиал self-match. Решение: атомарный
+# файловый лок + список pid'ов. Лок держит ровно один процесс; чужой держатель
+# (его pid в pid-файле) гасится по TERM — побеждает ПОСЛЕДНИЙ запуск; после
+# захвата лока подметаем всех прочих живых watcher'ов, кроме себя и предков
+# (предки = launcher/env цепочка текущего запуска, их трогать нельзя).
+RUNDIR="$HERE/../../.harness"       # корневой .harness репы (gitignored)
+LOCK="$RUNDIR/mutants-watch.lock"
+PIDF="$RUNDIR/mutants-watch.pid"
+mkdir -p "$RUNDIR"
+
+mykin=" $$ "                        # себя + цепочку предков (не трогаем)
+p="$$"
+while :; do
+    pp="$(awk '/^PPid:/{print $2}' "/proc/$p/status" 2>/dev/null || true)"
+    [ -n "$pp" ] || break
+    if [ "$pp" = "0" ] || [ "$pp" = "1" ] || [ "$pp" = "$p" ]; then break; fi
+    mykin="$mykin$pp "
+    p="$pp"
+done
+
+sweep_watchers() {                  # зачистка всех watcher'ов вне нашего рода
+    local q
+    for q in $(pgrep -f 'tools/mutants-watch\.sh' 2>/dev/null || true); do
+        case "$mykin" in *" $q "*) continue ;; esac
+        kill "$q" 2>/dev/null || true
+    done
+}
+
+exec 9>"$LOCK"
+if ! flock -n 9; then
+    # лок занят живым watcher'ом — гасим его (последний запуск выигрывает)
+    other="$(cat "$PIDF" 2>/dev/null || true)"
+    if [ -n "$other" ] && [ -r "/proc/$other/cmdline" ] \
+        && tr '\0' ' ' <"/proc/$other/cmdline" | grep -q 'mutants-watch\.sh'; then
+        kill "$other" 2>/dev/null || true
+    fi
+    for _ in $(seq 1 10); do        # ждём освобождения лока до 2с
+        flock -n 9 && break
+        sweep_watchers              # страховка: держатель без pid-файла
+        sleep 0.2
+    done
+fi
+echo "$$" >"$PIDF"
+sweep_watchers                      # и левые экземпляры (ручной запуск и пр.)
+
+trap 'if [ "$(cat "$PIDF" 2>/dev/null)" = "$$" ]; then rm -f "$PIDF"; fi' EXIT
+trap 'exit 0' TERM INT              # дать отработать EXIT-хуку
+
 OUT="${MUTANTS_OUT:-mutants.out}"
 OUTCOMES="$OUT/outcomes.json"
 MUTANTS_JSON="$OUT/mutants.json"
@@ -67,13 +118,18 @@ export COLOR
 #   NO_COLOR=1                             # без ANSI; в не-tty — троттлинг вывода
 #
 # ЖИВОЙ CLI (одна строка обновляется на месте, \r\033[K ПЕРЕД строкой) —
-# канон для агента: setsid отвязывает от timeout-обёртки тула (~470с),
-# иначе watcher умирает через 8 минут и оператор снова «ничего не видит»:
-#   setsid nohup env LIVE=1 HARNESS_COLOR=always STEP=1 INTERVAL=5 \
+# канон для агента: БЕЗ лог-файла и БЕЗ setsid/nohup. stdout watcher'а
+# идёт НАПРЯМУЮ в вывод tool'а — оператор видит строку прямо там. Любая
+# запись кадров в файл (/tmp/live.log и т.п.) ЗАПРЕЩЕНА: это дубль статуса
+# аудита, оператор видит только пустой лог и кричит «ничего не вижу».
+# Запуск из корня репы, аудит уже идёт:
+#   env LIVE=1 HARNESS_COLOR=always STEP=1 INTERVAL=2 \
 #     MUTANTS_LOG=/tmp/c1c_audit.log \
-#     devharness/tools/mutants-watch.sh > /tmp/live.log 2>&1 < /dev/null &
-# Показ текущего кадра одной строкой (tool отдаёт вывод после завершения):
-#   python3 -c "import re;s=open('/tmp/live.log','rb').read().decode('utf-8','replace');print(re.sub(r'\x1b\[[0-9;]*[A-Za-z]','',s.split('\r')[-1]))"
+#     devharness/tools/mutants-watch.sh
+#
+# Singleton: живой CLI всегда ОДИН процесс. Новый запуск сам гасит старые
+# watcher'ы (лок .harness/mutants-watch.lock + подметание по pgrep, кроме
+# себя и своих launcher'ов). Ручной pkill/kill перед перезапуском не нужен.
 # ---cut---
 
 # легенда — ОДИН раз, строкой выше прогресса (потом только строка прогресса)
@@ -199,21 +255,24 @@ sys.stdout.write("%s%s %s %s  avg %.1f мин  ETA %s%s%s"
 PY
 }
 
-# в tty — каждая строка; в pipe/логе — каждые STEP готовых мутантов (иначе шум)
+# в tty — каждая строка; в pipe/логе — каждые STEP готовых мутантов (иначе шум).
+# ЖИВОЙ режим (LIVE=1): кадр КАЖДЫЙ тик — при INTERVAL=1 раз в секунду.
+# Метка времени в кадне меняется каждую секунду, поэтому оператору видно,
+# что watcher живой и не завис, даже между мутантами (один мутант ~20-30с).
 render_throttled() {
     local dn
     dn="$(cut -f1 <<<"$(python3 -u -c 'import json,sys; print(len(json.load(open(sys.argv[1])).get("outcomes",[])))' "$OUTCOMES" 2>/dev/null || echo 0)")"
-    if [ "$LAST_PRINTED" = "-1" ] || [ "$(( dn - LAST_PRINTED ))" -ge "$STEP" ]; then
+    if [ "$LAST_PRINTED" = "-1" ] || [ "$(( dn - LAST_PRINTED ))" -ge "$STEP" ] || [ "${LIVE:-}" = "1" ]; then
         LAST_PRINTED="$dn"
         render
     fi
 }
 
-# --- подсказка запуска ЖИВОГО CLI — один раз при старте, до легенды ---
-# Чтобы оператор НИКОГДА не спрашивал «где cli / как запускать»: каждый
-# старт watcher'а печатает точную команду перезапуска живой строки.
-printf 'live-cli: строка ниже обновляется на месте (\\r\\033[K). Перезапустить/дублировать из %s:\n  setsid nohup env LIVE=1 HARNESS_COLOR=always STEP=1 INTERVAL=5 MUTANTS_LOG=%s devharness/tools/mutants-watch.sh > /tmp/live.log 2>&1 < /dev/null &\n' \
-    "$(pwd)" "${MUTANTS_LOG:-$OUT/debug.log}"
+# --- рецепт запуска ЖИВОГО CLI: ТОЛЬКО в --help и в этом комментарии. ---
+# В КОНСОЛЬ НЕ ПЕЧАТАЕМ (оператор: «сразу вывод live cli, без простыни
+# текста выше»): первый кадр = легенда + строка прогресса, ничего кроме.
+#   env LIVE=1 HARNESS_COLOR=always STEP=1 INTERVAL=1 \
+#     MUTANTS_LOG=/tmp/c1c_audit.log devharness/tools/mutants-watch.sh
 
 # ------------------------------------------------------------------- цикл
 if [ "$ONCE" = "1" ]; then
@@ -225,8 +284,13 @@ fi
 LIVE=1
 export LIVE
 LAST_PRINTED=-1
+LAUNCHER="$PPID"                # кто нас запустил (tool'шell/терминал)
 
+# Сирота: launcher умер (tool' вернул таймаут, терминал закрыт) — печатать
+# некуда, stdout висит в мёртвом pipe. Не копим мусор: выходим сами.
+# (Ложных выходов нет: при штатном запуске PPID не меняется.)
 while pgrep -x cargo-mutants >/dev/null; do
+    [ "$PPID" = "$LAUNCHER" ] || exit 0
     render_throttled
     if command -v inotifywait >/dev/null 2>&1; then
         inotifywait -q -t "$INTERVAL" -e close_write,moved_to "$OUTCOMES" >/dev/null 2>&1 || true
