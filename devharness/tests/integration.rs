@@ -1839,7 +1839,10 @@ fn section00b_branded_audit_cli_present() {
         contains(&src, "LIVE=1"),
         "живой режим: watcher сам обновляет строку: {src}"
     );
-    assert!(contains(&src, "\\r\\033[K"), "обновление \\r + clear строки");
+    assert!(
+        contains(&src, "\\r\\033[K"),
+        "обновление \\r + clear строки"
+    );
     assert!(
         contains(&src, "легенда"),
         "легенда значков строкой выше: {src}"
