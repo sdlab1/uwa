@@ -581,12 +581,20 @@ fn outcome_duration(item: &Value) -> f64 {
 /// дыра (детали прояснятся), а нормальная фаза записи — поэтому
 /// нечитаемый JSON молча игнорируется, а читаемый — разбирается.
 ///
-/// СТОИМОСТЬ: разбор `outcomes.json` стоит O(размер файла), а файл
+/// СТОИМОСТЬ: РАЗБОР `outcomes.json` стоит O(размер файла), а файл
 /// растёт с каждым мутантом (для 900 мутантов — сотни КБ). Вызывающий
 /// (таймер прогона) дёргает эту функцию раз в секунду — без кеша это
-/// O(n²) работы на пустом месте. Поэтому разбор кешируется по
-/// (размер, mtime) файла: файл меняется только когда cargo-mutants
-/// дописал новый исход, а между правками мы берём готовый ответ.
+/// O(n²) работы на пустом месте. Поэтому разбор кешируется по ОТПЕЧАТКУ
+/// СОДЕРЖИМОГО файла: между правками мы берём готовый ответ, а сам файл
+/// читается (из кеша страниц) — это заметно дешевле разбора.
+///
+/// Почему не (размер, mtime): cargo-mutants переписывает `outcomes.json`
+/// ЦЕЛИКОМ после КАЖДОГО мутанта, и длина файла при этом часто НЕ
+/// меняется («CaughtMutant» → «MissedMutant» — строки одной длины), а
+/// mtime на файловой системе с грубой меткой (секунда) совпадает. Тогда
+/// кеш отдал бы СТАРЫЙ ответ, и problem-first промолчал бы о новой дыре
+/// (ровно тот класс «тихой дыры», ради которого всё и затевалось).
+/// Хеш содержимого от такого класса ошибок свободен.
 ///
 /// Кеш — thread-local: вызывающий (таймер прогона) работает в одном
 /// потоке, глобальной синхронизации не нужно.
@@ -595,30 +603,40 @@ pub fn first_problem(dir: &Path, live: &early::LiveCounts) -> Option<early::Firs
         return Some(p);
     }
     let path = dir.join("outcomes.json");
-    let stamp = file_stamp(&path)?;
+    // Файла нет — проблем из JSON не будет (append-списки уже проверены).
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return None;
+    };
+    let stamp = content_stamp(&text);
     match cached_first_problem(&path, stamp) {
         CacheHit::Hit(result) => return result,
         CacheHit::Miss => {}
     }
-    let result = json_first_problem(&path);
+    let result = scan_first_problem(&text);
     store_first_problem(&path, stamp, result);
     result
 }
 
-/// Отпечаток файла: (размер, mtime). Меняется при каждой перезаписи
+/// Отпечаток содержимого: (размер, хеш). Меняется при каждой перезаписи
 /// cargo-mutants — по нему кеш разбора инвалидируется.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct FileStamp {
     len: u64,
-    mtime: Option<std::time::SystemTime>,
+    hash: u64,
 }
 
-fn file_stamp(path: &Path) -> Option<FileStamp> {
-    let md = std::fs::metadata(path).ok()?;
-    Some(FileStamp {
-        len: md.len(),
-        mtime: md.modified().ok(),
-    })
+/// FNV-1a по байтам содержимого: дешёвый, без аллокаций, достаточно
+/// сильный, чтобы отличить две перезаписи одного и того же файла.
+fn content_stamp(text: &str) -> FileStamp {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in text.as_bytes() {
+        hash ^= u64::from(*b);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    FileStamp {
+        len: text.len() as u64,
+        hash,
+    }
 }
 
 /// Ответ кеша: `Miss` — записи нет (разбираем), `Hit` — готовый ответ
@@ -667,9 +685,8 @@ fn store_first_problem(path: &Path, stamp: FileStamp, result: Option<early::Firs
 /// нужен только ИТОГ каждого мутанта, поэтому файл читается типизированным
 /// разбором: serde пропускает непрошенные поля на своей стороне (имя
 /// мутанта, файл, span, `phase_results` не аллоцируются вовсе).
-fn json_first_problem(path: &Path) -> Option<early::FirstProblem> {
-    let text = std::fs::read_to_string(path).ok()?;
-    let Some((succeeded, unknown)) = scan_summaries(&text) else {
+fn scan_first_problem(text: &str) -> Option<early::FirstProblem> {
+    let Some((succeeded, unknown)) = scan_summaries(text) else {
         // Пишем прямо сейчас — детали ещё не собраны. Не дыра.
         return None;
     };
@@ -971,6 +988,73 @@ mod tests {
             first_problem(d.path(), &live),
             Some(early::FirstProblem::Unknown(1)),
             "изменившийся outcomes.json обязан перечитываться (кеш — не клеймо)"
+        );
+    }
+
+    /// Метка времени файла (сек, наносек) — для имитации грубой ФС.
+    fn file_mtime(path: &Path) -> (i64, i64) {
+        let md = std::fs::metadata(path).unwrap_or_else(|_| unreachable!());
+        let t = md.modified().unwrap_or_else(|_| unreachable!());
+        let d = t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+        (d.as_secs() as i64, d.subsec_nanos() as i64)
+    }
+
+    /// Вернуть файлу ТУ ЖЕ метку времени, что была до перезаписи.
+    fn set_mtime(path: &Path, (secs, nanos): (i64, i64)) {
+        let times = [
+            libc::timespec {
+                tv_sec: secs,
+                tv_nsec: nanos,
+            },
+            libc::timespec {
+                tv_sec: secs,
+                tv_nsec: nanos,
+            },
+        ];
+        let c = std::ffi::CString::new(path.to_string_lossy().as_bytes())
+            .unwrap_or_else(|_| unreachable!());
+        let rc = unsafe { libc::utimensat(libc::AT_FDCWD, c.as_ptr(), times.as_ptr(), 0) };
+        assert_eq!(rc, 0, "не выставить метку времени");
+    }
+
+    /// Кеш разбора НЕ должен скрыть дыру, если cargo-mutants переписал
+    /// `outcomes.json` ТОЙ ЖЕ длины в ТУ ЖЕ метку времени (файловая система
+    /// с грубой, секундной меткой). Прежний отпечаток (размер, mtime) в
+    /// этом случае совпадал — кеш отдавал СТАРЫЙ ответ, и problem-first
+    /// молчал о новой дыре (ровно тот класс «тихой дыры», который здесь и
+    /// закрываем).
+    #[test]
+    fn cache_does_not_hide_a_problem_after_a_same_length_rewrite() {
+        let d = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let live = early::LiveCounts {
+            total: Some(1),
+            caught: 1,
+            missed: 0,
+            unviable: 0,
+            timeout: 0,
+        };
+        let path = d.path().join("outcomes.json");
+        // Первая запись: пойманный мутант — проблем нет.
+        let quiet =
+            r#"{"outcomes":[{"scenario":{"Mutant":{"name":"m"}},"summary":"CaughtMutant"}]}"#;
+        // Вторая: тот же размер, но мутант БЕЗ тестовой фазы (Success).
+        let loud =
+            r#"{"outcomes":[{"scenario":{"Mutant":{"name":"mAAAAA"}},"summary":"Success"}]}"#;
+        assert_eq!(
+            quiet.len(),
+            loud.len(),
+            "одинаковая длина — худший случай для отпечатка (размер, mtime)"
+        );
+        std::fs::write(&path, quiet).unwrap_or_else(|_| unreachable!());
+        assert_eq!(first_problem(d.path(), &live), None, "проблем нет");
+        // Перезапись + та же метка времени (имитация грубой ФС).
+        let stamp = file_mtime(&path);
+        std::fs::write(&path, loud).unwrap_or_else(|_| unreachable!());
+        set_mtime(&path, stamp);
+        assert_eq!(
+            first_problem(d.path(), &live),
+            Some(early::FirstProblem::Succeeded(1)),
+            "перезапись той же длины обязана инвалидировать кеш"
         );
     }
 
