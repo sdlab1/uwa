@@ -476,7 +476,12 @@ fn section01_happy_path() {
     let mut_log =
         fs::read_to_string(sb.log_file("W-001-mutate.log")).unwrap_or_else(|_| unreachable!());
     assert!(contains(&mut_log, "killed 10 (100%)"), "{mut_log}");
-    assert!(contains(&mut_log, "missed 0, unviable 0"), "{mut_log}");
+    // Формат итога мутационного гейта (v2): между missed и unviable стоит
+    // timeout, в конце — succeeded (мутант без тестовой фазы).
+    assert!(
+        contains(&mut_log, "missed 0, timeout 0, unviable 0, succeeded 0"),
+        "{mut_log}"
+    );
 
     let (ok, _) = sb.run_capture(&["merge"]);
     assert!(ok);
@@ -525,7 +530,10 @@ fn section02_mutation_fix_round() {
     let mut_log =
         fs::read_to_string(sb.log_file("W-001-mutate.log")).unwrap_or_else(|_| unreachable!());
     assert!(contains(&mut_log, "killed 10 (100%)"), "{mut_log}");
-    assert!(contains(&mut_log, "missed 0, unviable 0"), "{mut_log}");
+    assert!(
+        contains(&mut_log, "missed 0, timeout 0, unviable 0, succeeded 0"),
+        "{mut_log}"
+    );
 }
 
 #[test]
@@ -1063,7 +1071,10 @@ if [ -f "$T_MUT_GOOD" ]; then echo "Mutants: 10, Killed: 10 (100%)"; else echo "
     let mut_log =
         fs::read_to_string(sb.log_file("W-001-mutate.log")).unwrap_or_else(|_| unreachable!());
     assert!(contains(&mut_log, "killed 10 (100%)"), "{mut_log}");
-    assert!(contains(&mut_log, "missed 0, unviable 0"), "{mut_log}");
+    assert!(
+        contains(&mut_log, "missed 0, timeout 0, unviable 0, succeeded 0"),
+        "{mut_log}"
+    );
 }
 
 #[test]
@@ -2406,6 +2417,11 @@ fn section00c_native_mutate_verdict_semantics() {
     // Аудита нет — это НЕ «чисто»: rc=2.
     let empty = AuditSandbox::new("empty", 0, 0, 0, 0, None);
     fs::remove_dir_all(empty.root.join("mutants.out")).unwrap_or_else(|_| unreachable!());
+    // И состояния нет: аудит НИКОГДА не запускался. Это НЕ «стартовал и
+    // упал» (state=running при мёртвом супервизоре → aborted, отдельный
+    // случай в section52: status/verdict = rc 2, problems = rc 1).
+    fs::remove_file(empty.root.join(".harness/mutate/state.json"))
+        .unwrap_or_else(|_| unreachable!());
     let (rc, out) = empty.run(&["mutate", "verdict"]);
     assert_eq!(rc, 2, "аудита нет — rc=2: {out}");
     let (rc, out) = empty.run(&["mutate", "status"]);
@@ -2752,14 +2768,25 @@ printf 'feat: два файла\n\nдетали\n' > "$HARNESS_SUMMARY"
     c.env(
         "HARNESS_MUTATE",
         format!("{} {{files}}", sb.stubs.join("mut-spy.sh").display()),
-    );
+    )
+    // Предмет теста — «один прогон на N файлов», а не problem-first: гейт
+    // здесь судит ПО kill-rate (90% ≥ MIN_KILL=90), а строгий problem-first
+    // роняет прогон на первом же выжившем мутанте.
+    .env("HARNESS_MUTATE_FIRST_PROBLEM", "0")
+    // load-гейт P5.5 — не предмет теста; на контендере он ловит 8.1>8.0
+    .env("HARNESS_MUTATE_MAX_LOAD", "off")
+    // Без раундов фикса: один прогон мутатора = один вызов (предмет теста).
+    .env("HARNESS_MAX_FIX", "0");
     let out = c.output().unwrap_or_else(|_| unreachable!());
     let all = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
-    assert!(out.status.success(), "run: {all}");
+    // Семантика v2: выживший мутант (1 missed) роняет гейт, даже при
+    // kill-rate 90% ≥ порога. Предмет теста — «один прогон на N файлов»,
+    // а не вердикт: ждём красный гейт и проверяем батч-лог.
+    assert!(!out.status.success(), "run: {all}");
     let mut_log =
         fs::read_to_string(sb.log_file("W-001-mutate.log")).unwrap_or_else(|_| unreachable!());
     assert!(
@@ -2770,7 +2797,10 @@ printf 'feat: два файла\n\nдетали\n' > "$HARNESS_SUMMARY"
         "{mut_log}"
     );
     assert!(contains(&mut_log, "killed 9 (90%)"), "{mut_log}");
-    assert!(contains(&mut_log, "missed 1, unviable 0"), "{mut_log}");
+    assert!(
+        contains(&mut_log, "missed 1, timeout 0, unviable 0"),
+        "{mut_log}"
+    );
     // Главное P1b: мутатор запущен РОВНО один раз и получил оба файла.
     let calls = fs::read_to_string(&spy).unwrap_or_else(|_| unreachable!());
     assert_eq!(
@@ -3178,18 +3208,28 @@ echo "never: tail must not run"
             ("HARNESS_MUTATE", mut_doom.as_str()),
             ("HARNESS_MUTATE_SCOPE", "."),
             ("HARNESS_MUTATE_EARLY", "1"),
+            // Предмет теста — ранний выход DOOM (kill-rate недостижим).
+            // problem-first (R15, включён по умолчанию) перекрыл бы этот путь:
+            // он срабатывает раньше, на первой же проблеме.
+            ("HARNESS_MUTATE_FIRST_PROBLEM", "0"),
             // load-гейт P5.5 — не предмет теста; на контендере он ловит 8.1>8.0
             ("HARNESS_MUTATE_MAX_LOAD", "off"),
         ],
     );
     assert!(!ok, "DOOM обязан валить прогон:\n{out}");
-    assert!(out.contains("STOP: DOOM"), "нет DOOM-останова:\n{out}");
+    assert!(
+        out.contains("STOP [early-stop]: DOOM"),
+        "нет DOOM-останова:\n{out}"
+    );
     assert!(
         out.contains("kill-rate недостижим"),
         "нет причины останова:\n{out}"
     );
     assert!(
-        out.contains("остановлено досрочно, проверено до останова: Mutants 10, killed 8, missed 2"),
+        out.contains(
+            "остановлено досрочно (early-stop), проверено 10 из 10: killed 8, missed 2, \
+             timeout 0, unviable 0, succeeded 0, unknown 0"
+        ),
         "частичные live-счётчики обязаны попасть в лог:\n{out}"
     );
     assert!(
@@ -3250,7 +3290,7 @@ echo "never: tail must not run"
     );
     assert!(ok, "SAMPLE — это Ok, не Fail:\n{out}");
     assert!(
-        out.contains("STOP: SAMPLE") && out.contains("rule-of-three"),
+        out.contains("STOP [early-stop]: SAMPLE") && out.contains("rule-of-three"),
         "нет SAMPLE-останова:\n{out}"
     );
     assert!(
@@ -3290,9 +3330,15 @@ echo "never: tail must not run"
     );
     assert!(!ok, "kill-rate 80% < 90% обязан FAIL:\n{out}");
     assert!(!out.contains("STOP"), "ранний выход выключен:\n{out}");
+    // Семантика v2: первичная причина красного — выживший мутант (дыра в
+    // покрытии), а не «процент пониже порога». Процент остаётся в отчёте.
     assert!(
-        out.contains("FAIL: kill-rate 80% < 90%"),
+        out.contains("FAIL: missed 2 > 0"),
         "вердикт по-прежнему из итога:\n{out}"
+    );
+    assert!(
+        out.contains("kill-rate 80% (порог 90%)"),
+        "kill-rate остаётся в отчёте:\n{out}"
     );
 
     // (е) жёсткий случай: мутант остался в tracked-файле — repair через
@@ -3380,14 +3426,26 @@ echo "2 mutants tested in 1s: 1 caught, 1 missed"
         )
         .env("HARNESS_MUTATE_SURVIVORS", "1")
         .env("HARNESS_MIN_KILL", "40")
-        .env("HARNESS_MUTATE_MAX_LOAD", "off");
+        .env("HARNESS_MUTATE_MAX_LOAD", "off")
+        // Предмет теста — хук выживших и очередь observations, а не
+        // problem-first: гейт здесь судит по kill-rate (MIN_KILL=40).
+        .env("HARNESS_MUTATE_FIRST_PROBLEM", "0")
+        // Без раундов фикса: один прогон мутатора = один набор артефактов.
+        .env("HARNESS_MAX_FIX", "0");
         let out = c.output().unwrap_or_else(|_| unreachable!());
         let all = format!(
             "{}{}",
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr)
         );
-        assert!(out.status.success(), "run {id}: {all}");
+        // Гейт честно КРАСНЫЙ: стаб оставляет выжившего мутанта, а семантика
+        // v2 трактует любой missed как дыру (не «почти пойман»). Предмет
+        // теста — артефакты survivors/killmap: они должны появиться ДО
+        // красного вердикта.
+        assert!(
+            !out.status.success(),
+            "гейт с выжившим мутантом обязан быть красным: {all}"
+        );
         all
     };
     sb.run_ok(&["init"]);
@@ -3433,7 +3491,7 @@ echo "2 mutants tested in 1s: 1 caught, 1 missed"
     assert!(
         contains(
             &jrnl,
-            "| mutation | devharness/src/core/load.rs:22 | FnValue"
+            "| mutation | devharness/src/core/load.rs:22 | MissedMutant | FnValue"
         ),
         "{jrnl}"
     );
@@ -3621,14 +3679,27 @@ echo "3 mutants tested in 1s: 1 caught, 2 missed"
         .env("HARNESS_MUTATE_SURVIVORS", "1")
         .env("HARNESS_MIN_KILL", "10")
         .env("HARNESS_MUTATE_MAX_LOAD", "off")
-        .env("HARNESS_HOT_ROUND", round);
+        // Раунд прогона стаба мутатора пробрасывает devh: мутатору уходят все
+        // HARNESS_* (run.rs:::run_mut) — исходы второго раунда отличаются.
+        .env("HARNESS_HOT_ROUND", round)
+        // killmap не влияет на вердикт гейта (§8.5) — гоняем по kill-rate.
+        .env("HARNESS_MUTATE_FIRST_PROBLEM", "0")
+        // Без раундов фикса: один прогон мутатора = один набор артефактов.
+        .env("HARNESS_MAX_FIX", "0");
         let out = c.output().unwrap_or_else(|_| unreachable!());
         let all = format!(
             "{}{}",
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr)
         );
-        assert!(out.status.success(), "run {id}: {all}");
+        // Гейт честно КРАСНЫЙ: стаб оставляет выжившего мутанта, а семантика
+        // v2 трактует любой missed как дыру (не «почти пойман»). Предмет
+        // теста — артефакты survivors/killmap: они должны появиться ДО
+        // красного вердикта.
+        assert!(
+            !out.status.success(),
+            "гейт с выжившим мутантом обязан быть красным: {all}"
+        );
         all
     };
     run_hot(&sb, "W-001", "1");
@@ -3688,7 +3759,7 @@ echo "3 mutants tested in 1s: 1 caught, 2 missed"
     assert!(
         contains(
             &hint_out,
-            "- devharness/src/core/load.rs — 2 выживших / 2 прогонов"
+            "- devharness/src/core/load.rs — 2 выживших / 0 таймаутов / 2 прогонов"
         ),
         "слабые зоны: файл + счётчики: {hint_out}"
     );
@@ -3818,7 +3889,15 @@ fn section41_survivors_distillation_and_rules_log() {
     assert!(ok, "пустой журнал --rules: {out}");
     assert!(contains(&out, "нет данных"), "{out}");
 
-    // Часть 2: живой прогон с missed + merge → строка survivors в RULES_LOG.
+    // Часть 2: живой прогон с missed → артефакты; затем зелёный прогон →
+    // merge → строка survivors в RULES_LOG.
+    //
+    // Почему ДВА прогона: в семантике v2 выживший мутант ВСЕГДА роняет
+    // гейт — красный прогон не коммитится, и `devh merge` его не берёт.
+    // Урок сессии («здесь тесты слепы») переживает финальный зелёный раунд
+    // в накопителе сессии (.harness/logs/W-001-surv.log) — именно он
+    // попадает в RULES_LOG. Без накопителя финальный зелёный прогон стёр бы
+    // урок ровно тогда, когда работа доведена до конца.
     let sb = Sandbox::new("r41b");
     fs::create_dir_all(sb.repo.join("todo")).unwrap_or_else(|_| unreachable!());
     fs::write(
@@ -3831,34 +3910,57 @@ fn section41_survivors_distillation_and_rules_log() {
         &sb.stubs.join("mut-surv41.sh"),
         r#"#!/usr/bin/env bash
 mkdir -p mutants.out
+if [ "${HARNESS_SURV_ROUND:-1}" = "2" ]; then
+cat > mutants.out/outcomes.json <<'JSON'
+{"outcomes":[
+ {"scenario":{"Mutant":{"name":"devharness/src/core/load.rs:22:5: replace max_load -> Option<u32> with None","package":"devh","file":"devharness/src/core/load.rs","function":{"function_name":"max_load","return_type":"Option<u32>"},"span":{"start":{"line":22,"column":5},"end":{"line":22,"column":40}},"replacement":"None","genre":"FnValue"}},"summary":"CaughtMutant","log_path":"l2","diff_path":"d2","phase_results":[]}
+]}
+JSON
+echo "1 mutants tested in 1s: 1 caught, 0 missed"
+else
 cat > mutants.out/outcomes.json <<'JSON'
 {"outcomes":[
  {"scenario":{"Mutant":{"name":"devharness/src/core/load.rs:22:5: replace max_load -> Option<u32> with None","package":"devh","file":"devharness/src/core/load.rs","function":{"function_name":"max_load","return_type":"Option<u32>"},"span":{"start":{"line":22,"column":5},"end":{"line":22,"column":40}},"replacement":"None","genre":"FnValue"}},"summary":"MissedMutant","log_path":"l2","diff_path":"d2","phase_results":[]}
 ]}
 JSON
 echo "1 mutants tested in 1s: 0 caught, 1 missed"
+fi
 "#,
     );
     sb.new_item("surv merge item", "спека\n", Some("x"));
-    let mut c = sb.devh(&["run", "W-001"]);
-    c.env(
-        "HARNESS_MUTATE",
-        sb.stubs.join("mut-surv41.sh").to_string_lossy().to_string(),
-    )
-    .env("HARNESS_MUTATE_SURVIVORS", "1")
-    .env("HARNESS_MIN_KILL", "0")
-    .env("HARNESS_MUTATE_MAX_LOAD", "off");
-    let out = c.output().unwrap_or_else(|_| unreachable!());
-    let all = format!(
-        "{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
-    assert!(out.status.success(), "run W-001: {all}");
+    let run_surv41 = |sb: &Sandbox, round: &str| -> (bool, String) {
+        let mut c = sb.devh(&["run", "W-001"]);
+        c.env(
+            "HARNESS_MUTATE",
+            sb.stubs.join("mut-surv41.sh").to_string_lossy().to_string(),
+        )
+        .env("HARNESS_MUTATE_SURVIVORS", "1")
+        .env("HARNESS_MIN_KILL", "0")
+        .env("HARNESS_MUTATE_MAX_LOAD", "off")
+        // Предмет теста — дистилляция survivors в RULES_LOG, не problem-first.
+        .env("HARNESS_MUTATE_FIRST_PROBLEM", "0")
+        // Без раундов фикса: один прогон мутатора = один набор артефактов.
+        .env("HARNESS_MAX_FIX", "0")
+        // Раунд прогона стаба мутатора пробрасывается devh (run.rs:::run_mut).
+        .env("HARNESS_SURV_ROUND", round);
+        let out = c.output().unwrap_or_else(|_| unreachable!());
+        let all = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        (out.status.success(), all)
+    };
+    // Раунд 1: выживший мутант → гейт КРАСНЫЙ (v2), артефакты уже записаны.
+    let (ok1, all1) = run_surv41(&sb, "1");
+    assert!(!ok1, "гейт с выжившим мутантом обязан быть красным: {all1}");
     assert!(
-        contains(&all, "survivors: 1 → observations.md (fn-value 1)"),
-        "{all}"
+        contains(&all1, "survivors: 1 → observations.md (fn-value 1)"),
+        "{all1}"
     );
+    // Раунд 2: тесты починены → гейт зелёный → коммит.
+    let (ok2, all2) = run_surv41(&sb, "2");
+    assert!(ok2, "зелёный раунд обязан пройти: {all2}");
 
     sb.run_ok(&["merge", "W-001"]);
     let report =
@@ -3896,12 +3998,21 @@ fn section42_red_survivors_are_a_separate_stream() {
         &sb.stubs.join("mut-redsurv.sh"),
         r#"#!/usr/bin/env bash
 mkdir -p mutants.out
+if [ "${HARNESS_SURV_ROUND:-1}" = "2" ]; then
+cat > mutants.out/outcomes.json <<'JSON'
+{"outcomes":[
+ {"scenario":{"Mutant":{"name":"t/feature_test.sh:3:5: replace marker with other","file":"t/feature_test.sh","span":{"start":{"line":3,"column":5}},"replacement":"other","genre":"FnValue"}},"summary":"CaughtMutant"}
+]}
+JSON
+echo "Mutants: 1, Killed: 1 (100%)"
+else
 cat > mutants.out/outcomes.json <<'JSON'
 {"outcomes":[
  {"scenario":{"Mutant":{"name":"t/feature_test.sh:3:5: replace marker with other","file":"t/feature_test.sh","span":{"start":{"line":3,"column":5}},"replacement":"other","genre":"FnValue"}},"summary":"MissedMutant"}
 ]}
 JSON
 echo "Mutants: 1, Killed: 0 (0%)"
+fi
 "#,
     );
     sb.new_item(
@@ -3911,26 +4022,45 @@ echo "Mutants: 1, Killed: 0 (0%)"
     );
     let stub = sb.stubs.join("stub-red.sh");
     let redmut = format!("{} '{{test}}'", sb.stubs.join("mut-redsurv.sh").display());
-    let mut c = sb.devh(&["run", "W-001"]);
-    c.env("HARNESS_AGENT", stub.to_string_lossy().to_string())
-        .env("HARNESS_VERIFY", "bash scripts/test.sh")
-        .env("HARNESS_RED_MUTATE", redmut)
-        .env("HARNESS_MUTATE", "")
-        .env("HARNESS_MUTATE_SURVIVORS", "1")
-        .env("HARNESS_RED_MIN_KILL", "0")
-        .env("HARNESS_MUTATE_MAX_LOAD", "off");
-    let out = c.output().unwrap_or_else(|_| unreachable!());
-    let all = format!(
-        "{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
-    assert!(out.status.success(), "run W-001: {all}");
-    assert!(contains(&all, "OK red-mutation"), "{all}");
+    // Раунд 1 — красный выживший в red-потоке; раунд 2 — зелёный.
+    // (В семантике v2 выживший всегда роняет гейт: красный прогон не
+    // коммитится и не мержится. Урок сессии переживает зелёный финал в
+    // накопителе сессии — он и попадает в RULES_LOG.)
+    let run_redsurv = |sb: &Sandbox, round: &str| -> (bool, String) {
+        let mut c = sb.devh(&["run", "W-001"]);
+        c.env("HARNESS_AGENT", stub.to_string_lossy().to_string())
+            .env("HARNESS_VERIFY", "bash scripts/test.sh")
+            .env("HARNESS_RED_MUTATE", redmut.clone())
+            .env_remove("HARNESS_MUTATE")
+            .env("HARNESS_MUTATE_SURVIVORS", "1")
+            .env("HARNESS_RED_MIN_KILL", "0")
+            .env("HARNESS_MUTATE_MAX_LOAD", "off")
+            // Предмет теста — отдельный поток survivors от red-мутации.
+            .env("HARNESS_MUTATE_FIRST_PROBLEM", "0")
+            // Без раундов фикса: один прогон мутатора = один набор артефактов.
+            .env("HARNESS_MAX_FIX", "0")
+            // Раунд прогона стаба мутатора пробрасывается devh (run.rs:::run_mut).
+            .env("HARNESS_SURV_ROUND", round);
+        let out = c.output().unwrap_or_else(|_| unreachable!());
+        let all = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        (out.status.success(), all)
+    };
+    let (ok1, all1) = run_redsurv(&sb, "1");
+    // Гейт красный (выживший мутант) — предмет теста не в вердикте, а в
+    // артефактах survivors, которые пишутся ДО него.
+    assert!(!ok1, "гейт с выжившим мутантом обязан быть красным: {all1}");
     assert!(
-        contains(&all, "survivors: 1 → observations.md (fn-value 1)"),
-        "{all}"
+        contains(&all1, "survivors: 1 → observations.md (fn-value 1)"),
+        "{all1}"
     );
+    // Раунд 2: red-тест починен → гейт зелёный → коммит.
+    let (ok2, all2) = run_redsurv(&sb, "2");
+    assert!(ok2, "зелёный раунд обязан пройти: {all2}");
+    assert!(contains(&all2, "OK red-mutation"), "{all2}");
 
     // §8.6: кодовый гейт в сессии не шёл — красный выживший в killmap
     // (карту кодовых hot-spot'ов) не попадает.
@@ -3952,7 +4082,10 @@ echo "Mutants: 1, Killed: 0 (0%)"
     let journal =
         fs::read_to_string(sb.harness_file("survivors.log")).unwrap_or_else(|_| unreachable!());
     assert!(
-        contains(&journal, "| red-mutation | t/feature_test.sh:3 | FnValue |"),
+        contains(
+            &journal,
+            "| red-mutation | t/feature_test.sh:3 | MissedMutant | FnValue |"
+        ),
         "{journal}"
     );
 
