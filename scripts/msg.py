@@ -27,7 +27,39 @@ SESSION = os.environ.get("MSG_SESSION", "default")
 STATE = Path(os.environ.get("MSG_STATE", f"/tmp/messages.state.{SESSION}"))
 NOTIFY_LOG = Path(os.environ.get("MSG_NOTIFY_LOG", "/tmp/messages.notify.log"))
 NOTIFY_TIMEOUT_MS = int(os.environ.get("MSG_NOTIFY_TIMEOUT_MS", "20000"))
+KEEP = int(os.environ.get("MSG_KEEP", "10"))
+DEDUPE_SEC = int(os.environ.get("MSG_DEDUPE_SEC", "90"))
+DEDUPE_LOG = Path(os.environ.get("MSG_DEDUPE_LOG", "/tmp/messages.notified"))
 SEPARATOR = "=" * 80
+
+
+def _dedupe_key(text: str) -> str:
+    import hashlib
+
+    head = "\n".join(text.splitlines()[:3])
+    return hashlib.sha1(head.encode("utf-8", "replace")).hexdigest()[:16]
+
+
+def _claim_notification(key: str) -> bool:
+    """True — можно показывать; False — дубль (уже показывали недавно)."""
+    now = time.time()
+    entries: list[tuple[str, float]] = []
+    if DEDUPE_LOG.is_file():
+        for line in DEDUPE_LOG.read_text(encoding="utf-8", errors="replace").splitlines():
+            parts = line.split()
+            if len(parts) == 2:
+                try:
+                    entries.append((parts[0], float(parts[1])))
+                except ValueError:
+                    pass
+    for k, ts in entries:
+        if k == key and now - ts < DEDUPE_SEC:
+            return False
+    entries.append((key, now))
+    DEDUPE_LOG.write_text(
+        "\n".join(f"{k} {ts:.0f}" for k, ts in entries[-50:]) + "\n", encoding="utf-8"
+    )
+    return True
 
 
 def now() -> str:
@@ -76,6 +108,10 @@ def _notify(text: str) -> None:
     summary = f"{sender} — {first}"[:220]
     with NOTIFY_LOG.open("a", encoding="utf-8") as fh:
         fh.write(f"\n===== {time.strftime('%Y-%m-%d %H:%M:%S')} =====\n{text}\n")
+    key = _dedupe_key(text)
+    if not _claim_notification(key):
+        print("дубль уведомления (уже показано) — молчу", flush=True)
+        return
     # -t: уведомление само исчезает (таймаут дема — /expire-timeout в xfce4-notifyd).
     # ВАЖНО: без -u critical! У critical-демон держит уведомление до ручного закрытия
     # (проверено 2026-10-22: три "вечных" окна xfce4-notifyd на экране).
@@ -98,14 +134,32 @@ def _session_states() -> list[Path]:
     return sorted(Path("/tmp").glob("messages.state.*"))
 
 
+def _split_blocks(data: bytes) -> tuple[bytes, list[tuple[int, int]]]:
+    """-> (шапка, список блоков (start, end) в байтах)."""
+    sep = (SEPARATOR + "\n").encode()
+    first = data.find(sep)
+    if first < 0:
+        return data, []
+    header = data[: first + len(sep)]
+    blocks: list[tuple[int, int]] = []
+    pos = first + len(sep)
+    while True:
+        nxt = data.find(sep, pos)
+        if nxt < 0:
+            break
+        end = nxt + len(sep)
+        blocks.append((pos, end))
+        pos = end
+    return header, blocks
+
+
 def prune(args: argparse.Namespace) -> int:
-    """Удалить сообщения, прочитанные ВСЕМИ сессиями (по их курсорам)."""
+    """Удалить сообщения, прочитанные ВСЕМИ сессиями; последние K — оставить."""
     if not CHANNEL.is_file():
         print("канала нет")
         return 0
-    states = _session_states()
     offsets: dict[Path, int] = {}
-    for st in states:
+    for st in _session_states():
         try:
             offsets[st] = int(st.read_text(encoding="utf-8").strip() or 0)
         except (OSError, ValueError):
@@ -115,33 +169,29 @@ def prune(args: argparse.Namespace) -> int:
         return 0
     limit = min(offsets.values())
     data = CHANNEL.read_bytes()
-    if limit <= 0:
-        print("никто ещё ничего не прочитал — не удаляю")
+    header, blocks = _split_blocks(data)
+    if not blocks:
+        print("блоков нет — не удаляю")
         return 0
-    if limit > len(data):
-        print("курсор впереди файла (файл перезаписан) — не удаляю")
+    read_blocks = [b for b in blocks if b[1] <= limit]      # прочитаны всеми
+    unread = [b for b in blocks if b[1] > limit]            # кто-то ещё не прочитал
+    keep_read = read_blocks[-args.keep:] if args.keep > 0 else []
+    removed = [b for b in read_blocks if b not in keep_read]
+    if not removed:
+        print("удалять нечего (прочитанное в окне последних K блоков)")
         return 0
-    # режем только по границе блоков: последний SEPARATOR до limit
-    cut = data.rfind((SEPARATOR + "\n").encode(), 0, limit)
-    if cut < 0:
-        print("граница блоков не найдена — не удаляю")
-        return 0
-    cut += len(SEPARATOR) + 1
-    header_end = data.find((SEPARATOR + "\n").encode())
-    header = data[: header_end + len(SEPARATOR) + 1] if header_end >= 0 else b""
-    if cut <= len(header):
-        print("весь канал уже прочитан всеми, но шапку не трогаю")
-        return 0
-    kept = header + data[cut:]
-    removed = len(data) - len(kept)
+    removed_bytes = sum(e - s for s, e in removed)
+    kept_bytes = b"".join(data[s:e] for s, e in keep_read + unread)
     print(f"курсоры: " + ", ".join(f"{p.name}={v}" for p, v in offsets.items()))
-    print(f"к удалению: {removed} байт, остаётся {len(kept)} байт")
+    print(f"блоков: прочитано всеми={len(read_blocks)}, не прочитано={len(unread)}, "
+          f"оставляю последних={len(keep_read)}, удаляю={len(removed)} ({removed_bytes} байт)")
     if args.dry_run:
         return 0
-    CHANNEL.write_bytes(kept)
-    # сдвигаем курсоры сессий на величину удалённого
+    CHANNEL.write_bytes(header + kept_bytes)
+    first_removed_start = removed[0][0]
     for st, off in offsets.items():
-        st.write_text(str(max(0, off - removed)), encoding="utf-8")
+        new_off = off if off <= first_removed_start else max(0, off - removed_bytes)
+        st.write_text(str(new_off), encoding="utf-8")
     print("канал почищен, курсоры сдвинуты")
     return 0
 
@@ -159,7 +209,7 @@ def watch(args: argparse.Namespace) -> int:
             _notify(text)
             # авто-чистка: удаляем то, что прочитали ВСЕ сессии (курсоры)
             try:
-                prune(argparse.Namespace(dry_run=False))
+                prune(argparse.Namespace(dry_run=False, keep=KEEP))
             except Exception:  # noqa: BLE001
                 pass
         time.sleep(args.interval)
@@ -199,6 +249,7 @@ def main() -> int:
 
     p = sub.add_parser("prune")
     p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--keep", type=int, default=KEEP)
     p.set_defaults(func=prune)
 
     args = ap.parse_args()
