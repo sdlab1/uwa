@@ -25,7 +25,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
 
-const SEP: &str = "================================================================================";
+const SEP: &str =
+    "================================================================================";
 const DEFAULT_KEEP: usize = 10;
 const NOTIFY_TIMEOUT_MS: u64 = 20_000;
 
@@ -52,7 +53,12 @@ fn cursor_path(channel: &str, session: &str) -> PathBuf {
 }
 
 fn notified_path(channel: &str) -> PathBuf {
-    home().join(format!("{channel}.notified"))
+    // Общий файл дедупа (MSG_NOTIFY_DEDUPE): если на канал смотрят и Rust-тул,
+    // и старый python-watcher — popup должен быть один.
+    match std::env::var("MSG_NOTIFY_DEDUPE") {
+        Ok(v) if !v.is_empty() => PathBuf::from(v),
+        _ => home().join(format!("{channel}.notified")),
+    }
 }
 
 /// Локальное время HH:MM (через date — без лишних зависимостей).
@@ -196,9 +202,7 @@ struct Args {
 
 impl Args {
     fn flag(&self, name: &str) -> bool {
-        self.flags
-            .iter()
-            .any(|(k, v)| k == name && v.is_none())
+        self.flags.iter().any(|(k, v)| k == name && v.is_none())
     }
     fn value(&self, name: &str) -> Option<String> {
         self.flags
