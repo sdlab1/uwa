@@ -2022,7 +2022,8 @@ caught="${STUB_CAUGHT:-0}"
 missed="${STUB_MISSED:-0}"
 tmo="${STUB_TIMEOUT:-0}"
 unv="${STUB_UNVIABLE:-0}"
-total=$((caught + missed + tmo + unv))
+succ="${STUB_SUCCEEDED:-0}"
+total=$((caught + missed + tmo + unv + succ))
 sleep "${STUB_SLEEP:-0}"
 for f in caught missed timeout unviable; do : > "$out/$f.txt"; done
 printf '{"outcomes":[' > "$out/outcomes.part"
@@ -2031,7 +2032,9 @@ emit() {
   n=$((n + 1))
   f="devharness/src/core/plan.rs"
   name="$f:$n:5: replace x with None"
-  printf '%s\n' "$name" >> "$out/$1.txt"
+  # «succeeded» (мутант без тестовой фазы) в списки НЕ пишется — только в
+  # outcomes.json: ровно так ведёт себя cargo-mutants 27.1.0.
+  if [ "$1" != "succeeded" ]; then printf '%s\n' "$name" >> "$out/$1.txt"; fi
   if [ "$n" -gt 1 ]; then printf ',' >> "$out/outcomes.part"; fi
   printf '{"scenario":{"Mutant":{"name":"%s","file":"%s","span":{"start":{"line":%d,"column":5}},"replacement":"None","genre":"FnValue"}},"summary":"%s","phase_results":[{"phase":"Test","duration":1.0}]}' "$name" "$f" "$n" "$2" >> "$out/outcomes.part"
 }
@@ -2039,6 +2042,7 @@ i=0; while [ "$i" -lt "$caught" ]; do emit caught CaughtMutant; i=$((i + 1)); do
 i=0; while [ "$i" -lt "$missed" ]; do emit missed MissedMutant; i=$((i + 1)); done
 i=0; while [ "$i" -lt "$tmo" ]; do emit timeout Timeout; i=$((i + 1)); done
 i=0; while [ "$i" -lt "$unv" ]; do emit unviable Unviable; i=$((i + 1)); done
+i=0; while [ "$i" -lt "$succ" ]; do emit succeeded Success; i=$((i + 1)); done
 printf ']}' >> "$out/outcomes.part"
 mv "$out/outcomes.part" "$out/outcomes.json"
 printf '[\n' > "$out/mutants.json"
@@ -2198,6 +2202,52 @@ fn section00d_native_mutate_blocks_broken_details() {
     let (rc, out) = crashed.run(&["mutate", "verdict"]);
     assert_eq!(rc, 1, "упавший cargo-mutants — rc=1: {out}");
     assert!(contains(&out, "инструмент"), "{out}");
+}
+
+/// Мутант без тестовой фазы (`summary: "Success"` у МУТАНТА) — поимка НЕ
+/// подтверждена: «чисто» быть не может. И вердикт должен называть
+/// ПРАВДИВУЮ причину («succeeded N > 0»), а не «детали расходятся со
+/// счётчиками»: такой мутант в append-списки не попадает вовсе.
+#[test]
+fn section00h_native_mutate_blocks_succeeded_mutant() {
+    let sb = MutateSandbox::new("succeeded");
+    let (rc, out) = sb.run_env(
+        &[
+            "mutate",
+            "start",
+            "--",
+            "--config",
+            "devharness/cargo-mutants.toml",
+        ],
+        &[("STUB_CAUGHT", "3"), ("STUB_SUCCEEDED", "1")],
+    );
+    assert_eq!(rc, 0, "start: {out}");
+    let st = sb.wait_state(std::time::Duration::from_secs(60));
+    assert_eq!(st, "done", "прогон завершён: {st}");
+
+    let (rc, out) = sb.run(&["mutate", "verdict"]);
+    assert_eq!(rc, 1, "мутант без тестовой фазы — rc=1: {out}");
+    assert!(
+        contains(&out, "succeeded 1 > 0"),
+        "вердикт называет правдивую причину: {out}"
+    );
+
+    let (rc, out) = sb.run(&["mutate", "status", "--json"]);
+    assert_eq!(rc, 1, "status видит проблему: {out}");
+    assert!(contains(&out, "\"succeeded\": 1"), "{out}");
+    assert!(
+        !contains(&out, "\"details_mismatch\": true"),
+        "расхождения деталей нет — succeeded учтён, а не спрятан: {out}"
+    );
+
+    // Проблема — руководство к действию: файл/строка видны.
+    let (rc, out) = sb.run(&["mutate", "problems"]);
+    assert_eq!(rc, 1, "problems при succeeded — rc=1: {out}");
+    assert!(contains(&out, "plan.rs"), "{out}");
+    assert!(
+        contains(&out, "поимка не подтверждена"),
+        "смысл проблемы виден оператору: {out}"
+    );
 }
 
 /// НАСТОЯЩИЙ супервизор: `devh mutate start` → setsid → cargo-mutants →
