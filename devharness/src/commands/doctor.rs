@@ -338,6 +338,22 @@ pub fn doctor(store: &Store, cfg: &RunConfig, root: &Path) -> anyhow::Result<()>
                 say("WARN MUTATE без CARGO_PROFILE_TEST_INCREMENTAL=true — мутанты платят полную сборку профиля test (§9.7)");
                 warn = warn.saturating_add(1);
             }
+            // §9.28: opt-level=0 в профиле test — второй рычаг (узкое место
+            // мутационной сборки — codegen с оптимизацией, не линковка).
+            if m.tool.contains("CARGO_PROFILE_TEST_OPT_LEVEL=0") {
+                say("ok   MUTATE: CARGO_PROFILE_TEST_OPT_LEVEL=0 (сборка мутанта ×2.3–3.3, §9.28)");
+            } else {
+                say("WARN MUTATE без CARGO_PROFILE_TEST_OPT_LEVEL=0 — каждый мутант платит оптимизацию в codegen (§9.28)");
+                warn = warn.saturating_add(1);
+            }
+            // §9.29: аудит САМОГО devh — гейт загрузки внутри integration-тестов
+            // роняет тест, и cargo-mutants пишет «Caught» (ложная поимка):
+            // перепроверка 309 мутантов дала 11 вердиктов Caught -> Missed.
+            // Лечится выключением гейта на время аудита.
+            if root.join("devharness/tests/integration.rs").is_file() {
+                say("WARN это репозиторий devh: для аудита себя гейт загрузки надо выключать (HARNESS_MUTATE_MAX_LOAD=off) — иначе kill-rate плавает от загрузки машины (§9.29)");
+                warn = warn.saturating_add(1);
+            }
         }
     }
 
