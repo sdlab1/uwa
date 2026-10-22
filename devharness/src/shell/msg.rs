@@ -34,7 +34,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
 
-const SEP: &str = "================================================================================";
+const SEP: &str =
+    "================================================================================";
 const NOTIFY_TIMEOUT_MS: u64 = 20_000;
 const DEDUPE_PATH: &str = "/tmp/messages.notified";
 
@@ -62,9 +63,134 @@ fn thread_path(thread: &str) -> PathBuf {
     threads_dir().join(format!("{}.log", safe_name(thread)))
 }
 
+/// Поток подтверждений агента: «доставлено <id>», «прочитано <id>».
+fn acks_dir() -> PathBuf {
+    home().join("acks")
+}
+
+fn acks_path(agent: &str) -> PathBuf {
+    acks_dir().join(format!("{}.log", safe_name(agent)))
+}
+
+/// Записать подтверждение (доставлено/прочитано) адресату.
+fn ack(agent: &str, id: &str, what: &str) {
+    if id.is_empty() || agent.is_empty() {
+        return;
+    }
+    let stamp = now_hm();
+    let line = format!("[{stamp}] {what} {id} (агент {agent})\n");
+    let path = acks_path(agent);
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = writeln!(f, "{line}");
+    }
+}
+
+/// Отправитель письма (из строки заголовка «[..] ОТ: a — КОМУ: b»).
+fn block_sender(block: &str) -> String {
+    let header = block.lines().next().unwrap_or("");
+    match header.split_once("] ОТ: ") {
+        Some((_, tail)) => tail
+            .split(" — КОМУ: ")
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_string(),
+        None => String::new(),
+    }
+}
+
+/// Адресаты письма (из строки заголовка «... — КОМУ: a, b»).
+fn block_recipients(block: &str) -> String {
+    let header = block.lines().next().unwrap_or("");
+    match header.split_once(" — КОМУ: ") {
+        Some((_, to)) => to.trim().to_string(),
+        None => String::new(),
+    }
+}
+
 /// Голоса за закрытие треда: по строке на агента.
 fn votes_path(thread: &str) -> PathBuf {
     threads_dir().join(format!("{}.votes", safe_name(thread)))
+}
+
+/// Указание на место: "путь" или "путь:строка" (строка опциональна).
+fn parse_place(raw: &str) -> (String, Option<usize>) {
+    match raw.rsplit_once(':') {
+        Some((path, num)) => match num.parse::<usize>() {
+            Ok(n) => (path.to_string(), Some(n)),
+            Err(_) => (raw.to_string(), None),
+        },
+        None => (raw.to_string(), None),
+    }
+}
+
+/// Регион кода вокруг строки: (путь, контекст БЕЗ номеров строк, разметка).
+///
+/// Привязка сообщения к коду — по СОДЕРЖИМОМУ (контекст), а не по номеру
+/// строки: строки сдвигаются, контекст — нет. Как в unified diff.
+fn code_region(path: &str, line: Option<usize>) -> Option<(String, String, String)> {
+    let candidates = [
+        path.to_string(),
+        match crate::shell::git::root_from_cwd() {
+            Ok(root) => root.join(path).to_string_lossy().to_string(),
+            Err(_) => path.to_string(),
+        },
+    ];
+    let mut content: Option<String> = None;
+    for c in candidates.iter() {
+        if let Ok(t) = fs::read_to_string(c) {
+            content = Some(t);
+            break;
+        }
+    }
+    let content = content?;
+    let lines: Vec<&str> = content.lines().collect();
+    if lines.is_empty() {
+        return None;
+    }
+    let center = line.unwrap_or(1).clamp(1, lines.len());
+    let from = center.saturating_sub(3).max(1);
+    let to = center.saturating_add(3).min(lines.len());
+    let mut plain = String::new();
+    let mut marked = String::new();
+    for n in from..=to {
+        let text = lines.get(n.saturating_sub(1)).copied().unwrap_or("");
+        plain.push_str(text);
+        plain.push('\n');
+        let mark = if n == center { "»" } else { " " };
+        marked.push_str(&format!("{mark}{n:>5} | {text}\n"));
+    }
+    Some((path.to_string(), plain, marked))
+}
+
+/// Unified diff, приложенный к письму: (путь, контекст для ключа, сам diff).
+fn read_diff(file: &str) -> Option<(String, String, String)> {
+    let raw = fs::read_to_string(file).ok()?;
+    let mut path = String::new();
+    let mut context = String::new();
+    for line in raw.lines() {
+        if let Some(rest) = line.strip_prefix("+++ ") {
+            let p = rest.strip_prefix("b/").unwrap_or(rest);
+            if p != "/dev/null" {
+                path = p.to_string();
+            }
+        } else if let Some(rest) = line.strip_prefix("--- ") {
+            let p = rest.strip_prefix("a/").unwrap_or(rest);
+            if p != "/dev/null" && path.is_empty() {
+                path = p.to_string();
+            }
+        } else if line.starts_with(' ') {
+            context.push_str(line.get(1..).unwrap_or(""));
+            context.push('\n');
+        }
+    }
+    if path.is_empty() {
+        return None;
+    }
+    Some((path, context, raw))
 }
 
 /// Участники треда: отправители + адресаты (все, кого это касается).
@@ -306,7 +432,12 @@ fn notify(id: &str, text: &str) {
     let sender = block_field(text, "ОТ: ").unwrap_or_default();
     let first_body = text
         .lines()
-        .filter(|l| !l.starts_with('[') && !l.starts_with("ID:") && !l.starts_with("ТЕМА:") && !l.starts_with("ТЭГИ:"))
+        .filter(|l| {
+            !l.starts_with('[')
+                && !l.starts_with("ID:")
+                && !l.starts_with("ТЕМА:")
+                && !l.starts_with("ТЭГИ:")
+        })
         .find(|l| !l.trim().is_empty())
         .unwrap_or("")
         .to_string();
@@ -394,6 +525,21 @@ fn parse_args(args: &[String]) -> Args {
 }
 
 /// Собрать сообщение (тело + заголовки).
+/// Привязка к коду: место (путь) + вырезка (контекст/diff).
+struct Attachment {
+    place: Option<String>,
+    snippet: Option<String>,
+}
+
+impl Attachment {
+    fn empty() -> Self {
+        Attachment {
+            place: None,
+            snippet: None,
+        }
+    }
+}
+
 fn build_message(
     from: &str,
     to: &[String],
@@ -401,6 +547,7 @@ fn build_message(
     tags: &[String],
     body: &str,
     thread: &str,
+    att: &Attachment,
 ) -> String {
     let stamp = now_hm();
     let id = short_id(from, subject, body, &stamp);
@@ -408,6 +555,12 @@ fn build_message(
         "[{stamp}] ОТ: {from} — КОМУ: {}\nID: {id}\nТРЕД: {thread}\nТЕМА: {subject}",
         to.join(", ")
     );
+    if let Some(pl) = att.place.as_ref() {
+        block.push_str(&format!("\nМЕСТО: {pl}"));
+    }
+    if let Some(sn) = att.snippet.as_ref() {
+        block.push_str(&format!("\nВЫРЕЗКА:\n{sn}"));
+    }
     if !tags.is_empty() {
         block.push_str(&format!("\nТЭГИ: {}", tags.join(", ")));
     }
@@ -437,11 +590,13 @@ fn deliver(from: &str, to: &[String], block: &str, thread: &str) -> Vec<String> 
             unique.push(t.clone());
         }
     }
+    let msg_id = block_field(block, "ID: ").unwrap_or_default();
     let mut done: Vec<String> = Vec::new();
     for t in unique.iter() {
         let path = inbox_path(&safe_name(t));
         if append_message(&path, block) {
             done.push(t.clone());
+            ack(&safe_name(from), &msg_id, "доставлено");
         }
     }
     let _ = append_message(&thread_path(thread), block);
@@ -453,7 +608,9 @@ fn send(args: &[String]) -> i32 {
     let m = parse_args(args);
     match m.sub.as_str() {
         "send" | "reply" => {
-            let from = m.value("from").unwrap_or_else(|| me(m.value("agent").as_deref()));
+            let from = m
+                .value("from")
+                .unwrap_or_else(|| me(m.value("agent").as_deref()));
             let mut to = m.values("to");
             if to.is_empty() {
                 to.push("all".to_string());
@@ -464,21 +621,55 @@ fn send(args: &[String]) -> i32 {
                 Some(p) => fs::read_to_string(&p).unwrap_or_default(),
                 None => m.value("body").unwrap_or_default(),
             };
-            let block = build_message(&from, &to, &subject, &tags, &body, "x");
+            // Указание на код: --diff <файл> (unified diff, привязка по
+            // содержимому) или --at путь[:строка] (регион с контекстом).
+            let mut place_label: Option<String> = None;
+            let mut snippet: Option<String> = None;
+            let mut ctx_key: Option<(String, String)> = None;
+            if let Some(diff_file) = m.value("diff") {
+                if let Some((p, ctx, raw)) = read_diff(&diff_file) {
+                    place_label = Some(p.clone());
+                    snippet = Some(raw);
+                    ctx_key = Some((p, ctx));
+                }
+            }
+            if let Some(at) = m.value("at") {
+                let (path, line) = parse_place(&at);
+                if let Some((p, plain, marked)) = code_region(&path, line) {
+                    place_label = Some(p.clone());
+                    snippet = Some(marked);
+                    ctx_key = Some((p, plain));
+                }
+            }
+            let block = build_message(
+                &from,
+                &to,
+                &subject,
+                &tags,
+                &body,
+                "x",
+                &Attachment::empty(),
+            );
             let id = block_field(&block, "ID: ").unwrap_or_default();
-            // тред: явный --thread, иначе новое обсуждение (id = id письма)
-            let thread = m.value("thread").unwrap_or_else(|| id.clone());
-            let block = build_message(&from, &to, &subject, &tags, &body, &thread);
+            // тред: явный --thread, иначе ключ по КОНТЕКСТУ кода (устойчив к
+            // сдвигу строк), иначе новое обсуждение
+            let thread = match (m.value("thread"), ctx_key.as_ref()) {
+                (Some(t), _) => t,
+                (None, Some((p, ctx))) => short_id("ctx", p, ctx, ""),
+                (None, None) => id.clone(),
+            };
+            let att = Attachment {
+                place: place_label,
+                snippet,
+            };
+            let block = build_message(&from, &to, &subject, &tags, &body, &thread, &att);
             let id = block_field(&block, "ID: ").unwrap_or_default();
             let done = deliver(&from, &to, &block, &thread);
             if done.is_empty() {
                 eprintln!("не доставлено никому");
                 return 1;
             }
-            println!(
-                "отправлено (ID {id}, тред {thread}) -> {}",
-                done.join(", ")
-            );
+            println!("отправлено (ID {id}, тред {thread}) -> {}", done.join(", "));
             0
         }
         "thread" => {
@@ -515,6 +706,11 @@ fn send(args: &[String]) -> i32 {
                 if matches {
                     println!("{b}{SEP}");
                     shown = shown.saturating_add(1);
+                    if !peek {
+                        let id = block_field(b, "ID: ").unwrap_or_default();
+                        let sender = block_sender(b);
+                        ack(&safe_name(&sender), &id, "прочитано");
+                    }
                 } else {
                     kept.push(b.clone());
                 }
@@ -573,6 +769,106 @@ fn send(args: &[String]) -> i32 {
                     break;
                 }
                 std::thread::sleep(Duration::from_secs(interval));
+            }
+            0
+        }
+        "threads" => {
+            let agent = me(m.value("agent").as_deref());
+            let mut rows: Vec<(String, String, usize, Vec<String>)> = Vec::new();
+            if let Ok(dir) = fs::read_dir(threads_dir()) {
+                for e in dir.flatten() {
+                    let name = e.file_name().to_string_lossy().to_string();
+                    let Some(tid) = name.strip_suffix(".log") else {
+                        continue;
+                    };
+                    let text = fs::read_to_string(e.path()).unwrap_or_default();
+                    let (_h, blocks) = split_log(&text);
+                    if blocks.is_empty() {
+                        continue;
+                    }
+                    let who = thread_participants(&blocks);
+                    if !who.iter().any(|w| w == &agent) {
+                        continue;
+                    }
+                    let mut tags: Vec<String> = Vec::new();
+                    for b in blocks.iter() {
+                        for t in block_tags(b) {
+                            if !tags.contains(&t) {
+                                tags.push(t);
+                            }
+                        }
+                    }
+                    let first = blocks.first().cloned().unwrap_or_default();
+                    let subject = block_field(&first, "ТЕМА: ").unwrap_or_default();
+                    let place = block_field(&first, "МЕСТО: ").unwrap_or_default();
+                    let label = if place.is_empty() {
+                        subject
+                    } else {
+                        format!("{subject} @ {place}")
+                    };
+                    rows.push((tid.to_string(), label, blocks.len(), tags));
+                }
+            }
+            rows.sort();
+            if rows.is_empty() {
+                println!("открытых тредов с твоим участием нет");
+            }
+            for (tid, label, n, tags) in rows {
+                println!(
+                    "тред {tid}: сообщений={n} тэги=[{}] {label}",
+                    tags.join(", ")
+                );
+            }
+            0
+        }
+        "acks" => {
+            let agent = me(m.value("agent").as_deref());
+            let path = acks_path(&safe_name(&agent));
+            let text = fs::read_to_string(&path).unwrap_or_default();
+            let lines: Vec<String> = text
+                .lines()
+                .filter(|l| !l.trim().is_empty())
+                .map(str::to_string)
+                .collect();
+            if lines.is_empty() {
+                println!("(подтверждений нет)");
+            }
+            for l in lines.iter() {
+                println!("{l}");
+            }
+            // поток подтверждений НЕ уничтожается по умолчанию: по нему работает
+            // `pending` (что не прочитано). Очистить — флагом --consume.
+            if m.flag("consume") && !lines.is_empty() {
+                let _ = fs::write(&path, "");
+            }
+            0
+        }
+        "pending" => {
+            // Что из отправленного ещё не прочитано адресатами.
+            let agent = me(m.value("agent").as_deref());
+            let sent_text = fs::read_to_string(outbox_path(&safe_name(&agent))).unwrap_or_default();
+            let (_h, sent_blocks) = split_log(&sent_text);
+            let acks_text = fs::read_to_string(acks_path(&safe_name(&agent))).unwrap_or_default();
+            let read_ids: Vec<String> = acks_text
+                .lines()
+                .filter(|l| l.contains("прочитано"))
+                .filter_map(|l| l.split_whitespace().nth(2).map(str::to_string))
+                .collect();
+            let mut rows: Vec<(String, String)> = Vec::new();
+            for b in sent_blocks.iter() {
+                let id = block_field(b, "ID: ").unwrap_or_default();
+                if id.is_empty() || read_ids.iter().any(|r| r == &id) {
+                    continue;
+                }
+                let to = block_recipients(b);
+                let subject = block_field(b, "ТЕМА: ").unwrap_or_default();
+                rows.push((id, format!("-> {to}: {subject}")));
+            }
+            if rows.is_empty() {
+                println!("всё отправленное прочитано");
+            }
+            for (id, what) in rows {
+                println!("не прочитано {id} {what}");
             }
             0
         }
@@ -668,7 +964,9 @@ fn send(args: &[String]) -> i32 {
                 eprintln!("нужен ID треда");
                 return 2;
             }
-            let actor = m.value("by").unwrap_or_else(|| me(m.value("agent").as_deref()));
+            let actor = m
+                .value("by")
+                .unwrap_or_else(|| me(m.value("agent").as_deref()));
             let text = fs::read_to_string(thread_path(&thread)).unwrap_or_default();
             let (_h, blocks) = split_log(&text);
             if blocks.is_empty() {
@@ -708,9 +1006,7 @@ fn send(args: &[String]) -> i32 {
                     let (header, blks) = split_log(&raw);
                     let kept: Vec<String> = blks
                         .iter()
-                        .filter(|b| {
-                            block_field(b, "ТРЕД: ").as_deref() != Some(thread.as_str())
-                        })
+                        .filter(|b| block_field(b, "ТРЕД: ").as_deref() != Some(thread.as_str()))
                         .cloned()
                         .collect();
                     if kept.len() != blks.len() {
@@ -718,7 +1014,11 @@ fn send(args: &[String]) -> i32 {
                     }
                 }
                 let stamp = now_hm();
-                let how = if force { "форс" } else { "консенсус" };
+                let how = if force {
+                    "форс"
+                } else {
+                    "консенсус"
+                };
                 let tomb = format!(
                     "[{stamp}] ОТ: {actor} — КОМУ: все\nТРЕД: {thread}\nТЕМА: тред закрыт ({how})\n"
                 );
@@ -748,8 +1048,11 @@ fn send(args: &[String]) -> i32 {
         }
         _ => {
             println!(
-                "канал агентов: send | read | watch | list | sent | find | forward\n\
-                 модель: сообщение адресовано агенту, прочитанное удаляется (consume-on-read)"
+                "канал агентов: send | reply | read | watch | thread | threads | close | list | sent | find | acks | pending\n\
+                 письмо с одним или несколькими адресатами; прочитанное удаляется (consume-on-read);\n\
+                 обсуждение (тред) сохраняется целиком, треды закрываются консенсусом;\n\
+                 указание на код: --at путь[:строка] (регион с контекстом) или --diff файл (unified diff);\n\
+                 привязка к коду — по содержимому (контексту), номер строки может сдвинуться"
             );
             2
         }
