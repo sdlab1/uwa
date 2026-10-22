@@ -274,6 +274,24 @@ pub fn hhmmss() -> String {
 
 #[cfg(test)]
 mod tests {
+    /// Хвост («последний тест») показывается, только если он непустой.
+    /// Мутант `delete !` (условие инвертировано) роняет этот тест.
+    #[test]
+    fn line_shows_last_only_when_present() {
+        let c = crate::shell::color::colors();
+        let n = Counts::default();
+        let with = line(0, None, &n, 0.0, 0.0, "тест-последний", "", &c);
+        assert!(
+            with.contains("тест-последний"),
+            "непустой хвост показан: {with}"
+        );
+        let without = line(0, None, &n, 0.0, 0.0, "", "", &c);
+        assert!(
+            !without.contains("тест-последний"),
+            "пустой хвост не показан: {without}"
+        );
+    }
+
     use super::*;
     use crate::shell::color::colors;
 

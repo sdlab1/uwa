@@ -7,6 +7,18 @@ pub enum Step {
     Die { reason: String },
 }
 
+impl Default for Step {
+    /// Нейтральное значение для cargo-mutants: мутант подставляет
+    /// `Default::default()` вместо тела `next()` — без Default такой мутант НЕ
+    /// КОМПИЛИРУЕТСЯ (unviable = дыра, регламент P9). Ручной impl: у варианта
+    /// Retry поле Gate, а Default для Gate не нужен и не вводится.
+    fn default() -> Self {
+        Step::Die {
+            reason: String::new(),
+        }
+    }
+}
+
 impl Step {
     pub fn commit_msg(&self) -> Option<&str> {
         match self {

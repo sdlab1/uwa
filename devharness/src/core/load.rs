@@ -64,6 +64,30 @@ pub fn block_reason(env: Option<&str>, load: f64) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    /// Число CPU никогда не меньше двух: fallback «оценка снизу, не паникуем».
+    /// Мутанты `cpu_count -> 0` / `-> 1` роняют этот тест.
+    #[test]
+    fn cpu_count_is_at_least_two() {
+        let n = cpu_count();
+        assert!(n >= 2, "cpu_count() = {n} — меньше двух быть не должно");
+    }
+
+    /// Порог строгий: load РОВНО на пороге не блокирует, выше — блокирует.
+    /// Мутант `>` -> `>=` в block_reason роняет этот тест.
+    #[test]
+    fn block_reason_boundary_is_strict() {
+        let cpus = cpu_count();
+        let max = 4.0_f64.max(2.0 * cpus as f64);
+        assert!(
+            block_reason(None, max).is_none(),
+            "load ровно на пороге ({max}) — не блокируем"
+        );
+        let above = block_reason(None, max + 0.5);
+        assert!(above.is_some(), "load выше порога — блокируем");
+        let text = above.unwrap_or_default();
+        assert!(text.contains("порог"), "в тексте есть порог: {text}");
+    }
+
     use super::*;
 
     #[test]

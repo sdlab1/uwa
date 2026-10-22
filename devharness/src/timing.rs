@@ -10,6 +10,21 @@ pub struct Timing {
     stages: Vec<(String, u64)>,
 }
 
+impl Default for Timing {
+    /// Нейтральное значение для cargo-mutants: мутант подставляет
+    /// `Default::default()` вместо `Timing::start()` — без Default такой мутант
+    /// НЕ КОМПИЛИРУЕТСЯ (unviable = дыра, регламент P9). `Instant` Default не
+    /// имеет, поэтому строим вручную: пустой таймер без стадий.
+    fn default() -> Self {
+        let now = Instant::now();
+        Self {
+            t0: now,
+            last: now,
+            stages: Vec::new(),
+        }
+    }
+}
+
 impl Timing {
     pub fn start() -> Self {
         let now = Instant::now();

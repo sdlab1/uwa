@@ -1,7 +1,10 @@
 use super::types::ItemId;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Status {
+    /// Стартовое состояние. `Default` — обязателен: cargo-mutants подставляет
+    /// `Default::default()` вместо тела функции (P9: unviable = дыра).
+    #[default]
     Open,
     Active,
     Done,
@@ -25,8 +28,10 @@ impl Status {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Event {
+    /// Стартовое событие. `Default` — обязателен (см. Status: мутант-P9).
+    #[default]
     Claimed,
     Merged,
     Aborted,

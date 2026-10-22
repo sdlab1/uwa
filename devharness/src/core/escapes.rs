@@ -502,6 +502,51 @@ pub fn aggregate(
 
 #[cfg(test)]
 mod tests {
+    /// Комментарий в ledger'е — не побег: строка с '#' отфильтровывается.
+    /// Мутант `&&` -> `||` в parse_escapes (фильтр пустых И комментариев)
+    /// роняет этот тест.
+    #[test]
+    fn parse_escapes_skips_comments_and_blank_lines() {
+        let text = "# это комментарий\n\n2026-01-02 | W-001 | нашли | класс: blind:* | реакция: гейт: переделать\n";
+        let parsed = parse_escapes(text);
+        assert_eq!(parsed.len(), 1, "комментарий и пустая строка — не побеги: {parsed:?}");
+    }
+
+    /// Дата вида YYYY-MM-DD — ок; похожие строки — нет. Мутанты `||` -> `&&`
+    /// в looks_like_date (длина/разделители) роняют этот тест.
+    #[test]
+    fn looks_like_date_accepts_only_iso_dates() {
+        assert!(looks_like_date("2026-01-02"), "ISO-дата — дата");
+        assert!(!looks_like_date("2026/01/02"), "слэши — не дата");
+        assert!(!looks_like_date("2026-01-0x"), "не цифра — не дата");
+        assert!(!looks_like_date("26-01-020"), "длина не 10 — не дата");
+    }
+
+    /// Порог недоверия: недоверенным считается случай, когда БЕЗДАТНЫХ записей
+    /// вдвое больше, чем датированных. Мутант `>` -> `>=` на границе роняет тест.
+    #[test]
+    fn distrust_boundary_is_strict() {
+        let lh = LogHealth {
+            headers: 4,
+            dated: 2, // undated = 2 == headers/2 -> ровно граница, не недоверие
+        };
+        assert!(!lh.distrust(), "ровно половина — ещё не недоверие");
+        let lh = LogHealth {
+            headers: 4,
+            dated: 1, // undated = 3 > headers/2 -> недоверие
+        };
+        assert!(lh.distrust(), "без дат больше половины — недоверие");
+    }
+
+    /// kill-rate: total = 0 -> 0.0 (не деление на ноль), caught=total -> 1.0.
+    /// Мутанты гварда `total > 0` роняют тест.
+    #[test]
+    fn kill_rate_edges() {
+        assert_eq!(kill_rate(None), 0.0, "нет корпуса -> 0");
+        assert_eq!(kill_rate(Some((0, 0, String::new()))), 0.0, "total=0 -> 0");
+        assert_eq!(kill_rate(Some((3, 4, String::new()))), 0.75, "3/4");
+    }
+
     use super::*;
 
     fn line(reaction: &str) -> String {
