@@ -277,6 +277,13 @@ mod tests {
     use super::*;
     use crate::shell::color::colors;
 
+    /// Убирает ANSI escape-последовательности для проверки семантики вывода.
+    fn strip_ansi(s: &str) -> String {
+        // \x1b[...m — стандартные SGR коды
+        let re = regex::Regex::new(r"\x1b\[[0-9;]*m").unwrap_or_else(|_| unreachable!());
+        re.replace_all(s, "").to_string()
+    }
+
     #[test]
     fn legend_once_has_four_icons() {
         let l = legend(&colors());
@@ -311,8 +318,10 @@ mod tests {
             unviable: 1,
         };
         let row = counters(&n, &c);
-        assert!(row.contains("⊘ 1"), "unviable не спрятан: {row}");
-        assert!(row.contains("✗ 2"), "{row}");
+        // ANSI коды разрывают "⊘ 1" -> "⊘" + reset + " 1", стрипаем перед проверкой
+        let stripped = strip_ansi(&row);
+        assert!(stripped.contains("⊘ 1"), "unviable не спрятан: {stripped}");
+        assert!(stripped.contains("✗ 2"), "{stripped}");
         assert_eq!(n.done(), 15, "done = сумма исходов");
     }
 
@@ -335,6 +344,10 @@ mod tests {
 
     #[test]
     fn line_has_clock_pill_eta() {
+        // Широкий терминал, чтобы хвост не обрезался
+        unsafe {
+            std::env::set_var("COLUMNS", "200");
+        }
         let c = colors();
         let row = line(
             3,
@@ -351,14 +364,15 @@ mod tests {
             "core/escapes.rs:249",
             &c,
         );
-        assert!(row.contains("75%"), "{row}");
-        assert!(row.contains("avg 0.2 мин"), "{row}");
+        let stripped = strip_ansi(&row);
+        assert!(stripped.contains("75%"), "{stripped}");
+        assert!(stripped.contains("avg 0.2 мин"), "{stripped}");
         assert!(
-            row.contains("▸ core/escapes.rs:249"),
-            "текущий мутант: {row}"
+            stripped.contains("▸ core/escapes.rs:249"),
+            "текущий мутант: {stripped}"
         );
         // пустой хвост не печатается
-        assert!(!row.contains("▸ \n"), "{row}");
+        assert!(!stripped.contains("▸ \n"), "{stripped}");
     }
 
     #[test]
