@@ -76,10 +76,12 @@ def _notify(text: str) -> None:
     summary = f"{sender} — {first}"[:220]
     with NOTIFY_LOG.open("a", encoding="utf-8") as fh:
         fh.write(f"\n===== {time.strftime('%Y-%m-%d %H:%M:%S')} =====\n{text}\n")
-    # -t: уведомление само исчезает через MSG_NOTIFY_TIMEOUT_MS (по умолчанию 20 с)
+    # -t: уведомление само исчезает (таймаут дема — /expire-timeout в xfce4-notifyd).
+    # ВАЖНО: без -u critical! У critical-демон держит уведомление до ручного закрытия
+    # (проверено 2026-10-22: три "вечных" окна xfce4-notifyd на экране).
     try:
         subprocess.run(
-            ["notify-send", "-u", "critical", "-t", str(NOTIFY_TIMEOUT_MS),
+            ["notify-send", "-t", str(NOTIFY_TIMEOUT_MS),
              "Сессии: сообщение", summary],
             check=False, timeout=10,
         )
