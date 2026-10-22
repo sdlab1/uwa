@@ -62,7 +62,8 @@ pub const STATES: &str = r#"=== СОСТОЯНИЯ (маршрут) ===
   S7  аудит завершён, есть дыра                → devh mutate problems
   S8  аудит завершён, чисто                    → devh commit <ID> / devh merge <ID>
   S9  ничего не начато, но есть спеки          → devh auto --from specs/ --max 5
-  S10 лимит фиксов исчерпан                    → devh abort <ID>
+  S10 гейт красный: блокер среды (код 2)     → devh run <ID> (снять блокер, перепрогнать)
+      гейт красный по существу (код 1)        → devh abort <ID>
   S11 мусор: старые worktree/логи              → devh clean / devh sweep --maxsize 20G"#;
 
 /// Каталог команд.
