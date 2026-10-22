@@ -1913,6 +1913,13 @@ pub(crate) fn apply_cov_filter(cmd: &str, filter: Option<&str>) -> String {
 /// бы все планы кроме последнего. Очередь/seen/killmap — под тем же
 /// GlobalLock, что и `tickets --import` (§8.7): единственный append.
 /// `tool0` — шаблон прогона (нужен флаг `--output`, early::mutants_out_dir).
+///
+/// `before` — отпечаток outcomes.json ДО прогона. Файл исходов общий для
+/// двух потоков (код и red-mutation делят `mutants.out/`), поэтому «файл
+/// существует» ≠ «исходы принадлежат ЭТОМУ прогону»: без проверки прогон
+/// приписывал бы себе чужие исходы (red-выживший попал бы в кодовую
+/// killmap, §8.6). Если файл не изменился — прогон исходов не дал, и
+/// брать нечего.
 fn survivors_hook(
     m: &MutateCfg,
     wt: &Path,
@@ -1920,8 +1927,23 @@ fn survivors_hook(
     obs: &Path,
     id: &ItemId,
     gate: &str,
+    before: Option<crate::core::mutaudit::FreshStamp>,
 ) -> Option<String> {
     if !m.survivors {
+        return None;
+    }
+    if outcomes_stamp(wt, tool) == before {
+        // Отпечаток не изменился → прогон не дал исходов. Если файл вообще
+        // не появился (before = None) — молча: нечего приписывать и нечего
+        // предупреждать. Если файл БЫЛ (чужие исходы лежат в общем
+        // mutants.out/) — сообщаем: иначе тихий пропуск выглядит как
+        // «выживших нет», а на деле это чужие исходы, которые не наши.
+        if before.is_some() {
+            eprintln!(
+                ".. survivors: outcomes.json не изменился — прогон не дал исходов \
+                 (чужие исходы в общий mutants.out/ не засчитываем)"
+            );
+        }
         return None;
     }
     let _g = crate::shell::lock::GlobalLock::acquire(obs).ok()?;
@@ -1934,6 +1956,15 @@ fn survivors_hook(
         crate::core::survivors::append_session_line(obs, id, gate, l);
     }
     line
+}
+
+/// Отпечаток outcomes.json прогона (`None` — файла нет).
+///
+/// Путь — по шаблону инструмента: `early::mutants_out_dir` (флаг
+/// `--output=`), иначе общий `mutants.out/`.
+fn outcomes_stamp(wt: &Path, tool: &str) -> Option<crate::core::mutaudit::FreshStamp> {
+    let dir = wt.join(crate::core::early::mutants_out_dir(tool));
+    crate::core::mutaudit::fresh_stamp(&dir.join("outcomes.json"))
 }
 
 /// Гейт мутаций. scope — список git-pathspec через пробел; git сам матчит
@@ -2052,8 +2083,9 @@ fn mutate_gate(
 
     if !batch && !per_file {
         let cmd = apply_cov_filter(&tool0, cov_filter.as_deref());
+        let before = outcomes_stamp(wt, &tool0);
         let mut rep = finish(m, run_mut(wt, &cmd, m), label, key, gate.clone());
-        if let Some(line) = survivors_hook(m, wt, &tool0, obs, id, label) {
+        if let Some(line) = survivors_hook(m, wt, &tool0, obs, id, label, before) {
             rep.log += &format!("{line}\n");
         }
         return Ok(rep);
@@ -2078,6 +2110,7 @@ fn mutate_gate(
             .join(" ");
         let cmd = tool0.replace("{files}", &flags);
         let cmd = apply_cov_filter(&cmd, cov_filter.as_deref());
+        let before = outcomes_stamp(wt, &tool0);
         let head = format!(
             "mutation: один прогон на {} файл(ов): {}\n",
             live.len(),
@@ -2087,7 +2120,7 @@ fn mutate_gate(
                 .join(" ")
         );
         let mut rep = finish(m, run_mut(wt, &cmd, m), label, key, gate.clone());
-        if let Some(line) = survivors_hook(m, wt, &tool0, obs, id, label) {
+        if let Some(line) = survivors_hook(m, wt, &tool0, obs, id, label, before) {
             rep.log += &format!("{line}\n");
         }
         let log = format!("{head}{}", rep.log);
@@ -2132,6 +2165,7 @@ fn mutate_gate(
         let module = mod_of(f, &m.scope);
         let cmd = tool0.replace("{module}", &module).replace("{file}", f);
         let cmd = apply_cov_filter(&cmd, cov_filter.as_deref());
+        let before = outcomes_stamp(wt, &tool0);
         let mut rep = finish(
             m,
             run_mut(wt, &cmd, m),
@@ -2139,7 +2173,8 @@ fn mutate_gate(
             key,
             gate.clone(),
         );
-        if let Some(line) = survivors_hook(m, wt, &tool0, obs, id, &format!("{label} {f}")) {
+        if let Some(line) = survivors_hook(m, wt, &tool0, obs, id, &format!("{label} {f}"), before)
+        {
             rep.log += &format!("{line}\n");
         }
         acc.log += &rep.log;

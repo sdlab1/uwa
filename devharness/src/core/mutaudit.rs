@@ -639,6 +639,37 @@ fn content_stamp(text: &str) -> FileStamp {
     }
 }
 
+/// Отпечаток файла для проверки СВЕЖЕСТИ между прогонами.
+///
+/// Отличается от отпечатка кеша разбора: там важно «изменилось ли
+/// СОДЕРЖИМОЕ», здесь — «писал ли этот файл ИМЕННО ЭТОТ прогон».
+/// Поэтому в отпечаток входит и mtime: тот же набор исходов, записанный
+/// заново, — это новый прогон, а не остаток прошлого.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FreshStamp {
+    len: u64,
+    hash: u64,
+    mtime_ns: u128,
+}
+
+/// Отпечаток файла (`None` — файла нет или он нечитаем).
+pub fn fresh_stamp(path: &Path) -> Option<FreshStamp> {
+    let md = std::fs::metadata(path).ok()?;
+    let text = std::fs::read_to_string(path).ok()?;
+    let s = content_stamp(&text);
+    let mtime_ns = md
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    Some(FreshStamp {
+        len: s.len,
+        hash: s.hash,
+        mtime_ns,
+    })
+}
+
 /// Ответ кеша: `Miss` — записи нет (разбираем), `Hit` — готовый ответ
 /// (внутри `None` = «проблем в файле нет»).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -988,6 +1019,38 @@ mod tests {
             first_problem(d.path(), &live),
             Some(early::FirstProblem::Unknown(1)),
             "изменившийся outcomes.json обязан перечитываться (кеш — не клеймо)"
+        );
+    }
+
+    /// Отпечаток свежести: файл исходов общий для двух потоков (код и
+    /// red-mutation), поэтому «файл есть» ≠ «исходы наши». Отпечаток должен
+    /// отличать перезапись ОДНОГО И ТОГО ЖЕ содержимого (новый прогон) от
+    /// «файла не трогали» (исходы остались чужими).
+    #[test]
+    fn fresh_stamp_sees_rewrites_and_missing_files() {
+        let d = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let path = d.path().join("outcomes.json");
+        assert!(
+            fresh_stamp(&path).is_none(),
+            "файла нет — отпечатка нет (прогон исходов не дал)"
+        );
+        std::fs::write(&path, "исходы").unwrap_or_else(|_| unreachable!());
+        let s1 = fresh_stamp(&path).unwrap_or_else(|| unreachable!());
+        // ТОТ ЖЕ текст, но файл перезаписан (mtime другой) — новый прогон.
+        let stamp = file_mtime(&path);
+        std::fs::write(&path, "исходы").unwrap_or_else(|_| unreachable!());
+        set_mtime(&path, (stamp.0, stamp.1 + 1_000_000));
+        let s2 = fresh_stamp(&path).unwrap_or_else(|| unreachable!());
+        assert_ne!(s1, s2, "перезапись того же содержимого — новый прогон");
+        // Другое содержимое — другой отпечаток.
+        std::fs::write(&path, "исходы2").unwrap_or_else(|_| unreachable!());
+        let s3 = fresh_stamp(&path).unwrap_or_else(|| unreachable!());
+        assert_ne!(s2, s3, "содержимое изменилось");
+        // Файл не трогали — отпечаток тот же (чужие исходы не выдаём за свои).
+        assert_eq!(
+            s3,
+            fresh_stamp(&path).unwrap_or_else(|| unreachable!()),
+            "файл не менялся — отпечаток прежний"
         );
     }
 
