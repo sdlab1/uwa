@@ -319,7 +319,11 @@ mod tests {
         };
         km.files.insert(long.to_string(), st);
         let spots = km.hot_spots(HOTSPOT_MAX_FILES, 1);
-        assert_eq!(spots.len(), 1, "первая строка пула не режется бюджетом: {spots:?}");
+        assert_eq!(
+            spots.len(),
+            1,
+            "первая строка пула не режется бюджетом: {spots:?}"
+        );
     }
 
     /// Ровно в бюджет — строка помещается: проверка «> max_chars», не «>=».
@@ -336,7 +340,11 @@ mod tests {
         let cost = first.first().map(|l| l.chars().count()).unwrap_or(0);
         assert!(cost > 0, "строка пула непустая: {first:?}");
         let exact = km.hot_spots(HOTSPOT_MAX_FILES, cost);
-        assert_eq!(exact.len(), 1, "строка ровно в бюджет — помещается: {exact:?}");
+        assert_eq!(
+            exact.len(),
+            1,
+            "строка ровно в бюджет — помещается: {exact:?}"
+        );
     }
 
     #[test]
