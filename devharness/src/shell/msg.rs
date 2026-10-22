@@ -69,7 +69,9 @@ fn presence_dir() -> PathBuf {
 }
 
 fn presence_path(agent: &str) -> PathBuf {
-    presence_dir().join(format!("{}.txt", safe_name(agent)))
+    // на пару (агент, сессия): heartbeat watcher'а и «последнее действие»
+    // другой сессии не должны затирать друг друга
+    presence_dir().join(format!("{}.{}.txt", safe_name(agent), safe_name(&me(None))))
 }
 
 /// Записать «я жив, делал X» (heartbeat).
@@ -97,6 +99,7 @@ fn presence_rows() -> Vec<(String, String, u64, Option<i32>)> {
             let Some(base) = name.strip_suffix(".txt") else {
                 continue;
             };
+            let agent = base.rsplit_once('.').map(|(a, _)| a.to_string()).unwrap_or_else(|| base.to_string());
             let Ok(raw) = fs::read_to_string(e.path()) else {
                 continue;
             };
@@ -112,7 +115,7 @@ fn presence_rows() -> Vec<(String, String, u64, Option<i32>)> {
                     pid = v.parse::<i32>().ok();
                 }
             }
-            out.push((base.to_string(), action, ts, pid));
+            out.push((agent, action, ts, pid));
         }
     }
     out.sort();
