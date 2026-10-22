@@ -1,9 +1,14 @@
 //! P8-3/P8-1: `.harness/killmap.json` — накопительная карта kill-rate по файлам.
 //!
-//! Пишет хук выживших (P8-1) по КАЖДОМУ прогону мутационного гейта: killed
-//! (CaughtMutant + TimeoutMutant) и MissedMutant приращениями по файлу,
-//! `runs` + 1, `last` — дата. Читает пул hot-spot (P8-3: `agent_prompt` +
-//! `devh hint`).
+//! Пишет хук выживших (P8-1) по КАЖДОМУ прогону мутационного гейта: пойманные
+//! (`CaughtMutant`), выжившие (`MissedMutant`) и таймауты (`Timeout`) —
+//! приращениями по файлу, `runs` + 1, `last` — дата. Читает пул hot-spot
+//! (P8-3: `agent_prompt` + `devh hint`).
+//!
+//! Ф-3 (важно): пойман = ТОЛЬКО `CaughtMutant`. Таймаут — НЕ поимка: тест-фаза
+//! не уложилась, вопрос открыт. Раньше таймаут попадал в `killed`, и карта
+//! врала: «зона покрыта», хотя мутанты там висели. Теперь таймаут —
+//! отдельный счётчик и отдельная слабая зона.
 //!
 //! Намеренно НЕ влияет ни на один вердикт (§8.5 плана): killmap не карает —
 //! она говорит агенту «пиши тут плотнее». Отсутствие файла среди мутантов
@@ -17,18 +22,23 @@ use serde::{Deserialize, Serialize};
 /// Дельта одного файла за прогон (собирается из outcomes.json вызывающим).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct FileDelta {
-    /// Убито в этом прогоне (CaughtMutant + TimeoutMutant).
+    /// ПОЙМАНО в этом прогоне (только `CaughtMutant`).
     pub killed: u32,
     /// Выживших в этом прогоне (MissedMutant).
     pub missed: u32,
+    /// Таймаутов в этом прогоне (Timeout — не поимка, но тоже слабость).
+    pub timeout: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct FileStat {
-    /// Убито суммарно (CaughtMutant + TimeoutMutant — таймаут тоже поимка).
+    /// Поймано суммарно (ТОЛЬКО `CaughtMutant`).
     pub caught: u32,
     /// Выживших суммарно (MissedMutant).
     pub missed: u32,
+    /// Таймаутов суммарно (Timeout — поимкой не считается).
+    #[serde(default)]
+    pub timeout: u32,
     /// Сколько прогонов задели файл (его мутанты встречались в outcomes.json).
     pub runs: u32,
     /// Дата последнего прогона, YYYY-MM-DD.
@@ -79,6 +89,7 @@ impl Killmap {
             let e = self.files.entry(file.clone()).or_default();
             e.caught = e.caught.saturating_add(d.killed);
             e.missed = e.missed.saturating_add(d.missed);
+            e.timeout = e.timeout.saturating_add(d.timeout);
             e.runs = e.runs.saturating_add(1);
             e.last = today.to_string();
         }
@@ -101,21 +112,38 @@ pub const HOTSPOT_MAX_FILES: usize = 3;
 pub const HOTSPOT_MAX_CHARS: usize = 250;
 
 impl Killmap {
-    /// Пул слабых зон: ТОЛЬКО файлы с `missed > 0` (в остальных зонах тесты за
-    /// историю справлялись), топ-N по missed (при равенстве — по имени,
-    /// детерминированно). Пустой Vec → вызывающий блок не добавляет.
+    /// Пул слабых зон: файлы с НЕПОЙМАННЫМИ мутантами — выжившие
+    /// (`missed`) ИЛИ таймауты (`timeout`). Ф-3: таймаут — не поимка, но зона
+    /// с зависаниями такая же слебота тестов, поэтому она в пуле.
+    ///
+    /// Сортировка детерминированная: по сумме непойманных (missed+timeout)
+    /// убывающе, затем missed убывающе, затем timeout убывающе, затем имя
+    /// по возрастанию. Пустой Vec → вызывающий блок не добавляет.
     /// На вердикт гейта не влияет (§8.5) — это подсказка агенту.
     pub fn hot_spots(&self, max_files: usize, max_chars: usize) -> Vec<String> {
-        let mut hot: Vec<(&String, &FileStat)> =
-            self.files.iter().filter(|(_, f)| f.missed > 0).collect();
-        hot.sort_by(|a, b| b.1.missed.cmp(&a.1.missed).then_with(|| a.0.cmp(b.0)));
+        let mut hot: Vec<(&String, &FileStat)> = self
+            .files
+            .iter()
+            .filter(|(_, f)| f.missed > 0 || f.timeout > 0)
+            .collect();
+        hot.sort_by(|a, b| {
+            let ka = a.1.missed.saturating_add(a.1.timeout);
+            let kb = b.1.missed.saturating_add(b.1.timeout);
+            kb.cmp(&ka)
+                .then_with(|| b.1.missed.cmp(&a.1.missed))
+                .then_with(|| b.1.timeout.cmp(&a.1.timeout))
+                .then_with(|| a.0.cmp(b.0))
+        });
         let mut out: Vec<String> = Vec::new();
         let mut budget = 0usize;
         for (file, st) in hot {
             if out.len() >= max_files {
                 break;
             }
-            let line = format!("- {file} — {} выживших / {} прогонов", st.missed, st.runs);
+            let line = format!(
+                "- {file} — {} выживших / {} таймаутов / {} прогонов",
+                st.missed, st.timeout, st.runs
+            );
             let cost = line.chars().count();
             if !out.is_empty() && budget.saturating_add(cost) > max_chars {
                 break;
@@ -139,21 +167,30 @@ impl Killmap {
         ))
     }
 
-    /// Таблица для человека (`devh hint`, §5): kill-rate, missed, возраст
-    /// последнего прогона. Сортировка — те же слабые зоны первыми.
+    /// Таблица для человека (`devh hint`, §5): kill-rate, missed, timeout,
+    /// возраст последнего прогона. Сортировка — те же слабые зоны первыми
+    /// (непойманные: missed + timeout).
     /// На вердикты не влияет (§8.5) — отображение, не порог.
     pub fn table(&self, max_rows: usize) -> Vec<String> {
         let mut rows: Vec<(&String, &FileStat)> = self.files.iter().collect();
         rows.sort_by(|a, b| {
-            b.1.missed
-                .cmp(&a.1.missed)
+            let ka = a.1.missed.saturating_add(a.1.timeout);
+            let kb = b.1.missed.saturating_add(b.1.timeout);
+            kb.cmp(&ka)
+                .then_with(|| b.1.missed.cmp(&a.1.missed))
                 .then_with(|| b.1.caught.cmp(&a.1.caught))
                 .then_with(|| a.0.cmp(b.0))
         });
         rows.into_iter()
             .take(max_rows)
             .map(|(file, st)| {
-                let total = st.caught.saturating_add(st.missed);
+                // Знаменатель = ВСЕ исходы: пойманные + выжившие + таймауты.
+                // Таймаут в знаменателе остаётся (тесты запускались), в
+                // числителе — нет: это НЕ поимка (Ф-3).
+                let total = st
+                    .caught
+                    .saturating_add(st.missed)
+                    .saturating_add(st.timeout);
                 // checked_* без `if total == 0`: ноль killer'ов — легальный
                 // kill-rate 0% (все мутанты выжили), делить нечего.
                 let pct = st
@@ -162,8 +199,8 @@ impl Killmap {
                     .checked_div(total)
                     .unwrap_or(0);
                 format!(
-                    "{file}: {}/{} ({}%), missed {}, runs {}, last {}",
-                    st.caught, total, pct, st.missed, st.runs, st.last
+                    "{file}: {}/{} ({}%), missed {}, timeout {}, runs {}, last {}",
+                    st.caught, total, pct, st.missed, st.timeout, st.runs, st.last
                 )
             })
             .collect()
@@ -174,29 +211,17 @@ impl Killmap {
 mod tests {
     use super::*;
 
-    fn deltas_of(items: &[(&str, u32, u32)]) -> BTreeMap<String, FileDelta> {
-        let mut m = BTreeMap::new();
-        for (f, missed, killed) in items {
-            m.insert(
-                f.to_string(),
-                FileDelta {
-                    killed: *killed,
-                    missed: *missed,
-                },
-            );
-        }
-        m
-    }
-
-    fn deltas(entries: &[(&str, u32, u32)]) -> BTreeMap<String, FileDelta> {
+    /// Дельты для тестов: (файл, поймано, выжило, таймаутов).
+    fn d(entries: &[(&str, u32, u32, u32)]) -> BTreeMap<String, FileDelta> {
         entries
             .iter()
-            .map(|(f, k, m)| {
+            .map(|(f, k, m, t)| {
                 (
                     (*f).to_string(),
                     FileDelta {
                         killed: *k,
                         missed: *m,
+                        timeout: *t,
                     },
                 )
             })
@@ -206,26 +231,39 @@ mod tests {
     #[test]
     fn apply_run_accumulates_and_touches_dates() {
         let mut km = Killmap::default();
-        km.apply_run(&deltas(&[("a.rs", 3, 1)]), "2026-10-19");
-        km.apply_run(&deltas(&[("a.rs", 1, 0), ("b.rs", 5, 2)]), "2026-10-20");
+        km.apply_run(&d(&[("a.rs", 1, 3, 0)]), "2026-10-19");
+        km.apply_run(&d(&[("a.rs", 0, 1, 0), ("b.rs", 2, 5, 0)]), "2026-10-20");
         let a = km.files.get("a.rs").unwrap_or_else(|| unreachable!());
         assert_eq!(
-            (a.caught, a.missed, a.runs, a.last.as_str()),
-            (4, 1, 2, "2026-10-20")
+            (a.caught, a.missed, a.timeout, a.runs, a.last.as_str()),
+            (1, 4, 0, 2, "2026-10-20")
         );
         let b = km.files.get("b.rs").unwrap_or_else(|| unreachable!());
-        assert_eq!((b.caught, b.missed, b.runs), (5, 2, 1));
+        assert_eq!((b.caught, b.missed, b.runs), (2, 5, 1));
+    }
+
+    #[test]
+    fn timeout_accumulates_separately_from_missed() {
+        // Ф-3: таймаут — НЕ поимка и НЕ выживший: свой счётчик.
+        let mut km = Killmap::default();
+        km.apply_run(&d(&[("a.rs", 1, 2, 3)]), "2026-10-19");
+        let a = km.files.get("a.rs").unwrap_or_else(|| unreachable!());
+        assert_eq!(
+            (a.caught, a.missed, a.timeout),
+            (1, 2, 3),
+            "таймаут не сливается с выжившими и не идёт в caught"
+        );
     }
 
     #[test]
     fn missing_in_run_is_not_zero_killed() {
         let mut km = Killmap::default();
-        km.apply_run(&deltas(&[("a.rs", 1, 0)]), "2026-10-19");
-        km.apply_run(&deltas(&[("b.rs", 1, 0)]), "2026-10-20");
+        km.apply_run(&d(&[("a.rs", 0, 1, 0)]), "2026-10-19");
+        km.apply_run(&d(&[("b.rs", 0, 1, 0)]), "2026-10-20");
         let a = km.files.get("a.rs").unwrap_or_else(|| unreachable!());
         assert_eq!(
             (a.caught, a.missed, a.runs),
-            (1, 0, 1),
+            (0, 1, 1),
             "прогон без a.rs не трогает его строку"
         );
         assert_eq!(a.last, "2026-10-19");
@@ -234,27 +272,30 @@ mod tests {
     #[test]
     fn hot_spots_only_missed_top_n_and_budget() {
         let mut km = Killmap::default();
-        // 5 файлов с missed — в пул попадают ровно 3 (топ по missed)
+        // 5 файлов с missed — в пул попадают ровно 3 (топ по непойманным)
         km.apply_run(
-            &deltas_of(&[
-                ("a.rs", 1, 0),
-                ("b.rs", 2, 2),
-                ("c.rs", 1, 0),
-                ("d.rs", 5, 3),
-                ("e.rs", 3, 0),
-                ("f.rs", 0, 9), // только killed — выживших нет, не идёт
+            &d(&[
+                ("a.rs", 0, 1, 0),
+                ("b.rs", 2, 2, 0),
+                ("c.rs", 0, 1, 0),
+                ("d.rs", 3, 5, 0),
+                ("e.rs", 0, 3, 0),
+                ("f.rs", 9, 0, 0), // только пойманные — зона не слабая, не идёт
             ]),
             "2026-10-19",
         );
         let lines = km.hot_spots(HOTSPOT_MAX_FILES, HOTSPOT_MAX_CHARS);
         assert_eq!(lines.len(), 3, "бюджет ≤ 3 файла: {lines:?}");
-        // первый по missed desc — d.rs (5 выживших)
-        let d = lines.first().unwrap_or_else(|| unreachable!());
+        // первый по непойманным desc — d.rs (5 выживших)
+        let dline = lines.first().unwrap_or_else(|| unreachable!());
         assert!(
-            d.starts_with("- d.rs"),
-            "сортировка по missed desc: {lines:?}"
+            dline.starts_with("- d.rs"),
+            "сортировка по непойманным desc: {lines:?}"
         );
-        assert!(d.contains("5 выживших / 1 прогонов"), "{lines:?}");
+        assert!(
+            dline.contains("5 выживших / 0 таймаутов / 1 прогонов"),
+            "{lines:?}"
+        );
         assert!(
             lines.get(1).map(|l| l.starts_with("- e.rs")) == Some(true),
             "e.rs (3) вторым: {lines:?}"
@@ -266,14 +307,52 @@ mod tests {
     }
 
     #[test]
+    fn hot_spots_include_timeout_zones() {
+        // Ф-3: зона с таймаутами — такая же слепота тестов, попадает в пул.
+        let mut km = Killmap::default();
+        km.apply_run(&d(&[("slow.rs", 0, 0, 2)]), "2026-10-19");
+        let lines = km.hot_spots(HOTSPOT_MAX_FILES, HOTSPOT_MAX_CHARS);
+        assert_eq!(lines.len(), 1, "таймаут — слабая зона: {lines:?}");
+        assert!(lines[0].contains("0 выживших / 2 таймаутов"), "{lines:?}");
+        assert!(
+            km.hotspot_block().is_some(),
+            "зона с таймаутами даёт блок подсказки"
+        );
+    }
+
+    #[test]
+    fn hot_spots_sort_is_deterministic() {
+        let mut km = Killmap::default();
+        km.apply_run(
+            &d(&[("b.rs", 0, 1, 1), ("a.rs", 0, 1, 1), ("c.rs", 0, 0, 2)]),
+            "2026-10-19",
+        );
+        let lines = km.hot_spots(3, HOTSPOT_MAX_CHARS);
+        // Порядок — по документированному правилу: сумма непойманных desc,
+        // затем missed desc, затем timeout desc, затем имя asc. Выживший
+        // мутант — более сильный сигнал слепоты, чем таймаут, поэтому
+        // a.rs/b.rs (1 выживший + 1 таймаут) выше c.rs (2 таймаута).
+        assert!(lines[0].starts_with("- a.rs"), "{lines:?}");
+        assert!(lines[1].starts_with("- b.rs"), "{lines:?}");
+        assert!(lines[2].starts_with("- c.rs"), "{lines:?}");
+        // повторный вызов — тот же порядок
+        let again = km.hot_spots(3, HOTSPOT_MAX_CHARS);
+        assert_eq!(lines, again, "порядок детерминирован");
+    }
+
+    #[test]
     fn hot_spots_budget_cuts_long_names() {
         let mut km = Killmap::default();
         let long = format!("{}.rs", "deeply/nested/path/".repeat(3));
         km.apply_run(
-            &deltas_of(&[(long.as_str(), 1, 1), ("short.rs", 1, 1), ("z.rs", 1, 1)]),
+            &d(&[
+                (long.as_str(), 1, 1, 0),
+                ("short.rs", 1, 1, 0),
+                ("z.rs", 1, 1, 0),
+            ]),
             "2026-10-19",
         );
-        // первая строка — самая короткая? нет: сортировка по имени (missed равны)
+        // первая строка — самая короткая? нет: сортировка по имени (счётчики равны)
         let lines = km.hot_spots(3, 40);
         assert!(lines.len() < 3, "бюджет символов режет пул: {lines:?}");
         for l in &lines {
@@ -284,7 +363,7 @@ mod tests {
     #[test]
     fn hot_spots_empty_without_missed() {
         let mut km = Killmap::default();
-        km.apply_run(&deltas_of(&[("f.rs", 0, 7)]), "2026-10-19");
+        km.apply_run(&d(&[("f.rs", 7, 0, 0)]), "2026-10-19");
         assert!(km
             .hot_spots(HOTSPOT_MAX_FILES, HOTSPOT_MAX_CHARS)
             .is_empty());
@@ -302,9 +381,24 @@ mod tests {
     }
 
     #[test]
+    fn table_counts_timeout_in_denominator() {
+        let mut km = Killmap::default();
+        km.apply_run(&d(&[("a.rs", 5, 1, 2)]), "2026-10-19");
+        let row = km
+            .table(10)
+            .first()
+            .cloned()
+            .unwrap_or_else(|| unreachable!());
+        // 5 пойманных из 8 (1 выжил + 2 таймаута) = 62% (таймаут НЕ поимка)
+        assert!(row.contains("5/8 (62%)"), "{row}");
+        assert!(row.contains("missed 1"), "{row}");
+        assert!(row.contains("timeout 2"), "{row}");
+    }
+
+    #[test]
     fn hotspot_block_says_it_does_not_affect_gate() {
         let mut km = Killmap::default();
-        km.apply_run(&deltas_of(&[("core/load.rs", 1, 2)]), "2026-10-19");
+        km.apply_run(&d(&[("core/load.rs", 2, 1, 0)]), "2026-10-19");
         let b = km.hotspot_block().unwrap_or_else(|| unreachable!());
         assert!(b.contains("Исторически слабые зоны"), "{b}");
         assert!(
@@ -312,7 +406,7 @@ mod tests {
             "бюджет/граница честности §8.5: {b}"
         );
         assert!(
-            b.contains("- core/load.rs — 1 выживших / 1 прогонов"),
+            b.contains("- core/load.rs — 1 выживших / 0 таймаутов / 1 прогонов"),
             "{b}"
         );
     }
@@ -325,12 +419,13 @@ mod tests {
         let mut km = Killmap::load(obs);
         assert!(km.files.is_empty());
         assert_eq!(km.version, Killmap::VERSION);
-        km.apply_run(&deltas(&[("a.rs", 2, 1)]), "2026-10-19");
+        km.apply_run(&d(&[("a.rs", 1, 2, 1)]), "2026-10-19");
         km.save(obs).unwrap_or_else(|_| unreachable!());
         let back = Killmap::load(obs);
         assert_eq!(back.files.len(), 1);
-        assert_eq!(back.files.get("a.rs").map(|f| f.caught), Some(2));
-        assert_eq!(back.files.get("a.rs").map(|f| f.missed), Some(1));
+        assert_eq!(back.files.get("a.rs").map(|f| f.caught), Some(1));
+        assert_eq!(back.files.get("a.rs").map(|f| f.missed), Some(2));
+        assert_eq!(back.files.get("a.rs").map(|f| f.timeout), Some(1));
         // битый JSON → пустая карта, не паника
         std::fs::write(Killmap::path(obs), "{не json").unwrap_or_else(|_| unreachable!());
         assert!(Killmap::load(obs).files.is_empty());
@@ -338,5 +433,21 @@ mod tests {
         std::fs::write(Killmap::path(obs), r#"{"version":99,"files":{}}"#)
             .unwrap_or_else(|_| unreachable!());
         assert!(Killmap::load(obs).files.is_empty());
+    }
+
+    #[test]
+    fn old_killmap_without_timeout_field_loads() {
+        // Совместимость serde: карта, записанная до появления поля timeout,
+        // читается без ошибки (timeout = 0).
+        let t = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let obs = t.path();
+        std::fs::write(
+            Killmap::path(obs),
+            r#"{"version":1,"files":{"a.rs":{"caught":2,"missed":1,"runs":1,"last":"2026-10-19"}}}"#,
+        )
+        .unwrap_or_else(|_| unreachable!());
+        let km = Killmap::load(obs);
+        assert_eq!(km.files.len(), 1, "старая карта читается");
+        assert_eq!(km.files.get("a.rs").map(|f| f.timeout), Some(0));
     }
 }

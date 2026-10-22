@@ -10,12 +10,14 @@
 //! Делает хук `collect_after_run` (вызывается ПОСЛЕ каждого прогона гейта —
 //! per-file режим перезаписывает outcomes.json каждым запуском):
 //! 1. парсит outcomes.json (прощающий: доступ по имени, unknown summary → WARN);
-//! 2. MissedMutant'ы (и ТОЛЬКО они: таймаут = убит, unviable = не про тесты)
-//!    → строки очереди с авто-идеей red-теста по жанру (§4 таксономии);
+//! 2. Непойманные (MissedMutant И Timeout — Ф-3: пойман = только CaughtMutant;
+//!    таймаут поимкой НЕ считается) → строки очереди с авто-идеей red-теста
+//!    по жанру (§4 таксономии); unviable — не про тесты, это провал кода;
 //! 3. seen-дедуп через `.harness/survivors-seen.json` (SHA256 file:line:col:mutation):
 //!    «вечный» выживший в очереди одно строкой, повтор — только в killmap/survivors.log;
-//! 4. каждый свежий выживший — строкой в `.harness/survivors.log` (дата | гейт |
-//!    файл:строка | genre | мутация) — материал для дистилляции классов (P8-4);
+//! 4. каждый свежий непойманный — строкой в `.harness/survivors.log` (дата | гейт |
+//!    файл:строка | ВИД исхода | genre | мутация) — материал для дистилляции
+//!    классов (P8-4); старый 5-полевой формат читается как есть;
 //! 5. `.harness/killmap.json` (§5) — по ВСЕМ исходам прогона, включая caught;
 //! 6. возвращает строку лога гейта: `survivors: 2 → observations.md (fn-value 1)`.
 //!
@@ -32,6 +34,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::core::killmap::{self, FileDelta};
+use crate::core::mutaudit::{S_CAUGHT, S_MISSED, S_TIMEOUT, S_UNVIABLE};
 
 /// Имя файла отпечатков увиденных выживших (в `.harness/`).
 const SEEN_FILE: &str = "survivors-seen.json";
@@ -43,7 +46,8 @@ const OBS_FILE: &str = "observations.md";
 /// Один исход прогона из outcomes.json (scenario.Mutant + summary).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Outcome {
-    /// «CaughtMutant» / «MissedMutant» / «TimeoutMutant» / «UnviableMutant».
+    /// Каноническое имя исхода: `CaughtMutant` / `MissedMutant` / `Timeout` /
+    /// `Unviable` (легаси-имена приводятся к канону при разборе).
     pub summary: String,
     /// Файл мутанта (относительный путь, как в дереве гейта).
     pub file: String,
@@ -58,10 +62,20 @@ pub struct Outcome {
 }
 
 impl Outcome {
-    /// Выживший = MissedMutant и только: таймаут в статистике devh убит
-    /// (killed = caught + timeout), unviable — не про тесты.
+    /// Выживший = MissedMutant (дыра в тестах: тесты не поймали мутанта).
     pub fn is_survivor(&self) -> bool {
-        self.summary == "MissedMutant"
+        self.summary == S_MISSED
+    }
+
+    /// Таймаут = ТОЖЕ не пойман (Ф-3): тест-фаза не уложилась — вопрос
+    /// открыт, значит это такой же предмет для red-теста, как и выживший.
+    pub fn is_timeout(&self) -> bool {
+        self.summary == S_TIMEOUT
+    }
+
+    /// Непойманный мутант = руководство к действию (выживший ИЛИ таймаут).
+    pub fn is_action(&self) -> bool {
+        self.is_survivor() || self.is_timeout()
     }
 
     /// Отпечаток для seen-дедупа (§3 плана: SHA256 file:line:col:mutation).
@@ -71,16 +85,25 @@ impl Outcome {
         format!("{:x}", h.finalize())
     }
 
-    /// Вклад в killmap: killed (ловят таймауты тоже) / missed.
+    /// Вклад в killmap. Ф-3: пойман = ТОЛЬКО `CaughtMutant`. Таймаут — не
+    /// поимка, он учитывается ОТДЕЛЬНО (и в hot-spot попадает: зона с
+    /// зависаниями — такая же слепота тестов). Unviable — не про тесты.
     pub fn delta(&self) -> Option<FileDelta> {
         match self.summary.as_str() {
-            "CaughtMutant" | "TimeoutMutant" => Some(FileDelta {
+            S_CAUGHT => Some(FileDelta {
                 killed: 1,
                 missed: 0,
+                timeout: 0,
             }),
-            "MissedMutant" => Some(FileDelta {
+            S_MISSED => Some(FileDelta {
                 killed: 0,
                 missed: 1,
+                timeout: 0,
+            }),
+            S_TIMEOUT => Some(FileDelta {
+                killed: 0,
+                missed: 0,
+                timeout: 1,
             }),
             _ => None,
         }
@@ -124,7 +147,8 @@ pub fn parse_outcomes(text: &str) -> (Vec<Outcome>, usize) {
     let mut out = Vec::new();
     for item in arr {
         let Some(m) = item.get("scenario").and_then(|s| s.get("Mutant")) else {
-            warn = warn.saturating_add(1);
+            // baseline-сценарий (`Success`) — НЕ мутант: не проблема и не
+            // предупреждение (раньше он попадал в warn и пугал оператора).
             continue;
         };
         let name = as_str(m, "name").unwrap_or_default();
@@ -149,18 +173,12 @@ pub fn parse_outcomes(text: &str) -> (Vec<Outcome>, usize) {
             .map(|v| v as u32)
             .unwrap_or(nc);
         let genre = as_str(m, "genre").unwrap_or("unknown").to_string();
-        let summary = match as_str(item, "summary") {
-            Some(s)
-                if matches!(
-                    s,
-                    "CaughtMutant" | "MissedMutant" | "TimeoutMutant" | "UnviableMutant"
-                ) =>
-            {
-                s.to_string()
-            }
-            _ => {
-                // нет summary или новый вид: один WARN на исход, не паника.
-                // В очередь/killmap такой исход не идёт (не мутационный вердикт).
+        let summary = match as_str(item, "summary").and_then(crate::core::mutaudit::canon_summary) {
+            Some(canon) => canon.to_string(),
+            None => {
+                // Нераспознанный summary МУТАНТА: один WARN на исход, не
+                // паника. В очередь не идёт (исход неизвестен) — но он виден
+                // в логе гейта и в отчёте нативного CLI как проблема.
                 warn = warn.saturating_add(1);
                 continue;
             }
@@ -213,8 +231,11 @@ pub fn genre_tag(genre: &str) -> &'static str {
 /// спеки тикета), red-гейт помечает источник `[red-mutation]`.
 pub fn queue_line(o: &Outcome, red_gate: bool) -> String {
     let marker = if red_gate { " [red-mutation]" } else { "" };
+    // Таймаут — тоже непойманный (Ф-3): помечаем вид исхода, чтобы триаж
+    // видел, что чинить: «выжил» (тест не ловит) vs «завис» (тест виснет).
+    let kind = if o.is_timeout() { " [timeout]" } else { "" };
     format!(
-        "{}:{} | survivor: {} [{}]{} | red-тест: {}\n",
+        "{}:{} | survivor: {} [{}]{kind}{} | red-тест: {}\n",
         o.file,
         o.line,
         o.mutation,
@@ -331,6 +352,8 @@ pub fn collect_after_run(wt: &Path, tool: &str, obs: &Path, gate: &str) -> Optio
                 let e = deltas.entry(o.file.clone()).or_default();
                 e.killed = e.killed.saturating_add(d.killed);
                 e.missed = e.missed.saturating_add(d.missed);
+                // Ф-3: таймаут — отдельный счётчик (не поимка, не выживший).
+                e.timeout = e.timeout.saturating_add(d.timeout);
             }
         }
     }
@@ -341,11 +364,12 @@ pub fn collect_after_run(wt: &Path, tool: &str, obs: &Path, gate: &str) -> Optio
             eprintln!(".. survivors: killmap не сохранён: {e}");
         }
     }
-    // Очередь: только свежие MissedMutant'ы. Повторы («вечные» выжившие)
-    // не дублируются — их рост виден в killmap и survivors.log (§3).
+    // Очередь: только свежие НЕПОЙМАННЫЕ (выжившие + таймауты). Повторы
+    // («вечные» выжившие) не дублируются — их рост виден в killmap и
+    // survivors.log (§3).
     let mut seen = load_seen(obs);
     let mut fresh: Vec<&Outcome> = Vec::new();
-    for o in outcomes.iter().filter(|o| o.is_survivor()) {
+    for o in outcomes.iter().filter(|o| o.is_action()) {
         if seen.insert(o.dedup_hash()) {
             fresh.push(o);
         }
@@ -361,8 +385,8 @@ pub fn collect_after_run(wt: &Path, tool: &str, obs: &Path, gate: &str) -> Optio
     for o in &fresh {
         queue += &queue_line(o, red);
         journal += &format!(
-            "{today} | {gate} | {}:{} | {} | {}\n",
-            o.file, o.line, o.genre, o.mutation
+            "{today} | {gate} | {}:{} | {} | {} | {}\n",
+            o.file, o.line, o.summary, o.genre, o.mutation
         );
         let t = genre_tag(&o.genre);
         let n = tags.entry(t).or_insert(0);
@@ -435,6 +459,9 @@ pub struct Shot {
     pub line: u32,
     pub genre: String,
     pub mutation: String,
+    /// Вид исхода (`MissedMutant` / `Timeout`). В старых журналах (5 полей)
+    /// — пусто: вид тогда был один (выживший).
+    pub summary: String,
 }
 
 impl Shot {
@@ -452,6 +479,10 @@ pub fn is_red(gate: &str) -> bool {
 }
 
 /// не наш формат, молча пропускаем (журнал дописывают люди и инструменты).
+///
+/// Формат строки — 6 полей: «дата | гейт | файл:строка | вид | жанр |
+/// мутация». Старые журналы (5 полей, без вида) читаются как есть: вид
+/// неизвестен → пусто.
 pub fn parse_journal(text: &str) -> Vec<Shot> {
     let mut out: Vec<Shot> = Vec::new();
     for raw in text.lines() {
@@ -459,12 +490,37 @@ pub fn parse_journal(text: &str) -> Vec<Shot> {
         if l.is_empty() {
             continue;
         }
-        let mut parts = l.splitn(5, '|');
-        let date = parts.next().unwrap_or_default().trim().to_string();
-        let gate = parts.next().unwrap_or_default().trim().to_string();
-        let at = parts.next().unwrap_or_default().trim().to_string();
-        let genre = parts.next().unwrap_or_default().trim().to_string();
-        let mutation = parts.next().unwrap_or_default().trim().to_string();
+        let parts: Vec<&str> = l.split('|').collect();
+        if parts.len() < 5 {
+            continue;
+        }
+        let date = parts
+            .first()
+            .copied()
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        let gate = parts.get(1).copied().unwrap_or_default().trim().to_string();
+        let at = parts.get(2).copied().unwrap_or_default().trim().to_string();
+        // Формат строки: 6 полей «дата | гейт | файл:строка | вид | жанр |
+        // мутация». Старый — 5 полей (без вида). Различаем ПО СОДЕРЖИМОМУ
+        // поля 3: там стоит имя исхода (новый формат) или жанр (старый).
+        // Так строки со «|» внутри мутации не путаются.
+        let f3 = parts.get(3).copied().unwrap_or_default().trim();
+        let new_fmt = is_summary_token(f3);
+        let (summary, genre, mutation) = if new_fmt {
+            (
+                f3.to_string(),
+                parts.get(4).copied().unwrap_or_default().trim().to_string(),
+                join_mutation(parts.get(5..).unwrap_or_default()),
+            )
+        } else {
+            (
+                String::new(),
+                f3.to_string(),
+                join_mutation(parts.get(4..).unwrap_or_default()),
+            )
+        };
         if !looks_like_date(&date) || genre.is_empty() {
             continue;
         }
@@ -482,6 +538,7 @@ pub fn parse_journal(text: &str) -> Vec<Shot> {
             line: num.trim().parse::<u32>().unwrap_or(0),
             genre,
             mutation,
+            summary,
         });
     }
     out
@@ -495,6 +552,23 @@ fn looks_like_date(d: &str) -> bool {
         && d.chars().take(4).all(|c| c.is_ascii_digit())
         && d.chars().skip(5).take(2).all(|c| c.is_ascii_digit())
         && d.chars().skip(8).all(|c| c.is_ascii_digit())
+}
+
+/// Склеить хвост журнала (мутация) из полей, разделённых «|».
+///
+/// Внутри мутации «|» — часть текста, поэтому склеиваем как есть, но
+/// внешние пробелы убираем: разделитель «| » оставлял бы лишний пробел
+/// в начале описания замены.
+fn join_mutation(parts: &[&str]) -> String {
+    parts.join("|").trim().to_string()
+}
+
+/// Похоже ли поле на имя исхода мутанта (новый формат журнала)?
+fn is_summary_token(s: &str) -> bool {
+    matches!(
+        s,
+        S_CAUGHT | S_MISSED | S_TIMEOUT | S_UNVIABLE | "TimeoutMutant" | "UnviableMutant"
+    )
 }
 
 /// Базовое имя файла: в RULES координаты инстансов запрещены (§8), а для
@@ -1121,27 +1195,41 @@ mod tests {
 
         let line = collect_after_run(&wt, "cargo mutants --in-place", &obs, "mutation")
             .unwrap_or_else(|| unreachable!());
-        assert_eq!(line, "survivors: 2 → observations.md (binop 1, fn-value 1)");
+        // Ф-3: в очередь идут выжившие И таймауты (2 + 1 = 3).
+        assert_eq!(
+            line, "survivors: 3 → observations.md (binop 1, fn-value 2)",
+            "таймаут — actionable, в счётчике жанров тот же fn-value"
+        );
 
         let queue =
             std::fs::read_to_string(obs.join("observations.md")).unwrap_or_else(|_| unreachable!());
         let qlines: Vec<&str> = queue.lines().collect();
-        assert_eq!(qlines.len(), 2, "ровно два выживших — по строке на каждый");
+        assert_eq!(qlines.len(), 3, "по строке на каждый непойманный");
         for l in &qlines {
             assert!(l.contains("survivor:"), "{l}");
             assert!(l.contains("red-тест:"), "{l}");
         }
         assert!(queue.contains("devharness/src/core/load.rs:15 | survivor:"));
         assert!(queue.contains("devharness/src/core/timing.rs:40 | survivor:"));
+        assert!(
+            queue.contains("devharness/src/core/gates.rs:9 | survivor:")
+                && queue.contains("[timeout]"),
+            "таймаут в очереди помечен видом исхода: {queue}"
+        );
 
         let seen = load_seen(&obs);
-        assert_eq!(seen.len(), 2, "seen-дедуп: два отпечатка");
+        assert_eq!(seen.len(), 3, "seen-дедуп: три отпечатка");
         let journal =
             std::fs::read_to_string(obs.join("survivors.log")).unwrap_or_else(|_| unreachable!());
-        assert_eq!(journal.lines().count(), 2);
+        assert_eq!(journal.lines().count(), 3);
         assert!(
-            journal.contains("| mutation | devharness/src/core/load.rs:15 | FnValue"),
-            "{journal}"
+            journal
+                .contains("| mutation | devharness/src/core/load.rs:15 | MissedMutant | FnValue"),
+            "новый формат журнала: 6 полей, вид исхода явным полем: {journal}"
+        );
+        assert!(
+            journal.contains("| mutation | devharness/src/core/gates.rs:9 | Timeout | FnValue"),
+            "таймаут в журнале — со своим видом: {journal}"
         );
 
         let km = killmap::Killmap::load(&obs);
@@ -1150,15 +1238,19 @@ mod tests {
             .get("devharness/src/core/load.rs")
             .unwrap_or_else(|| unreachable!());
         assert_eq!(
-            (load.caught, load.missed, load.runs),
-            (1, 1, 1),
+            (load.caught, load.missed, load.timeout, load.runs),
+            (1, 1, 0, 1),
             "caught+missed приращения, runs +1"
         );
         let gates = km
             .files
             .get("devharness/src/core/gates.rs")
             .unwrap_or_else(|| unreachable!());
-        assert_eq!((gates.caught, gates.missed), (1, 0), "timeout = убит");
+        assert_eq!(
+            (gates.caught, gates.missed, gates.timeout),
+            (0, 0, 1),
+            "Ф-3: таймаут — НЕ поимка (caught=0), отдельный счётчик"
+        );
         assert!(
             !km.files.contains_key("devharness/src/core/plan.rs"),
             "unviable — не про тесты, в карту не идёт"
@@ -1177,13 +1269,13 @@ mod tests {
         assert!(again.is_none(), "повтор — только счётчики, не очередь");
         let queue2 =
             std::fs::read_to_string(obs.join("observations.md")).unwrap_or_else(|_| unreachable!());
-        assert_eq!(queue2.lines().count(), 2, "очередь не задвоена");
+        assert_eq!(queue2.lines().count(), 3, "очередь не задвоена");
         let km2 = killmap::Killmap::load(&obs);
         assert_eq!(
             km2.files.get("devharness/src/core/load.rs").map(|f| f.runs),
             Some(2)
         );
-        assert_eq!(load_seen(&obs).len(), 2);
+        assert_eq!(load_seen(&obs).len(), 3);
     }
 
     #[test]
@@ -1284,6 +1376,34 @@ mod tests {
         "- `blind:red-asserts` RED-выстрел = спека без проверяемого ассерта: red-тест пишется\n",
         "  из спеки до кода (поток red-mutation). Признак в триаже: жанр FnValue из red-гейта.\n",
     );
+
+    /// Журнал в НОВОМ формате (6 полей): вид исхода — отдельное поле.
+    const JOURNAL_NEW: &str = concat!(
+        "2026-10-20 | mutation | devharness/src/core/load.rs:15 | MissedMutant | FnValue | replace load_average -> Option<f64> with Some(0.0)\n",
+        "2026-10-21 | mutation | devharness/src/core/gates.rs:9 | Timeout | FnValue | replace a with b\n",
+        "2026-10-21 | mutation | devharness/src/core/plan.rs:3 | Unviable | FnValue | replace c with d\n",
+    );
+
+    #[test]
+    fn parse_journal_reads_new_six_field_format() {
+        // Новый формат: 6 полей, вид исхода — ПОЛЕ 3. Старый (5 полей)
+        // читается как есть (вид неизвестен → пусто, не выдумываем).
+        let shots = parse_journal(JOURNAL_NEW);
+        assert_eq!(shots.len(), 3, "{shots:?}");
+        let s = shots.first().unwrap_or_else(|| unreachable!());
+        assert_eq!(s.summary, "MissedMutant");
+        assert_eq!(s.file, "devharness/src/core/load.rs");
+        assert_eq!(s.line, 15);
+        assert_eq!(s.genre, "FnValue");
+        let t = shots.get(1).unwrap_or_else(|| unreachable!());
+        assert_eq!(t.summary, "Timeout", "таймаут — свой вид исхода");
+        let old = parse_journal(JOURNAL);
+        assert_eq!(old.len(), 5);
+        assert!(
+            old.iter().all(|s| s.summary.is_empty()),
+            "старый 5-полевой журнал: вид неизвестен"
+        );
+    }
 
     #[test]
     fn journal_grouping_counts_files_and_examples() {

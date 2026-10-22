@@ -61,15 +61,22 @@ pub struct LiveCounts {
 }
 
 impl LiveCounts {
-    /// Killed = caught + timeout: таймаут и так пойман (оценка сверху честная).
+    /// ПОЙМАНО = только `CaughtMutant` (F-3). Таймаут поимкой НЕ считается:
+    /// тест-фаза не уложилась → вопрос открыт, мутант не «убит».
     pub fn killed(&self) -> u32 {
-        self.caught.saturating_add(self.timeout)
+        self.caught
     }
 
-    /// «Чистая выборка» для SAMPLE: убитые, без unviable (билд не удался —
-    /// это не проверка тестов) и без missed.
+    /// «Чистая выборка» для SAMPLE: пойманные, без unviable (билд не удался —
+    /// это не проверка тестов) и без missed/timeout (не пойман = не чисто).
     pub fn clean(&self) -> u32 {
         self.killed()
+    }
+
+    /// НЕПОЙМАННЫЕ = выжившие + таймауты: руководство к действию.
+    /// Пока это не ноль — kill-rate не может быть 100% и вердикт не «чисто».
+    pub fn unresolved(&self) -> u32 {
+        self.missed.saturating_add(self.timeout)
     }
 
     /// Прошлый прогон/--iterate оставил списки: текущий считаем дельтой
@@ -142,8 +149,9 @@ pub fn sample_for(min_kill: u32) -> u32 {
     k.checked_div(miss).unwrap_or(u32::MAX)
 }
 
-/// DOOM-bound: сколько missed делает kill-rate недостижимым.
-/// min_kill ≥ 100 → 1 (любой выживший обречён); 0 → testable+1 (никогда).
+/// DOOM-bound: сколько НЕПОЙМАННЫХ (missed + timeout) делает kill-rate
+/// недостижимым. min_kill ≥ 100 → 1 (любой непойманный обречён);
+/// 0 → testable+1 (никогда).
 pub fn doomed_missed(total: u32, unviable: u32, min_kill: u32) -> u32 {
     let testable = total.saturating_sub(unviable);
     let allowed = testable
@@ -158,7 +166,8 @@ pub fn doomed_missed(total: u32, unviable: u32, min_kill: u32) -> u32 {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EarlyStop {
     Doom {
-        missed: u32,
+        /// Непойманных (выжившие + таймауты) — столько уже не поймать.
+        unresolved: u32,
         bound: u32,
         total: u32,
         unviable: u32,
@@ -175,14 +184,15 @@ impl EarlyStop {
     pub fn describe(&self) -> String {
         match self {
             EarlyStop::Doom {
-                missed,
+                unresolved,
                 bound,
                 total,
                 unviable,
                 min_kill,
             } => format!(
-                "DOOM: missed {missed} >= границы {bound} (total {total}, unviable {unviable}, \
-                 min_kill {min_kill}%) — kill-rate недостижим, остальные мутанты бессмысленны"
+                "DOOM: непойманных {unresolved} (выжившие+таймауты) >= границы {bound} \
+                 (total {total}, unviable {unviable}, min_kill {min_kill}%) — \
+                 kill-rate недостижим, остальные мутанты бессмысленны"
             ),
             EarlyStop::Sample { clean, k, min_kill } => format!(
                 "SAMPLE: {clean} убитых, missed 0 (k={k}, min_kill {min_kill}%) — rule-of-three: \
@@ -204,9 +214,11 @@ pub fn evaluate(
     if let Some(t) = total {
         if t > live.unviable {
             let bound = doomed_missed(t, live.unviable, min_kill);
-            if live.missed >= bound {
+            // Непойманные = выжившие + таймауты: и то и другое не поймано,
+            // обе цифры съедают kill-rate (F-3).
+            if live.unresolved() >= bound {
                 return Some(EarlyStop::Doom {
-                    missed: live.missed,
+                    unresolved: live.unresolved(),
                     bound,
                     total: t,
                     unviable: live.unviable,
@@ -215,7 +227,7 @@ pub fn evaluate(
             }
         }
     }
-    if shuffled && min_kill < 100 && live.missed == 0 {
+    if shuffled && min_kill < 100 && live.unresolved() == 0 {
         let k = sample_for(min_kill);
         if live.clean() >= k {
             return Some(EarlyStop::Sample {
@@ -304,7 +316,7 @@ mod tests {
         assert!(matches!(
             stop,
             EarlyStop::Doom {
-                missed: 2,
+                unresolved: 2,
                 bound: 2,
                 ..
             }
@@ -321,11 +333,30 @@ mod tests {
         assert!(matches!(
             stop,
             EarlyStop::Doom {
-                missed: 1,
+                unresolved: 1,
                 bound: 1,
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn timeout_counts_as_unresolved_not_as_kill() {
+        // F-3: таймаут — не поимка. Значит он съедает kill-rate и может
+        // обречь прогон (DOOM), а SAMPLE (чистая выборка) при нём запрещена.
+        let mut l = live(Some(10), 8, 0, 0);
+        l.timeout = 2;
+        assert_eq!(l.killed(), 8, "таймаут не пойман");
+        assert_eq!(l.unresolved(), 2);
+        // 8 пойманных + 2 таймаута из 10 тестируемых = 80% < 90% → обречено
+        assert!(evaluate(&l, None, 90, false).is_some(), "DOOM по таймаутам");
+        // SAMPLE при таймауте запрещена (выборка не чистая)
+        let mut l2 = live(Some(100), 30, 0, 0);
+        l2.timeout = 1;
+        assert!(
+            evaluate(&l2, None, 90, true).is_none(),
+            "таймаут делает выборку нечистой"
+        );
     }
 
     #[test]

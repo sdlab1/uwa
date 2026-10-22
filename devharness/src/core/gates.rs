@@ -124,13 +124,16 @@ pub struct Raw {
 }
 
 /// Итог мутационного прогона в терминах devh-гейта.
-/// `killed` = caught + timeout (тесты с мутантом не прошли → детектирован),
-/// `missed` = выжил тихо, `unviable` = мутант не собрался (код/линты, не тесты).
+/// `killed` = **только пойманные** (`CaughtMutant`): таймаут поимкой не
+/// считается — тест-фаза не уложилась, вопрос открыт (F-3).
+/// `missed` = выжил тихо, `timeout` = не уложился (оба — руководство к
+/// действию), `unviable` = мутант не собрался (провал, ноль терпимости).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct MutationStats {
     pub mutants: u32,
     pub killed: u32,
     pub missed: u32,
+    pub timeout: u32,
     pub unviable: u32,
 }
 
@@ -227,14 +230,16 @@ fn parse_mutants_summary_line(line: &str) -> Option<MutationStats> {
     let mut killed: u32 = 0;
     let mut missed: u32 = 0;
     let mut unviable: u32 = 0;
+    let mut timeout: u32 = 0;
     for tok in outcomes.split(',') {
         let mut w = tok.split_whitespace();
         let n: u32 = w.next()?.parse().ok()?;
         match w.next()? {
             "missed" => missed = n,
+            // F-3: caught — единственная поимка. Таймаут поимкой НЕ является.
             "caught" => killed = n,
             "unviable" => unviable = n,
-            "timeout" | "timeouts" => killed = killed.saturating_add(n),
+            "timeout" | "timeouts" => timeout = n,
             _ => return None,
         }
     }
@@ -242,6 +247,7 @@ fn parse_mutants_summary_line(line: &str) -> Option<MutationStats> {
         mutants,
         killed,
         missed,
+        timeout,
         unviable,
     })
 }
@@ -257,6 +263,7 @@ fn parse_legacy_muex_line(line: &str) -> Option<MutationStats> {
         mutants,
         killed,
         missed: mutants.saturating_sub(killed),
+        timeout: 0,
         unviable: 0,
     })
 }
@@ -874,31 +881,101 @@ fn judge_mutation(raw: &Raw, min_kill: u32) -> Verdict {
         None => Verdict::EnvBlocked {
             missing: "mutation tool: вывод не распознан".into(),
         },
-        Some(MutationStats { mutants: 0, .. }) => Verdict::Pass,
-        Some(stats) => {
-            // Политика знаменателя: unviable (мутант не собирается) вычитается —
-            // тестами его поймать невозможно в принципе, и сам cargo-mutants
-            // считает прогон успешным при unviable>0 (exit 0); фейлят только
-            // missed и timeout (ExitCode::FoundProblems / Timeout).
-            let testable = stats.mutants.saturating_sub(stats.unviable);
-            if testable == 0 {
-                return Verdict::Pass; // нечего ловить: всё не собирается
-            }
-            let rate = 100_u32
-                .saturating_mul(stats.killed)
-                .checked_div(testable)
-                .unwrap_or(0);
-            if rate >= min_kill {
-                Verdict::Pass
-            } else {
-                Verdict::Fail {
-                    gate: Gate::Mutate,
-                    tail: format!(
-                        "kill-rate {rate}% < {min_kill}%: mutants {}, testable {}, killed (caught+timeout) {}, missed {}, unviable {}",
-                        stats.mutants, testable, stats.killed, stats.missed, stats.unviable
-                    ),
-                }
-            }
+        Some(stats) => judge_mutation_stats(&stats, min_kill),
+    }
+}
+
+/// Канонический вердикт мутационного гейта по СТАТАМ.
+///
+/// **Единственная** семантика мутационного вердикта в харнессе: её
+/// используют и синхронный гейт (`devh run`, `commands/run.rs`), и
+/// нативный аудит (`devh mutate verdict`, `commands/mutate.rs`). Расхождение
+/// двух входов = «красивый» отчёт в одном и честный провал в другом.
+///
+/// Канон (F-3/R4/R5/R6):
+/// * пойман (`killed`) — **только** `CaughtMutant`;
+/// * `Unviable` — **провал** (ноль терпимости): мутант не компилируется;
+/// * `Timeout` — **открытый вопрос**: поимки не было;
+/// * `MissedMutant` — **открытый вопрос**: дыра в покрытии;
+/// * «почти чисто» (99% при одном выжившем) — **не чисто**: чистый вердикт
+///   возможен, только когда пойман ВЕСЬ тестируемый набор.
+pub fn judge_mutation_stats(stats: &MutationStats, min_kill: u32) -> Verdict {
+    if stats.mutants == 0 {
+        // Мутантов не было — нечего ловить (честный пропуск, не дыра).
+        return Verdict::Pass;
+    }
+    // unviable = ПРОВАЛ (ноль терпимости): мутант не компилируется.
+    if stats.unviable > 0 {
+        return Verdict::Fail {
+            gate: Gate::Mutate,
+            tail: format!(
+                "unviable {} > 0: мутант не компилируется — это дыра, а не «граница \
+                 мутатора»: чинить код/типы, пока мутант собирается (mutants {}, \
+                 killed {}, missed {}, timeout {})",
+                stats.unviable, stats.mutants, stats.killed, stats.missed, stats.timeout
+            ),
+        };
+    }
+    // timeout = открытый вопрос: поимки нет (тест-фаза не уложилась).
+    if stats.timeout > 0 {
+        return Verdict::Fail {
+            gate: Gate::Mutate,
+            tail: format!(
+                "timeout {} > 0: тест-фаза мутанта не уложилась — поимки нет, вопрос \
+                 открыт (mutants {}, killed {}, missed {})",
+                stats.timeout, stats.mutants, stats.killed, stats.missed
+            ),
+        };
+    }
+    // Знаменатель: unviable вычитается (тестами его не поймать).
+    let testable = stats.mutants.saturating_sub(stats.unviable);
+    if testable == 0 {
+        // Все мутанты некомпилящиеся — это НЕ «нечего ловить → пропуск»,
+        // а провал: ни один мутант не был проверен.
+        return Verdict::Fail {
+            gate: Gate::Mutate,
+            tail: format!(
+                "testable 0: все {} мутантов не собираются — ни один не проверен, \
+                 гейт не может быть «чисто» (killed {}, missed {}, timeout {})",
+                stats.mutants, stats.killed, stats.missed, stats.timeout
+            ),
+        };
+    }
+    // Числитель — ТОЛЬКО пойманные (`CaughtMutant`): таймаут поимкой
+    // не считается (F-3).
+    let rate = 100_u32
+        .saturating_mul(stats.killed)
+        .checked_div(testable)
+        .unwrap_or(0);
+    // R5: выживший мутант блокирует «чисто» ВСЕГДА, независимо от
+    // kill-rate. «99%» — не оправдание для непойманного мутанта.
+    if stats.missed > 0 {
+        return Verdict::Fail {
+            gate: Gate::Mutate,
+            tail: format!(
+                "missed {} > 0: выживший мутант — дыра в покрытии (поимки нет, это не \
+                 «почти пойман»): чинить тесты, пока мутант не станет CaughtMutant\n\
+                 kill-rate {rate}% (порог {min_kill}%): mutants {}, testable {}, \
+                 killed (caught) {}, missed {}, timeout {}, unviable {}",
+                stats.missed,
+                stats.mutants,
+                testable,
+                stats.killed,
+                stats.missed,
+                stats.timeout,
+                stats.unviable,
+            ),
+        };
+    }
+    if rate >= min_kill {
+        Verdict::Pass
+    } else {
+        Verdict::Fail {
+            gate: Gate::Mutate,
+            tail: format!(
+                "kill-rate {rate}% < {min_kill}%: mutants {}, testable {}, killed (caught) {}, missed {}, timeout {}, unviable {}",
+                stats.mutants, testable, stats.killed, stats.missed, stats.timeout, stats.unviable
+            ),
         }
     }
 }
@@ -1025,6 +1102,7 @@ mod tests {
                 mutants: 12,
                 killed: 11,
                 missed: 1,
+                timeout: 0,
                 unviable: 0,
             })
         );
@@ -1038,6 +1116,7 @@ mod tests {
                 mutants: 10,
                 killed: 2,
                 missed: 8,
+                timeout: 0,
                 unviable: 0,
             })
         );
@@ -1059,6 +1138,7 @@ mod tests {
                 mutants: 10,
                 killed: 9,
                 missed: 1,
+                timeout: 0,
                 unviable: 0,
             })
         );
@@ -1069,6 +1149,7 @@ mod tests {
                 mutants: 1,
                 killed: 1,
                 missed: 0,
+                timeout: 0,
                 unviable: 0,
             })
         );
@@ -1079,8 +1160,10 @@ mod tests {
             ),
             Some(MutationStats {
                 mutants: 42,
-                killed: 7, // caught 5 + timeout 2
+                // F-3: пойман = ТОЛЬКО caught. Таймаут — не поимка.
+                killed: 5,
                 missed: 10,
+                timeout: 2,
                 unviable: 3,
             })
         );
@@ -1096,6 +1179,7 @@ mod tests {
                 mutants: 2,
                 killed: 0,
                 missed: 2,
+                timeout: 0,
                 unviable: 0,
             })
         );
@@ -1103,23 +1187,45 @@ mod tests {
 
     #[test]
     fn mutation_kill_rate_new_format_boundary() {
-        // 18/20 = 90% == min_kill (90) → Pass; 2/20 = 10% → Fail
-        let pass = raw(Some(0), "20 mutants tested in 10s: 2 missed, 18 caught");
+        // R5: выживший мутант блокирует «чисто» ВСЕГДА. 18/20 = 90% ==
+        // min_kill — но 2 выживших остаются открытым вопросом, поэтому
+        // вердикт Fail (и в хвосте — kill-rate, чтобы виден масштаб).
+        let partial = raw(Some(0), "20 mutants tested in 10s: 2 missed, 18 caught");
+        match judge(&Gate::Mutate, &partial, &cfg()) {
+            Verdict::Fail { tail, .. } => {
+                assert!(tail.contains("missed 2 > 0"), "{tail}");
+                assert!(tail.contains("kill-rate 90%"), "{tail}");
+            }
+            other => panic!("выживший мутант обязан быть Fail: {other:?}"),
+        }
+        // 18/20 выживших — тоже Fail (и по rate, и по missed).
         let fail = raw(Some(2), "20 mutants tested in 10s: 18 missed, 2 caught");
-        assert!(matches!(judge(&Gate::Mutate, &pass, &cfg()), Verdict::Pass));
         assert!(matches!(
             judge(&Gate::Mutate, &fail, &cfg()),
             Verdict::Fail { .. }
         ));
+        // Чисто = пойманы ВСЕ: только тогда Pass.
+        let clean = raw(Some(0), "20 mutants tested in 10s: 20 caught");
+        assert!(matches!(
+            judge(&Gate::Mutate, &clean, &cfg()),
+            Verdict::Pass
+        ));
     }
 
     #[test]
-    fn mutation_unviable_excluded_from_denominator() {
-        // реальный замер: 84 мутанта, 13 unviable, 71 caught, 0 missed
-        // старая формула: 71/84 = 84% < 90% → ложный FAIL;
-        // новая (как exit-коды cargo-mutants): 71/71 = 100% → Pass
-        let ok = raw(Some(0), "84 mutants tested in 40m: 71 caught, 13 unviable");
-        assert!(matches!(judge(&Gate::Mutate, &ok, &cfg()), Verdict::Pass));
+    fn mutation_unviable_is_zero_tolerance_fail() {
+        // F-3: unviable = мутант НЕ КОМПИЛИРУЕТСЯ. Это дыра (ноль
+        // терпимости), а не «граница мутатора»: раньше cargo-mutants при
+        // unviable>0 выходил с кодом 0, и харнесс это молча прощал.
+        // Теперь — ВСЕГДА Fail, даже при kill-rate 100%.
+        let r = raw(Some(0), "84 mutants tested in 40m: 71 caught, 13 unviable");
+        match judge(&Gate::Mutate, &r, &cfg()) {
+            Verdict::Fail { gate, tail } => {
+                assert_eq!(gate, Gate::Mutate);
+                assert!(tail.contains("unviable 13 > 0"), "{tail}");
+            }
+            other => panic!("unviable обязан быть Fail: {other:?}"),
+        }
         // 100 mutants, 20 unviable, 70 killed → 70/80 = 87% < 90% → Fail
         let bad = raw(
             Some(2),
@@ -1129,12 +1235,83 @@ mod tests {
             judge(&Gate::Mutate, &bad, &cfg()),
             Verdict::Fail { .. }
         ));
-        // всё unviable — нечего ловить → Pass (cargo-mutants тоже exit 0)
+        // всё unviable — тоже Fail (не «нечего ловить → Pass»)
         let all_unvia = raw(Some(0), "3 mutants tested in 1s: 3 unviable");
         assert!(matches!(
             judge(&Gate::Mutate, &all_unvia, &cfg()),
-            Verdict::Pass
+            Verdict::Fail { .. }
         ));
+    }
+
+    #[test]
+    fn mutation_timeout_is_not_a_kill_and_fails_the_gate() {
+        // F-3: таймаут — не поимка. Числитель = только caught.
+        // 9 caught + 1 timeout → 90% == min_kill, но таймаут = открытый
+        // вопрос → Fail (иначе «90%» выглядело бы как успех).
+        let r = raw(Some(0), "10 mutants tested in 5m: 1 timeout, 9 caught");
+        match judge(&Gate::Mutate, &r, &cfg()) {
+            Verdict::Fail { tail, .. } => {
+                assert!(tail.contains("timeout 1 > 0"), "{tail}");
+                assert!(tail.contains("поимки нет"), "{tail}");
+            }
+            other => panic!("таймаут обязан быть Fail: {other:?}"),
+        }
+        // без таймаутов всё как раньше
+        let ok = raw(Some(0), "10 mutants tested in 5m: 9 caught, 1 missed");
+        match judge(&Gate::Mutate, &ok, &cfg()) {
+            Verdict::Fail { tail, .. } => {
+                assert!(tail.contains("kill-rate 90%"), "{tail}");
+                assert!(tail.contains("killed (caught) 9"), "{tail}");
+            }
+            other => panic!("9/10 = 90% == min_kill → Pass: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mutation_stats_judge_is_the_single_source_of_truth() {
+        // Канон одной таблицы: verdict по СТАТАМ (её используют и `devh run`,
+        // и `devh mutate verdict`).
+        let empty = MutationStats::default();
+        assert!(
+            matches!(judge_mutation_stats(&empty, 90), Verdict::Pass),
+            "0 мутантов — честный пропуск"
+        );
+        let all_unviable = MutationStats {
+            mutants: 3,
+            killed: 0,
+            missed: 0,
+            timeout: 0,
+            unviable: 3,
+        };
+        assert!(
+            matches!(
+                judge_mutation_stats(&all_unviable, 90),
+                Verdict::Fail { .. }
+            ),
+            "все unviable — провал, а не «нечего ловить → Pass»"
+        );
+        let timeout = MutationStats {
+            mutants: 10,
+            killed: 9,
+            missed: 0,
+            timeout: 1,
+            unviable: 0,
+        };
+        assert!(
+            matches!(judge_mutation_stats(&timeout, 90), Verdict::Fail { .. }),
+            "таймаут — открытый вопрос"
+        );
+        let clean = MutationStats {
+            mutants: 10,
+            killed: 10,
+            missed: 0,
+            timeout: 0,
+            unviable: 0,
+        };
+        assert!(
+            matches!(judge_mutation_stats(&clean, 90), Verdict::Pass),
+            "пойманы все — чисто"
+        );
     }
 
     #[test]
@@ -1572,9 +1749,23 @@ test result: FAILED. 1 passed; 1 failed";
 
     #[test]
     fn mutation_kill_rate_boundary() {
-        let pass = raw(Some(0), "Mutants: 10, Killed: 9");
+        // Легаси-диалект (muex): «Mutants: N, Killed: M» → missed = N - M.
+        // 9 из 10 = 90% == min_kill, но один выживший — открытый вопрос →
+        // Fail (R5). Чисто = пойманы все 10.
+        let partial = raw(Some(0), "Mutants: 10, Killed: 9");
+        match judge(&Gate::Mutate, &partial, &cfg()) {
+            Verdict::Fail { tail, .. } => {
+                assert!(tail.contains("missed 1 > 0"), "{tail}");
+                assert!(tail.contains("kill-rate 90%"), "{tail}");
+            }
+            other => panic!("выживший мутант обязан быть Fail: {other:?}"),
+        }
+        let clean = raw(Some(0), "Mutants: 10, Killed: 10");
+        assert!(matches!(
+            judge(&Gate::Mutate, &clean, &cfg()),
+            Verdict::Pass
+        ));
         let fail = raw(Some(0), "Mutants: 100, Killed: 89");
-        assert!(matches!(judge(&Gate::Mutate, &pass, &cfg()), Verdict::Pass));
         assert!(matches!(
             judge(&Gate::Mutate, &fail, &cfg()),
             Verdict::Fail { .. }

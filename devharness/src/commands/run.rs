@@ -1441,17 +1441,28 @@ fn review_size_verdict(lines: usize, max: u32) -> Verdict {
 /// правка файлов «заодно с ревью» — это работа мимо гейтов (серия F:
 /// гейты не обходятся молча). Нечитаемое дерево после ревью — тоже
 /// env-блокер: без этого проверка вслепую превращалась бы в «чисто».
-fn post_review_guard(before: &str, wt: &Path) -> Option<Verdict> {
+/// Дайджест дерева до/после ревью. `Some((причина, verdict))` — блокер:
+/// ревьюер изменил дерево, либо дайджест не читается (обе — среда/обход,
+/// rc=2, сильнее любого «VERDICT: OK»). `None` — дерево не тронуто.
+fn post_review_guard(before: &str, wt: &Path) -> Option<(String, Verdict)> {
     let after = match git::tree_digest(wt) {
         Ok(a) => a,
         Err(e) => {
-            return Some(Verdict::EnvBlocked {
-                missing: format!("дайджест дерева после ревью не читается ({e})"),
-            })
+            return Some((
+                format!("дайджест дерева после ревью не читается ({e})"),
+                Verdict::EnvBlocked {
+                    missing: "дайджест дерева после ревью не читается".into(),
+                },
+            ))
         }
     };
-    (after != before).then(|| Verdict::EnvBlocked {
-        missing: "ревьюер изменил дерево".into(),
+    (after != before).then(|| {
+        (
+            "ревьюер изменил дерево".to_string(),
+            Verdict::EnvBlocked {
+                missing: "ревьюер изменил дерево".into(),
+            },
+        )
     })
 }
 
@@ -1550,14 +1561,10 @@ fn review_gate(store: &Store, cfg: &RunConfig, wt: &Path, id: &ItemId) -> (Strin
     };
     // Дайджест ПОСЛЕ — сильнее любого вердикта ревьюера: молчаливая правка
     // дерева перебивает даже «VERDICT: OK».
+    // post_review_guard отдаёт (причина, EnvBlocked) — без внутреннего match с
+    // `_`-arm: его «delete match arm» не компилировался (unviable = дыра).
     match post_review_guard(&before, wt) {
-        Some(v) => {
-            let why = match &v {
-                Verdict::EnvBlocked { missing } => missing.clone(),
-                _ => unreachable!("post_review_guard отдаёт только EnvBlocked"),
-            };
-            (format!("{log}review: {why}\n"), v)
-        }
+        Some((why, v)) => (format!("{log}review: {why}\n"), v),
         None => (log, verdict),
     }
 }
@@ -1608,11 +1615,16 @@ fn crap_gate(wt: &Path, cr: &CrapCfg) -> (String, Verdict) {
 }
 
 /// Статистика мутационного прогона (P4: из неё пишется perf.log).
+///
+/// `killed` = **только пойманные** (`CaughtMutant`): таймаут поимкой не
+/// считается (F-3). `missed` и `timeout` — открытые вопросы (дыра в
+/// покрытии / не уложился), `unviable` — провал (ноль терпимости).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct MutStats {
     total: u32,
     killed: u32,
     missed: u32,
+    timeout: u32,
     unviable: u32,
 }
 
@@ -1941,6 +1953,7 @@ fn mutate_gate(
             total: 0,
             killed: 0,
             missed: 0,
+            timeout: 0,
             unviable: 0,
         }),
         fatal: false,
@@ -1989,6 +2002,7 @@ fn mutate_gate(
                 a.total = a.total.saturating_add(s.total);
                 a.killed = a.killed.saturating_add(s.killed);
                 a.missed = a.missed.saturating_add(s.missed);
+                a.timeout = a.timeout.saturating_add(s.timeout);
                 a.unviable = a.unviable.saturating_add(s.unviable);
             }
         }
@@ -2028,6 +2042,7 @@ fn finish(m: &MutateCfg, run: MutRun, label: &str, key: &str, gate: Gate) -> Mut
                 total: 0,
                 killed: 0,
                 missed: 0,
+                timeout: 0,
                 unviable: 0,
             }),
             fatal: false,
@@ -2048,10 +2063,11 @@ fn finish(m: &MutateCfg, run: MutRun, label: &str, key: &str, gate: Gate) -> Mut
             log += repair;
         }
         log += &format!(
-            "{label}: остановлено досрочно, проверено до останова: Mutants {total}, killed {killed}, missed {missed}, unviable {unviable} (MUTATE_EARLY=1)\n",
+            "{label}: остановлено досрочно, проверено до останова: Mutants {total}, killed {killed}, missed {missed}, timeout {timeout}, unviable {unviable} (MUTATE_EARLY=1)\n",
             total = stats.total,
             killed = stats.killed,
             missed = stats.missed,
+            timeout = stats.timeout,
             unviable = stats.unviable
         );
         let fatal = matches!(kind, crate::core::early::EarlyStop::Doom { .. }) || *poisoned;
@@ -2071,7 +2087,27 @@ fn finish(m: &MutateCfg, run: MutRun, label: &str, key: &str, gate: Gate) -> Mut
                 tail: tail_of(&log, 40),
             }
         } else {
-            Verdict::Pass
+            // Канон тот же: выживший/таймаут/некомпилящийся блокируют «чисто»
+            // даже при ранней остановке (SAMPLE) — остановка не «прощает» дыру.
+            match gates::judge_mutation_stats(
+                &gates::MutationStats {
+                    mutants: stats.total,
+                    killed: stats.killed,
+                    missed: stats.missed,
+                    timeout: stats.timeout,
+                    unviable: stats.unviable,
+                },
+                m.min_kill,
+            ) {
+                Verdict::Fail { gate: g, tail } => {
+                    log += &format!("{label} FAIL: {tail}\n");
+                    Verdict::Fail {
+                        gate: g,
+                        tail: tail_of(&log, 40),
+                    }
+                }
+                other => other,
+            }
         };
         return MutReport {
             log,
@@ -2085,6 +2121,7 @@ fn finish(m: &MutateCfg, run: MutRun, label: &str, key: &str, gate: Gate) -> Mut
         total,
         killed,
         missed,
+        timeout,
         unviable,
     } = run
     else {
@@ -2118,52 +2155,56 @@ fn finish(m: &MutateCfg, run: MutRun, label: &str, key: &str, gate: Gate) -> Mut
         total,
         killed,
         missed,
+        timeout,
         unviable,
     };
-    let testable = total.saturating_sub(unviable);
-    if let Some(pct) = killed
-        .checked_mul(100)
-        .and_then(|n| n.checked_div(testable))
-    {
-        let mut log = format!(
-            "{label}: Mutants {total}, killed {killed} ({pct}%) [testable {testable}], missed {missed}, unviable {unviable}\n"
-        );
-        let verdict = if pct < m.min_kill {
-            log += &format!(
-                "{label} FAIL: kill-rate {pct}% < {}% — тесты не ловят мутантов (missed {missed}, unviable {unviable})\n",
-                m.min_kill
-            );
-            Verdict::Fail {
-                gate: gate.clone(),
-                tail: tail_of(&log, 40),
-            }
-        } else {
-            Verdict::Pass
-        };
-        MutReport {
-            log,
-            verdict,
-            stats: Some(stats),
-            fatal: false,
-            early: false,
-        }
-    } else if total == 0 {
-        MutReport {
+    // 0 мутантов — честный пропуск (нечего мутировать), не дыра.
+    if total == 0 {
+        return MutReport {
             log: format!("{label}: 0 мутантов — нечего убивать, пропуск\n"),
             verdict: Verdict::Pass,
             stats: Some(stats),
             fatal: false,
             early: false,
+        };
+    }
+    let testable = total.saturating_sub(unviable);
+    let mut log = match killed.checked_mul(100).and_then(|n| n.checked_div(testable)) {
+        Some(pct) => format!(
+            "{label}: Mutants {total}, killed {killed} ({pct}%) [testable {testable}], missed {missed}, timeout {timeout}, unviable {unviable}\n"
+        ),
+        // testable == 0: все мутанты некомпилящиеся (см. вердикт ниже).
+        None => format!(
+            "{label}: Mutants {total}, killed {killed} [testable 0], missed {missed}, timeout {timeout}, unviable {unviable}\n"
+        ),
+    };
+    // Канон вердикта — ОДИН (core/gates.rs::judge_mutation_stats): тот же,
+    // что у `devh mutate verdict`. Здесь он превращается в хвост fix-промпта.
+    let verdict = match gates::judge_mutation_stats(
+        &gates::MutationStats {
+            mutants: total,
+            killed,
+            missed,
+            timeout,
+            unviable,
+        },
+        m.min_kill,
+    ) {
+        Verdict::Fail { gate, tail } => {
+            log += &format!("{label} FAIL: {tail}\n");
+            Verdict::Fail {
+                gate,
+                tail: tail_of(&log, 40),
+            }
         }
-    } else {
-        MutReport {
-            log: format!(
-                "{label}: все {total} мутантов unviable (не собираются) — тесты не при чём, пропуск\n"
-            ),
-            verdict: Verdict::Pass,
-            stats: Some(stats),
-            fatal: false,
-            early: false,        }
+        other => other,
+    };
+    MutReport {
+        log,
+        verdict,
+        stats: Some(stats),
+        fatal: false,
+        early: false,
     }
 }
 
@@ -2182,7 +2223,7 @@ fn perf_mutate(store: &Store, id: &ItemId, rep: &MutReport, timing: &Timing) {
         .map(|p| p.to_string())
         .unwrap_or_else(|| "-".into());
     let secs = timing.stages().last().map(|(_, s)| *s).unwrap_or(0);
-    let header = "task,mutants,killed,missed,unviable,kill_pct,mutate_s\n";
+    let header = "task,mutants,killed,missed,timeout,unviable,kill_pct,mutate_s\n";
     if !store.dir.join("logs").join("perf.log").exists() {
         store.append_raw("logs/perf.log", header).ok();
     }
@@ -2190,11 +2231,12 @@ fn perf_mutate(store: &Store, id: &ItemId, rep: &MutReport, timing: &Timing) {
         .append_raw(
             "logs/perf.log",
             &format!(
-                "{},{},{},{},{},{},{}\n",
+                "{},{},{},{},{},{},{},{}\n",
                 id.dir_name(),
                 s.total,
                 s.killed,
                 s.missed,
+                s.timeout,
                 s.unviable,
                 kill_pct,
                 secs
@@ -2216,6 +2258,7 @@ enum MutRun {
         total: u32,
         killed: u32,
         missed: u32,
+        timeout: u32,
         unviable: u32,
     },
     /// P5.5: контенция — нагрузка выше порога, гейт перенесён (не молчаливый Env).
@@ -2329,8 +2372,16 @@ impl TuiProgress {
             return None;
         }
         self.last_printed = done;
-        let row =
-            crate::core::tui::line(done, total, &counts, self.avg_secs(done), "", "", &self.c);
+        let row = crate::core::tui::line(
+            done,
+            total,
+            &counts,
+            self.avg_secs(done),
+            self.started.elapsed().as_secs_f64(),
+            "",
+            "",
+            &self.c,
+        );
         if row == self.last_row {
             return None; // ничего не изменилось — не зеркалим одну строку
         }
@@ -2358,6 +2409,7 @@ fn classify(log: &str) -> MutRun {
             total: s.mutants,
             killed: s.killed,
             missed: s.missed,
+            timeout: s.timeout,
             unviable: s.unviable,
         },
         // P7-2.2: пустой скоуп (--in-diff без мутантов на изменённых
@@ -2436,6 +2488,7 @@ fn run_mut_watched(wt: &Path, cmd: &str, m: &MutateCfg, envs: &[(String, String)
                     total,
                     killed: live.killed(),
                     missed: live.missed,
+                    timeout: live.timeout,
                     unviable: live.unviable,
                 },
                 poisoned,
@@ -2794,11 +2847,12 @@ mod tests {
         std::fs::write(d.path().join("a.txt"), b"2").unwrap_or_else(|_| unreachable!());
         let got = post_review_guard(&before, d.path());
         match got {
-            Some(Verdict::EnvBlocked { missing }) => {
+            Some((why, Verdict::EnvBlocked { missing })) => {
                 assert!(
                     missing.contains("ревьюер изменил дерево"),
                     "причина названа: {missing}"
                 );
+                assert!(why.contains("ревьюер изменил дерево"), "лог назван: {why}");
             }
             other => panic!("правка дерева из ревью не поймана: {other:?}"),
         }

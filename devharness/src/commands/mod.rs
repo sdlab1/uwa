@@ -6,11 +6,15 @@ pub mod escapes;
 pub mod init;
 pub mod merge;
 pub mod misc;
+pub mod mutate;
 pub mod new;
+pub mod next;
 pub mod ps;
 pub mod run;
 pub mod survivors;
+pub mod test;
 pub mod tickets;
+pub mod workflow;
 
 use std::path::Path;
 
@@ -215,9 +219,30 @@ pub fn dispatch(cmd: &Cmd, root: &Path) -> anyhow::Result<()> {
     if let Cmd::Init = cmd {
         return init::init(root);
     }
+    // Команмы, которые работают БЕЗ .harness/config: оракул следующего шага
+    // (S0: «нет конфига» → он и должен сказать «devh init»), печать канона
+    // и полный сьют (свой backend, конфиг проекта ему не нужен).
+    match cmd {
+        Cmd::Next => {
+            let cfg = load_config(root).unwrap_or_default();
+            return next::next(root, &cfg);
+        }
+        Cmd::Workflow => {
+            workflow::workflow();
+            return Ok(());
+        }
+        Cmd::Test { args } => {
+            test::test(root, args)?;
+            return Ok(());
+        }
+        _ => {}
+    }
     let cfg = load_config(root)?;
     match cmd {
         Cmd::Init => unreachable!(),
+        Cmd::Next => unreachable!(),
+        Cmd::Workflow => unreachable!(),
+        Cmd::Test { .. } => unreachable!(),
         Cmd::New {
             arg,
             no_red,
@@ -295,6 +320,7 @@ pub fn dispatch(cmd: &Cmd, root: &Path) -> anyhow::Result<()> {
             *reset,
         )?,
         Cmd::Escapes => escapes::escapes(&store, &cfg, root)?,
+        Cmd::Mutate { sub, args } => mutate::mutate(root, sub, args)?,
     }
     Ok(())
 }

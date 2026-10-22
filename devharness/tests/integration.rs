@@ -1840,51 +1840,483 @@ fn section00_shellcheck_oracle_files() {
 }
 
 #[test]
-fn section00b_branded_audit_cli_present() {
-    // Фирменный CLI вывода аудита: watcher обязан быть БЕЗ прогресс-бара и с
-    // пилюлей процента + легендой строкой выше. Дрейф («в main-репо осталась
-    // старая версия, оператор не видит фирменный вывод») замечаем здесь.
+fn section00b_native_audit_cli_contract() {
+    // Контракт НАЦИОНАЛЬНОГО аудита (R2/R3): внешний watcher удалён без
+    // обёртки и без второго входа, второй источник истины (корневой
+    // MUTATION_WORKFLOW.md) удалён, а канон живёт в коде (`devh mutate
+    // help` + `devh workflow`).
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let src = std::fs::read_to_string(manifest.join("tools/mutants-watch.sh"))
-        .unwrap_or_else(|_| unreachable!());
+    for gone in ["tools/mutants-watch.sh", "tools/mutants-run.sh"] {
+        assert!(
+            !manifest.join(gone).exists(),
+            "{gone} обязан быть удалён (R2) — второй вход в аудит запрещён"
+        );
+    }
+    let repo_root = manifest.parent().unwrap_or_else(|| unreachable!());
     assert!(
-        contains(&src, "pbg"),
-        "пилюля процента (pbg) обязана быть: {src}"
+        !repo_root.join("MUTATION_WORKFLOW.md").exists(),
+        "MUTATION_WORKFLOW.md в корне обязан быть удалён (R3) — второй источник истины"
     );
-    assert!(!contains(&src, "###"), "прогресс-бар удалён: {src}");
-    // Наблюдение за прогоном = ЖИВОЙ прогресс: watcher без флага циклит,
-    // пока cargo-mutants жив. Если дрейф сделает из watcher одноразовый
-    // снимок — оператор снова останется без вывода (ругань «одноразовая
-    // хуета»), поэтому режим ожидания под этим гейтом.
-    assert!(
-        contains(&src, "while pgrep -x cargo-mutants"),
-        "watcher обязан жить циклом ожидания (без --once): {src}"
-    );
-    assert!(contains(&src, "--once"), "точечный снимок --once остаётся");
-    // ЖИВОЙ режим: одна строка, обновляемая \r на месте (не снапшоты!)
-    assert!(
-        contains(&src, "LIVE=1"),
-        "живой режим: watcher сам обновляет строку: {src}"
-    );
-    assert!(
-        contains(&src, "\\r\\033[K"),
-        "обновление \\r + clear строки"
-    );
-    assert!(
-        contains(&src, "легенда"),
-        "легенда значков строкой выше: {src}"
-    );
-    // Rust-часть фирменного вывода — общий модуль для всего харнесса.
-    assert!(
-        manifest.join("src/core/tui.rs").exists(),
-        "core/tui.rs — единая рисовка процентов (run.rs + watcher)"
-    );
+    // Родные слои вместо скрипта: события, данные исходов, общая рисовка.
+    for layer in [
+        "src/core/watch.rs",
+        "src/core/mutaudit.rs",
+        "src/core/tui.rs",
+        "src/commands/mutate.rs",
+    ] {
+        assert!(
+            manifest.join(layer).exists(),
+            "{layer} — обязательный слой нативного аудита"
+        );
+    }
     let tui = std::fs::read_to_string(manifest.join("src/core/tui.rs"))
         .unwrap_or_else(|_| unreachable!());
     assert!(contains(&tui, "pub fn pill"), "tui::pill — процент пилюлей");
     assert!(
         contains(&tui, "pub fn legend"),
         "tui::legend — легенда значков"
+    );
+    // Событийный слой: inotify + poll, а НЕ sleep-цикл (linux-ветка).
+    let watch_src = std::fs::read_to_string(manifest.join("src/core/watch.rs"))
+        .unwrap_or_else(|_| unreachable!());
+    let linux_part = watch_src
+        .split("#[cfg(not(target_os = \"linux\"))]")
+        .next()
+        .unwrap_or_default();
+    assert!(
+        !contains(&linux_part, "thread::sleep"),
+        "core/watch.rs: linux-ветка обязана быть событийной (без sleep-цикла)"
+    );
+    assert!(
+        contains(&watch_src, "inotify_init1") && contains(&watch_src, "libc::poll"),
+        "core/watch.rs — inotify + poll"
+    );
+    // Канон мутационной семантики — в коде, а не в скрипте.
+    let canon = std::fs::read_to_string(manifest.join("src/commands/mutate.rs"))
+        .unwrap_or_else(|_| unreachable!());
+    assert!(
+        contains(&canon, "Руками cargo-mutants НЕ запускать"),
+        "канон обязан запрещать ручной cargo-mutants"
+    );
+}
+
+/// Песочница нативного аудита: поддельный каталог прогона cargo-mutants
+/// (append-списки + outcomes.json) и состояние супервизора.
+struct AuditSandbox {
+    _guard: tempfile::TempDir,
+    root: PathBuf,
+}
+
+impl AuditSandbox {
+    /// `caught`/`missed`/`timeout`/`unviable` — сколько исходов каждого
+    /// вида. `exit` — код возврата cargo-mutants (None = прогон идёт).
+    fn new(
+        name: &str,
+        caught: usize,
+        missed: usize,
+        timeout: usize,
+        unviable: usize,
+        exit: Option<i32>,
+    ) -> Self {
+        let guard = tempfile::TempDir::new().unwrap_or_else(|_| unreachable!());
+        let root = guard.path().join(name);
+        let out = root.join("mutants.out");
+        fs::create_dir_all(&out).unwrap_or_else(|_| unreachable!());
+        fs::create_dir_all(root.join(".harness/mutate")).unwrap_or_else(|_| unreachable!());
+        // devh требует git-репозиторий (root ищется по нему).
+        git(None, &["init", "-q", &root.to_string_lossy()]);
+        // Минимальный конфиг: диспетчер devh требует `.harness/config`
+        // (как и `devh init` его создаёт). Порог kill-rate — дефолтный.
+        fs::write(
+            root.join(".harness/config"),
+            "MIN_KILL=90\nMUTATE=cargo mutants --in-place --test-tool nextest --baseline=skip {files}\n",
+        )
+        .unwrap_or_else(|_| unreachable!());
+        let mut outcomes: Vec<String> = Vec::new();
+        let mut n = 0usize;
+        for (kind, count) in [
+            ("caught.txt", caught),
+            ("missed.txt", missed),
+            ("timeout.txt", timeout),
+            ("unviable.txt", unviable),
+        ] {
+            let summary = match kind {
+                "caught.txt" => "CaughtMutant",
+                "missed.txt" => "MissedMutant",
+                "timeout.txt" => "Timeout",
+                _ => "Unviable",
+            };
+            let mut lines = String::new();
+            for _ in 0..count {
+                n += 1;
+                let file = format!("devharness/src/core/plan.rs");
+                let name = format!("{file}:{n}:5: replace x with None");
+                lines.push_str(&format!("{name}\n"));
+                outcomes.push(format!(
+                    r#"{{"scenario":{{"Mutant":{{"name":"{name}","file":"{file}","span":{{"start":{{"line":{n},"column":5}}}},"replacement":"None","genre":"FnValue"}}}},"summary":"{summary}","phase_results":[{{"phase":"Test","duration":1.0}}]}}"#
+                ));
+            }
+            fs::write(out.join(kind), lines).unwrap_or_else(|_| unreachable!());
+        }
+        fs::write(
+            out.join("outcomes.json"),
+            format!("{{\"outcomes\":[{}]}}", outcomes.join(",")),
+        )
+        .unwrap_or_else(|_| unreachable!());
+        let state = serde_json::json!({
+            "state": if exit.is_some() { "done" } else { "running" },
+            "pid": 0,
+            "exit": exit,
+            "started": 1,
+            "finished": exit.map(|_| 2),
+            "args": [],
+            "cwd": root.to_string_lossy(),
+            "mode": "copy",
+            "pgid": 0,
+        });
+        fs::write(
+            root.join(".harness/mutate/state.json"),
+            serde_json::to_string_pretty(&state).unwrap_or_default(),
+        )
+        .unwrap_or_else(|_| unreachable!());
+        Self {
+            _guard: guard,
+            root,
+        }
+    }
+
+    fn run(&self, args: &[&str]) -> (i32, String) {
+        let out = Command::new(devh_bin())
+            .args(args)
+            .current_dir(&self.root)
+            .output()
+            .unwrap_or_else(|_| unreachable!());
+        let mut all = String::from_utf8_lossy(&out.stdout).to_string();
+        all.push_str(&String::from_utf8_lossy(&out.stderr));
+        (out.status.code().unwrap_or(-1), all)
+    }
+}
+
+/// Песочница НАСТОЯЩЕГО супервизора: `cargo` подменён стабом, который
+/// пишет в `mutants.out` ровно то, что пишет cargo-mutants 27.1.0
+/// (append-списки + outcomes.json + mutants.json).
+///
+/// Никаких заглушек самого харнесса: тут проверяется ВЕСЬ путь
+/// `devh mutate start` → супервизор (setsid) → cargo-mutants → state/
+/// verdict/problems.json → `devh mutate verdict`.
+struct MutateSandbox {
+    _guard: tempfile::TempDir,
+    root: PathBuf,
+    stub_bin: PathBuf,
+}
+
+/// Стаб cargo-mutants. Сценарий задаётся переменными окружения:
+/// STUB_CAUGHT / STUB_MISSED / STUB_TIMEOUT / STUB_UNVIABLE / STUB_EXIT /
+/// STUB_SLEEP.
+const CARGO_MUTANTS_STUB: &str = r#"#!/usr/bin/env bash
+# Стаб cargo-mutants: пишет в mutants.out то же, что пишет настоящий.
+out="mutants.out"
+mkdir -p "$out"
+rm -f "$out"/*.txt "$out/outcomes.json" "$out/mutants.json"
+caught="${STUB_CAUGHT:-0}"
+missed="${STUB_MISSED:-0}"
+tmo="${STUB_TIMEOUT:-0}"
+unv="${STUB_UNVIABLE:-0}"
+total=$((caught + missed + tmo + unv))
+sleep "${STUB_SLEEP:-0}"
+for f in caught missed timeout unviable; do : > "$out/$f.txt"; done
+printf '{"outcomes":[' > "$out/outcomes.part"
+n=0
+emit() {
+  n=$((n + 1))
+  f="devharness/src/core/plan.rs"
+  name="$f:$n:5: replace x with None"
+  printf '%s\n' "$name" >> "$out/$1.txt"
+  if [ "$n" -gt 1 ]; then printf ',' >> "$out/outcomes.part"; fi
+  printf '{"scenario":{"Mutant":{"name":"%s","file":"%s","span":{"start":{"line":%d,"column":5}},"replacement":"None","genre":"FnValue"}},"summary":"%s","phase_results":[{"phase":"Test","duration":1.0}]}' "$name" "$f" "$n" "$2" >> "$out/outcomes.part"
+}
+i=0; while [ "$i" -lt "$caught" ]; do emit caught CaughtMutant; i=$((i + 1)); done
+i=0; while [ "$i" -lt "$missed" ]; do emit missed MissedMutant; i=$((i + 1)); done
+i=0; while [ "$i" -lt "$tmo" ]; do emit timeout Timeout; i=$((i + 1)); done
+i=0; while [ "$i" -lt "$unv" ]; do emit unviable Unviable; i=$((i + 1)); done
+printf ']}' >> "$out/outcomes.part"
+mv "$out/outcomes.part" "$out/outcomes.json"
+printf '[\n' > "$out/mutants.json"
+i=1; while [ "$i" -le "$total" ]; do
+  printf '    {\n    "name": "m%d"\n    }' "$i" >> "$out/mutants.json"
+  if [ "$i" -lt "$total" ]; then printf ',\n' >> "$out/mutants.json"; else printf '\n' >> "$out/mutants.json"; fi
+  i=$((i + 1))
+done
+printf ']\n' >> "$out/mutants.json"
+echo "$total mutants tested in 1s"
+exit "${STUB_EXIT:-0}"
+"#;
+
+impl MutateSandbox {
+    fn new(name: &str) -> Self {
+        let guard = tempfile::TempDir::new().unwrap_or_else(|_| unreachable!());
+        let root = guard.path().join(name);
+        fs::create_dir_all(&root).unwrap_or_else(|_| unreachable!());
+        let stub_bin = guard.path().join("stub-bin");
+        fs::create_dir_all(&stub_bin).unwrap_or_else(|_| unreachable!());
+        write_exec(&stub_bin.join("cargo"), CARGO_MUTANTS_STUB);
+        git(None, &["init", "-q", &root.to_string_lossy()]);
+        fs::create_dir_all(root.join(".harness")).unwrap_or_else(|_| unreachable!());
+        fs::write(
+            root.join(".harness/config"),
+            "MIN_KILL=90\nMUTATE=cargo mutants --in-place --test-tool nextest --baseline=skip {files}\n",
+        )
+        .unwrap_or_else(|_| unreachable!());
+        Self {
+            _guard: guard,
+            root,
+            stub_bin,
+        }
+    }
+
+    fn run_env(&self, args: &[&str], env: &[(&str, &str)]) -> (i32, String) {
+        let path = format!(
+            "{}:{}",
+            self.stub_bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let mut cmd = Command::new(devh_bin());
+        cmd.args(args).current_dir(&self.root).env("PATH", path);
+        // Гейт нагрузки выключен: тест не должен зависеть от того, что в
+        // момент прогона машина загружена соседним агентом (детерминизм).
+        cmd.env("HARNESS_MUTATE_MAX_LOAD", "off");
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+        let out = cmd.output().unwrap_or_else(|_| unreachable!());
+        let mut all = String::from_utf8_lossy(&out.stdout).to_string();
+        all.push_str(&String::from_utf8_lossy(&out.stderr));
+        (out.status.code().unwrap_or(-1), all)
+    }
+
+    fn run(&self, args: &[&str]) -> (i32, String) {
+        self.run_env(args, &[])
+    }
+
+    /// Дождаться финального состояния супервизора (state.json).
+    ///
+    /// Ожидание в ТЕСТЕ — это не «sleep-цикл агента»: тут мы проверяем
+    /// асинхронный процесс, а не реализуем пользовательский вход.
+    fn wait_state(&self, timeout: std::time::Duration) -> String {
+        let path = self.root.join(".harness/mutate/state.json");
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            if let Ok(text) = fs::read_to_string(&path) {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+                    let st = v.get("state").and_then(|s| s.as_str()).unwrap_or("");
+                    if !st.is_empty() && st != "running" {
+                        return st.to_string();
+                    }
+                }
+            }
+            if std::time::Instant::now() > deadline {
+                return "timeout".to_string();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
+    fn read_json(&self, rel: &str) -> serde_json::Value {
+        let text = fs::read_to_string(self.root.join(rel)).unwrap_or_default();
+        serde_json::from_str(&text).unwrap_or(serde_json::Value::Null)
+    }
+}
+
+#[test]
+fn section00c_native_mutate_verdict_semantics() {
+    // F-3/R5: пойман = ТОЛЬКО CaughtMutant. Выживший, таймаут, некомпилящийся
+    // и неопознанный исход блокируют чистый вердикт. Коды возврата:
+    // 0 — чисто, 1 — дыра, 2 — «аудита нет / ещё идёт».
+    let clean = AuditSandbox::new("clean", 5, 0, 0, 0, Some(0));
+    let (rc, out) = clean.run(&["mutate", "verdict"]);
+    assert_eq!(rc, 0, "чистый аудит — rc=0: {out}");
+    assert!(contains(&out, "вердикт: чисто"), "{out}");
+
+    let missed = AuditSandbox::new("missed", 4, 1, 0, 0, Some(2));
+    let (rc, out) = missed.run(&["mutate", "verdict"]);
+    assert_eq!(rc, 1, "выживший мутант — rc=1: {out}");
+    assert!(contains(&out, "ПРОВАЛ"), "{out}");
+
+    // Таймаут — НЕ поимка: kill-rate считается по пойманным, вердикт не чистый.
+    let timed = AuditSandbox::new("timeout", 4, 0, 1, 0, Some(3));
+    let (rc, out) = timed.run(&["mutate", "verdict"]);
+    assert_eq!(rc, 1, "таймаут — открытый вопрос, rc=1: {out}");
+    let (rc, out) = timed.run(&["mutate", "status", "--json"]);
+    assert_eq!(rc, 1, "status --json тоже видит проблему: {out}");
+    assert!(contains(&out, "\"timeout\": 1"), "{out}");
+    assert!(
+        contains(&out, "\"kill_rate\": 80"),
+        "kill-rate только по пойманным: {out}"
+    );
+
+    // Unviable — провал с нулевой терпимостью.
+    let unv = AuditSandbox::new("unviable", 4, 0, 0, 1, Some(0));
+    let (rc, out) = unv.run(&["mutate", "verdict"]);
+    assert_eq!(rc, 1, "unviable — rc=1: {out}");
+
+    // Проблемы — руководство к действию: file:line, замена, жанр.
+    let (rc, out) = missed.run(&["mutate", "problems"]);
+    assert_eq!(rc, 1, "problems при дыре — rc=1: {out}");
+    assert!(contains(&out, "plan.rs"), "файл проблемы: {out}");
+    assert!(contains(&out, "замена → None"), "замена в проблеме: {out}");
+    assert!(contains(&out, "genre: FnValue"), "жанр в проблеме: {out}");
+
+    // Аудита нет — это НЕ «чисто»: rc=2.
+    let empty = AuditSandbox::new("empty", 0, 0, 0, 0, None);
+    fs::remove_dir_all(empty.root.join("mutants.out")).unwrap_or_else(|_| unreachable!());
+    let (rc, out) = empty.run(&["mutate", "verdict"]);
+    assert_eq!(rc, 2, "аудита нет — rc=2: {out}");
+    let (rc, out) = empty.run(&["mutate", "status"]);
+    assert_eq!(rc, 2, "аудита нет — rc=2: {out}");
+    let (rc, out) = empty.run(&["mutate", "problems"]);
+    assert_eq!(rc, 2, "аудита нет — rc=2: {out}");
+}
+
+#[test]
+fn section00d_native_mutate_blocks_broken_details() {
+    // Повреждённые/отсутствующие детали аудита — чистый вердикт невозможен
+    // (R5): «счётчики красивые» не доказывают, что всё поймано.
+    let broken = AuditSandbox::new("broken", 3, 0, 0, 0, Some(0));
+    fs::write(broken.root.join("mutants.out/outcomes.json"), "{ not json")
+        .unwrap_or_else(|_| unreachable!());
+    let (rc, out) = broken.run(&["mutate", "verdict"]);
+    assert_eq!(rc, 1, "битые детали — rc=1: {out}");
+    assert!(contains(&out, "детали"), "{out}");
+
+    let lost = AuditSandbox::new("lost", 3, 0, 0, 0, Some(0));
+    fs::remove_file(lost.root.join("mutants.out/outcomes.json")).unwrap_or_else(|_| unreachable!());
+    let (rc, out) = lost.run(&["mutate", "verdict"]);
+    assert_eq!(rc, 1, "детали отсутствуют — rc=1: {out}");
+
+    // Упавший инструмент (rc=70) — видимая проблема, а не «чисто».
+    let crashed = AuditSandbox::new("crashed", 3, 0, 0, 0, Some(70));
+    let (rc, out) = crashed.run(&["mutate", "verdict"]);
+    assert_eq!(rc, 1, "упавший cargo-mutants — rc=1: {out}");
+    assert!(contains(&out, "инструмент"), "{out}");
+}
+
+/// НАСТОЯЩИЙ супервизор: `devh mutate start` → setsid → cargo-mutants →
+/// state.json / verdict.json / problems.json → `devh mutate verdict`.
+#[test]
+fn section00e_native_mutate_supervisor_end_to_end() {
+    let sb = MutateSandbox::new("e2e");
+    let (rc, out) = sb.run_env(
+        &[
+            "mutate",
+            "start",
+            "--",
+            "--config",
+            "devharness/cargo-mutants.toml",
+        ],
+        &[
+            ("STUB_CAUGHT", "4"),
+            ("STUB_MISSED", "1"),
+            ("STUB_EXIT", "2"),
+        ],
+    );
+    assert_eq!(rc, 0, "start: {out}");
+    assert!(contains(&out, "аудит запущен"), "{out}");
+    assert!(
+        contains(&out, "copy"),
+        "фоновый аудит не мутирует дерево: {out}"
+    );
+
+    let st = sb.wait_state(std::time::Duration::from_secs(60));
+    assert_eq!(
+        st, "failed",
+        "cargo-mutants вернул 2 → прогон провален: {st}"
+    );
+
+    // Вердикт: выживший мутант = дыра → rc=1, с указанием где чинить.
+    let (rc, out) = sb.run(&["mutate", "verdict"]);
+    assert_eq!(rc, 1, "выживший мутант — rc=1: {out}");
+    assert!(contains(&out, "plan.rs"), "файл проблемы в вердикте: {out}");
+
+    // Проблемы: файл:строка + замена + жанр (то, что уходит в промпт).
+    let (rc, out) = sb.run(&["mutate", "problems"]);
+    assert_eq!(rc, 1, "problems при дыре — rc=1: {out}");
+    assert!(contains(&out, "plan.rs"), "{out}");
+    assert!(contains(&out, "замена → None"), "{out}");
+    assert!(contains(&out, "genre: FnValue"), "{out}");
+
+    // Машиночитаемые артефакты супервизора.
+    let pj = sb.read_json(".harness/mutate/problems.json");
+    assert_eq!(pj["count"], 1, "problems.json: {pj}");
+    let vj = sb.read_json(".harness/mutate/verdict.json");
+    assert_eq!(vj["caught"], 4, "verdict.json: {vj}");
+    assert_eq!(vj["missed"], 1, "verdict.json: {vj}");
+    assert_eq!(vj["exit"], 2, "verdict.json: {vj}");
+
+    // Живой кадр остаётся в логе (история прогона в одном месте).
+    let live = fs::read_to_string(sb.root.join(".harness/mutate/live.log")).unwrap_or_default();
+    assert!(contains(&live, "✗"), "выживший виден в живом логе: {live}");
+    assert!(contains(&live, "plan.rs"), "{live}");
+}
+
+/// Остановка идущего аудита: супервизор гасит cargo-mutants и пишет
+/// состояние «stopped» (а не «failed»). Вердикт после остановки = rc=2:
+/// результата нет.
+#[test]
+fn section00f_native_mutate_stop_is_event_driven() {
+    let sb = MutateSandbox::new("stop");
+    let (rc, out) = sb.run_env(
+        &[
+            "mutate",
+            "start",
+            "--",
+            "--config",
+            "devharness/cargo-mutants.toml",
+        ],
+        &[("STUB_CAUGHT", "1"), ("STUB_SLEEP", "60")],
+    );
+    assert_eq!(rc, 0, "start: {out}");
+
+    // Ждём, пока супервизор запишет группу cargo-mutants.
+    let mut pgid = 0i64;
+    for _ in 0..600 {
+        let v = sb.read_json(".harness/mutate/state.json");
+        if let Some(g) = v.get("pgid").and_then(|x| x.as_i64()) {
+            if g > 0 {
+                pgid = g;
+                break;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(pgid > 0, "супервизор записал группу cargo-mutants");
+
+    let (rc, out) = sb.run(&["mutate", "stop"]);
+    assert_eq!(rc, 0, "stop: {out}");
+    assert!(contains(&out, "остановка запрошена"), "{out}");
+
+    let st = sb.wait_state(std::time::Duration::from_secs(30));
+    assert_eq!(
+        st, "stopped",
+        "после stop состояние = stopped, не failed: {st}"
+    );
+
+    // Остановленный прогон — НЕ «чисто»: результата нет.
+    let (rc, out) = sb.run(&["mutate", "verdict"]);
+    assert_eq!(rc, 2, "остановленный аудит — rc=2: {out}");
+    assert!(contains(&out, "остановлен"), "{out}");
+}
+
+/// `--in-place` фоновому аудиту запрещён (R11): он мутирует дерево агента.
+#[test]
+fn section00g_native_mutate_rejects_in_place() {
+    let sb = MutateSandbox::new("inplace");
+    let (rc, out) = sb.run(&["mutate", "start", "--", "--in-place"]);
+    assert_eq!(rc, 1, "--in-place запрещён: {out}");
+    assert!(contains(&out, "--in-place"), "{out}");
+    // Никакого прогона не началось.
+    assert!(
+        !sb.root.join(".harness/mutate/state.json").exists(),
+        "аудит не запускался"
     );
 }
 

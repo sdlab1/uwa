@@ -14,8 +14,12 @@ export GIT_AUTHOR_NAME=devh-test GIT_AUTHOR_EMAIL=devh-test@localhost
 export GIT_COMMITTER_NAME=devh-test GIT_COMMITTER_EMAIL=devh-test@localhost
 T="$(mktemp -d /tmp/devh-test-XXXXXX)"
 trap 'rm -rf "$T"' EXIT
-PASS=0; FAIL=0
+PASS=0; FAIL=0; SKIP=0
 FAIL_NAMES=()
+# ТОЧЕЧНАЯ ПРОВЕРКА (`devh test --case <N|имя>`): фильтр меняет ТОЛЬКО отчёт
+# (какие проверки считаются), выполнение сьюта остаётся полным — иначе
+# «точечная проверка» была бы второй, параллельной тестовой системой.
+# Пустой фильтр = режим по умолчанию (всё считается).
 # ПОЛНЫЙ ЛОГ ПРОГОНА (урок хвоста tail -15: 11 FAIL'ов ушли в терминал
 # безымянными). Логирование сделано ре-экзеком через pipe в подоболочке:
 # `exec > >(tee ...)` в bash 5.2 регистрирует tee как job, и ПЕРВЫЙ же
@@ -33,8 +37,15 @@ if [ "${SUITE_REEXEC:-}" != "1" ]; then
   "$0" | tee -a "$SUITE_LOG"
   exit "${PIPESTATUS[0]}"
 fi
-pass() { PASS=$((PASS+1)); echo "  PASS: $1"; }
+suite_skip() { # $1=имя проверки → 0, если проверка НЕ попадает в фильтр
+  [ -n "${SUITE_CASE_FILTER:-}" ] || return 1
+  [[ "$1" != *"$SUITE_CASE_FILTER"* ]]
+}
+pass() {
+  if suite_skip "$1"; then SKIP=$((SKIP+1)); echo "  SKIP: $1"; return 0; fi
+  PASS=$((PASS+1)); echo "  PASS: $1"; }
 fail() {
+  if suite_skip "$1"; then SKIP=$((SKIP+1)); echo "  SKIP: $1"; return 0; fi
   FAIL=$((FAIL+1)); FAIL_NAMES+=("$1")
   echo "  FAIL: $1"
   # синхронно, без pipe-гонок: имя + UTC-время — каждый провал поименован
@@ -208,11 +219,10 @@ echo "CRAP: functions=0"
 S
 chmod +x "$T"/stub*.sh "$T/sleeper.sh" "$T"/mut-*.sh "$T"/crap-*.sh "$T/redmut.sh"
 
-echo "== 0. статика: shellcheck (полный прогон, 19 файлов) =="
+echo "== 0. статика: shellcheck (полный прогон, 18 файлов) =="
 if command -v shellcheck >/dev/null 2>&1; then
   sc=0
   for f in devh test.sh selfmutate.sh examples/check_bench.sh stubs/good.sh tests/mk_smoke_repo.sh \
-    tools/mutants-watch.sh \
     stubs/red-green.sh stubs/red-wrong.sh stubs/no-summary.sh stubs/bad-summary.sh stubs/hang.sh \
     stubs/ignored-test.sh stubs/lint-dirty.sh stubs/mutate-killer.sh stubs/tool-gone.sh \
     stubs/crap-violation.sh stubs/review-issues.sh stubs/review-mute.sh \
@@ -1158,5 +1168,5 @@ if [ "$FAIL" -gt 0 ]; then
   echo "ПАДЕНИЯ (${#FAIL_NAMES[@]}):"
   printf '  - %s\n' "${FAIL_NAMES[@]}"
 fi
-echo "ИТОГ: PASS=$PASS FAIL=$FAIL (лог: $SUITE_LOG)"
+echo "ИТОГ: PASS=$PASS FAIL=$FAIL SKIP=$SKIP (лог: $SUITE_LOG)"
 [ "$FAIL" -eq 0 ]

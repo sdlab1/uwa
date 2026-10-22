@@ -61,6 +61,25 @@ pub enum Cmd {
     },
     /// B1: агрегация ledger'а побегов (только чтение — файл правится руками).
     Escapes,
+    /// Мутационный аудит: ЕДИНСТВЕННЫЙ вход (start/status/watch/verdict/help).
+    /// Раньше аудит вёлся внешним bash-скриптом, который «нельзя было
+    /// запускать руками» — то есть нельзя было запустить ВООБЩЕ. Теперь
+    /// вход — подкоманда самого харнесса: одна команда на весь цикл.
+    Mutate {
+        /// Подкоманда: start | status | watch | verdict | help.
+        sub: String,
+        /// Остальные аргументы (для `start` — флаги cargo-mutants).
+        args: Vec<String>,
+    },
+    /// Полный сьют харнесса (authoritative backend — `devharness/test.sh`).
+    Test {
+        /// Аргументы: `--list`, `--case <N|имя>`.
+        args: Vec<String>,
+    },
+    /// Оракул следующего шага: ровно одна исполняемая команда (всегда rc=0).
+    Next,
+    /// Печать канонического workflow из кода (машинно-читаемая проекция).
+    Workflow,
 }
 
 impl Default for Cmd {
@@ -148,6 +167,33 @@ impl Cmd {
                 ),
             Command::new("escapes")
                 .about("ledger побегов: классы, streak, корпус, уровень автономии (чтение)"),
+            Command::new("mutate")
+                .about("мутационный аудит: ЕДИНСТВЕННЫЙ вход (start/status/watch/verdict/help)")
+                .arg(
+                    Arg::new("sub")
+                        .index(1)
+                        .default_value("help")
+                        .help("start | status | watch | verdict | help"),
+                )
+                .arg(
+                    Arg::new("rest")
+                        .index(2)
+                        .num_args(0..)
+                        .trailing_var_arg(true)
+                        .allow_hyphen_values(true)
+                        .help("аргументы: для start — флаги cargo-mutants (передаются как есть)"),
+                ),
+            Command::new("test")
+                .about("полный сьют харнесса (test.sh): полный лог + PASS/FAIL + код возврата")
+                .arg(
+                    Arg::new("args")
+                        .num_args(0..)
+                        .trailing_var_arg(true)
+                        .allow_hyphen_values(true)
+                        .help("--list — список проверок; --case <N|имя> — точечная проверка"),
+                ),
+            Command::new("next").about("оракул следующего шага: ровно одна команда (всегда rc=0)"),
+            Command::new("workflow").about("печать канонического workflow из кода"),
         ]
     }
 
@@ -261,6 +307,32 @@ impl Cmd {
                 })
             }
             Some("escapes") => Ok(Cmd::Escapes),
+            Some("mutate") => {
+                let m = matches
+                    .subcommand_matches("mutate")
+                    .unwrap_or_else(|| unreachable!());
+                let sub = m
+                    .get_one::<String>("sub")
+                    .cloned()
+                    .unwrap_or_else(|| "help".to_string());
+                let args = m
+                    .get_many::<String>("rest")
+                    .map(|v| v.cloned().collect::<Vec<String>>())
+                    .unwrap_or_default();
+                Ok(Cmd::Mutate { sub, args })
+            }
+            Some("test") => {
+                let m = matches
+                    .subcommand_matches("test")
+                    .unwrap_or_else(|| unreachable!());
+                let args = m
+                    .get_many::<String>("args")
+                    .map(|v| v.cloned().collect::<Vec<String>>())
+                    .unwrap_or_default();
+                Ok(Cmd::Test { args })
+            }
+            Some("next") => Ok(Cmd::Next),
+            Some("workflow") => Ok(Cmd::Workflow),
             _ => Err("unknown subcommand".to_string()),
         }
     }
@@ -287,6 +359,10 @@ mod tests {
         assert!(matches!(dispatch(&["list"]), Cmd::List));
         assert!(matches!(dispatch(&["clean"]), Cmd::Clean));
         assert!(matches!(dispatch(&["escapes"]), Cmd::Escapes));
+        assert!(matches!(dispatch(&["next"]), Cmd::Next));
+        assert!(matches!(dispatch(&["workflow"]), Cmd::Workflow));
+        assert!(matches!(dispatch(&["test"]), Cmd::Test { .. }));
+        assert!(matches!(dispatch(&["test", "--list"]), Cmd::Test { .. }));
     }
 
     #[test]
