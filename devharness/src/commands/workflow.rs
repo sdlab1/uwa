@@ -83,9 +83,11 @@ pub const COMMANDS: &str = r#"=== КОМАНДЫ ===
   devh test --list             список проверок сьюта
   devh test --case <N|имя>     точечная проверка (фильтр отчёта)
   devh mutate start|status|watch|problems|verdict|stop   мутационный аудит
-  devh msg send|reply|read|watch|list|sent|find|thread|close
-                              канал сообщений между агентами (письма, треды,
-                              consume-on-read: прочитанное удаляется; --to all)
+  devh msg send|reply|read|watch|thread|threads|close|list|sent|find|acks|pending
+  devh msg send --to <агент> --subject "..." --body "..."   письмо агенту (несколько --to — несколько адресатов)
+  devh msg read                                                 прочитать письма (consume-on-read: прочитанное удаляется)
+  devh msg watch --agent <мне>                                 оповещение: письма в stdout + popup + звук (дедуп по ID)
+  devh msg send ... --at путь[:строка] | --diff файл          указание на код по контексту (устойчиво к сдвигу строк)
   devh next                    оракул: ровно одна следующая команда (всегда rc=0)
   devh workflow                печать этого канона из кода"#;
 

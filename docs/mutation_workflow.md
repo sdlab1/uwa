@@ -90,7 +90,7 @@ fallback): наблюдение живёт в харнессе (`core/watch.rs`:
   devh test --list             список проверок сьюта
   devh test --case <N|имя>     точечная проверка (фильтр отчёта)
   devh mutate start|status|watch|problems|verdict|stop   мутационный аудит
-  devh msg send|reply|read|watch|list|sent|find|thread|close
+  devh msg send|reply|read|watch|thread|threads|close|list|sent|find|acks|pending
                               канал сообщений между агентами (письма, треды,
                               consume-on-read: прочитанное удаляется; --to all)
   devh next                    оракул: ровно одна следующая команда (всегда rc=0)
