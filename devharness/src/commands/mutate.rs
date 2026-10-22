@@ -564,12 +564,8 @@ fn supervise(root: &Path, args: &[String]) -> anyhow::Result<()> {
     // иначе читатель (оракул `devh next`, внешний скрипт) поймает файл на
     // середине записи — ровно та же беда, что с outcomes.json у
     // cargo-mutants (там File::create перетирает файл целиком).
-    if let Err(e) = write_json_atomic(&dir, VERDICT_FILE, &verdict) {
-        // Fail-closed: вердикт не записан → артефакт неполон, и читать
-        // «чисто» нельзя. Гасим и старый файл (иначе прочитают ЧУЖОЙ вердикт
-        // прошлого прогона) и говорим об этом в stderr.
-        eprintln!(".. вердикт не записан ({e}) — артефакт неполон");
-        let _ = fs::remove_file(dir.join(VERDICT_FILE));
+    if let Err(e) = write_verdict_fail_closed(&dir, &verdict) {
+        eprintln!(".. {e}");
     }
     let state = if stopped {
         "stopped".to_string()
@@ -826,6 +822,24 @@ fn write_json_atomic(dir: &Path, name: &str, value: &serde_json::Value) -> anyho
     )?;
     fs::rename(&tmp, &path)?;
     Ok(())
+}
+
+/// Записать машинночитаемый вердикт АТОМАРНО и fail-closed.
+///
+/// Ошибка записи = артефакт неполон: читать из него «чисто» нельзя. Старый
+/// вердикт (прошлого прогона) при этом ГАСИМ — иначе читатель увидит
+/// чужой вердикт и примет его за результат текущего прогона (ровно та же
+/// беда, что с перезаписью outcomes.json у cargo-mutants).
+fn write_verdict_fail_closed(dir: &Path, verdict: &serde_json::Value) -> anyhow::Result<()> {
+    match write_json_atomic(dir, VERDICT_FILE, verdict) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = fs::remove_file(dir.join(VERDICT_FILE));
+            Err(anyhow::anyhow!(
+                "вердикт не записан ({e}) — артефакт неполон"
+            ))
+        }
+    }
 }
 
 /// Problem-first: доложить ТОЛЬКО новые проблемы (и обновить список, когда
@@ -1357,6 +1371,29 @@ mod tests {
         assert_eq!(verdict_flag(&alive, false, false), None, "идущий аудит");
         assert_eq!(verdict_flag(&clean, true, false), None, "остановлен");
         assert_eq!(verdict_flag(&clean, false, true), None, "оборвался");
+    }
+
+    /// Ошибка записи вердикта — fail-closed: артефакт неполон, и старый
+    /// вердикт прошлого прогона гасится (иначе читатель принял бы его за
+    /// результат текущего).
+    #[test]
+    fn verdict_write_failure_is_fail_closed() {
+        let d = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        // Старый «чистый» вердикт ПРОШЛОГО прогона.
+        fs::write(d.path().join(VERDICT_FILE), r#"{"hole":false}"#)
+            .unwrap_or_else(|_| unreachable!());
+        // Ломаем запись: tmp-путь занимает каталог → fs::write падает.
+        fs::create_dir_all(d.path().join(".verdict.json.tmp")).unwrap_or_else(|_| unreachable!());
+        let err = write_verdict_fail_closed(d.path(), &serde_json::json!({"hole": true}))
+            .expect_err("запись должна упасть");
+        assert!(
+            err.to_string().contains("вердикт"),
+            "неинформативная ошибка: {err}"
+        );
+        assert!(
+            !d.path().join(VERDICT_FILE).exists(),
+            "старый вердикт оставлен — читатель примет его за результат текущего прогона"
+        );
     }
 
     /// Отчёт не должен называть «чисто» прогон с дырами — и наоборот.
