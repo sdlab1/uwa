@@ -194,6 +194,16 @@ pub enum FirstProblem {
     Unknown(u32),
 }
 
+/// Нейтральное значение для cargo-mutants: мутант подставляет
+/// `Some(Default::default())` вместо тела `first_problem` — без Default такой
+/// мутант НЕ КОМПИЛИРУЕТСЯ (unviable = дыра, регламент P9). Значение честное:
+/// «исход неизвестен» (fail-closed), ноль — счётчик неизвестен.
+impl Default for FirstProblem {
+    fn default() -> Self {
+        FirstProblem::Unknown(0)
+    }
+}
+
 impl FirstProblem {
     /// Канон исхода cargo-mutants.
     pub fn kind(&self) -> &'static str {
@@ -371,6 +381,14 @@ pub fn evaluate(
 
 #[cfg(test)]
 mod tests {
+    /// Мутант-совместимость (P9): форма, которую cargo-mutants подставляет
+    /// вместо тела `first_problem`, должна быть конструируемой — иначе мутант
+    /// unviable и дыра не закрывается.
+    #[test]
+    fn mutant_shape_is_constructible() {
+        let _ = Some(FirstProblem::default());
+    }
+
     use super::*;
 
     fn live(total: Option<u32>, caught: u32, missed: u32, unviable: u32) -> LiveCounts {

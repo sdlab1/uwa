@@ -270,6 +270,23 @@ fn parse_str_array(v: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    /// Контракт «пустой» — только если НИ ОДНА часть не записана. Мутанты
+    /// `&&` -> `||` в is_empty роняют этот тест: с `||` контракт с одной
+    /// целью и пустым observe считался бы пустым.
+    #[test]
+    fn is_empty_only_when_every_part_is_empty() {
+        let goal_only = Contract::from_parts("цель", &[], &[], "");
+        assert!(!goal_only.is_empty(), "только цель — не пусто");
+        let observe_only = Contract::from_parts("", &["наблюдать".to_string()], &[], "");
+        assert!(!observe_only.is_empty(), "только observe — не пусто");
+        let touch_only = Contract::from_parts("", &[], &["тронуть".to_string()], "");
+        assert!(!touch_only.is_empty(), "только touch — не пусто");
+        let red_only = Contract::from_parts("", &[], &[], "RED: падать");
+        assert!(!red_only.is_empty(), "только red_expect — не пусто");
+        let empty = Contract::from_parts("", &[], &[], "");
+        assert!(empty.is_empty(), "совсем пусто — пусто");
+    }
+
     use super::*;
 
     fn sample() -> Contract {

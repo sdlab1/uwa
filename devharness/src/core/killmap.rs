@@ -306,6 +306,39 @@ mod tests {
         );
     }
 
+    /// Первая строка пула проходит даже если длиннее бюджета: бюджет
+    /// ограничивает РОСТ пула, а не первую строку. Мутант `delete !`
+    /// (проверка бюджета применяется и к первой строке) роняет этот тест.
+    #[test]
+    fn hot_spots_first_line_is_not_budget_capped() {
+        let mut km = Killmap::default();
+        let long = "a-very-long-file-name-that-exceeds-any-budget-for-sure.rs";
+        let st = FileStat {
+            missed: 1,
+            ..FileStat::default()
+        };
+        km.files.insert(long.to_string(), st);
+        let spots = km.hot_spots(HOTSPOT_MAX_FILES, 1);
+        assert_eq!(spots.len(), 1, "первая строка пула не режется бюджетом: {spots:?}");
+    }
+
+    /// Ровно в бюджет — строка помещается: проверка «> max_chars», не «>=».
+    /// Мутант `>` -> `>=` роняет этот тест.
+    #[test]
+    fn hot_spots_budget_boundary_keeps_exact_fit() {
+        let mut km = Killmap::default();
+        let st = FileStat {
+            missed: 1,
+            ..FileStat::default()
+        };
+        km.files.insert("f.rs".to_string(), st);
+        let first = km.hot_spots(HOTSPOT_MAX_FILES, 10_000);
+        let cost = first.first().map(|l| l.chars().count()).unwrap_or(0);
+        assert!(cost > 0, "строка пула непустая: {first:?}");
+        let exact = km.hot_spots(HOTSPOT_MAX_FILES, cost);
+        assert_eq!(exact.len(), 1, "строка ровно в бюджет — помещается: {exact:?}");
+    }
+
     #[test]
     fn hot_spots_include_timeout_zones() {
         // Ф-3: зона с таймаутами — такая же слепота тестов, попадает в пул.

@@ -471,8 +471,9 @@ fn regex_matches(pat: &str, name: &str) -> bool {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Default)]
 pub enum ReviewVerdict {
+    #[default]
     Ok,
     Issues(String),
     Unrecognized,
@@ -490,7 +491,7 @@ pub fn parse_review_verdict(log: &str) -> ReviewVerdict {
     ReviewVerdict::Unrecognized
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct CrapRow {
     pub file: String,
     pub line: u32,
@@ -506,7 +507,7 @@ pub fn crap_score(c: u32, cov: u32) -> f64 {
     cc * cc * (1.0 - cov).powi(3) + cc
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Default)]
 pub struct CrapReport {
     pub functions: u32,
     pub violations: Vec<CrapRow>,
@@ -1150,6 +1151,16 @@ pub fn flaky_groups(lines: &[String]) -> Vec<(String, usize)> {
 
 #[cfg(test)]
 mod tests {
+    /// Мутант-совместимость (P9): формы, которые cargo-mutants подставляет
+    /// вместо тела, должны быть конструируемыми — иначе мутант unviable.
+    #[test]
+    fn mutant_shapes_are_constructible() {
+        let _ = ReviewVerdict::default(); // parse_review_verdict
+        let _ = Some(CrapReport::default()); // parse_crap_report
+        let _ = Some((0u32, vec![CrapRow::default()])); // parse_crap_output
+        let _ = Some(CrapRow::default()); // parse_crap_row
+    }
+
     use super::*;
 
     #[test]

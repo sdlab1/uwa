@@ -44,7 +44,7 @@ const LOG_FILE: &str = "survivors.log";
 const OBS_FILE: &str = "observations.md";
 
 /// Один исход прогона из outcomes.json (scenario.Mutant + summary).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Outcome {
     /// Каноническое имя исхода: `CaughtMutant` / `MissedMutant` / `Timeout` /
     /// `Unviable` (легаси-имена приводятся к канону при разборе).
@@ -399,11 +399,13 @@ pub fn collect_after_run(wt: &Path, tool: &str, obs: &Path, gate: &str) -> Optio
     let mut journal = String::new();
     let mut tags: BTreeMap<&str, u32> = BTreeMap::new();
     for o in &fresh {
-        queue += &queue_line(o, red);
-        journal += &format!(
+        // push_str, а не += : мутант `+=` -> `-=` / `*=` на String НЕ КОМПИЛИРУЕТСЯ
+        // (unviable, дыра по регламенту P9) — оператора `+=` здесь просто нет.
+        queue.push_str(&queue_line(o, red));
+        journal.push_str(&format!(
             "{today} | {gate} | {}:{} | {} | {} | {}\n",
             o.file, o.line, o.summary, o.genre, o.mutation
-        );
+        ));
         let t = genre_tag(&o.genre);
         let n = tags.entry(t).or_insert(0);
         *n = n.saturating_add(1);
@@ -467,7 +469,7 @@ const GENRE_ALIASES: &[(&str, &[&str])] = &[
 
 /// Один выстрел из `.harness/survivors.log`:
 /// «дата | гейт | файл:строка | жанр | мутация».
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Shot {
     pub date: String,
     pub gate: String,
@@ -594,7 +596,7 @@ fn basename(file: &str) -> String {
 }
 
 /// Группа «жанр × файлы»: сколько выстрелов, где, когда последний, примеры.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct GenreGroup {
     pub genre: String,
     pub tag: &'static str,
@@ -822,7 +824,7 @@ pub fn rule_blocks(text: &str) -> Vec<(String, String)> {
 /// Класс RULES с фактурой выстрелов и тишины. Пенсия — когда тишина ≥ K и
 /// маппинг жанров тега непустой (без жанров в теге пенсия не предлагается:
 /// это решение человека, а не догадка тулинга).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ClassRow {
     pub tag: String,
     pub genres: Vec<String>,
@@ -1134,6 +1136,16 @@ pub fn reset_seen(obs: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// Мутант-совместимость (P9): формы, которые cargo-mutants подставляет
+    /// вместо тела, должны быть конструируемыми — иначе мутант unviable.
+    #[test]
+    fn mutant_shapes_are_constructible() {
+        let _ = (vec![Outcome::default()], 0usize); // parse_outcomes
+        let _ = vec![Shot::default()]; // parse_journal
+        let _ = vec![GenreGroup::default()]; // group_by_genre
+        let _ = vec![ClassRow::default()]; // rule_classes
+    }
+
     use super::*;
 
     const FIXTURE: &str = r#"{"outcomes":[
