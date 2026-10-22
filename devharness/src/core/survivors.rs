@@ -1074,17 +1074,48 @@ pub fn session_survivors_lines(code_logs: &[String], red_logs: &[String]) -> Vec
     out
 }
 
-/// Строки сессии для RULES_LOG: логи гейтов item — `<id>-mutate.log` (код) и
-/// `<id>-redmut.log` (red-mutation, §8.6). Пусто — в сессии выживших не было.
+/// Файл накопителя сессии item'а: код и red-mutation — разные (§8.6).
+fn session_file(obs: &Path, id: &crate::core::types::ItemId, red: bool) -> std::path::PathBuf {
+    let name = if red { "redsurv" } else { "surv" };
+    obs.join("logs")
+        .join(format!("{}-{name}.log", id.dir_name()))
+}
+
+/// Накопитель сессии: строка выживших дописывается в per-item файл и
+/// ПЕРЕЖИВАЕТ финальный (зелёный) раунд.
+///
+/// Зачем: в семантике v2 выживший мутант ВСЕГДА роняет гейт — значит
+/// зелёный финал возможен только после починки тестов, и лог последнего
+/// (зелёного) прогона не содержит ни одной строки выживших. Урок сессии
+/// («здесь тесты были слепы») без накопителя стирался бы ровно тогда, когда
+/// работа доведена до конца, — и RULES_LOG на merge не смог бы его записать.
+pub fn append_session_line(obs: &Path, id: &crate::core::types::ItemId, gate: &str, line: &str) {
+    let path = session_file(obs, id, is_red(gate));
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    let mut f = match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        Ok(f) => f,
+        Err(_) => return,
+    };
+    writeln!(f, "{line}").ok();
+}
+
+/// Строки сессии для RULES_LOG: накопители item'а — `<id>-surv.log` (код) и
+/// `<id>-redsurv.log` (red-mutation, §8.6). Пусто — в сессии выживших не было.
 pub fn session_line(
     store: &crate::shell::store::Store,
     id: &crate::core::types::ItemId,
 ) -> Vec<String> {
-    let code: Vec<String> = std::fs::read_to_string(store.log_file(id, "mutate"))
+    let code: Vec<String> = std::fs::read_to_string(session_file(&store.dir, id, false))
         .ok()
         .into_iter()
         .collect();
-    let red: Vec<String> = std::fs::read_to_string(store.log_file(id, "redmut"))
+    let red: Vec<String> = std::fs::read_to_string(session_file(&store.dir, id, true))
         .ok()
         .into_iter()
         .collect();
@@ -1687,6 +1718,52 @@ mod tests {
             shots.first().map(|s| s.mutation.as_str()),
             Some("replace a with b | лишний | хвост")
         );
+    }
+
+    #[test]
+    fn session_lines_survive_a_later_green_round() {
+        // Накопитель сессии: строка выживших ПЕРЕЖИВАЕТ финальный (зелёный)
+        // раунд. В семантике v2 выживший всегда роняет гейт — значит зелёный
+        // финал возможен только после починки тестов, и лог последнего
+        // (зелёного) прогона не содержит ни строки выживших. Без накопителя
+        // урок сессии стирался бы ровно тогда, когда работа доведена до конца.
+        let t = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let store = crate::shell::store::Store::new(t.path());
+        let id = crate::core::types::ItemId(1);
+        let obs = store.dir.clone();
+        append_session_line(
+            &obs,
+            &id,
+            "mutation",
+            "survivors: 1 → observations.md (fn-value 1)",
+        );
+        // финальный зелёный раунд перезаписал лог гейта — там выживших нет
+        std::fs::write(
+            store.log_file(&id, "mutate"),
+            "MUTATE: Mutants 10, killed 10 (100%)\n",
+        )
+        .unwrap_or_else(|_| unreachable!());
+        let lines = session_line(&store, &id);
+        assert_eq!(lines.len(), 1, "урок сессии дожил до merge: {lines:?}");
+        assert!(lines[0].contains("fn-value 1"), "{lines:?}");
+        assert!(lines[0].starts_with("- survivors: "), "{lines:?}");
+
+        // red-поток — отдельный файл и отдельная строка (§8.6)
+        append_session_line(
+            &obs,
+            &id,
+            "red-mutation",
+            "survivors: 2 → observations.md (binop 1, fn-value 1)",
+        );
+        let lines = session_line(&store, &id);
+        assert_eq!(lines.len(), 2, "код и red — разными строками: {lines:?}");
+        let rl = lines.get(1).unwrap_or_else(|| unreachable!());
+        assert!(rl.starts_with("- survivors [red-mutation]: "), "{rl}");
+        assert!(rl.contains("binop 1") && rl.contains("fn-value 1"), "{rl}");
+
+        // item без выживших — строк нет (RULES_LOG не засоряем)
+        let other = crate::core::types::ItemId(2);
+        assert!(session_line(&store, &other).is_empty());
     }
 
     #[test]

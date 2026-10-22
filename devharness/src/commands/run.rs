@@ -607,6 +607,7 @@ fn red_mutate_phase(
             m,
             wt,
             &store.dir,
+            id,
             Some(red_cmd.trim()),
             "red-mutation",
             "RED_MUTATE",
@@ -1318,11 +1319,20 @@ fn gate_ladder(
     }
 
     if let Some(m) = &cfg.mutate {
-        let rep = mutate_gate(m, wt, &store.dir, None, "mutation", "MUTATE", Gate::Mutate)
-            .unwrap_or_else(|e| {
-                eprintln!("{}{e}{}", c.r, c.z);
-                die(store, id, 1);
-            });
+        let rep = mutate_gate(
+            m,
+            wt,
+            &store.dir,
+            id,
+            None,
+            "mutation",
+            "MUTATE",
+            Gate::Mutate,
+        )
+        .unwrap_or_else(|e| {
+            eprintln!("{}{e}{}", c.r, c.z);
+            die(store, id, 1);
+        });
         let mpath = store.log_file(id, "mutate");
         std::fs::write(&mpath, &rep.log).ok();
         timing.stage(format!("mutate-r{}", round.saturating_add(1)), store, id);
@@ -1903,7 +1913,14 @@ pub(crate) fn apply_cov_filter(cmd: &str, filter: Option<&str>) -> String {
 /// бы все планы кроме последнего. Очередь/seen/killmap — под тем же
 /// GlobalLock, что и `tickets --import` (§8.7): единственный append.
 /// `tool0` — шаблон прогона (нужен флаг `--output`, early::mutants_out_dir).
-fn survivors_hook(m: &MutateCfg, wt: &Path, tool: &str, obs: &Path, gate: &str) -> Option<String> {
+fn survivors_hook(
+    m: &MutateCfg,
+    wt: &Path,
+    tool: &str,
+    obs: &Path,
+    id: &ItemId,
+    gate: &str,
+) -> Option<String> {
     if !m.survivors {
         return None;
     }
@@ -1911,6 +1928,10 @@ fn survivors_hook(m: &MutateCfg, wt: &Path, tool: &str, obs: &Path, gate: &str) 
     let line = crate::core::survivors::collect_after_run(wt, tool, obs, gate);
     if let Some(l) = &line {
         eprintln!("{l}");
+        // Накопитель сессии: строка выживших переживает финальный (зелёный)
+        // раунд — иначе урок сессии стирался бы ровно тогда, когда работа
+        // доведена до конца (см. survivors::append_session_line).
+        crate::core::survivors::append_session_line(obs, id, gate, l);
     }
     line
 }
@@ -1935,6 +1956,7 @@ fn mutate_gate(
     m: &MutateCfg,
     wt: &Path,
     obs: &Path,
+    id: &ItemId,
     test: Option<&str>,
     label: &str,
     key: &str,
@@ -2031,7 +2053,7 @@ fn mutate_gate(
     if !batch && !per_file {
         let cmd = apply_cov_filter(&tool0, cov_filter.as_deref());
         let mut rep = finish(m, run_mut(wt, &cmd, m), label, key, gate.clone());
-        if let Some(line) = survivors_hook(m, wt, &tool0, obs, label) {
+        if let Some(line) = survivors_hook(m, wt, &tool0, obs, id, label) {
             rep.log += &format!("{line}\n");
         }
         return Ok(rep);
@@ -2065,7 +2087,7 @@ fn mutate_gate(
                 .join(" ")
         );
         let mut rep = finish(m, run_mut(wt, &cmd, m), label, key, gate.clone());
-        if let Some(line) = survivors_hook(m, wt, &tool0, obs, label) {
+        if let Some(line) = survivors_hook(m, wt, &tool0, obs, id, label) {
             rep.log += &format!("{line}\n");
         }
         let log = format!("{head}{}", rep.log);
@@ -2117,7 +2139,7 @@ fn mutate_gate(
             key,
             gate.clone(),
         );
-        if let Some(line) = survivors_hook(m, wt, &tool0, obs, &format!("{label} {f}")) {
+        if let Some(line) = survivors_hook(m, wt, &tool0, obs, id, &format!("{label} {f}")) {
             rep.log += &format!("{line}\n");
         }
         acc.log += &rep.log;
