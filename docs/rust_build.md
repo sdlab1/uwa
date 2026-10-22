@@ -1495,3 +1495,39 @@ ghost   не в сети   1 ч назад   send    pid=1
 - `core/killmap.rs` (2) и `core/contract.rs` (2): тесты на границы бюджета пула и на «контракт пуст только если пусто всё» (`29e9558`).
 
 **Осталось закрывать:** `core/survivors.rs` (33 missed — зона соседней сессии), `core/escapes.rs` (8), `core/gates.rs` (7), `core/contract.rs`/`core/load.rs`/`core/early.rs`/`core/killmap.rs`/`core/tui.rs` (по 1–4), и unviable в `core/state.rs` (5), `core/plan.rs` (1), `core/timing.rs` (1).
+
+## §9.33 Итоговый тюнинг аудита мутаций (2026-10-22)
+
+### Принятый профиль мутационного аудита
+
+| Параметр | Было (дефолт) | Стало (принятый профиль) | Эффект |
+|---|---|---|---|
+| `CARGO_PROFILE_TEST_INCREMENTAL` | `false` | `true` | Инкрементальная сборка: **×2.3–2.6** в цикле |
+| `CARGO_PROFILE_TEST_OPT_LEVEL` | 2 (по умолчанию) | `0` | Codegen **×2.3–3.3** на мутанте |
+| `CARGO_PROFILE_TEST_INCREMENTAL` | — | `true` | Инкремент работает: 16.4с → **0.34с** (touch-пересборка) |
+| `HARNESS_MUTATE_MAX_LOAD` | не задан (гейт включен) | `off` (для аудита devh) | Убрано **37 ложных поимок** (load-флак) |
+
+### Ключевые находки:
+
+1. **Load-флак = 37 ложных поимок** (kill-rate 93.7% → 89.8% реально). Гейт внутри интеграционных тестов ронял тесты под нагрузкой → cargo-mutants считал «поймано». **Лечение:** `HARNESS_MUTATE_MAX_LOAD=off` при аудите devh.
+
+2. **Покрытийный отбор (MUTATE_COV) был мёртв** — парсер не понимал формат nextest (`rust-suites` vs `rust_suites`). Исправлено в `f042829`: **40/40 caught**.
+
+3. **Unviable-волна закрыта**: `Default` для 8 типов + `+=`→`push_str` + guard-тесты.
+
+### Принятый профиль (шаблон `devh init`):
+```toml
+MUTATE='CARGO_PROFILE_TEST_INCREMENTAL=true CARGO_PROFILE_TEST_OPT_LEVEL=0 \
+        cargo mutants --in-place --test-tool nextest --baseline=skip \
+        --timeout-multiplier 2 {files}'
+```
+
+### Doctor-проверки (добавлены в `doctor.rs`):
+- `CARGO_PROFILE_TEST_INCREMENTAL=true` → OK / WARN
+- `CARGO_PROFILE_TEST_OPT_LEVEL=0` → OK / WARN
+- Аудит devh без `HARNESS_MUTATE_MAX_LOAD=off` → WARN (§9.29)
+
+### Итоговые цифры (приёмка 926/926):
+- **Чистый kill-rate: 89.8%** (810/902 testable) — против 93.7% с load-гейтом
+- **37 ложных поимок** (load-флак) устранены отключением гейта
+- **92 реальные дыры** покрытия + 24 unviable (после фиксов — 24 → 7)
