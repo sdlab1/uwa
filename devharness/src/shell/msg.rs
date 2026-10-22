@@ -971,10 +971,17 @@ fn send(args: &[String]) -> i32 {
             for (agent, action, ts, pid) in rows.iter() {
                 let fresh = now.saturating_sub(*ts) <= window;
                 let alive = pid.map(pid_alive).unwrap_or(false);
-                let state = if fresh && alive {
-                    "ОНЛАЙН"
+                let state = if action == "watch" {
+                    // Сессия с живым watcher'ом: только он и есть «онлайн».
+                    if fresh && alive {
+                        "ОНЛАЙН"
+                    } else {
+                        "не в сети"
+                    }
                 } else {
-                    "не в сети"
+                    // Одноразовое действие (send/read): онлайн-статус по нему
+                    // не судим — это «последняя активность», а не присутствие.
+                    "активность"
                 };
                 println!(
                     "{agent}	{state}	{}	{action}	pid={}",
