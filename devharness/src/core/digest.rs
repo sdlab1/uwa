@@ -13,7 +13,7 @@
 use sha2::Digest;
 
 /// Файл дерева для дайджеста: путь, режим, содержимое.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Entry {
     pub path: String,
     /// 0o100644 / 0o100755 / 0o120000 (symlink: `content` = цель ссылки).

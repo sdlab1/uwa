@@ -189,7 +189,7 @@ mod tests {
     fn report_stale_corpus_blocks_level() {
         // E3: корпус старше порога — цифры реальные (13/13), но уровень
         // не растёт, и причина названа строкой. Без пометки «почему L0»
-        /// оператор видит только «не выросло» без причины.
+        // оператор видит только «не выросло» без причины.
         let td = tempfile::TempDir::new().unwrap_or_else(|_| unreachable!());
         let store = Store::new(td.path());
         seed(
