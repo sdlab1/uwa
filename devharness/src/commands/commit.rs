@@ -82,11 +82,23 @@ pub fn commit(store: &Store, cfg: &RunConfig, id: &ItemId) -> anyhow::Result<()>
     // Дайджест дерева — на случай, если после коммита дерево снова
     // изменится: тогда вердикт «гейты зелёные» протухнет.
     let digest = git::tree_digest(&wt).unwrap_or_default();
-    let _ = crate::core::runstate::write(
+    if digest.is_empty() {
+        // Свежесть содержимого неизвестна → оракул такой вердикт не
+        // доверяет (пустой дайджест = «перепроверь гейты»). Предупреждаем
+        // оператора, чтобы «почему оракул снова просит прогон» не было
+        // загадкой.
+        eprintln!(
+            "devh: дайджест дерева не посчитан — вердикт «committed» будет считаться \
+             протухшим (оракул предложит перепроверку гейтов)"
+        );
+    }
+    if let Err(e) = crate::core::runstate::write_or_invalidate(
         store,
         id,
         &crate::core::runstate::RunState::committed(&git::short_head(&wt)).with_digest(&digest),
-    );
+    ) {
+        eprintln!("devh: маркер «committed» не записан ({e}) — оракул перепроверит гейты заново");
+    }
     if git::has_remote(&root) {
         if git::push(&wt, &cfg.remote, &br).is_ok() {
             println!("{}OK push: {}/{}{}", c.g, cfg.remote, br, c.z);

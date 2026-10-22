@@ -60,13 +60,39 @@ fn mark_phase_named(
     // коммиту. Без него незакоммиченная правка после зелёных гейтов не
     // протухала бы, и оракул предложил бы `commit` по чужому вердикту.
     let digest = git::tree_digest(wt).unwrap_or_default();
+    if digest.is_empty() && matches!(phase, runstate::Phase::GatesOk | runstate::Phase::Committed) {
+        // Дайджест не посчитан → свежесть содержимого НЕИЗВЕСТНА. Оракул
+        // такой вердикт не доверяет (пустой дайджест = «перепроверь»), но
+        // оператор должен знать, почему оракул просит прогон заново.
+        eprintln!(
+            "devh: дайджест дерева не посчитан — вердикт будет считаться протухшим \
+             (оракул предложит перепроверку гейтов)"
+        );
+    }
     let st = match phase {
         runstate::Phase::GatesOk => runstate::RunState::gates_ok(&head),
         runstate::Phase::Committed => runstate::RunState::committed(&head),
         runstate::Phase::GateFailed => runstate::RunState::gate_failed(gate, code, &head),
+        runstate::Phase::InProgress => runstate::RunState::in_progress(&head),
     }
     .with_digest(&digest);
-    let _ = runstate::write(store, id, &st);
+    if let Err(e) = runstate::write_or_invalidate(store, id, &st) {
+        eprintln!("devh: маркер прогона не записан ({e}) — оракул перепроверит гейты заново");
+    }
+}
+
+/// Fail-closed маркер «прогон идёт» — пишется ДО любого fallible шага.
+///
+/// Старый терминальный вердикт (gates_ok/committed) не должен пережить
+/// начатый прогон: если прогон упадёт на preflight'е (claim, worktree),
+/// оракул иначе предложил бы `commit`/`merge` по зелёному свету от
+/// ПРЕДЫДУЩЕГО прогона. Маркер без дерева (head/digest пустые) — вердикта
+/// нет, оракул предложит `devh run`.
+fn mark_phase_start(store: &Store, id: &ItemId) {
+    let st = runstate::RunState::in_progress("");
+    if let Err(e) = runstate::write_or_invalidate(store, id, &st) {
+        eprintln!("devh: маркер прогона не записан ({e}) — оракул перепроверит гейты заново");
+    }
 }
 
 /// Имя гейта по вердикту (для маркера сдачи и для сообщений).
@@ -108,8 +134,18 @@ pub fn run(store: &Store, cfg: &RunConfig, id: &ItemId) -> anyhow::Result<()> {
     let mut timing = Timing::start();
     timing.flush(store, id);
 
+    // Fail-closed ДО любого fallible шага: старый терминальный маркер
+    // (gates_ok/committed) не должен пережить начатый прогон — иначе
+    // ранний сбой (claim, worktree) оставил бы оракулу зелёный свет от
+    // ПРЕДЫДУЩЕГО прогона.
+    mark_phase_start(store, id);
     claim_item(store, cfg, id)?;
     let (wt, fresh) = ensure_worktree(store, cfg, id, &mut timing)?;
+    // Fail-closed маркер: пока прогон идёт — вердикта НЕТ. Если финальная
+    // запись (GatesOk/Committed/GateFailed) не удастся, оракул увидит «прогон
+    // не завершён» и предложит `devh run` (перепроверить гейты), а НЕ
+    // `commit`/`merge` по маркеру ПРЕДЫДУЩЕГО прогона.
+    mark_phase(store, id, &wt, runstate::Phase::InProgress);
     let red = red_pre_phase(store, cfg, id, &root, &wt, &agent, fresh, &mut timing)?;
     no_crap_notice(store, cfg, id);
     timing.stage("red-pre", store, id);
@@ -804,12 +840,14 @@ fn give_up(
     // отказа исчерпан, следующий шаг — `devh abort`, а не новый run.
     let head = git::short_head(wt);
     let digest = git::tree_digest(wt).unwrap_or_default();
-    let _ = runstate::write(
+    if let Err(e) = runstate::write_or_invalidate(
         store,
         id,
         &runstate::RunState::gate_failed(&verdict_gate_name(&stop.verdict), code, &head)
             .with_digest(&digest),
-    );
+    ) {
+        eprintln!("devh: маркер сдачи не записан ({e}) — оракул перепроверит гейты заново");
+    }
     match kind {
         gates::FailureKind::Fix => {
             let Verdict::Fail { gate, .. } = &stop.verdict else {

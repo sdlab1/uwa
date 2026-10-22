@@ -7,7 +7,9 @@
 //! | состояние | что делать | как отличить |
 //! | --- | --- | --- |
 //! | S1/S3 — прогона ещё не было / гейт красный, бюджет есть | `devh run` | маркера нет |
+//! | S2 — прогон идёт, вердикта ещё нет | `devh run` | `phase=in_progress` |
 //! | S4 — гейты зелёные, коммита нет | `devh commit` | `phase=gates_ok` |
+//! | S5 — гейты зелёные, коммит есть | `devh merge` | `phase=committed` |
 //! | S10 — бюджет фиксов исчерпан, сдача | `devh abort` | `phase=gate_failed` |
 //!
 //! Маркер пишет ТОЛЬКО харнесс (тот, кто знает вердикт гейта) — агент его
@@ -39,6 +41,13 @@ pub enum Phase {
     Committed,
     /// Гейт красный, бюджет/класс отказа исчерпан — работа сдана.
     GateFailed,
+    /// Прогон ИДЁТ — финального вердикта ещё нет.
+    ///
+    /// Fail-closed: маркер пишется в начале прогона. Если финальная запись
+    /// (GatesOk/Committed/GateFailed) не удастся, оракул увидит «прогон не
+    /// завершён» и предложит `devh run` (перепроверить гейты) — а НЕ
+    /// `commit` по маркеру ПРЕДЫДУЩЕГО прогона.
+    InProgress,
 }
 
 /// Что известно о последнем прогоне item'а.
@@ -62,7 +71,9 @@ pub struct RunState {
     /// к ДРУГОМУ дереву. Дайджест закрывает эту дыру: оракул не имеет
     /// права предлагать `commit`/`merge` по протухшему вердикту.
     ///
-    /// Пусто — дайджест не вычислился (тогда проверяется только `head`).
+    /// Пусто — дайджест не вычислился. Тогда фазы `gates_ok`/`committed`
+    /// оракулом НЕ доверяются (свежесть содержимого неизвестна → fail-closed
+    /// → `devh run`), фаза `gate_failed` — доверяется (сдача безопасна).
     #[serde(default)]
     pub digest: String,
     /// Unix-время записи.
@@ -112,6 +123,18 @@ impl RunState {
         self.digest = digest.to_string();
         self
     }
+
+    /// Прогон идёт — финального вердикта ещё нет.
+    pub fn in_progress(head: &str) -> Self {
+        Self {
+            phase: Phase::InProgress,
+            gate: String::new(),
+            code: 0,
+            head: head.to_string(),
+            digest: String::new(),
+            ts: now_secs(),
+        }
+    }
 }
 
 /// Путь к маркеру item'а.
@@ -131,6 +154,36 @@ pub fn write(store: &Store, id: &ItemId, st: &RunState) -> anyhow::Result<()> {
     store
         .atomic_write(item_rel(id, FILE), &json)
         .map_err(|e| anyhow::anyhow!("devh: не записать маркер прогона ({e})"))
+}
+
+/// Записать маркер; при ошибке записи — снять старый (fail-closed).
+///
+/// Ошибка записи не должна ронять прогон: без маркера оракул предложит
+/// `devh run` (безопасный ответ — перепроверить гейты). Но старый маркер
+/// оставлять НЕЛЬЗЯ: по нему оракул предложил бы `commit`/`merge` по
+/// вердикту ПРЕДЫДУЩЕГО прогона, которого уже нет.
+pub fn write_or_invalidate(store: &Store, id: &ItemId, st: &RunState) -> anyhow::Result<()> {
+    match write(store, id, st) {
+        Ok(()) => Ok(()),
+        Err(e) => match clear(store, id) {
+            Ok(()) => Err(anyhow::anyhow!("{e} (старый маркер снят)")),
+            Err(c) => Err(anyhow::anyhow!("{e} (старый маркер НЕ снят: {c})")),
+        },
+    }
+}
+
+/// Снять маркер (fail-closed): старый вердикт больше не доверяем.
+///
+/// Нужен, когда запись нового маркера не удалась: иначе оракул увидит
+/// маркер ПРЕДЫДУЩЕГО прогона (например `gates_ok`) и предложит `commit`
+/// по вердикту, которого уже нет.
+pub fn clear(store: &Store, id: &ItemId) -> anyhow::Result<()> {
+    let p = path(store, id);
+    match std::fs::remove_file(&p) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(anyhow::anyhow!("devh: не снять маркер прогона ({e})")),
+    }
 }
 
 /// Unix-время (секунды).
@@ -167,5 +220,51 @@ mod tests {
         assert_eq!(got.phase, Phase::GateFailed);
         assert_eq!(got.gate, "verify");
         assert_eq!(got.code, 1);
+    }
+
+    #[test]
+    fn in_progress_phase_is_a_real_state() {
+        let d = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let store = Store::new(d.path());
+        let id = ItemId(3);
+        write(&store, &id, &RunState::in_progress("sha")).unwrap_or_else(|_| unreachable!());
+        let got = read(&store, &id).unwrap_or_else(|| unreachable!());
+        assert_eq!(got.phase, Phase::InProgress);
+    }
+
+    #[test]
+    fn failed_write_invalidates_stale_marker() {
+        // Сценарий: маркер предыдущего прогона (gates_ok) есть, а запись
+        // нового падает. Старый маркер оставлять НЕЛЬЗЯ: оракул предложил бы
+        // `commit` по вердикту, которого уже нет.
+        let d = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let store = Store::new(d.path());
+        let id = ItemId(4);
+        write(&store, &id, &RunState::gates_ok("sha")).unwrap_or_else(|_| unreachable!());
+        assert!(read(&store, &id).is_some());
+        // Ломаем запись: tmp-путь занимает каталог → write падает.
+        let tmp_dir = store.item_dir(&id).join("run-state.tmp");
+        std::fs::create_dir_all(&tmp_dir).unwrap_or_else(|_| unreachable!());
+        let err = write_or_invalidate(&store, &id, &RunState::gate_failed("verify", 1, "sha"))
+            .expect_err("запись должна упасть");
+        assert!(
+            err.to_string().contains("маркер"),
+            "неинформативная ошибка: {err}"
+        );
+        assert!(
+            read(&store, &id).is_none(),
+            "старый маркер не снят — оракул предложил бы commit по чужому вердикту"
+        );
+    }
+
+    #[test]
+    fn clear_is_idempotent() {
+        let d = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let store = Store::new(d.path());
+        let id = ItemId(5);
+        clear(&store, &id).unwrap_or_else(|_| unreachable!());
+        write(&store, &id, &RunState::gates_ok("sha")).unwrap_or_else(|_| unreachable!());
+        clear(&store, &id).unwrap_or_else(|_| unreachable!());
+        assert!(read(&store, &id).is_none());
     }
 }

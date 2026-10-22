@@ -171,11 +171,17 @@ fn item_next(
     // Незакоммиченная правка после зелёных гейтов = другое дерево →
     // вердикт протух → оракул предлагает `devh run` (перепроверить гейты),
     // а не `commit` по чужому зелёному свету.
-    if !rs.digest.is_empty() {
-        let now = git::tree_digest(&wt).unwrap_or_default();
-        if now != rs.digest {
-            return None;
-        }
+    //
+    // Пустой дайджест = «свежесть НЕИЗВЕСТНА» (маркер записан, когда
+    // дайджест дерева не удалось посчитать). Доверять такому вердикту
+    // нельзя: фазы GatesOk/Committed разрешают коммит и мерж, значит
+    // содержимое обязано быть проверено. Fail-closed → перепроверка.
+    if rs.digest.is_empty() {
+        return None;
+    }
+    let now = git::tree_digest(&wt).unwrap_or_default();
+    if now != rs.digest {
+        return None;
     }
     let ahead = git::rev_list_count(&wt, &cfg.main_branch).unwrap_or(0);
     match rs.phase {
@@ -468,9 +474,14 @@ mod tests {
         let (cfg, store, it) = sandbox(d.path());
         let wt = worktree::path_for(&cfg, store.root(), &it.id);
         let head = git::short_head(&wt);
-        runstate::write(&store, &it.id, &runstate::RunState::gates_ok(&head))
-            .unwrap_or_else(|_| unreachable!());
         std::fs::write(wt.join("new.txt"), "z").unwrap_or_else(|_| unreachable!());
+        let digest = git::tree_digest(&wt).unwrap_or_default();
+        runstate::write(
+            &store,
+            &it.id,
+            &runstate::RunState::gates_ok(&head).with_digest(&digest),
+        )
+        .unwrap_or_else(|_| unreachable!());
         let n = item_next(store.root(), &cfg, &store, &it).unwrap_or_else(|| unreachable!());
         assert_eq!(n.command, "devh commit W-001", "S4: гейты зелёные → commit");
     }
@@ -486,8 +497,13 @@ mod tests {
         git(&wt, &["add", "g.txt"]);
         git(&wt, &["commit", "-q", "-m", "work"]);
         let head = git::short_head(&wt);
-        runstate::write(&store, &it.id, &runstate::RunState::committed(&head))
-            .unwrap_or_else(|_| unreachable!());
+        let digest = git::tree_digest(&wt).unwrap_or_default();
+        runstate::write(
+            &store,
+            &it.id,
+            &runstate::RunState::committed(&head).with_digest(&digest),
+        )
+        .unwrap_or_else(|_| unreachable!());
         let n = item_next(store.root(), &cfg, &store, &it).unwrap_or_else(|| unreachable!());
         assert_eq!(n.command, "devh merge W-001", "S5: коммит есть → merge");
     }
@@ -542,5 +558,58 @@ mod tests {
         std::fs::write(wt.join("new.txt"), "z").unwrap_or_else(|_| unreachable!());
         let n = decide(store.root(), &cfg, &store);
         assert_eq!(n.command, "devh run W-001", "протухший дайджест → run");
+    }
+
+    #[test]
+    fn marker_without_digest_is_not_trusted() {
+        // Дайджест дерева не посчитан (маркер записан при ошибке) → свежесть
+        // содержимого НЕИЗВЕСТНА. Фаза GatesOk разрешает коммит, а значит
+        // содержимое обязано быть проверено: fail-closed → перепроверка.
+        let d = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let (cfg, store, it) = sandbox(d.path());
+        let wt = worktree::path_for(&cfg, store.root(), &it.id);
+        let head = git::short_head(&wt);
+        // Дерево грязное — иначе оракул предложил бы `abort`, а не `commit`.
+        std::fs::write(wt.join("new.txt"), "z").unwrap_or_else(|_| unreachable!());
+        runstate::write(&store, &it.id, &runstate::RunState::gates_ok(&head))
+            .unwrap_or_else(|_| unreachable!());
+        let n = decide(store.root(), &cfg, &store);
+        assert_eq!(n.command, "devh run W-001", "без дайджеста → перепроверка");
+    }
+
+    #[test]
+    fn committed_without_digest_does_not_offer_merge() {
+        // То же для фазы Committed: без дайджеста мерж не предлагается —
+        // после коммита дерево могли изменить, а это другой вердикт.
+        let d = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let (cfg, store, it) = sandbox(d.path());
+        let wt = worktree::path_for(&cfg, store.root(), &it.id);
+        let head = git::short_head(&wt);
+        runstate::write(&store, &it.id, &runstate::RunState::committed(&head))
+            .unwrap_or_else(|_| unreachable!());
+        let n = decide(store.root(), &cfg, &store);
+        assert_eq!(n.command, "devh run W-001", "без дайджеста → перепроверка");
+    }
+
+    #[test]
+    fn in_progress_marker_falls_back_to_run() {
+        // Fail-closed: прогон начат, но финального вердикта нет (упал или
+        // запись маркера не удалась) → оракул предлагает ПЕРЕПРОВЕРИТЬ гейты,
+        // а не коммитить по маркеру прошлого прогона.
+        let d = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let (cfg, store, it) = sandbox(d.path());
+        let wt = worktree::path_for(&cfg, store.root(), &it.id);
+        let head = git::short_head(&wt);
+        runstate::write(&store, &it.id, &runstate::RunState::gates_ok(&head))
+            .unwrap_or_else(|_| unreachable!());
+        // Прогон стартовал — старый «зелёный» маркер перекрыт.
+        runstate::write(&store, &it.id, &runstate::RunState::in_progress(&head))
+            .unwrap_or_else(|_| unreachable!());
+        assert!(
+            item_next(store.root(), &cfg, &store, &it).is_none(),
+            "незавершённый прогон не должен давать commit/merge"
+        );
+        let n = decide(store.root(), &cfg, &store);
+        assert_eq!(n.command, "devh run W-001", "незавершённый прогон → run");
     }
 }
