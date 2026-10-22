@@ -63,6 +63,85 @@ fn thread_path(thread: &str) -> PathBuf {
     threads_dir().join(format!("{}.log", safe_name(thread)))
 }
 
+/// Присутствие агентов: presence/<agent>.txt — кто на месте и когда был последний раз.
+fn presence_dir() -> PathBuf {
+    home().join("presence")
+}
+
+fn presence_path(agent: &str) -> PathBuf {
+    presence_dir().join(format!("{}.txt", safe_name(agent)))
+}
+
+/// Записать «я жив, делал X» (heartbeat).
+fn touch_presence(agent: &str, action: &str) {
+    let path = presence_path(agent);
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let host = std::env::var("HOSTNAME").unwrap_or_else(|_| "local".to_string());
+    let body = format!(
+        "agent={agent}\nsession={}\npid={}\nhost={host}\naction={action}\nts={}\n",
+        me(None),
+        std::process::id(),
+        unix_now()
+    );
+    let _ = fs::write(&path, body);
+}
+
+/// Прочие присутствия: агент -> (действие, ts, pid).
+fn presence_rows() -> Vec<(String, String, u64, Option<i32>)> {
+    let mut out: Vec<(String, String, u64, Option<i32>)> = Vec::new();
+    if let Ok(dir) = fs::read_dir(presence_dir()) {
+        for e in dir.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            let Some(base) = name.strip_suffix(".txt") else {
+                continue;
+            };
+            let Ok(raw) = fs::read_to_string(e.path()) else {
+                continue;
+            };
+            let mut action = String::new();
+            let mut ts: u64 = 0;
+            let mut pid: Option<i32> = None;
+            for line in raw.lines() {
+                if let Some(v) = line.strip_prefix("action=") {
+                    action = v.to_string();
+                } else if let Some(v) = line.strip_prefix("ts=") {
+                    ts = v.parse::<u64>().unwrap_or(0);
+                } else if let Some(v) = line.strip_prefix("pid=") {
+                    pid = v.parse::<i32>().ok();
+                }
+            }
+            out.push((base.to_string(), action, ts, pid));
+        }
+    }
+    out.sort();
+    out
+}
+
+/// «N секунд/минут/часов назад».
+fn ago(ts: u64) -> String {
+    let now = unix_now();
+    let d = now.saturating_sub(ts);
+    if d < 60 {
+        format!("{d} с назад")
+    } else if d < 3600 {
+        format!("{} мин назад", d / 60)
+    } else if d < 86_400 {
+        format!("{} ч назад", d / 3600)
+    } else {
+        format!("{} дн назад", d / 86_400)
+    }
+}
+
+/// Процесс жив? (владелец heartbeat мог уйти)
+fn pid_alive(pid: i32) -> bool {
+    if pid <= 0 {
+        return false;
+    }
+    Path::new(&format!("/proc/{pid}")).is_dir()
+}
+
 /// Поток подтверждений агента: «доставлено <id>», «прочитано <id>».
 fn acks_dir() -> PathBuf {
     home().join("acks")
@@ -664,6 +743,7 @@ fn send(args: &[String]) -> i32 {
             };
             let block = build_message(&from, &to, &subject, &tags, &body, &thread, &att);
             let id = block_field(&block, "ID: ").unwrap_or_default();
+            touch_presence(&from, "send");
             let done = deliver(&from, &to, &block, &thread);
             if done.is_empty() {
                 eprintln!("не доставлено никому");
@@ -718,6 +798,7 @@ fn send(args: &[String]) -> i32 {
             if !peek && shown > 0 {
                 let _ = fs::write(&path, join_log(&header, &kept));
             }
+            touch_presence(&agent, "read");
             if shown == 0 {
                 println!("(входящих нет)");
             }
@@ -734,6 +815,8 @@ fn send(args: &[String]) -> i32 {
             let path = inbox_path(&safe_name(&agent));
             let mut seen: Vec<String> = Vec::new();
             loop {
+                // heartbeat: «я на месте» — по нему соседи видят, кто онлайн
+                touch_presence(&agent, "watch");
                 let text = fs::read_to_string(&path).unwrap_or_default();
                 let (header, blocks) = split_log(&text);
                 let fresh: Vec<String> = blocks
@@ -869,6 +952,32 @@ fn send(args: &[String]) -> i32 {
             }
             for (id, what) in rows {
                 println!("не прочитано {id} {what}");
+            }
+            0
+        }
+        "presence" => {
+            let window: u64 = m
+                .value("window")
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(120);
+            let rows = presence_rows();
+            if rows.is_empty() {
+                println!("никто не отмечался (presence пуст)");
+            }
+            let now = unix_now();
+            for (agent, action, ts, pid) in rows.iter() {
+                let fresh = now.saturating_sub(*ts) <= window;
+                let alive = pid.map(pid_alive).unwrap_or(false);
+                let state = if fresh && alive {
+                    "ОНЛАЙН"
+                } else {
+                    "не в сети"
+                };
+                println!(
+                    "{agent}	{state}	{}	{action}	pid={}",
+                    ago(*ts),
+                    pid.map(|p| p.to_string()).unwrap_or_else(|| "?".to_string())
+                );
             }
             0
         }
@@ -1048,7 +1157,7 @@ fn send(args: &[String]) -> i32 {
         }
         _ => {
             println!(
-                "канал агентов: send | reply | read | watch | thread | threads | close | list | sent | find | acks | pending\n\
+                "канал агентов: send | reply | read | watch | thread | threads | close | list | sent | find | acks | pending | presence\n\
                  письмо с одним или несколькими адресатами; прочитанное удаляется (consume-on-read);\n\
                  обсуждение (тред) сохраняется целиком, треды закрываются консенсусом;\n\
                  указание на код: --at путь[:строка] (регион с контекстом) или --diff файл (unified diff);\n\
