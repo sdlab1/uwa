@@ -53,6 +53,44 @@ fn outbox_dir() -> PathBuf {
     home().join("outbox")
 }
 
+/// Треды (обсуждения) — сохраняются целиком, в отличие от входящих.
+fn threads_dir() -> PathBuf {
+    home().join("threads")
+}
+
+fn thread_path(thread: &str) -> PathBuf {
+    threads_dir().join(format!("{}.log", safe_name(thread)))
+}
+
+/// Голоса за закрытие треда: по строке на агента.
+fn votes_path(thread: &str) -> PathBuf {
+    threads_dir().join(format!("{}.votes", safe_name(thread)))
+}
+
+/// Участники треда: отправители + адресаты (все, кого это касается).
+fn thread_participants(blocks: &[String]) -> Vec<String> {
+    let mut who: Vec<String> = Vec::new();
+    for b in blocks.iter() {
+        let header = b.lines().next().unwrap_or("");
+        let Some((_, tail)) = header.split_once("] ОТ: ") else {
+            continue;
+        };
+        let from = tail.split(" — КОМУ: ").next().unwrap_or("");
+        if !from.trim().is_empty() && !who.iter().any(|x| x == from.trim()) {
+            who.push(from.trim().to_string());
+        }
+        if let Some((_, to)) = tail.split_once(" — КОМУ: ") {
+            for t in to.split(',') {
+                let name = t.trim().to_string();
+                if !name.is_empty() && !who.iter().any(|x| x == &name) {
+                    who.push(name);
+                }
+            }
+        }
+    }
+    who
+}
+
 fn inbox_path(agent: &str) -> PathBuf {
     inbox_dir().join(format!("{agent}.log"))
 }
@@ -358,14 +396,18 @@ fn parse_args(args: &[String]) -> Args {
 /// Собрать сообщение (тело + заголовки).
 fn build_message(
     from: &str,
-    to: &str,
+    to: &[String],
     subject: &str,
     tags: &[String],
     body: &str,
+    thread: &str,
 ) -> String {
     let stamp = now_hm();
     let id = short_id(from, subject, body, &stamp);
-    let mut block = format!("[{stamp}] ОТ: {from} — КОМУ: {to}\nID: {id}\nТЕМА: {subject}");
+    let mut block = format!(
+        "[{stamp}] ОТ: {from} — КОМУ: {}\nID: {id}\nТРЕД: {thread}\nТЕМА: {subject}",
+        to.join(", ")
+    );
     if !tags.is_empty() {
         block.push_str(&format!("\nТЭГИ: {}", tags.join(", ")));
     }
@@ -373,24 +415,36 @@ fn build_message(
     block
 }
 
-/// Раздать сообщение: адресату (или всем в ростере) + копия в мой исходящий.
-fn deliver(from: &str, to: &str, block: &str) -> Vec<String> {
+/// Раздать письмо: каждому адресату (или всем в ростере) + в тред (обсуждение)
+/// + копия в мои исходящие. Тред сохраняется целиком — обсуждение не теряется.
+fn deliver(from: &str, to: &[String], block: &str, thread: &str) -> Vec<String> {
     let mut targets: Vec<String> = Vec::new();
-    if to == "all" {
-        targets = roster();
-        if targets.is_empty() {
-            targets.push(from.to_string());
+    for t in to.iter() {
+        if t == "all" {
+            let all = roster();
+            if all.is_empty() {
+                targets.push(from.to_string());
+            } else {
+                targets.extend(all);
+            }
+        } else {
+            targets.push(t.clone());
         }
-    } else {
-        targets.push(to.to_string());
+    }
+    let mut unique: Vec<String> = Vec::new();
+    for t in targets.iter() {
+        if !unique.iter().any(|x| x == t) {
+            unique.push(t.clone());
+        }
     }
     let mut done: Vec<String> = Vec::new();
-    for t in targets.iter() {
+    for t in unique.iter() {
         let path = inbox_path(&safe_name(t));
         if append_message(&path, block) {
             done.push(t.clone());
         }
     }
+    let _ = append_message(&thread_path(thread), block);
     let _ = append_message(&outbox_path(&safe_name(from)), block);
     done
 }
@@ -398,23 +452,50 @@ fn deliver(from: &str, to: &str, block: &str) -> Vec<String> {
 fn send(args: &[String]) -> i32 {
     let m = parse_args(args);
     match m.sub.as_str() {
-        "send" => {
+        "send" | "reply" => {
             let from = m.value("from").unwrap_or_else(|| me(m.value("agent").as_deref()));
-            let to = m.value("to").unwrap_or_else(|| "all".to_string());
+            let mut to = m.values("to");
+            if to.is_empty() {
+                to.push("all".to_string());
+            }
             let subject = m.value("subject").unwrap_or_default();
             let tags = m.values("tag");
             let body = match m.value("body-file") {
                 Some(p) => fs::read_to_string(&p).unwrap_or_default(),
                 None => m.value("body").unwrap_or_default(),
             };
-            let block = build_message(&from, &to, &subject, &tags, &body);
+            let block = build_message(&from, &to, &subject, &tags, &body, "x");
             let id = block_field(&block, "ID: ").unwrap_or_default();
-            let done = deliver(&from, &to, &block);
+            // тред: явный --thread, иначе новое обсуждение (id = id письма)
+            let thread = m.value("thread").unwrap_or_else(|| id.clone());
+            let block = build_message(&from, &to, &subject, &tags, &body, &thread);
+            let id = block_field(&block, "ID: ").unwrap_or_default();
+            let done = deliver(&from, &to, &block, &thread);
             if done.is_empty() {
                 eprintln!("не доставлено никому");
                 return 1;
             }
-            println!("отправлено (ID {id}) -> {}", done.join(", "));
+            println!(
+                "отправлено (ID {id}, тред {thread}) -> {}",
+                done.join(", ")
+            );
+            0
+        }
+        "thread" => {
+            let id = m.first();
+            if id.is_empty() {
+                eprintln!("нужен ID треда");
+                return 2;
+            }
+            let text = fs::read_to_string(thread_path(&id)).unwrap_or_default();
+            let (_h, blocks) = split_log(&text);
+            if blocks.is_empty() {
+                eprintln!("тред {id} не найден");
+                return 1;
+            }
+            for b in blocks.iter() {
+                println!("{b}{SEP}");
+            }
             0
         }
         "read" => {
@@ -514,6 +595,21 @@ fn send(args: &[String]) -> i32 {
             for (agent, n) in rows {
                 println!("{agent}: непрочитанных={n}");
             }
+            let mut threads: Vec<(String, usize)> = Vec::new();
+            if let Ok(dir) = fs::read_dir(threads_dir()) {
+                for e in dir.flatten() {
+                    let name = e.file_name().to_string_lossy().to_string();
+                    if let Some(base) = name.strip_suffix(".log") {
+                        let text = fs::read_to_string(e.path()).unwrap_or_default();
+                        let (_h, blocks) = split_log(&text);
+                        threads.push((base.to_string(), blocks.len()));
+                    }
+                }
+            }
+            threads.sort();
+            for (t, n) in threads {
+                println!("тред {t}: сообщений={n}");
+            }
             0
         }
         "sent" => {
@@ -533,7 +629,7 @@ fn send(args: &[String]) -> i32 {
             }
             let mut hits = 0usize;
             let mut files: Vec<PathBuf> = Vec::new();
-            for dir in [inbox_dir(), outbox_dir()] {
+            for dir in [inbox_dir(), outbox_dir(), threads_dir()] {
                 if let Ok(entries) = fs::read_dir(dir) {
                     for e in entries.flatten() {
                         files.push(e.path());
@@ -566,62 +662,87 @@ fn send(args: &[String]) -> i32 {
             }
             0
         }
-        "forward" => {
-            let id = m.value("id").unwrap_or_default();
-            let to = m.value("to").unwrap_or_else(|| "all".to_string());
-            let from = m.value("from").unwrap_or_else(|| me(m.value("agent").as_deref()));
-            if id.is_empty() {
-                eprintln!("нужен --id <id>");
+        "close" => {
+            let thread = m.first();
+            if thread.is_empty() {
+                eprintln!("нужен ID треда");
                 return 2;
             }
-            let mut source: Option<String> = None;
-            let mut found: Option<String> = None;
-            for dir in [inbox_dir(), outbox_dir()] {
-                if let Ok(entries) = fs::read_dir(dir) {
-                    for e in entries.flatten() {
-                        let text = fs::read_to_string(e.path()).unwrap_or_default();
-                        let (_h, blocks) = split_log(&text);
-                        for b in blocks.iter() {
-                            if block_field(b, "ID: ").as_deref() == Some(id.as_str()) {
-                                source = e
-                                    .path()
-                                    .file_stem()
-                                    .map(|s| s.to_string_lossy().to_string());
-                                found = Some(b.clone());
-                            }
-                        }
+            let actor = m.value("by").unwrap_or_else(|| me(m.value("agent").as_deref()));
+            let text = fs::read_to_string(thread_path(&thread)).unwrap_or_default();
+            let (_h, blocks) = split_log(&text);
+            if blocks.is_empty() {
+                eprintln!("тред {thread} не найден");
+                return 1;
+            }
+            let participants = thread_participants(&blocks);
+            let mut votes: Vec<String> = Vec::new();
+            if let Ok(raw) = fs::read_to_string(votes_path(&thread)) {
+                for line in raw.lines() {
+                    if let Some((a, _)) = line.split_once(' ') {
+                        votes.push(a.to_string());
                     }
                 }
             }
-            let Some(block) = found else {
-                eprintln!("сообщение {id} не найдено");
-                return 1;
-            };
-            let mut tags = block_tags(&block);
-            for t in m.values("tag") {
-                if !tags.contains(&t) {
-                    tags.push(t);
-                }
+            if !votes.iter().any(|v| v == &actor) {
+                votes.push(actor.clone());
             }
-            let subject = block_field(&block, "ТЕМА: ").unwrap_or_default();
-            let body: String = block
-                .lines()
-                .skip_while(|l| {
-                    l.starts_with('[')
-                        || l.starts_with("ID:")
-                        || l.starts_with("ТЕМА:")
-                        || l.starts_with("ТЭГИ:")
-                })
-                .collect::<Vec<&str>>()
-                .join("\n");
-            let new_block = build_message(&from, &to, &subject, &tags, &body);
-            let new_id = block_field(&new_block, "ID: ").unwrap_or_default();
-            let done = deliver(&from, &to, &new_block);
+            let voted: Vec<String> = participants
+                .iter()
+                .filter(|p| votes.iter().any(|v| v == *p))
+                .cloned()
+                .collect();
+            let missing: Vec<String> = participants
+                .iter()
+                .filter(|p| !votes.iter().any(|v| v == *p))
+                .cloned()
+                .collect();
+            let force = m.flag("force");
+            if missing.is_empty() || force {
+                let _ = fs::remove_file(thread_path(&thread));
+                let _ = fs::remove_file(votes_path(&thread));
+                // непрочитанные копии этого треда — тоже вон (вопрос решён)
+                for agent in roster() {
+                    let path = inbox_path(&safe_name(&agent));
+                    let raw = fs::read_to_string(&path).unwrap_or_default();
+                    let (header, blks) = split_log(&raw);
+                    let kept: Vec<String> = blks
+                        .iter()
+                        .filter(|b| {
+                            block_field(b, "ТРЕД: ").as_deref() != Some(thread.as_str())
+                        })
+                        .cloned()
+                        .collect();
+                    if kept.len() != blks.len() {
+                        let _ = fs::write(&path, join_log(&header, &kept));
+                    }
+                }
+                let stamp = now_hm();
+                let how = if force { "форс" } else { "консенсус" };
+                let tomb = format!(
+                    "[{stamp}] ОТ: {actor} — КОМУ: все\nТРЕД: {thread}\nТЕМА: тред закрыт ({how})\n"
+                );
+                let _ = append_message(&outbox_path(&safe_name(&actor)), &tomb);
+                println!(
+                    "тред {thread} закрыт ({how}): голоса {}/{}",
+                    voted.len(),
+                    participants.len()
+                );
+                return 0;
+            }
+            let mut lines: Vec<String> = Vec::new();
+            for v in voted.iter() {
+                lines.push(format!("{v} {}", unix_now()));
+            }
+            if let Some(parent) = votes_path(&thread).parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            let _ = fs::write(votes_path(&thread), lines.join("\n") + "\n");
             println!(
-                "тема поднята: {new_id} -> {} (тэги: {}; источник: {} / {id})",
-                done.join(", "),
-                tags.join(", "),
-                source.unwrap_or_default()
+                "голос за закрытие треда {thread} принят ({}/{}); ждём: {}",
+                voted.len(),
+                participants.len(),
+                missing.join(", ")
             );
             0
         }
