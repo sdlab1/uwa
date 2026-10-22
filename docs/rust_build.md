@@ -1452,3 +1452,46 @@ ghost   не в сети   1 ч назад   send    pid=1
 - Любая проверка `MUTATE_COV` до `f042829` проверяла **пустой** индекс — могла «проходить» на пустом маппинге. Перепроверять MUTATE_COV надо на `f042829`+.
 - Общий урок (для репо в целом): **serde-парсеры внешних форматов молча дают пустой результат** — нужен тест на ЖИВОМ формате (здесь: фикстура, снятая с реального `nextest list`), иначе фича «работает», ничего не делая. Тот же класс, что и load-флак (§9.29): тихий шум вместо отказа.
 - Побочно: соседней сессии отправлен diff-патч на их `core/survivors.rs` / `core/gates.rs` (волна Unviable из-за отсутствия `Default` у `Outcome`/`Shot`/`GenreGroup`/`ClassRow`/`ReviewVerdict`/`CrapRow`/`CrapReport` + `+=` на `String` в `collect_after_run`), с guard-тестами `mutant_shapes_are_constructible` — фиксируют ровно те формы, которые подставляет мутатор.
+
+### 8. ФИНАЛЬНЫЙ ВЕРДИКТ ПРИЁМКИ (полная перепроверка 926/926, load-гейт выключен)
+
+Полный прогон **всего scope** с `HARNESS_MUTATE_MAX_LOAD=off` (3 ч, 926 мутантов): **810 caught / 92 missed / 24 unviable**. Сверка **поимённо** с исходным прогоном (load-гейт ВКЛ, как в проде):
+
+| переход | количество | что это |
+|---|---|---|
+| Caught → Missed | **37** | **ложные поимки** от load-флака (§9.29): тест упал из-за блокировки гейта, а не из-за мутанта |
+| Missed → Caught | 2 | шум (профиль/загрузка), симметрично |
+| вердикт совпал | 889 | — |
+
+Ложные поимки по файлам: `core/survivors.rs` 21, `core/coverage.rs` 7, `core/escapes.rs` 3, `core/contract.rs` 2, `core/load.rs` 2, `core/tui.rs` 1, `core/gates.rs` 1.
+
+**Итог по kill-rate (scope 926 мутантов, дерево 317a365):**
+
+| | прогон с load-гейтом (как в проде) | чистый прогон (гейт выключен) |
+|---|---|---|
+| caught | 845 | **810** |
+| missed | 57 | **92** |
+| kill-rate по testable | 93.7 % | **89.8 %** |
+
+**Вывод приёмки (честно):** kill-rate, который показывают обычные прогоны, **завышен на 4 п.п. из-за load-флака**. 92 пропущенных мутанта — настоящие дыры покрытия, а 37 «пойманных» были шумом. Профиль мутантов (incremental + opt-level=0) **принят** — он даёт ×2.3–2.6 по времени и не меняет семантику вердиктов; чинить надо **дыры**, а не профиль.
+
+**Реальные дыры на 317a365 (после вычитания ложных поимок):**
+
+| MISSED (нужен тест) | | UNVIABLE (не компилируется — дыра по P9) | |
+|---|---|---|---|
+| `core/survivors.rs` | 33 | `core/survivors.rs` | 9 |
+| `core/coverage.rs` | 30 | `core/gates.rs` | 5 |
+| `core/escapes.rs` | 8 | `core/state.rs` | 5 |
+| `core/gates.rs` | 7 | `core/coverage.rs` | 2 |
+| `core/contract.rs` | 4 | `core/timing.rs` | 1 |
+| `core/early.rs` | 4 | `core/early.rs` | 1 |
+| `core/load.rs` | 3 | `core/plan.rs` | 1 |
+| `core/killmap.rs` | 2 | | |
+| `core/tui.rs` | 1 | | |
+
+**Что уже закрыто после этого прогона (мои коммиты):**
+- `core/coverage.rs`: 30 missed → **0**, unviable → 0 (`f042829` — фича P7-2.4 была мёртвой, §9.32; проверка: `40 mutants tested: 40 caught`).
+- Unviable-волна «нет Default»: `Outcome`/`Shot`/`GenreGroup`/`ClassRow` (survivors.rs), `ReviewVerdict`/`CrapRow`/`CrapReport` (gates.rs), `FirstProblem` (early.rs) → `Default` + `+=`→`push_str` в `collect_after_run` + guard-тесты `mutant_shapes_are_constructible`/`mutant_shape_is_constructible` (`29e9558`).
+- `core/killmap.rs` (2) и `core/contract.rs` (2): тесты на границы бюджета пула и на «контракт пуст только если пусто всё» (`29e9558`).
+
+**Осталось закрывать:** `core/survivors.rs` (33 missed — зона соседней сессии), `core/escapes.rs` (8), `core/gates.rs` (7), `core/contract.rs`/`core/load.rs`/`core/early.rs`/`core/killmap.rs`/`core/tui.rs` (по 1–4), и unviable в `core/state.rs` (5), `core/plan.rs` (1), `core/timing.rs` (1).
