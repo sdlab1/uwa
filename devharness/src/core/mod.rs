@@ -8,6 +8,7 @@ pub mod killmap;
 pub mod load;
 pub mod mutaudit;
 pub mod plan;
+pub mod runstate;
 pub mod state;
 pub mod survivors;
 pub mod tui;

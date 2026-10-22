@@ -16,10 +16,11 @@
 
 use std::path::Path;
 
+use crate::core::runstate::{self, Phase};
 use crate::core::state::Status;
 use crate::core::types::ItemId;
 use crate::shell::git;
-use crate::shell::store::Store;
+use crate::shell::store::{Item, Store};
 use crate::shell::worktree;
 
 /// Ответ оракула: команда + причина.
@@ -81,23 +82,12 @@ pub fn decide(root: &Path, cfg: &crate::core::types::RunConfig, store: &Store) -
                 ),
             );
         }
-        // S5: коммит есть, не смержено → мерж.
-        let wt = worktree::path_for(cfg, root, &it.id);
-        if wt.is_dir() {
-            if let Ok(n) = git::rev_list_count(&wt, &cfg.main_branch) {
-                if n > 0 {
-                    return Next::new(
-                        &format!("devh merge {}", it.id.dir_name()),
-                        &format!(
-                            "{}: гейты зелёные, коммит есть ({n} шт.) — смержить",
-                            it.id.dir_name()
-                        ),
-                    );
-                }
-            }
+        // S10/S5/S4 — по durable-маркеру прогона (гейты зелёные? сдача?).
+        if let Some(n) = item_next(root, cfg, store, it) {
+            return n;
         }
-        // S1/S3: прогона не было или гейт красный → прогнать (внутри
-        // run живёт fix-раунд с промптом, несущим список проблем).
+        // S1/S3: прогона не было или гейт красный с бюджетом → прогнать
+        // (внутри run живёт fix-раунд с промптом, несущим список проблем).
         return Next::new(
             &format!("devh run {}", it.id.dir_name()),
             &format!(
@@ -124,11 +114,142 @@ pub fn decide(root: &Path, cfg: &crate::core::types::RunConfig, store: &Store) -
         );
     }
 
+    // ── S11: мусор — старые worktree/логи ────────────────────────────
+    if let Some(n) = cleanup_next(cfg, store) {
+        return n;
+    }
+
     // ── всё завершено ─────────────────────────────────────────────────
     Next::new(
         "готово: активных item'ов нет, спек нет — работа завершена",
         "проверять больше нечего",
     )
+}
+
+/// Следующий шаг по активному item'у: S10 (сдача) → S5 (мерж) → S4 (коммит).
+///
+/// Решение опирается на DURABLE-маркер прогона (`core::runstate`): статус
+/// item'а не различает «гейты зелёные, нужен коммит» и «бюджет фиксов
+/// исчерпан» (в обоих случаях item остаётся `active`), а маркер пишет
+/// только харнесс — тот, кто знает вердикт гейта.
+///
+/// Маркеру верим только пока ДЕРЕВО не менялось: в нём записан SHA
+/// проверенного дерева. Изменилось — вердикт протух, гейты надо
+/// перепроверить (`devh run`).
+fn item_next(
+    root: &Path,
+    cfg: &crate::core::types::RunConfig,
+    store: &Store,
+    it: &Item,
+) -> Option<Next> {
+    let wt = worktree::path_for(cfg, root, &it.id);
+    let rs = runstate::read(store, &it.id)?;
+    // S10: бюджет фиксов (или класс отказа) исчерпан — работа сдана.
+    if rs.phase == Phase::GateFailed {
+        let gate = if rs.gate.is_empty() {
+            "гейт"
+        } else {
+            rs.gate.as_str()
+        };
+        return Some(Next::new(
+            &format!("devh abort {}", it.id.dir_name()),
+            &format!(
+                "{}: {gate} красный, бюджет исчерпан — списать item (или переформулировать: devh hint)",
+                it.id.dir_name()
+            ),
+        ));
+    }
+    if !matches!(rs.phase, Phase::GatesOk | Phase::Committed) {
+        return None;
+    }
+    // Свежесть: HEAD дерева должен совпадать с проверенным.
+    let head_now = git::short_head(&wt);
+    if rs.head.is_empty() || rs.head != head_now {
+        return None;
+    }
+    // Свежесть содержимого: вердикт относится к дереву, а не к коммиту.
+    // Незакоммиченная правка после зелёных гейтов = другое дерево →
+    // вердикт протух → оракул предлагает `devh run` (перепроверить гейты),
+    // а не `commit` по чужому зелёному свету.
+    if !rs.digest.is_empty() {
+        let now = git::tree_digest(&wt).unwrap_or_default();
+        if now != rs.digest {
+            return None;
+        }
+    }
+    let ahead = git::rev_list_count(&wt, &cfg.main_branch).unwrap_or(0);
+    match rs.phase {
+        Phase::Committed if ahead > 0 => Some(Next::new(
+            &format!("devh merge {}", it.id.dir_name()),
+            &format!(
+                "{}: гейты зелёные, коммит есть ({ahead} шт.) — смержить",
+                it.id.dir_name()
+            ),
+        )),
+        Phase::Committed => Some(Next::new(
+            &format!("devh abort {}", it.id.dir_name()),
+            &format!(
+                "{}: гейты зелёные, но коммитов сверх {} нет — работа уже в базе, item списать",
+                it.id.dir_name(),
+                cfg.main_branch
+            ),
+        )),
+        Phase::GatesOk if git::tree_dirty(&wt) => Some(Next::new(
+            &format!("devh commit {}", it.id.dir_name()),
+            &format!(
+                "{}: гейты зелёные, коммита нет — закоммитить (коммит делает харнесс)",
+                it.id.dir_name()
+            ),
+        )),
+        Phase::GatesOk => Some(Next::new(
+            &format!("devh abort {}", it.id.dir_name()),
+            &format!(
+                "{}: гейты зелёные, но изменений нет — нечего коммитить, item списать",
+                it.id.dir_name()
+            ),
+        )),
+        _ => None,
+    }
+}
+
+/// S11: мусор — worktree закрытого item'а остался или логи протухли.
+/// Уборку делает `devh clean` (он же чистит логи старше LOG_DAYS).
+fn cleanup_next(cfg: &crate::core::types::RunConfig, store: &Store) -> Option<Next> {
+    for it in store.items() {
+        if it.status != Status::Done {
+            continue;
+        }
+        let wt = worktree::path_for(cfg, store.root(), &it.id);
+        if wt.is_dir() {
+            return Some(Next::new(
+                "devh clean",
+                &format!(
+                    "{}: item закрыт, но worktree остался — убрать мусор",
+                    it.id.dir_name()
+                ),
+            ));
+        }
+    }
+    if cfg.log_days > 0 {
+        let logs = store.dir.join("logs");
+        if let Ok(rd) = std::fs::read_dir(&logs) {
+            for e in rd.flatten() {
+                let Ok(meta) = e.metadata() else { continue };
+                let Ok(mtime) = meta.modified() else { continue };
+                let age_days = mtime.elapsed().map(|d| d.as_secs() / 86_400).unwrap_or(0);
+                if age_days > cfg.log_days as u64 {
+                    return Some(Next::new(
+                        "devh clean",
+                        &format!(
+                            "логи старше {}д протухли — убрать (devh clean)",
+                            cfg.log_days
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Следующий шаг по мутационному аудиту (S6/S7), если аудит есть.
@@ -212,6 +333,60 @@ fn item_alive(store: &Store, id: &ItemId) -> bool {
 mod tests {
     use super::*;
 
+    /// Мини-репозиторий worktree'а: git init + коммит(ы).
+    fn git(dir: &Path, args: &[&str]) {
+        let ok = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        assert!(ok, "git {args:?} не прошёл в {}", dir.display());
+    }
+
+    /// Worktree задачи: базовый коммит на `main` (+ ветка задачи с коммитом).
+    fn make_wt(dir: &Path, branch: &str, work_commit: bool) {
+        std::fs::create_dir_all(dir).unwrap_or_else(|_| unreachable!());
+        git(dir, &["init", "-q", "-b", "main"]);
+        git(dir, &["config", "user.email", "t@t"]);
+        git(dir, &["config", "user.name", "t"]);
+        std::fs::write(dir.join("f.txt"), "x").unwrap_or_else(|_| unreachable!());
+        git(dir, &["add", "f.txt"]);
+        git(dir, &["commit", "-q", "-m", "base"]);
+        if work_commit {
+            git(dir, &["checkout", "-q", "-b", branch]);
+            std::fs::write(dir.join("g.txt"), "y").unwrap_or_else(|_| unreachable!());
+            git(dir, &["add", "g.txt"]);
+            git(dir, &["commit", "-q", "-m", "work"]);
+        }
+    }
+
+    /// Песочница: item W-001 в active + worktree + конфиг.
+    fn sandbox(d: &Path) -> (crate::core::types::RunConfig, Store, Item) {
+        let root = d.join("repo");
+        std::fs::create_dir_all(root.join(".harness/items/W-001"))
+            .unwrap_or_else(|_| unreachable!());
+        std::fs::write(root.join(".harness/config"), "MIN_KILL=90\n")
+            .unwrap_or_else(|_| unreachable!());
+        std::fs::write(root.join(".harness/items/W-001/status"), "active")
+            .unwrap_or_else(|_| unreachable!());
+        let store = Store::new(&root);
+        let mut cfg = crate::core::types::RunConfig::default();
+        cfg.wt_root = d.join("wt");
+        let id = ItemId(1);
+        let wt = worktree::per_id_path(&cfg, &root, &id);
+        make_wt(&wt, &id.branch(), false);
+        let it = Item {
+            id,
+            status: Status::Active,
+            title: "t".to_string(),
+            red_cmd: None,
+            no_red: None,
+            agent: None,
+        };
+        (cfg, store, it)
+    }
+
     #[test]
     fn next_is_a_single_executable_command() {
         let n = Next::new("devh run W-001", "причина");
@@ -267,5 +442,105 @@ mod tests {
         );
         assert_eq!(n.command, "devh init", "S0: нет конфига → devh init");
         assert!(!n.command.contains('<'), "без плейсхолдеров: {}", n.command);
+    }
+
+    #[test]
+    fn failed_run_marker_points_to_abort() {
+        // S10: бюджет фиксов исчерпан → сдача, а не новый прогон.
+        let d = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let (cfg, store, it) = sandbox(d.path());
+        let wt = worktree::path_for(&cfg, store.root(), &it.id);
+        let head = git::short_head(&wt);
+        runstate::write(
+            &store,
+            &it.id,
+            &runstate::RunState::gate_failed("verify", 1, &head),
+        )
+        .unwrap_or_else(|_| unreachable!());
+        let n = item_next(store.root(), &cfg, &store, &it).unwrap_or_else(|| unreachable!());
+        assert_eq!(n.command, "devh abort W-001", "S10: сдача → abort");
+    }
+
+    #[test]
+    fn gates_ok_with_dirty_tree_points_to_commit() {
+        // S4: гейты зелёные, коммита нет → коммит (делает харнесс).
+        let d = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let (cfg, store, it) = sandbox(d.path());
+        let wt = worktree::path_for(&cfg, store.root(), &it.id);
+        let head = git::short_head(&wt);
+        runstate::write(&store, &it.id, &runstate::RunState::gates_ok(&head))
+            .unwrap_or_else(|_| unreachable!());
+        std::fs::write(wt.join("new.txt"), "z").unwrap_or_else(|_| unreachable!());
+        let n = item_next(store.root(), &cfg, &store, &it).unwrap_or_else(|| unreachable!());
+        assert_eq!(n.command, "devh commit W-001", "S4: гейты зелёные → commit");
+    }
+
+    #[test]
+    fn committed_marker_points_to_merge() {
+        // S5: гейты зелёные + коммит → мерж.
+        let d = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let (cfg, store, it) = sandbox(d.path());
+        let wt = worktree::path_for(&cfg, store.root(), &it.id);
+        git(&wt, &["checkout", "-q", "-b", &it.id.branch()]);
+        std::fs::write(wt.join("g.txt"), "y").unwrap_or_else(|_| unreachable!());
+        git(&wt, &["add", "g.txt"]);
+        git(&wt, &["commit", "-q", "-m", "work"]);
+        let head = git::short_head(&wt);
+        runstate::write(&store, &it.id, &runstate::RunState::committed(&head))
+            .unwrap_or_else(|_| unreachable!());
+        let n = item_next(store.root(), &cfg, &store, &it).unwrap_or_else(|| unreachable!());
+        assert_eq!(n.command, "devh merge W-001", "S5: коммит есть → merge");
+    }
+
+    #[test]
+    fn stale_marker_falls_back_to_run() {
+        // Дерево изменилось после вердикта → маркер протух: гейты надо
+        // перепроверить, а не коммитить/мержить вслепую.
+        let d = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let (cfg, store, it) = sandbox(d.path());
+        runstate::write(&store, &it.id, &runstate::RunState::gates_ok("deadbeef"))
+            .unwrap_or_else(|_| unreachable!());
+        let n = decide(store.root(), &cfg, &store);
+        assert_eq!(n.command, "devh run W-001", "протухший маркер → run");
+    }
+
+    #[test]
+    fn fresh_digest_allows_commit() {
+        // Тот же маркер, но с дайджестом СОДЕРЖИМОГО дерева: вердикт
+        // относится к этому дереву → оракул предлагает коммит.
+        let d = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let (cfg, store, it) = sandbox(d.path());
+        let wt = worktree::path_for(&cfg, store.root(), &it.id);
+        let head = git::short_head(&wt);
+        std::fs::write(wt.join("new.txt"), "z").unwrap_or_else(|_| unreachable!());
+        let digest = git::tree_digest(&wt).unwrap_or_default();
+        runstate::write(
+            &store,
+            &it.id,
+            &runstate::RunState::gates_ok(&head).with_digest(&digest),
+        )
+        .unwrap_or_else(|_| unreachable!());
+        let n = item_next(store.root(), &cfg, &store, &it).unwrap_or_else(|| unreachable!());
+        assert_eq!(n.command, "devh commit W-001", "свежий дайджест → commit");
+    }
+
+    #[test]
+    fn stale_digest_falls_back_to_run() {
+        // Незакоммиченная правка ПОСЛЕ зелёных гейтов = другое дерево:
+        // вердикт протух, даже если HEAD тот же → оракул предлагает run.
+        let d = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let (cfg, store, it) = sandbox(d.path());
+        let wt = worktree::path_for(&cfg, store.root(), &it.id);
+        let head = git::short_head(&wt);
+        let digest = git::tree_digest(&wt).unwrap_or_default();
+        runstate::write(
+            &store,
+            &it.id,
+            &runstate::RunState::gates_ok(&head).with_digest(&digest),
+        )
+        .unwrap_or_else(|_| unreachable!());
+        std::fs::write(wt.join("new.txt"), "z").unwrap_or_else(|_| unreachable!());
+        let n = decide(store.root(), &cfg, &store);
+        assert_eq!(n.command, "devh run W-001", "протухший дайджест → run");
     }
 }

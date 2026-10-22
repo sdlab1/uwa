@@ -4,6 +4,7 @@ use std::time::Duration;
 use crate::core::gates::{
     self, parse_review_verdict, tail_of, Gate, Raw, RedPhase, ReviewVerdict, Verdict,
 };
+use crate::core::runstate;
 use crate::core::state::{self, ClaimAction, Event};
 use crate::core::types::{CrapCfg, ItemId, MutateCfg, RunConfig};
 use crate::prompt;
@@ -34,6 +35,48 @@ impl Drop for PidGuard<'_> {
 fn die(store: &Store, id: &ItemId, code: i32) -> ! {
     store.remove_pid(id);
     crate::commands::die(code)
+}
+
+/// Зафиксировать фазу прогона в durable-маркере (для оракула `devh next`).
+///
+/// Пишет ТОЛЬКО харнесс — тот, кто знает вердикт гейта. Ошибка записи не
+/// должна ронять прогон: без маркера оракул предложит `devh run`
+/// (безопасный ответ: перепроверить гейты).
+fn mark_phase(store: &Store, id: &ItemId, wt: &Path, phase: runstate::Phase) {
+    mark_phase_named(store, id, wt, phase, "", 1);
+}
+
+/// То же, но с именем упавшего гейта и кодом (для `GateFailed`).
+fn mark_phase_named(
+    store: &Store,
+    id: &ItemId,
+    wt: &Path,
+    phase: runstate::Phase,
+    gate: &str,
+    code: i32,
+) {
+    let head = git::short_head(wt);
+    // Дайджест дерева: вердикт гейта относится к ЭТОМУ дереву, а не к
+    // коммиту. Без него незакоммиченная правка после зелёных гейтов не
+    // протухала бы, и оракул предложил бы `commit` по чужому вердикту.
+    let digest = git::tree_digest(wt).unwrap_or_default();
+    let st = match phase {
+        runstate::Phase::GatesOk => runstate::RunState::gates_ok(&head),
+        runstate::Phase::Committed => runstate::RunState::committed(&head),
+        runstate::Phase::GateFailed => runstate::RunState::gate_failed(gate, code, &head),
+    }
+    .with_digest(&digest);
+    let _ = runstate::write(store, id, &st);
+}
+
+/// Имя гейта по вердикту (для маркера сдачи и для сообщений).
+fn verdict_gate_name(v: &Verdict) -> String {
+    match v {
+        Verdict::Pass => "pass".to_string(),
+        Verdict::Fail { gate, .. } => gate.name().to_string(),
+        Verdict::EnvBlocked { .. } => "env".to_string(),
+        Verdict::SpecBlock { gate, .. } => gate.name().to_string(),
+    }
 }
 
 /// Конфиг для `devh run`: последовательный прогон включает стабильный
@@ -117,12 +160,16 @@ pub fn run(store: &Store, cfg: &RunConfig, id: &ItemId) -> anyhow::Result<()> {
                         next_prompt = prompt::fix_prompt(&gate, &tail, cfg, store, id);
                     }
                     gates::RoundDecision::GiveUp { code } => {
-                        give_up(store, id, &stop, kind, code, cfg.max_fix)
+                        give_up(store, id, &stop, kind, code, cfg.max_fix, &wt)
                     }
                 }
             }
         }
     }
+    // Гейты зелёные — но маркер «gates ok» ставим ПОСЛЕ red-пост-гейта и
+    // RED-MUT: иначе маркер врал бы оракулу (`devh commit`), когда
+    // обязательная стадия после лестницы гейтов упала. До red-стадий
+    // маркера нет — оракул предложит `devh run` (безопасно: перепроверить).
     println!(
         "{}OK гейты: verify{}{}{}",
         c.g,
@@ -137,6 +184,8 @@ pub fn run(store: &Store, cfg: &RunConfig, id: &ItemId) -> anyhow::Result<()> {
 
     red_post(store, cfg, id, &wt, &red, &mut timing)?;
     red_mutate_phase(store, cfg, id, &wt, &red, &mut timing)?;
+    // Все обязательные стадии прошли — теперь вердикт «гейты зелёные» честен.
+    mark_phase(store, id, &wt, runstate::Phase::GatesOk);
     commit_push(store, cfg, id, &wt, round, &mut timing, &root)?;
     finalize(cfg, id, &wt, &timing)?;
     drop(lock);
@@ -484,6 +533,7 @@ fn red_post(
                 "{}FAIL: Red-пост-гейт: red.cmd не позеленел — фикс не доказан{}",
                 c.r, c.z
             );
+            mark_phase_named(store, id, wt, runstate::Phase::GateFailed, "red-post", 1);
             die(store, id, 1);
         }
     }
@@ -528,6 +578,14 @@ fn red_mutate_phase(
         )
         .unwrap_or_else(|e| {
             eprintln!("{}{e}{}", c.r, c.z);
+            mark_phase_named(
+                store,
+                id,
+                wt,
+                runstate::Phase::GateFailed,
+                "red-mutation",
+                1,
+            );
             die(store, id, 1);
         });
         let mpath = store.log_file(id, "redmut");
@@ -540,6 +598,14 @@ fn red_mutate_phase(
                     c.r,
                     mpath.display(),
                     c.z
+                );
+                mark_phase_named(
+                    store,
+                    id,
+                    wt,
+                    runstate::Phase::GateFailed,
+                    "red-mutation",
+                    2,
                 );
                 die(store, id, 2);
             }
@@ -555,6 +621,14 @@ fn red_mutate_phase(
                     red.file.display(),
                     mpath.display(),
                     c.z
+                );
+                mark_phase_named(
+                    store,
+                    id,
+                    wt,
+                    runstate::Phase::GateFailed,
+                    "red-mutation",
+                    1,
                 );
                 die(store, id, 1);
             }
@@ -651,6 +725,8 @@ fn commit_push(
     }
     git::commit(wt, &msg)?;
     println!("{}OK commit: {msg}{}", c.g, c.z);
+    // Коммит сделан → фаза «committed»: оракул предложит merge (S5).
+    mark_phase(store, id, wt, runstate::Phase::Committed);
 
     let gates_list = match (cfg.mutate.is_some(), cfg.bench.is_some()) {
         (true, true) => "verify,mutation,bench",
@@ -721,8 +797,19 @@ fn give_up(
     kind: gates::FailureKind,
     code: i32,
     max_fix: u32,
+    wt: &Path,
 ) -> ! {
     let c = colors();
+    // Сдача — фиксируем ФАКТ (S10 в оракуле `devh next`): бюджет/класс
+    // отказа исчерпан, следующий шаг — `devh abort`, а не новый run.
+    let head = git::short_head(wt);
+    let digest = git::tree_digest(wt).unwrap_or_default();
+    let _ = runstate::write(
+        store,
+        id,
+        &runstate::RunState::gate_failed(&verdict_gate_name(&stop.verdict), code, &head)
+            .with_digest(&digest),
+    );
     match kind {
         gates::FailureKind::Fix => {
             let Verdict::Fail { gate, .. } = &stop.verdict else {

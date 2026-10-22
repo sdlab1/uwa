@@ -78,6 +78,15 @@ pub fn commit(store: &Store, cfg: &RunConfig, id: &ItemId) -> anyhow::Result<()>
     } else {
         println!("{}OK: изменений нет — только push{}", c.g, c.z);
     }
+    // Фаза «committed»: оракул `devh next` предложит merge (S5).
+    // Дайджест дерева — на случай, если после коммита дерево снова
+    // изменится: тогда вердикт «гейты зелёные» протухнет.
+    let digest = git::tree_digest(&wt).unwrap_or_default();
+    let _ = crate::core::runstate::write(
+        store,
+        id,
+        &crate::core::runstate::RunState::committed(&git::short_head(&wt)).with_digest(&digest),
+    );
     if git::has_remote(&root) {
         if git::push(&wt, &cfg.remote, &br).is_ok() {
             println!("{}OK push: {}/{}{}", c.g, cfg.remote, br, c.z);
