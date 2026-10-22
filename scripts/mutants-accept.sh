@@ -47,6 +47,14 @@ run_one() { # $1 = new|old
   [ "$prof" = old ] && env_args=()
   local extra=()
   [ -n "$GATE" ] && extra=(CARGO_BUILD_RUSTC_WRAPPER="$GATE")
+  # scope через запятую -> несколько -f (один прогон на набор файлов)
+  local scope_args=()
+  if [ -n "$SCOPE" ]; then
+    local IFS=,
+    for f in $SCOPE; do
+      [ -n "$f" ] && scope_args+=(-f "$f")
+    done
+  fi
   echo "=== приёмка: профиль=$prof scope='${SCOPE:-ядро devh}' $(date +%T)"
   local log="mutants-accept-$prof.log"
   (
@@ -54,7 +62,7 @@ run_one() { # $1 = new|old
     env "${extra[@]}" "${env_args[@]}" \
       cargo-mutants mutants --in-place --test-tool nextest --baseline=skip \
       --timeout-multiplier 2 -p devh --config devharness/cargo-mutants.toml \
-      ${SCOPE:+-f "$SCOPE"} "${EXTRA_ARGS[@]}" 2>&1 | tee "$log"
+      "${scope_args[@]}" "${EXTRA_ARGS[@]}" 2>&1 | tee "$log"
   )
   local rc=${PIPESTATUS[0]}
   echo "=== профиль=$prof завершён rc=$rc $(date +%T); лог: $log"
