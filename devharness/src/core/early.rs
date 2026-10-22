@@ -140,13 +140,21 @@ pub fn count_json_mutants(text: &str) -> u32 {
 
 /// SAMPLE: k = ⌈3/(1 - min_kill/100)⌉, целочисленно: ⌈300/miss⌉.
 /// 90% → 30, 95% → 60, 99% → 300; 100% → решения нет.
+///
+/// Граница «решения нет» обязана быть ЕДИНСТВЕННОЙ. Если «нет решения» и
+/// «деление на ноль → u32::MAX» дают один и тот же результат, то мутация
+/// границы (>= 100 → < 100) неотличима от правильного поведения и остаётся
+/// непойманным мутантом. Поэтому деление считается через checked_div с
+/// честным нулём, а «решения нет» возвращается явным возвратом.
 pub fn sample_for(min_kill: u32) -> u32 {
     if min_kill >= 100 {
         return u32::MAX;
     }
     let miss = 100u32.saturating_sub(min_kill);
-    let k = 300u32.saturating_add(miss.saturating_sub(1));
-    k.checked_div(miss).unwrap_or(u32::MAX)
+    // ceil(300/miss) без обычного деления (песочница: arithmetic_side_effects).
+    let q = 300u32.checked_div(miss).unwrap_or(0);
+    let r = 300u32.checked_rem(miss).unwrap_or(0);
+    q.saturating_add(u32::from(r > 0))
 }
 
 /// DOOM-bound: сколько НЕПОЙМАННЫХ (missed + timeout) делает kill-rate
@@ -295,6 +303,26 @@ impl EarlyStop {
     }
 }
 
+/// Решение раннего выхода: остановиться с причиной или идти дальше.
+///
+/// `Default` = `Continue`: у решения «остановки нет» нет причины, и это
+/// честное значение по умолчанию. Тип намеренно Default-абелен: мутационный
+/// аудит (cargo-mutants) подменяет тело функции на `Default::default()`, и без
+/// Default такой мутант просто НЕ КОМПИЛИРОВАЛСЯ бы — Unviable, дыра с нулевой
+/// терпимостью вместо мутанта, который проверяется тестами.
+///
+/// Поэтому `evaluate` возвращает не `Option<EarlyStop>` (у `Option<T>`
+/// cargo-mutants подставляет `Some(Default::default())` — нужен `Default` у
+/// `EarlyStop`, а у «причины остановки» его быть не может), а решение целиком.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum EarlyDecision {
+    /// Идём дальше: ранней остановки нет.
+    #[default]
+    Continue,
+    /// Останавливаемся, причина — в `EarlyStop`.
+    Stop(EarlyStop),
+}
+
 /// DOOM/SAMPLE по live-счётчикам. `total` (список Found) важнее live.total:
 /// mutants.json мог быть ещё не дописан.
 pub fn evaluate(
@@ -302,15 +330,19 @@ pub fn evaluate(
     total: Option<u32>,
     min_kill: u32,
     shuffled: bool,
-) -> Option<EarlyStop> {
+) -> EarlyDecision {
     let total = total.or(live.total);
     if let Some(t) = total {
+        // DOOM защищает kill-rate, а kill-rate считается по ТЕСТИРУЕМЫМ
+        // мутантам (t - unviable). Если тестировать нечего, терять нечего и
+        // граница неприменима — прогон продолжается, а выживший/таймаут его
+        // всё равно остановят (problem-first).
         if t > live.unviable {
             let bound = doomed_missed(t, live.unviable, min_kill);
             // Непойманные = выжившие + таймауты: и то и другое не поймано,
             // обе цифры съедают kill-rate (F-3).
             if live.unresolved() >= bound {
-                return Some(EarlyStop::Doom {
+                return EarlyDecision::Stop(EarlyStop::Doom {
                     unresolved: live.unresolved(),
                     bound,
                     total: t,
@@ -320,17 +352,21 @@ pub fn evaluate(
             }
         }
     }
-    if shuffled && min_kill < 100 && live.unresolved() == 0 {
+    if shuffled && live.unresolved() == 0 {
+        // Порог 100% не проверяем здесь: sample_for сам возвращает «решения
+        // нет» (k = u32::MAX), и выборка не срабатывает. Дублировать порог
+        // нельзя — лишняя проверка даёт мутанта, неотличимого от правильного
+        // поведения (при 100% оба варианта дают «не сработало»).
         let k = sample_for(min_kill);
         if live.clean() >= k {
-            return Some(EarlyStop::Sample {
+            return EarlyDecision::Stop(EarlyStop::Sample {
                 clean: live.clean(),
                 k,
                 min_kill,
             });
         }
     }
-    None
+    EarlyDecision::Continue
 }
 
 #[cfg(test)]
@@ -344,6 +380,14 @@ mod tests {
             missed,
             unviable,
             timeout: 0,
+        }
+    }
+
+    /// Причина остановки. `Continue` в тесте — это провал, а не «ну ок».
+    fn stop_reason(d: EarlyDecision) -> EarlyStop {
+        match d {
+            EarlyDecision::Stop(why) => why,
+            EarlyDecision::Continue => unreachable!("ожидалась остановка, а получено Continue"),
         }
     }
 
@@ -385,6 +429,58 @@ mod tests {
         assert_eq!(sample_for(0), 3);
     }
 
+    /// k = ⌈300/miss⌉ — округление ВВЕРХ. 300 делится на 10/5/1/100 нацело,
+    /// поэтому округление видно только на неделимом miss (7 → 43, а не 42).
+    #[test]
+    fn sample_for_rounds_up() {
+        assert_eq!(sample_for(93), 43); // miss = 7: 300/7 = 42.857 → 43
+        assert_eq!(sample_for(89), 28); // miss = 11: 300/11 = 27.27 → 28
+        assert_eq!(sample_for(1), 4); // miss = 99: 300/99 = 3.03 → 4
+    }
+
+    /// Порог выше 100% — решения нет (kill-rate > 100% невозможен).
+    #[test]
+    fn sample_for_above_hundred_has_no_solution() {
+        assert_eq!(sample_for(101), u32::MAX);
+        assert_eq!(sample_for(200), u32::MAX);
+    }
+
+    /// live.total известен только если мутантов хотя бы один: пустой
+    /// mutants.json — это «неизвестно», а не «ноль».
+    #[test]
+    fn read_live_total_needs_at_least_one_mutant() {
+        let d = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
+        std::fs::write(d.path().join("mutants.json"), "[]\n").unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            read_live(d.path()).total,
+            None,
+            "0 мутантов — total неизвестен"
+        );
+        let j = concat!(
+            "[\n  {\n    \"name\": \"a\",\n  },\n",
+            "  {\n    \"name\": \"b\",\n  }\n]\n"
+        );
+        std::fs::write(d.path().join("mutants.json"), j).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(read_live(d.path()).total, Some(2));
+    }
+
+    /// Live-счётчики читаются из append-only списков.
+    #[test]
+    fn read_live_counts_append_lists() {
+        let d = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
+        std::fs::write(d.path().join("caught.txt"), "a\nb\n").unwrap_or_else(|e| panic!("{e}"));
+        std::fs::write(d.path().join("missed.txt"), "c\n").unwrap_or_else(|e| panic!("{e}"));
+        std::fs::write(d.path().join("unviable.txt"), "d\nd2\n").unwrap_or_else(|e| panic!("{e}"));
+        std::fs::write(d.path().join("timeout.txt"), "e\n").unwrap_or_else(|e| panic!("{e}"));
+        let l = read_live(d.path());
+        assert_eq!(l.caught, 2);
+        assert_eq!(l.missed, 1);
+        assert_eq!(l.unviable, 2);
+        assert_eq!(l.timeout, 1);
+        assert_eq!(l.killed(), 2);
+        assert_eq!(l.unresolved(), 2);
+    }
+
     #[test]
     fn doomed_bounds_match_acceptance_numbers() {
         // приёмка 255: (255-27)*10/100+1 = 23 — 23-й missed обречён
@@ -400,12 +496,13 @@ mod tests {
     #[test]
     fn doom_fires_at_bound_not_before() {
         let l = live(Some(10), 3, 1, 0);
-        assert!(
-            evaluate(&l, None, 90, false).is_none(),
+        assert_eq!(
+            evaluate(&l, None, 90, false),
+            EarlyDecision::Continue,
             "missed 1 < bound 2"
         );
         let l = live(Some(10), 3, 2, 0);
-        let stop = evaluate(&l, None, 90, false).unwrap_or_else(|| unreachable!());
+        let stop = stop_reason(evaluate(&l, None, 90, false));
         assert!(matches!(
             stop,
             EarlyStop::Doom {
@@ -422,7 +519,7 @@ mod tests {
     #[test]
     fn red_first_survivor_doomed() {
         let l = live(Some(14), 5, 1, 0);
-        let stop = evaluate(&l, None, 100, false).unwrap_or_else(|| unreachable!());
+        let stop = stop_reason(evaluate(&l, None, 100, false));
         assert!(matches!(
             stop,
             EarlyStop::Doom {
@@ -442,12 +539,19 @@ mod tests {
         assert_eq!(l.killed(), 8, "таймаут не пойман");
         assert_eq!(l.unresolved(), 2);
         // 8 пойманных + 2 таймаута из 10 тестируемых = 80% < 90% → обречено
-        assert!(evaluate(&l, None, 90, false).is_some(), "DOOM по таймаутам");
+        assert!(
+            matches!(
+                evaluate(&l, None, 90, false),
+                EarlyDecision::Stop(EarlyStop::Doom { .. })
+            ),
+            "DOOM по таймаутам"
+        );
         // SAMPLE при таймауте запрещена (выборка не чистая)
         let mut l2 = live(Some(100), 30, 0, 0);
         l2.timeout = 1;
-        assert!(
-            evaluate(&l2, None, 90, true).is_none(),
+        assert_eq!(
+            evaluate(&l2, None, 90, true),
+            EarlyDecision::Continue,
             "таймаут делает выборку нечистой"
         );
     }
@@ -455,22 +559,33 @@ mod tests {
     #[test]
     fn doom_without_total_is_silent() {
         let l = live(None, 0, 5, 0);
-        assert!(evaluate(&l, None, 90, false).is_none());
+        assert_eq!(evaluate(&l, None, 90, false), EarlyDecision::Continue);
         // total из аргумента важнее отсутствующего live.total
         let l2 = live(None, 0, 2, 0);
-        assert!(evaluate(&l2, Some(10), 90, false).is_some());
+        assert!(
+            matches!(
+                evaluate(&l2, Some(10), 90, false),
+                EarlyDecision::Stop(EarlyStop::Doom { .. })
+            ),
+            "total из аргумента даёт границу"
+        );
     }
 
     #[test]
     fn sample_needs_shuffle_and_k() {
         let l = live(Some(100), 30, 0, 0);
-        assert!(
-            evaluate(&l, None, 90, false).is_none(),
+        assert_eq!(
+            evaluate(&l, None, 90, false),
+            EarlyDecision::Continue,
             "без --shuffle SAMPLE запрещена"
         );
         let l2 = live(Some(100), 29, 0, 0);
-        assert!(evaluate(&l2, None, 90, true).is_none(), "29 < k=30");
-        let stop = evaluate(&l, None, 90, true).unwrap_or_else(|| unreachable!());
+        assert_eq!(
+            evaluate(&l2, None, 90, true),
+            EarlyDecision::Continue,
+            "29 < k=30"
+        );
+        let stop = stop_reason(evaluate(&l, None, 90, true));
         assert!(matches!(
             stop,
             EarlyStop::Sample {
@@ -480,12 +595,45 @@ mod tests {
             }
         ));
         assert!(stop.describe().contains("rule-of-three"));
+        // Выборка чище порога — тоже остановка (не только ровно k).
+        let l5 = live(Some(100), 31, 0, 0);
+        assert!(
+            matches!(
+                evaluate(&l5, None, 90, true),
+                EarlyDecision::Stop(EarlyStop::Sample { .. })
+            ),
+            "clean > k тоже срабатывает"
+        );
         // unviable не чистит выборку
         let l3 = live(Some(100), 30, 0, 40);
-        assert!(evaluate(&l3, None, 90, true).is_some());
+        assert!(matches!(
+            evaluate(&l3, None, 90, true),
+            EarlyDecision::Stop(EarlyStop::Sample { .. })
+        ));
         // 100% порог — sample_for не имеет решения
         let l4 = live(Some(10), 10, 0, 0);
-        assert!(evaluate(&l4, None, 100, true).is_none());
+        assert_eq!(evaluate(&l4, None, 100, true), EarlyDecision::Continue);
+    }
+
+    /// DOOM неприменим, когда тестировать нечего: все мутанты unviable →
+    /// testable = 0, kill-rate не считается, и «обречённость» выдумана.
+    #[test]
+    fn doom_is_silent_when_nothing_to_test() {
+        let l = live(Some(5), 0, 1, 5);
+        assert_eq!(
+            evaluate(&l, None, 90, false),
+            EarlyDecision::Continue,
+            "t == unviable — тестировать нечего"
+        );
+        // На один тестируемый больше — граница уже применяется.
+        let l2 = live(Some(6), 0, 1, 5);
+        assert!(
+            matches!(
+                evaluate(&l2, None, 90, false),
+                EarlyDecision::Stop(EarlyStop::Doom { .. })
+            ),
+            "t > unviable — граница применяется"
+        );
     }
 
     #[test]

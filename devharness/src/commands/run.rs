@@ -2736,7 +2736,10 @@ fn stop_decision(
         let total = live
             .total
             .or_else(|| crate::core::early::parse_discovered(log));
-        return crate::core::early::evaluate(live, total, min_kill, shuffled).map(MutStop::Early);
+        return match crate::core::early::evaluate(live, total, min_kill, shuffled) {
+            crate::core::early::EarlyDecision::Continue => None,
+            crate::core::early::EarlyDecision::Stop(why) => Some(MutStop::Early(why)),
+        };
     }
     None
 }
