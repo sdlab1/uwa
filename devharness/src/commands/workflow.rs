@@ -82,6 +82,7 @@ pub const COMMANDS: &str = r#"=== КОМАНДЫ ===
   devh test --list             список проверок сьюта
   devh test --case <N|имя>     точечная проверка (фильтр отчёта)
   devh mutate start|status|watch|problems|verdict|stop   мутационный аудит
+  devh msg send|read|watch|list|prune   канал сообщений между агентами (координация 2+ агентов)
   devh next                    оракул: ровно одна следующая команда (всегда rc=0)
   devh workflow                печать этого канона из кода"#;
 

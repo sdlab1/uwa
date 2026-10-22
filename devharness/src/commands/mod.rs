@@ -22,7 +22,7 @@ use crate::core::types::{CrapCfg, ItemId, MutateCfg, RunConfig};
 use crate::shell::store::{Item, Store};
 use crate::Cmd;
 
-pub const CONFIG_KEYS: [&str; 38] = [
+pub const CONFIG_KEYS: [&str; 39] = [
     "VERIFY",
     "BOOTSTRAP",
     "AGENT",
@@ -38,6 +38,7 @@ pub const CONFIG_KEYS: [&str; 38] = [
     "MUTATE_SCOPE",
     "MIN_KILL",
     "MUTATE_EARLY",
+    "MUTATE_FIRST_PROBLEM",
     "MUTATE_COV",
     "MUTATE_SURVIVORS",
     "RED_MUTATE",
@@ -81,6 +82,12 @@ pub fn load_config(root: &Path) -> anyhow::Result<RunConfig> {
         g(k).map(|v| matches!(v.trim(), "1" | "true" | "yes"))
             .unwrap_or(d)
     };
+    // Флаг, включённый ПО УМОЛЧАНИЮ: выключается явным 0/false/no/off
+    // (garbage тоже трактуем как «выключено» — тише и безопаснее).
+    let boolv_on = |k: &str, d: bool| {
+        g(k).map(|v| !matches!(v.trim(), "0" | "false" | "no" | "off" | ""))
+            .unwrap_or(d)
+    };
     let ignored_allowlist = {
         let path = g("IGNORED_ALLOWLIST")
             .filter(|s| !s.trim().is_empty())
@@ -117,6 +124,7 @@ pub fn load_config(root: &Path) -> anyhow::Result<RunConfig> {
                 scope: g("MUTATE_SCOPE").unwrap_or_else(|| "lib".into()),
                 min_kill: u32v("MIN_KILL", 90),
                 early: boolv("MUTATE_EARLY", false),
+                first_problem: boolv_on("MUTATE_FIRST_PROBLEM", true),
                 cov: boolv("MUTATE_COV", false),
                 survivors: boolv("MUTATE_SURVIVORS", false),
             }),
@@ -127,6 +135,7 @@ pub fn load_config(root: &Path) -> anyhow::Result<RunConfig> {
                 scope: g("MUTATE_SCOPE").unwrap_or_else(|| "lib".into()),
                 min_kill: u32v("RED_MIN_KILL", 90),
                 early: boolv("MUTATE_EARLY", false),
+                first_problem: boolv_on("MUTATE_FIRST_PROBLEM", true),
                 cov: false,
                 survivors: boolv("MUTATE_SURVIVORS", false),
             }),
@@ -321,6 +330,14 @@ pub fn dispatch(cmd: &Cmd, root: &Path) -> anyhow::Result<()> {
         )?,
         Cmd::Escapes => escapes::escapes(&store, &cfg, root)?,
         Cmd::Mutate { sub, args } => mutate::mutate(root, sub, args)?,
+        Cmd::Msg { args } => {
+            // Канал агентов: свой код возврата (0 — ок, иначе ненулевой).
+            let code = crate::shell::msg::run(args);
+            if code == 0 {
+                return Ok(());
+            }
+            anyhow::bail!("devh msg: код возврата {code}");
+        }
     }
     Ok(())
 }

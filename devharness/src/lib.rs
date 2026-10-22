@@ -80,6 +80,11 @@ pub enum Cmd {
     Next,
     /// Печать канонического workflow из кода (машинно-читаемая проекция).
     Workflow,
+    /// Канал сообщений между агентами: координация 2+ агентов (по каналам/темам).
+    Msg {
+        /// Аргументы после `msg`: send|read|watch|list|prune + флаги.
+        args: Vec<String>,
+    },
 }
 
 impl Default for Cmd {
@@ -194,6 +199,15 @@ impl Cmd {
                 ),
             Command::new("next").about("оракул следующего шага: ровно одна команда (всегда rc=0)"),
             Command::new("workflow").about("печать канонического workflow из кода"),
+            Command::new("msg")
+                .about("канал сообщений между агентами: send|read|watch|list|prune")
+                .arg(
+                    Arg::new("args")
+                        .num_args(0..)
+                        .trailing_var_arg(true)
+                        .allow_hyphen_values(true)
+                        .help("аргументы: send|read|watch|list|prune + флаги"),
+                ),
         ]
     }
 
@@ -333,6 +347,16 @@ impl Cmd {
             }
             Some("next") => Ok(Cmd::Next),
             Some("workflow") => Ok(Cmd::Workflow),
+            Some("msg") => {
+                let m = matches
+                    .subcommand_matches("msg")
+                    .unwrap_or_else(|| unreachable!());
+                let args = m
+                    .get_many::<String>("args")
+                    .map(|v| v.cloned().collect::<Vec<String>>())
+                    .unwrap_or_default();
+                Ok(Cmd::Msg { args })
+            }
             _ => Err("unknown subcommand".to_string()),
         }
     }
