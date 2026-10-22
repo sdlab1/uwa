@@ -1622,10 +1622,23 @@ fn crap_gate(wt: &Path, cr: &CrapCfg) -> (String, Verdict) {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct MutStats {
     total: u32,
+    /// Сколько мутантов ПЛАНИРОВАЛОСЬ (mutants.json) — для остановленного
+    /// прогона: `total` = проверенные, `planned` = все. 0 = неизвестно.
+    planned: u32,
     killed: u32,
     missed: u32,
     timeout: u32,
     unviable: u32,
+    /// Мутанты без тестовой фазы (итог «N succeeded»): поимка не
+    /// подтверждена; ни поимка, ни дыра покрытия.
+    succeeded: u32,
+    /// Мутанты с неопознанным исходом (слова нет в контракте
+    /// cargo-mutants 27.1.0): «пойман или нет» неизвестно → поимка не
+    /// подтверждена. Видно только в `outcomes.json` (в append-списки
+    /// такие исходы не пишутся) — отсюда значение есть у остановленного
+    /// прогона, а у разобранной строки итога — нет (там исход не
+    /// распознан → `MutRun::Unknown`).
+    unknown: u32,
 }
 
 /// Итог мутационного гейта: лог, вердикт и (если вывод распарсился) статы.
@@ -1951,10 +1964,13 @@ fn mutate_gate(
         verdict: Verdict::Pass,
         stats: Some(MutStats {
             total: 0,
+            planned: 0,
             killed: 0,
             missed: 0,
             timeout: 0,
             unviable: 0,
+            succeeded: 0,
+            unknown: 0,
         }),
         fatal: false,
         early: false,
@@ -2040,10 +2056,13 @@ fn finish(m: &MutateCfg, run: MutRun, label: &str, key: &str, gate: Gate) -> Mut
             verdict: Verdict::Pass,
             stats: Some(MutStats {
                 total: 0,
+                planned: 0,
                 killed: 0,
                 missed: 0,
                 timeout: 0,
                 unviable: 0,
+                succeeded: 0,
+                unknown: 0,
             }),
             fatal: false,
             early: false,
@@ -2054,23 +2073,42 @@ fn finish(m: &MutateCfg, run: MutRun, label: &str, key: &str, gate: Gate) -> Mut
         kind,
         reason,
         stats,
+        actions,
         poisoned,
         repair,
     } = &run
     {
-        let mut log = format!("{label} STOP: {reason}\n");
+        let mut log = format!("{label} STOP [{}]: {reason}\n", kind.tag());
         if !repair.is_empty() {
             log += repair;
         }
+        let planned = if stats.planned > 0 {
+            stats.planned
+        } else {
+            stats.total
+        };
         log += &format!(
-            "{label}: остановлено досрочно, проверено до останова: Mutants {total}, killed {killed}, missed {missed}, timeout {timeout}, unviable {unviable} (MUTATE_EARLY=1)\n",
+            "{label}: остановлено досрочно ({tag}), проверено {total} из {planned}: killed {killed}, missed {missed}, timeout {timeout}, unviable {unviable}, succeeded {succeeded}, unknown {unknown}\n",
+            tag = kind.tag(),
             total = stats.total,
+            planned = planned,
             killed = stats.killed,
             missed = stats.missed,
             timeout = stats.timeout,
-            unviable = stats.unviable
+            unviable = stats.unviable,
+            succeeded = stats.succeeded,
+            unknown = stats.unknown
         );
-        let fatal = matches!(kind, crate::core::early::EarlyStop::Doom { .. }) || *poisoned;
+        if !actions.is_empty() {
+            log += &format!("{label}: проблемы этого прогона (чинить их):\n");
+            for a in actions {
+                log += &format!("  {a}\n");
+            }
+        }
+        let fatal = matches!(
+            kind,
+            MutStop::Early(crate::core::early::EarlyStop::Doom { .. })
+        ) || *poisoned;
         let verdict = if fatal {
             if *poisoned {
                 log += &format!(
@@ -2096,6 +2134,8 @@ fn finish(m: &MutateCfg, run: MutRun, label: &str, key: &str, gate: Gate) -> Mut
                     missed: stats.missed,
                     timeout: stats.timeout,
                     unviable: stats.unviable,
+                    succeeded: stats.succeeded,
+                    unknown: stats.unknown,
                 },
                 m.min_kill,
             ) {
@@ -2123,8 +2163,28 @@ fn finish(m: &MutateCfg, run: MutRun, label: &str, key: &str, gate: Gate) -> Mut
         missed,
         timeout,
         unviable,
+        succeeded,
+        actions,
     } = run
     else {
+        // Неизвестный исход мутанта — дыра, а не поломка инструмента:
+        // вердикт Fail (чисто быть не может), хвост actionable.
+        if let MutRun::Unknown(why) = run {
+            let log = format!(
+                "{label} FAIL: {why}\n{label}: исход мутанта не распознан — поимка не подтверждена, чистый вердикт невозможен (ожидается 'N mutants tested in T: C caught, M missed, U unviable, X timeouts')\n"
+            );
+            let tail = tail_of(&log, 40);
+            return MutReport {
+                log,
+                verdict: Verdict::Fail {
+                    gate: gate.clone(),
+                    tail,
+                },
+                stats: None,
+                fatal: false,
+                early: false,
+            };
+        }
         if let MutRun::Blocked(why) = run {
             return MutReport {
                 log: format!("{label} env-blocked: {why}\n"),
@@ -2153,10 +2213,15 @@ fn finish(m: &MutateCfg, run: MutRun, label: &str, key: &str, gate: Gate) -> Mut
     };
     let stats = MutStats {
         total,
+        planned: 0,
         killed,
         missed,
         timeout,
         unviable,
+        succeeded,
+        // Разобранная строка итога: неопознанный исход сюда не доходит
+        // (он даёт `MutRun::Unknown` → Fail). Ноль = «неизвестных нет».
+        unknown: 0,
     };
     // 0 мутантов — честный пропуск (нечего мутировать), не дыра.
     if total == 0 {
@@ -2171,15 +2236,23 @@ fn finish(m: &MutateCfg, run: MutRun, label: &str, key: &str, gate: Gate) -> Mut
     let testable = total.saturating_sub(unviable);
     let mut log = match killed.checked_mul(100).and_then(|n| n.checked_div(testable)) {
         Some(pct) => format!(
-            "{label}: Mutants {total}, killed {killed} ({pct}%) [testable {testable}], missed {missed}, timeout {timeout}, unviable {unviable}\n"
+            "{label}: Mutants {total}, killed {killed} ({pct}%) [testable {testable}], missed {missed}, timeout {timeout}, unviable {unviable}, succeeded {succeeded}\n"
         ),
         // testable == 0: все мутанты некомпилящиеся (см. вердикт ниже).
         None => format!(
-            "{label}: Mutants {total}, killed {killed} [testable 0], missed {missed}, timeout {timeout}, unviable {unviable}\n"
+            "{label}: Mutants {total}, killed {killed} [testable 0], missed {missed}, timeout {timeout}, unviable {unviable}, succeeded {succeeded}\n"
         ),
     };
     // Канон вердикта — ОДИН (core/gates.rs::judge_mutation_stats): тот же,
     // что у `devh mutate verdict`. Здесь он превращается в хвост fix-промпта.
+    // ПЕРЕД вердиктом — строки проблем (файл:строка, замена, жанр): без них
+    // fix-промпт несёт «хвост лога», и агент ищет дыру сам.
+    if !actions.is_empty() {
+        log += &format!("{label}: проблемы этого прогона (чинить их):\n");
+        for a in actions {
+            log += &format!("  {a}\n");
+        }
+    }
     let verdict = match gates::judge_mutation_stats(
         &gates::MutationStats {
             mutants: total,
@@ -2187,6 +2260,8 @@ fn finish(m: &MutateCfg, run: MutRun, label: &str, key: &str, gate: Gate) -> Mut
             missed,
             timeout,
             unviable,
+            succeeded,
+            unknown: 0,
         },
         m.min_kill,
     ) {
@@ -2223,7 +2298,7 @@ fn perf_mutate(store: &Store, id: &ItemId, rep: &MutReport, timing: &Timing) {
         .map(|p| p.to_string())
         .unwrap_or_else(|| "-".into());
     let secs = timing.stages().last().map(|(_, s)| *s).unwrap_or(0);
-    let header = "task,mutants,killed,missed,timeout,unviable,kill_pct,mutate_s\n";
+    let header = "task,mutants,killed,missed,timeout,unviable,succeeded,kill_pct,mutate_s\n";
     if !store.dir.join("logs").join("perf.log").exists() {
         store.append_raw("logs/perf.log", header).ok();
     }
@@ -2231,13 +2306,14 @@ fn perf_mutate(store: &Store, id: &ItemId, rep: &MutReport, timing: &Timing) {
         .append_raw(
             "logs/perf.log",
             &format!(
-                "{},{},{},{},{},{},{},{}\n",
+                "{},{},{},{},{},{},{},{},{}\n",
                 id.dir_name(),
                 s.total,
                 s.killed,
                 s.missed,
                 s.timeout,
                 s.unviable,
+                s.succeeded,
                 kill_pct,
                 secs
             ),
@@ -2248,8 +2324,10 @@ fn perf_mutate(store: &Store, id: &ItemId, rep: &MutReport, timing: &Timing) {
 /// Пустой скоуп мутатора: cargo-mutants вышел 0 и написал почему
 /// («Diff file is empty» и т.п.) — это не сломанный инструмент (Env),
 /// а «нечего убивать».
+#[derive(Debug)]
 struct EmptyWhy(String);
 
+#[derive(Debug)]
 enum MutRun {
     Empty {
         why: EmptyWhy,
@@ -2260,21 +2338,66 @@ enum MutRun {
         missed: u32,
         timeout: u32,
         unviable: u32,
+        /// Мутанты без тестовой фазы (итог «N succeeded»): поимка не
+        /// подтверждена, но это и не дыра покрытия (тесты не запускались).
+        succeeded: u32,
+        /// Строки-руководства по плохим мутантам ТЕКУЩЕГО прогона
+        /// (файл:строка, замена, жанр) — уходят в fix-промпт (problem-first).
+        actions: Vec<String>,
     },
     /// P5.5: контенция — нагрузка выше порога, гейт перенесён (не молчаливый Env).
     Blocked(String),
+    /// Итог прогона распознан, но исход мутанта НЕИЗВЕСТЕН — видимая дыра
+    /// (вердикт Fail), а не «инструмент сломан» (Env).
+    Unknown(String),
     /// P7-2.3: ранний выход по DOOM/SAMPLE — watcher остановил прогон
     /// (SIGINT группе). stats — live-счётчики на момент останова.
     Stopped {
-        kind: crate::core::early::EarlyStop,
+        kind: MutStop,
         reason: String,
         stats: MutStats,
+        /// Строки-руководства по плохим мутантам (то же, что в Stats).
+        actions: Vec<String>,
         /// true: в дереве остались маркеры мутанта даже после ремонта —
         /// коммитить нельзя («отравленный коммит»), гейт честно FAIL.
         poisoned: bool,
         repair: String,
     },
     Env,
+}
+
+/// Причина останова синхронного мутационного прогона.
+///
+/// Два вида останова, и оба — «вердикт, а не отчёт»:
+/// * `Early` — статистическая граница (DOOM/SAMPLE, MUTATE_EARLY=1):
+///   kill-rate недостижим или выборка достаточна;
+/// * `First` — problem-first: появилась ПЕРВАЯ проблема (выжил/таймаут/
+///   не собрался/без тестовой фазы/неизвестный исход). Прогон ради
+///   «дожимемся конца» тут только тратит время: проблема уже actionable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MutStop {
+    /// Ранний выход по DOOM/SAMPLE.
+    Early(crate::core::early::EarlyStop),
+    /// Problem-first: первая проблема прогона.
+    First(crate::core::early::FirstProblem),
+}
+
+impl MutStop {
+    /// Человекочитаемая причина останова (уходит в лог гейта).
+    fn describe(&self) -> String {
+        match self {
+            MutStop::Early(e) => e.describe(),
+            MutStop::First(p) => p.describe(),
+        }
+    }
+
+    /// Короткая метка для сводки гейта.
+    fn tag(&self) -> &'static str {
+        match self {
+            MutStop::Early(_) => "early-stop",
+            MutStop::First(_) => "problem-first",
+        }
+    }
 }
 
 /// fn-replace мутант (Default::default()) обязан быть VIABLE: cargo-mutants
@@ -2402,6 +2525,17 @@ impl TuiProgress {
     }
 }
 
+/// Плохие мутанты ТЕКУЩЕГО прогона — строки руководства к действию.
+///
+/// Именно эти строки уходят в fix-промпт: файл, строка, что подменил
+/// мутатор и жанр. Без них агент получает «хвост лога» и догадывается сам.
+fn problem_actions(dir: &Path, base: &crate::core::mutaudit::BadBaseline) -> Vec<String> {
+    crate::core::mutaudit::current_run_bad(dir, base)
+        .iter()
+        .map(crate::core::mutaudit::bad_line)
+        .collect()
+}
+
 /// Вывод мутатора → MutRun (классификация общая для run_logged/run_monitored).
 fn classify(log: &str) -> MutRun {
     match gates::parse_mutation_output(log) {
@@ -2411,6 +2545,8 @@ fn classify(log: &str) -> MutRun {
             missed: s.missed,
             timeout: s.timeout,
             unviable: s.unviable,
+            succeeded: s.succeeded,
+            actions: Vec::new(),
         },
         // P7-2.2: пустой скоуп (--in-diff без мутантов на изменённых
         // строках, либо всё вычищен --iterate) — честный пропуск,
@@ -2420,8 +2556,45 @@ fn classify(log: &str) -> MutRun {
         }
         // Ошибка фильтра --in-diff (rc 5/6): diff устарел/не читается.
         None if let Some(why) = gates::parse_diff_filter_error(log) => MutRun::Blocked(why),
+        // Итоговая строка ЕСТЬ и по форме правильная, но один из сегментов
+        // исхода не распознан («2 weird, 3 caught»): поимка не подтверждена →
+        // чистый вердикт невозможен. Это ВИДИМАЯ ДЫРА (Fail), а не
+        // «инструмент сломан» (EnvBlocked): инструмент отработал, но ответ
+        // про исход мутанта мы не поняли.
+        None if let Some(why) = gates::parse_unknown_outcome_reason(log) => MutRun::Unknown(why),
         None => MutRun::Env,
     }
+}
+
+/// Решение об останове по ЖИВОМУ состоянию прогона.
+///
+/// Приоритет:
+/// 1. **problem-first** — реальная проблема (выжил / таймаут / не собрался /
+///    без тестовой фазы / неизвестный исход). Она actionable: ждать конца
+///    прогона только ради неё — трата времени. Detached-аудит при этом
+///    идёт до конца (он не останавливается — см. `devh mutate`);
+/// 2. **статистическая граница** (DOOM/SAMPLE) — только при MUTATE_EARLY=1.
+fn stop_decision(
+    live: &crate::core::early::LiveCounts,
+    dir: &Path,
+    first_problem: bool,
+    m_early: bool,
+    min_kill: u32,
+    shuffled: bool,
+    log: &str,
+) -> Option<MutStop> {
+    if first_problem {
+        if let Some(p) = crate::core::mutaudit::first_problem(dir, live) {
+            return Some(MutStop::First(p));
+        }
+    }
+    if m_early {
+        let total = live
+            .total
+            .or_else(|| crate::core::early::parse_discovered(log));
+        return crate::core::early::evaluate(live, total, min_kill, shuffled).map(MutStop::Early);
+    }
+    None
 }
 
 /// P7-2.3: monitored-прогон. Watcher раз в секунду читает append-only
@@ -2432,9 +2605,14 @@ fn run_mut_watched(wt: &Path, cmd: &str, m: &MutateCfg, envs: &[(String, String)
     use crate::core::early;
     let dir = wt.join(early::mutants_out_dir(cmd));
     let base = early::read_live(&dir);
+    // Базовая линия плохих мутантов: списки append-only — без неё прошлый
+    // прогон попал бы в отчёт текущего.
+    let bad_base = crate::core::mutaudit::BadBaseline::take(&dir);
     let shuffled = cmd.split_whitespace().any(|w| w == "--shuffle");
     let min_kill = m.min_kill;
     let m_early = m.early;
+    // Problem-first: останов на ПЕРВОЙ проблеме (по умолчанию включён).
+    let m_first = m.first_problem;
     let dir_clone = dir.clone();
     let base_clone = base;
     // Фирменная строка прогресса живёт здесь: тик watcher'а = печать + (при
@@ -2460,37 +2638,64 @@ fn run_mut_watched(wt: &Path, cmd: &str, m: &MutateCfg, envs: &[(String, String)
             drop(t);
             println!("{row}");
         }
-        let total = live.total.or_else(|| early::parse_discovered(log_text));
-        if m_early {
-            early::evaluate(&live, total, min_kill, shuffled)
-        } else {
-            None
-        }
+        // Problem-first ВЫШЕ статистики: реальная проблема actionable —
+        // ждать конца прогона ради неё незачем. Detached-аудит при этом
+        // идёт до конца (он не останавливается — см. `devh mutate`).
+        stop_decision(
+            &live, &dir_clone, m_first, m_early, min_kill, shuffled, log_text,
+        )
     }) {
         Ok(mn) => {
             let log = proc::combined(&mn.outcome);
             let Some(stop) = mn.stopped else {
                 // не остановили — полный лог, обычная классификация
-                return classify(&log);
+                let mut run = classify(&log);
+                if let MutRun::Stats { actions, .. } = &mut run {
+                    *actions = problem_actions(&dir, &bad_base);
+                }
+                return run;
             };
             let mut live = early::read_live(&dir);
             live.sub_base(&base);
-            let total = live
+            // Сколько мутантов ПЛАНИРОВАЛОСЬ (mutants.json) и сколько
+            // РЕАЛЬНО получило исход. Знаменатель kill-rate — ПРОВЕРЕННЫЕ:
+            // остановленный прогон не имеет права судить по непроверенным
+            // (иначе SAMPLE-останов «выборка достаточна» всегда давал бы
+            // kill-rate по всему плану и никогда не проходил).
+            let planned = live
                 .total
                 .or_else(|| early::parse_discovered(&log))
                 .unwrap_or(0);
+            // «succeeded» (мутант без тестовой фазы) и неопознанные исходы
+            // в append-списки НЕ пишутся — они видны только в outcomes.json.
+            let det = crate::core::mutaudit::load(&dir, true, None);
+            let done = live
+                .caught
+                .saturating_add(live.missed)
+                .saturating_add(live.timeout)
+                .saturating_add(live.unviable)
+                .saturating_add(det.succeeded)
+                .saturating_add(det.unknown);
             let (repair, poisoned) = repair_mutant_markers(wt, &dir);
             let reason = stop.describe();
             MutRun::Stopped {
                 kind: stop,
                 reason,
                 stats: MutStats {
-                    total,
+                    total: done,
+                    planned,
                     killed: live.killed(),
                     missed: live.missed,
                     timeout: live.timeout,
                     unviable: live.unviable,
+                    succeeded: det.succeeded,
+                    // Неопознанные исходы видны ТОЛЬКО в outcomes.json — в
+                    // списках их нет. Без этого числа остановленный прогон
+                    // с неизвестным исходом прошёл бы общий kill-rate judge
+                    // как «чисто» (поимка не подтверждена, а вердикт зелёный).
+                    unknown: det.unknown,
                 },
+                actions: problem_actions(&dir, &bad_base),
                 poisoned,
                 repair,
             }
@@ -2581,14 +2786,93 @@ pub fn which(bin: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{freeze_verdict, post_review_guard, review_size_verdict, TuiProgress};
+    use super::{
+        freeze_verdict, post_review_guard, review_size_verdict, stop_decision, MutStop, TuiProgress,
+    };
     use crate::core::gates::{Gate, Verdict};
+    use crate::core::types::MutateCfg;
     use crate::shell::git;
     use std::path::Path;
 
     /// Парс-контракт `devh ps`: имена стадий тайминга печатаются дословно.
     /// Разрез run() по фазам (A2) переносит вызовы между функциями, но не
     /// имена — ассерт ловит любое переименование или потерю стадии.
+    /// Неизвестный исход мутанта — ВИДИМАЯ ДЫРА (Fail), а не «инструмент
+    /// сломан» (EnvBlocked).
+    ///
+    /// Инструмент отработал, строка итога есть, но один из сегментов исхода
+    /// не распознан → «пойман или нет» неизвестно → чистый вердикт невозможен.
+    /// Раньше такой прогон уезжал в Env («инструмент не распознан» = блокер
+    /// среды, rc=2), то есть настоящая дыра маскировалась под поломку.
+    #[test]
+    fn unknown_mutant_outcome_is_fail_not_env() {
+        let log = "5 mutants tested in 3s: 2 weird, 3 caught\n";
+        let run = super::classify(log);
+        assert!(
+            matches!(run, super::MutRun::Unknown(_)),
+            "ожидался Unknown, получено {run:?}"
+        );
+        let m = MutateCfg {
+            tool: "cargo-mutants".into(),
+            scope: "lib".into(),
+            min_kill: 90,
+            early: false,
+            first_problem: false,
+            cov: false,
+            survivors: false,
+        };
+        let rep = super::finish(&m, run, "mutation", "MUTATE", Gate::Mutate);
+        match &rep.verdict {
+            Verdict::Fail { gate, tail } => {
+                assert_eq!(*gate, Gate::Mutate);
+                assert!(tail.contains("weird"), "{tail}");
+            }
+            other => panic!("неизвестный исход обязан быть Fail: {other:?}"),
+        }
+        assert!(
+            !matches!(rep.verdict, Verdict::EnvBlocked { .. }),
+            "Env маскировал бы дыру под поломку инструмента"
+        );
+    }
+
+    /// Известный, но НЕ поимка исход «succeeded» (мутант без тестовой фазы):
+    /// не Env, не «инструмент не распознан», а Fail с внятной причиной.
+    #[test]
+    fn succeeded_mutant_outcome_is_known_and_blocks_clean_verdict() {
+        let log = "5 mutants tested in 3s: 2 succeeded, 3 caught\n";
+        let run = super::classify(log);
+        let super::MutRun::Stats {
+            total,
+            killed,
+            missed,
+            timeout,
+            unviable,
+            succeeded,
+            ..
+        } = run
+        else {
+            panic!("ожидались статы, получено {run:?}")
+        };
+        assert_eq!(
+            (total, killed, missed, timeout, unviable, succeeded),
+            (5, 3, 0, 0, 0, 2)
+        );
+        let m = MutateCfg {
+            tool: "cargo-mutants".into(),
+            scope: "lib".into(),
+            min_kill: 90,
+            early: false,
+            first_problem: false,
+            cov: false,
+            survivors: false,
+        };
+        let rep = super::finish(&m, run, "mutation", "MUTATE", Gate::Mutate);
+        match &rep.verdict {
+            Verdict::Fail { tail, .. } => assert!(tail.contains("succeeded 2 > 0"), "{tail}"),
+            other => panic!("непроверенный мутант обязан быть Fail: {other:?}"),
+        }
+    }
+
     #[test]
     fn stage_names_preserved_for_ps() {
         let src = include_str!("run.rs");
@@ -2856,5 +3140,81 @@ mod tests {
             }
             other => panic!("правка дерева из ревью не поймана: {other:?}"),
         }
+    }
+
+    /// Остановленный problem-first прогон с неопознанным исходом — НЕ «чисто».
+    ///
+    /// Грабли, которые закрывает тест: неопознанный исход виден ТОЛЬКО в
+    /// `outcomes.json` (в append-списки cargo-mutants его не пишет), а
+    /// kill-rate считается по пойманным. Без `unknown` в статах 100 из 101
+    /// пойманных давали 99% ≥ порога → вердикт ЗЕЛЁНЫЙ при неподтверждённой
+    /// поимке. «Пойман или нет» неизвестно → поимка не подтверждена.
+    #[test]
+    fn stopped_run_with_unknown_outcome_is_fail() {
+        let m = MutateCfg {
+            tool: "cargo-mutants".into(),
+            scope: "lib".into(),
+            min_kill: 90,
+            early: false,
+            first_problem: false,
+            cov: false,
+            survivors: false,
+        };
+        let run = super::MutRun::Stopped {
+            kind: MutStop::First(crate::core::early::FirstProblem::Unknown(1)),
+            reason: "PROBLEM: неизвестный исход мутанта x1".into(),
+            stats: super::MutStats {
+                total: 101,
+                planned: 101,
+                killed: 100,
+                missed: 0,
+                timeout: 0,
+                unviable: 0,
+                succeeded: 0,
+                unknown: 1,
+            },
+            actions: Vec::new(),
+            poisoned: false,
+            repair: String::new(),
+        };
+        let rep = super::finish(&m, run, "mutation", "MUTATE", Gate::Mutate);
+        match &rep.verdict {
+            Verdict::Fail { gate, tail } => {
+                assert_eq!(*gate, Gate::Mutate);
+                assert!(tail.contains("unknown 1 > 0"), "{tail}");
+            }
+            other => panic!("неопознанный исход обязан быть Fail: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stop_decision_stops_at_first_problem() {
+        let d = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let dir = d.path().join("mutants.out");
+        std::fs::create_dir_all(&dir).unwrap_or_else(|_| unreachable!());
+        let live = crate::core::early::LiveCounts {
+            total: Some(10),
+            caught: 4,
+            missed: 0,
+            unviable: 0,
+            timeout: 0,
+        };
+        // Проблем нет — идём до конца (даже при включённом problem-first).
+        assert!(stop_decision(&live, &dir, true, false, 90, false, "").is_none());
+        // Появился выживший — немедленный останов с actionable-причиной.
+        std::fs::write(
+            dir.join("missed.txt"),
+            "devharness/src/core/plan.rs:19:5: replace x with None\n",
+        )
+        .unwrap_or_else(|_| unreachable!());
+        let mut live2 = live;
+        live2.missed = 1;
+        let stop = stop_decision(&live2, &dir, true, false, 90, false, "");
+        assert_eq!(
+            stop,
+            Some(MutStop::First(crate::core::early::FirstProblem::Missed(1)))
+        );
+        // Выключенный problem-first — прогон идёт до конца.
+        assert!(stop_decision(&live2, &dir, false, false, 90, false, "").is_none());
     }
 }

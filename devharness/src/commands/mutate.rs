@@ -147,8 +147,13 @@ pub const CANON: &str = r#"devh mutate — единственный вход в 
   ⊘ Unviable      — мутант не компилируется: провал (ноль терпимости), чинить код.
 
 Пока есть ✗/⏱/⊘/неопознанный исход/битые детали — вердикт НЕ может быть
-«чисто». Руками cargo-mutants НЕ запускать — только через devh mutate."#;
+«чисто». Руками cargo-mutants НЕ запускать — только через devh mutate.
 
+Problem-first (синхронный гейт внутри devh run):
+  • первая проблема (✗/⏱/⊘/неопознанный исход/собран-но-не-протестирован)
+    ОСТАНАВЛИВАЕТ гейт и уходит в fix-промпт: файл, строка, замена, жанр;
+  • остановка бьёт ТОЛЬКО по своей process group — фоновый devh mutate идёт дальше;
+  • выключается: MUTATE_FIRST_PROBLEM=0 (по умолчанию включено)."#;
 // ─────────────────────────── каталоги и файлы ───────────────────────────
 
 fn work_dir(root: &Path) -> PathBuf {
@@ -414,6 +419,10 @@ fn supervise(root: &Path, args: &[String]) -> anyhow::Result<()> {
     fs::create_dir_all(&dir)?;
     let adir = audit_dir(root, &args);
     let started = now_secs();
+    // Старый вердикт прошлого прогона — в нём «чисто/дыра» для ДРУГОГО
+    // аудита. Убираем на старте: пока новый вердикт не записан, его нет
+    // (fail-closed), а не «протухший зелёный».
+    let _ = fs::remove_file(dir.join(VERDICT_FILE));
     write_state(
         root,
         &State {
@@ -509,7 +518,10 @@ fn supervise(root: &Path, args: &[String]) -> anyhow::Result<()> {
                     // (setpgid), супервизор в неё не входит.
                     if !stop_sent && dir.join(STOP_MARKER).exists() {
                         stop_sent = true;
-                        if pgid > 0 {
+                        // Гасим ТОЛЬКО группу ребёнка: группа супервизора —
+                        // он сам (setsid), её трогать нельзя, иначе не
+                        // запишется финальный статус.
+                        if pgid > 1 && pgid != std::process::id() as i32 {
                             unsafe {
                                 libc::kill(-pgid, libc::SIGTERM);
                             }
@@ -541,6 +553,7 @@ fn supervise(root: &Path, args: &[String]) -> anyhow::Result<()> {
         "timeout": audit.counts.timeout,
         "unviable": audit.counts.unviable,
         "unknown": audit.unknown,
+        "succeeded": audit.succeeded,
         "total": audit.total,
         "done": audit.done,
         "kill_rate": audit.kill_rate(),
@@ -551,10 +564,17 @@ fn supervise(root: &Path, args: &[String]) -> anyhow::Result<()> {
         "tool_problem": audit.tool_problem,
         "problems": problem_json(&audit),
     });
-    let _ = fs::write(
-        dir.join(VERDICT_FILE),
-        serde_json::to_string_pretty(&verdict).unwrap_or_default(),
-    );
+    // Вердикт — машинночитаемый артефакт: пишем АТОМАРНО (tmp+rename),
+    // иначе читатель (оракул `devh next`, внешний скрипт) поймает файл на
+    // середине записи — ровно та же беда, что с outcomes.json у
+    // cargo-mutants (там File::create перетирает файл целиком).
+    if let Err(e) = write_json_atomic(&dir, VERDICT_FILE, &verdict) {
+        // Fail-closed: вердикт не записан → артефакт неполон, и читать
+        // «чисто» нельзя. Гасим и старый файл (иначе прочитают ЧУЖОЙ вердикт
+        // прошлого прогона) и говорим об этом в stderr.
+        eprintln!(".. вердикт не записан ({e}) — артефакт неполон");
+        let _ = fs::remove_file(dir.join(VERDICT_FILE));
+    }
     let state = if stopped {
         "stopped".to_string()
     } else {
@@ -719,6 +739,19 @@ fn report_lines(audit: &Audit) -> Vec<String> {
     for l in problem_blocks(audit) {
         v.push(l);
     }
+    if audit.succeeded > 0 {
+        v.push(format!(
+            "⚠ без тестовой фазы: {} мутант(ов) собраны, но НЕ протестированы — \
+             поимка не подтверждена (это не killed и не missed)",
+            audit.succeeded
+        ));
+    }
+    if audit.unknown > 0 {
+        v.push(format!(
+            "⚠ неизвестный исход мутанта: {} — поимка не подтверждена",
+            audit.unknown
+        ));
+    }
     if let Some(t) = &audit.tool_problem {
         v.push(format!("⚠ инструмент: {t}"));
     }
@@ -731,8 +764,14 @@ fn report_lines(audit: &Audit) -> Vec<String> {
     if audit.details_mismatch {
         v.push("⚠ детали аудита расходятся со счётчиками (outcomes.json ≠ списки)".to_string());
     }
-    if !audit.alive && !audit.blocks_clean_verdict() {
-        v.push("вердикт: чисто — все мутанты пойманы".to_string());
+    if !audit.alive {
+        // `blocks_clean_verdict()` = «БЛОКИРУЕТ чистый вердикт» (true = дыра).
+        // Поэтому «чисто» — это ровно НЕ блокирует.
+        if audit.blocks_clean_verdict() {
+            v.push("вердикт: НЕ чисто — есть непойманные мутанты (см. проблемы выше)".to_string());
+        } else {
+            v.push("вердикт: чисто — все мутанты пойманы".to_string());
+        }
     }
     v
 }
@@ -776,11 +815,18 @@ fn write_problems(dir: &Path, audit: &Audit) -> anyhow::Result<()> {
         "count": audit.bad.len(),
         "problems": problem_json(audit),
     });
-    let path = dir.join(PROBLEMS_FILE);
-    let tmp = dir.join(".problems.json.tmp");
+    write_json_atomic(dir, PROBLEMS_FILE, &json)
+}
+
+/// Атомарная запись JSON-артефакта: временный файл + rename в том же
+/// каталоге. Читатель (devh next, внешний скрипт) никогда не видит файл
+/// на середине записи.
+fn write_json_atomic(dir: &Path, name: &str, value: &serde_json::Value) -> anyhow::Result<()> {
+    let path = dir.join(name);
+    let tmp = dir.join(format!(".{name}.tmp"));
     fs::write(
         &tmp,
-        serde_json::to_string_pretty(&json).unwrap_or_default(),
+        serde_json::to_string_pretty(value).unwrap_or_default(),
     )?;
     fs::rename(&tmp, &path)?;
     Ok(())
@@ -844,6 +890,7 @@ fn status(root: &Path, args: &[String]) -> anyhow::Result<()> {
             "timeout": audit.counts.timeout,
             "unviable": audit.counts.unviable,
             "unknown": audit.unknown,
+            "succeeded": audit.succeeded,
             "kill_rate": audit.kill_rate(),
             "alive": audit.alive,
             "exit": audit.exit,
@@ -977,6 +1024,19 @@ fn problems(root: &Path, args: &[String]) -> anyhow::Result<()> {
     if let Some(t) = &audit.tool_problem {
         extra.push(format!("⚠ инструмент: {t}"));
     }
+    if audit.succeeded > 0 {
+        extra.push(format!(
+            "⚠ без тестовой фазы: {} мутант(ов) собраны, но НЕ протестированы — \
+             поимка не подтверждена (это не killed и не missed)",
+            audit.succeeded
+        ));
+    }
+    if audit.unknown > 0 {
+        extra.push(format!(
+            "⚠ неизвестный исход мутанта: {} — поимка не подтверждена",
+            audit.unknown
+        ));
+    }
     if audit.malformed {
         extra.push("⚠ детали аудита повреждены: outcomes.json не читается".to_string());
     }
@@ -1058,15 +1118,39 @@ fn verdict(root: &Path) -> anyhow::Result<()> {
     for l in report_lines(&audit) {
         println!("{l}");
     }
+    // Неопознанный исход мутанта — БЛОКЕР «чистого» вердикта: поимка не
+    // подтверждена (инструмент отработал непостижимо). Общий судья считает
+    // такие мутанты в знаменателе, но сам по себе вердикт не выносит —
+    // поэтому блокируем ЯВНО, до общей арифметики kill-rate.
+    if audit.unknown > 0 {
+        println!(
+            "вердикт: ПРОВАЛ — неизвестный исход мутанта: {} — поимка не подтверждена",
+            audit.unknown
+        );
+        crate::commands::die(1);
+    }
     // Канонический судья — тот же, что у синхронного гейта (F-3/R5):
     // расхождение двух входов = «красивый» отчёт в одном и честный провал
     // в другом.
     let stats = MutationStats {
-        mutants: audit.done,
+        // Мутантов «с исходом» = все, кто получил исход: пойманные + дыры +
+        // те, у кого тестовой фазы не было + неопознанные. Ровно то же
+        // число, что cargo-mutants печатает как «N mutants tested».
+        mutants: audit
+            .done
+            .saturating_add(audit.succeeded)
+            .saturating_add(audit.unknown),
         killed: audit.killed(),
         missed: audit.counts.missed,
         timeout: audit.counts.timeout,
         unviable: audit.counts.unviable,
+        // «succeeded» (мутант без тестовой фазы) cargo-mutants НЕ пишет ни в
+        // один append-список: он виден только в outcomes.json — и мы
+        // считаем его ЯВНО, чтобы вердикт говорил правду («succeeded N > 0:
+        // поимка не подтверждена»), а не «детали расходятся со счётчиками».
+        succeeded: audit.succeeded,
+        // Неопознанный исход мутанта — тоже только из outcomes.json.
+        unknown: audit.unknown,
     };
     let min_kill = min_kill_pct(root);
     match gates::judge_mutation_stats(&stats, min_kill) {
@@ -1125,13 +1209,22 @@ pub fn live_problem_count(root: &Path) -> u32 {
 
 /// Вердикт по завершённому аудиту: `Some(true)` — чисто, `Some(false)` —
 /// дыра, `None` — вердикт выносить нельзя (идёт/оборвался/остановлен).
+///
+/// Контракт ОДНОЗНАЧЕН: `true` = чисто. Оракул `devh next` читает
+/// `Some(false)` как «дыра, надо чинить» — инверсия здесь делала бы
+/// чистый аудит «дырой», а дырявый — «чистым».
 pub fn verdict_state(root: &Path) -> Option<bool> {
     let eff = effective_args(root, &[]);
     let audit = snapshot(root, &eff);
-    if audit.alive {
-        return None;
-    }
-    if stopped(root).is_some() || aborted(root).is_some() {
+    verdict_flag(&audit, stopped(root).is_some(), aborted(root).is_some())
+}
+
+/// Чистая функция решения: без файловой системы, без скрытых состояний.
+///
+/// `blocks_clean_verdict()` = «блокирует чистый вердикт» (true = дыра),
+/// поэтому чистота — это ЕГО ОТСУТСТВИЕ.
+fn verdict_flag(audit: &Audit, stopped: bool, aborted: bool) -> Option<bool> {
+    if audit.alive || stopped || aborted {
         return None;
     }
     Some(!audit.blocks_clean_verdict())
@@ -1144,13 +1237,28 @@ pub fn verdict_state(root: &Path) -> Option<bool> {
 /// Без sleep-цикла: супервизор сам увидит завершение ребёнка (труба
 /// завершения в `core::watch`) и запишет состояние «stopped».
 fn stop(root: &Path) -> anyhow::Result<()> {
-    let Some(st) = running(root) else {
+    let Some(_st) = running(root) else {
         if let Some(st) = aborted(root) {
-            println!(
-                "аудит уже мёртв (супервизор pid {} не в списке процессов) — состояние \
-                 осталось «running»",
-                st.pid
-            );
+            // Супервизор мёртв, а cargo-mutants — жив: это СИРОТА. Владельца
+            // у неё больше нет (гасить должен был супервизор), поэтому
+            // гасит вызывающий — иначе мутатор продолжит крутиться.
+            let pgid = st.pgid;
+            if pgid > 1 && group_alive(pgid) {
+                unsafe {
+                    libc::kill(-pgid, libc::SIGTERM);
+                }
+                println!(
+                    "супервизор мёртв (pid {}) — сирота cargo-mutants (группа {pgid}) \
+                     погашена",
+                    st.pid
+                );
+            } else {
+                println!(
+                    "аудит уже мёртв (супервизор pid {} не в списке процессов) — состояние \
+                     осталось «running»",
+                    st.pid
+                );
+            }
             crate::commands::die(2);
         }
         println!("нечего останавливать: аудит не идёт (devh mutate status)");
@@ -1161,18 +1269,20 @@ fn stop(root: &Path) -> anyhow::Result<()> {
     // Маркер: по нему супервизор запишет «stopped», а не «failed», и САМ
     // погасит своего ребёнка (он владеет завершением cargo-mutants).
     let _ = fs::write(dir.join(STOP_MARKER), b"stop\n");
-    // Быстрый путь: если группа cargo-mutants уже известна — гасим её
-    // сразу. ВАЖНО: группа супервизора — это он сам (setsid), гасить её
-    // нельзя (тогда финальное состояние не запишется).
-    let pgid = st.pgid;
-    if pgid > 0 && pgid != st.pid {
-        unsafe {
-            libc::kill(-pgid, libc::SIGTERM);
-        }
-    }
+    // Пока супервизор ЖИВ — остановкой владеет только он. Второй kill из
+    // `stop` был гонкой: ребёнок мог быть убит, а супервизор — не успеть
+    // записать финальный статус («stopped» превратился бы в «failed»).
     println!("остановка запрошена (супервизор погасит cargo-mutants сам)");
     println!("финальный статус: devh mutate status");
     Ok(())
+}
+
+/// Жива ли группа процессов (есть ли в ней хоть один процесс).
+fn group_alive(pgid: i32) -> bool {
+    if pgid <= 1 {
+        return false;
+    }
+    unsafe { libc::kill(-pgid, 0) == 0 }
 }
 
 #[cfg(test)]
@@ -1203,6 +1313,71 @@ mod tests {
         assert!(CANON.contains("Unviable"));
         // и запрет ручного cargo-mutants
         assert!(CANON.contains("Руками cargo-mutants НЕ запускать"));
+    }
+
+    /// Контракт `verdict_state`: `Some(true)` — ЧИСТО, `Some(false)` — дыра.
+    ///
+    /// Инверсия (Some(true) = «не чисто») делала бы ровно наоборот: чистый
+    /// аудит оракул `devh next` считал бы дырой, а дырявый — чистым.
+    #[test]
+    fn verdict_flag_true_means_clean() {
+        let mut clean = Audit::default();
+        clean.counts.caught = 3;
+        clean.done = 3;
+        assert_eq!(
+            verdict_flag(&clean, false, false),
+            Some(true),
+            "пойманные мутанты без дыр = чисто"
+        );
+
+        let mut hole = Audit::default();
+        hole.counts.caught = 2;
+        hole.counts.missed = 1;
+        hole.done = 3;
+        assert_eq!(verdict_flag(&hole, false, false), Some(false), "выживший = дыра");
+
+        // Идёт / остановлен / оборвался — вердикт выносить НЕЛЬЗЯ.
+        let mut alive = Audit::default();
+        alive.alive = true;
+        assert_eq!(verdict_flag(&alive, false, false), None, "идущий аудит");
+        assert_eq!(verdict_flag(&clean, true, false), None, "остановлен");
+        assert_eq!(verdict_flag(&clean, false, true), None, "оборвался");
+    }
+
+    /// Отчёт не должен называть «чисто» прогон с дырами — и наоборот.
+    #[test]
+    fn report_lines_name_the_real_verdict() {
+        let mut clean = Audit::default();
+        clean.counts.caught = 2;
+        clean.done = 2;
+        let out = report_lines(&clean);
+        assert!(
+            out.iter().any(|l| l.contains("вердикт: чисто")),
+            "чистый аудит назван чистым: {out:?}"
+        );
+
+        let mut hole = Audit::default();
+        hole.counts.caught = 1;
+        hole.counts.missed = 1;
+        hole.done = 2;
+        let out = report_lines(&hole);
+        assert!(
+            out.iter().any(|l| l.contains("вердикт: НЕ чисто")),
+            "дырявый аудит назван не-чистым: {out:?}"
+        );
+        assert!(
+            !out.iter().any(|l| l.contains("вердикт: чисто")),
+            "дырявый аудит НЕ может быть назван чистым: {out:?}"
+        );
+
+        // Идущий прогон: финального вердикта нет вовсе.
+        let mut alive = Audit::default();
+        alive.alive = true;
+        let out = report_lines(&alive);
+        assert!(
+            !out.iter().any(|l| l.contains("вердикт:")),
+            "у идущего прогона финального вердикта нет: {out:?}"
+        );
     }
 
     #[test]

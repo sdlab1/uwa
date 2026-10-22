@@ -161,6 +161,99 @@ pub fn doomed_missed(total: u32, unviable: u32, min_kill: u32) -> u32 {
     allowed.saturating_add(1)
 }
 
+/// Первая ПЛОХАЯ исхода мутанта — problem-first остановка.
+///
+/// Канон тот же: пойман = только `CaughtMutant`. Всё остальное — НЕ
+/// результат, а руководство к действию, и агент должен узнать о нём
+/// СРАЗУ, а не в конце прогона. Для синхронного in-place гейта это
+/// означает: остановить известную process group на первом плохом исходе,
+/// отдать координаты (файл/строка/замена/жанр) в fix-промпт и продолжить
+/// чинить. Detached-аудит при этом НЕ останавливается — он доводится до
+/// конца, а проблема попадает в отчёт сразу.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FirstProblem {
+    /// Выжил (`MissedMutant`) — дыра в тестах.
+    Missed(u32),
+    /// Тест-фаза не уложилась (`Timeout`) — поимки нет, вопрос открыт.
+    Timeout(u32),
+    /// Не собрался (`Unviable`) — провал с нулевой терпимостью.
+    Unviable(u32),
+    /// Собран, но тестовая фаза НЕ выполнялась (`Success` у мутанта,
+    /// в итоге cargo-mutants — «N succeeded»). Поимка не подтверждена.
+    Succeeded(u32),
+    /// Исход мутанта НЕ РАСПОЗНАН (`Failure` или незнакомое имя) —
+    /// сломанный/непрозрачный инструмент: молчать о нём нельзя.
+    Unknown(u32),
+}
+
+impl FirstProblem {
+    /// Канон исхода cargo-mutants.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            FirstProblem::Missed(_) => "MissedMutant",
+            FirstProblem::Timeout(_) => "Timeout",
+            FirstProblem::Unviable(_) => "Unviable",
+            FirstProblem::Succeeded(_) => "Success",
+            FirstProblem::Unknown(_) => "Unknown",
+        }
+    }
+
+    /// Сколько мутантов с таким исходом.
+    pub fn count(&self) -> u32 {
+        match self {
+            FirstProblem::Missed(n)
+            | FirstProblem::Timeout(n)
+            | FirstProblem::Unviable(n)
+            | FirstProblem::Succeeded(n)
+            | FirstProblem::Unknown(n) => *n,
+        }
+    }
+
+    /// Строка-объяснение: что случилось и почему это не «почти успех».
+    pub fn describe(&self) -> String {
+        match self {
+            FirstProblem::Missed(n) => format!(
+                "PROBLEM: выжил мутант (MissedMutant) x{n} — дыра в тестах, поимки нет; \
+                 прогон остановлен, чтобы чинить (координаты — в списке проблем)"
+            ),
+            FirstProblem::Timeout(n) => format!(
+                "PROBLEM: таймаут тест-фазы (Timeout) x{n} — поимки нет, вопрос открыт; \
+                 прогон остановлен, чтобы чинить (координаты — в списке проблем)"
+            ),
+            FirstProblem::Unviable(n) => format!(
+                "PROBLEM: мутант не собрался (Unviable) x{n} — это дыра с нулевой \
+                 терпимостью: чинить код/типы; прогон остановлен"
+            ),
+            FirstProblem::Succeeded(n) => format!(
+                "PROBLEM: мутант собран, но тестовая фаза НЕ выполнялась (Success) x{n} — \
+                 поимка не подтверждена (это не killed и не missed); прогон остановлен"
+            ),
+            FirstProblem::Unknown(n) => format!(
+                "PROBLEM: неизвестный исход мутанта x{n} — поимка не подтверждена, \
+                 инструмент отработал непостижимо; прогон остановлен"
+            ),
+        }
+    }
+}
+
+/// Первая плохая исхода по live-счётчикам (уже дельта прогона).
+///
+/// Приоритет: выживший → таймаут → некомпилящийся. Выживший — самый
+/// actionable (это дыра в ТЕСТАХ, а не в коде), и он виден в отчёте
+/// раньше остальных.
+pub fn first_problem(live: &LiveCounts) -> Option<FirstProblem> {
+    if live.missed > 0 {
+        return Some(FirstProblem::Missed(live.missed));
+    }
+    if live.timeout > 0 {
+        return Some(FirstProblem::Timeout(live.timeout));
+    }
+    if live.unviable > 0 {
+        return Some(FirstProblem::Unviable(live.unviable));
+    }
+    None
+}
+
 /// Причина ранней остановки. Doom → Fail (kill-rate недостижим),
 /// Sample → Ok (rule-of-three, ≥95%).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -415,6 +508,67 @@ mod tests {
                 unviable: 1,
                 timeout: 1
             }
+        );
+    }
+
+    /// Первая плохая исхода — problem-first: останавливаемся на первом
+    /// непойманном мутанте, а не ждём конца прогона.
+    #[test]
+    fn first_problem_prefers_missed_over_timeout_and_unviable() {
+        // Ничего плохого — продолжаем.
+        assert_eq!(first_problem(&live(Some(10), 5, 0, 0)), None);
+        // Выживший — самый actionable, он и первый по приоритету.
+        let mut l = live(Some(10), 5, 1, 0);
+        l.timeout = 2;
+        l.unviable = 3;
+        let p = first_problem(&l).unwrap_or_else(|| unreachable!());
+        assert_eq!(p, FirstProblem::Missed(1));
+        assert_eq!(p.kind(), "MissedMutant");
+        assert_eq!(p.count(), 1);
+        assert!(p.describe().contains("дыра в тестах"), "{}", p.describe());
+    }
+
+    #[test]
+    fn first_problem_reports_timeout_then_unviable() {
+        let mut l = live(Some(10), 5, 0, 0);
+        l.timeout = 2;
+        let p = first_problem(&l).unwrap_or_else(|| unreachable!());
+        assert_eq!(p, FirstProblem::Timeout(2));
+        assert_eq!(p.kind(), "Timeout");
+        assert!(p.describe().contains("поимки нет"), "{}", p.describe());
+
+        let mut l2 = live(Some(10), 5, 0, 1);
+        l2.timeout = 0;
+        let p2 = first_problem(&l2).unwrap_or_else(|| unreachable!());
+        assert_eq!(p2, FirstProblem::Unviable(1));
+        assert_eq!(p2.kind(), "Unviable");
+        assert!(
+            p2.describe().contains("нулевой терпимостью"),
+            "{}",
+            p2.describe()
+        );
+    }
+
+    #[test]
+    fn first_problem_covers_succeeded_and_unknown() {
+        // Мутант без тестовой фазы: поимка НЕ подтверждена, но это не дыра
+        // покрытия (тесты не запускались) — отдельная категория.
+        let s = FirstProblem::Succeeded(3);
+        assert_eq!(s.kind(), "Success");
+        assert_eq!(s.count(), 3);
+        assert!(
+            s.describe().contains("поимка не подтверждена"),
+            "{}",
+            s.describe()
+        );
+        // Неопознанный исход — инструмент отработал непостижимо.
+        let u = FirstProblem::Unknown(2);
+        assert_eq!(u.kind(), "Unknown");
+        assert_eq!(u.count(), 2);
+        assert!(
+            u.describe().contains("неизвестный исход"),
+            "{}",
+            u.describe()
         );
     }
 

@@ -141,6 +141,7 @@ pub fn init(root: &Path) -> anyhow::Result<()> {
     c += &format!("MUTATE_SCOPE='{mutate_scope}'  # какие пути считать «прод-кодом» для мутаций\n");
     c += &format!("MIN_KILL={min_kill}           # минимальный kill-rate, %\n");
     c += "MUTATE_EARLY=0            # P7-2.3 ранний выход: DOOM (kill-rate недостижим) всегда, SAMPLE (rule-of-three ≥95%) — только с --shuffle в шаблоне\n";
+    c += "MUTATE_FIRST_PROBLEM=1    # problem-first: стоп на ПЕРВОЙ проблеме (missed/timeout/unviable/succeeded/unknown) — файл/строка/замена/жанр уходят в fix-промпт; 0 = выкл (ждать полный прогон)\n";
     c += "MUTATE_COV=0              # P7-2.4 покрытийный отбор: llvm-cov -> nextest -E (требует nightly rustc)\n";
     c += "MUTATE_SURVIVORS=1        # P8-1 третья петля: MissedMutant'ы каждого прогона → .harness/observations.md (seen-дедуп + killmap.json + survivors.log); 0 = выкл\n";
     c += "RED_MUTATE=''  # контроль red-теста: шаблон мутантов с {test} и {diff} (пусто = выкл)\n";

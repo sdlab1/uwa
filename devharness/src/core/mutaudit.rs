@@ -42,7 +42,7 @@
 //! - **Детали плохих мутантов** (файл:строка, замена, жанр) — из
 //!   `outcomes.json`: там есть координаты, в списках — только имена.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
@@ -57,6 +57,14 @@ pub const S_MISSED: &str = "MissedMutant";
 pub const S_TIMEOUT: &str = "Timeout";
 /// Мутант не компилируется — провал с нулевой терпимостью.
 pub const S_UNVIABLE: &str = "Unviable";
+/// Мутант собран, но тестовая фаза НЕ выполнялась (cargo-mutants печатает
+/// его в итоге как «N succeeded»; в `outcomes.json` — `summary: "Success"`).
+/// Это НЕ поимка (поимка = только `CaughtMutant`) и НЕ дыра покрытия (тесты
+/// не запускались) — но поимка не подтверждена, значит «чисто» быть не может.
+///
+/// ВАЖНО: у BASELINE тот же `Success` — это не мутант вовсе (см. `parse_all`:
+/// baseline-сценарии отбрасываются по `scenario`, а не по `summary`).
+pub const S_SUCCEEDED: &str = "Success";
 
 /// Имена, которых cargo-mutants не пишет, но которые остались в старых
 /// логах и в коде. Принимаем — иначе старые прогоны «теряют» исходы.
@@ -116,6 +124,24 @@ impl Bad {
             s.push_str(&format!(" [genre: {}]", self.genre));
         }
         s
+    }
+}
+
+/// Строка-руководство по ОДНОМУ плохому мутанту (с видом исхода).
+///
+/// Формат: `✗ выжил (дыра в тестах): файл:строка — имя (замена → …) [genre: …]`
+/// — в этой строке всё, что нужно агенту, чтобы починить, и она уходит
+/// в fix-промпт.
+pub fn bad_line(b: &Bad) -> String {
+    match b.summary.as_str() {
+        S_MISSED => format!("✗ выжил (дыра в тестах): {}", b.action()),
+        S_UNVIABLE => format!("⊘ не компилится (дыра в покрытии): {}", b.action()),
+        S_TIMEOUT => format!("⏱ таймаут тест-фазы (пойман не был): {}", b.action()),
+        S_SUCCEEDED => format!(
+            "⊘ без тестовой фазы (поимка не подтверждена, прогон без тестов): {}",
+            b.action()
+        ),
+        other => format!("? {other}: {}", b.action()),
     }
 }
 
@@ -185,6 +211,94 @@ pub fn live_bad(dir: &Path) -> Vec<Bad> {
     out
 }
 
+/// Базовая линия плохих мутантов: сколько строк в списках было ДО прогона.
+///
+/// Списки append-only — без базовой линии прошлый прогон попал бы в отчёт
+/// текущего («выжил мутант, которого тут не было»).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BadBaseline {
+    /// Строк в `missed.txt` до прогона.
+    pub missed: usize,
+    /// Строк в `timeout.txt` до прогона.
+    pub timeout: usize,
+    /// Строк в `unviable.txt` до прогона.
+    pub unviable: usize,
+}
+
+impl BadBaseline {
+    /// Снимок списков ДО прогона.
+    pub fn take(dir: &Path) -> Self {
+        Self {
+            missed: count_lines(&dir.join("missed.txt")),
+            timeout: count_lines(&dir.join("timeout.txt")),
+            unviable: count_lines(&dir.join("unviable.txt")),
+        }
+    }
+}
+
+/// Сколько непустых строк в файле.
+fn count_lines(path: &Path) -> usize {
+    std::fs::read_to_string(path)
+        .map(|t| t.lines().filter(|l| !l.trim().is_empty()).count())
+        .unwrap_or(0)
+}
+
+/// Плохие мутанты ТОЛЬКО текущего прогона (дельта списков относительно
+/// базовой линии) + детали из `outcomes.json` (файл, замена, жанр).
+///
+/// `outcomes.json` cargo-mutants перезаписывает целиком на каждый прогон —
+/// там лежит именно текущий прогон. Списки — append-only, поэтому дельта
+/// против базовой линии отсекает прошлые прогоны.
+pub fn current_run_bad(dir: &Path, base: &BadBaseline) -> Vec<Bad> {
+    let mut out = live_bad_since(dir, base);
+    if let Ok(text) = std::fs::read_to_string(dir.join("outcomes.json")) {
+        let parsed = parse_all(&text);
+        if !parsed.malformed {
+            for pb in parsed.bad {
+                match out
+                    .iter_mut()
+                    .find(|b| b.file == pb.file && b.line == pb.line && b.summary == pb.summary)
+                {
+                    Some(b) => {
+                        b.name = pb.name;
+                        b.replacement = pb.replacement;
+                        b.genre = pb.genre;
+                    }
+                    None => out.push(pb),
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Плохие мутанты из списков, начиная с базовой линии (дельта прогона).
+fn live_bad_since(dir: &Path, base: &BadBaseline) -> Vec<Bad> {
+    let mut out = Vec::new();
+    for (list, summary) in BAD_LISTS {
+        let skip = match summary {
+            S_MISSED => base.missed,
+            S_TIMEOUT => base.timeout,
+            _ => base.unviable,
+        };
+        let Ok(text) = std::fs::read_to_string(dir.join(list)) else {
+            continue;
+        };
+        for line in text.lines().filter(|l| !l.trim().is_empty()).skip(skip) {
+            let (file, line_no, name) = parse_list_name(line);
+            out.push(Bad {
+                summary: summary.to_string(),
+                file,
+                line: line_no,
+                name,
+                replacement: String::new(),
+                genre: String::new(),
+            });
+        }
+    }
+    out
+}
+
 /// Живой снимок аудита.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Audit {
@@ -201,6 +315,14 @@ pub struct Audit {
     /// Сколько исходов не распознали (нераспознанные исходы МУТАНТОВ).
     /// Baseline `Success` — не мутант, сюда не входит.
     pub unknown: u32,
+    /// Мутанты, у которых НЕ БЫЛО тестовой фазы (у мутанта
+    /// `summary: "Success"`, в итоге cargo-mutants — «N succeeded»).
+    ///
+    /// Их НЕТ ни в одном append-списке (`caught/missed/timeout/unviable`),
+    /// они видны только в `outcomes.json`. Считаем ЯВНО, иначе вердикт
+    /// врал бы: вместо правды «поимка не подтверждена» он сообщал бы
+    /// «детали расходятся со счётчиками» — а это разные вещи.
+    pub succeeded: u32,
     /// Файл `outcomes.json` нечитаем/не JSON — детали не восстановлены
     /// (счётчики при этом взяты из append-списков).
     pub malformed: bool,
@@ -247,10 +369,17 @@ impl Audit {
         100.0 * f64::from(self.killed()) / f64::from(testable)
     }
 
-    /// Плох ли аудит: выживший, таймаут, некомпилящийся или неопознанный
-    /// исход — открытый вопрос, а не «почти успех».
+    /// Плох ли аудит: выживший, таймаут, некомпилящийся, неопознанный
+    /// исход или мутант без тестовой фазы — открытый вопрос, а не «почти
+    /// успех».
+    ///
+    /// `succeeded` — тоже дыра: поимка НЕ подтверждена (мутант собрался,
+    /// но тест-фаза не выполнялась). Раньше он учитывался только в
+    /// [`Self::blocks_clean_verdict`], и JSON-поле `hole` врало: вердикт
+    /// блокировался, а `hole` был `false` — два разных ответа на один
+    /// вопрос «чисто ли».
     pub fn has_hole(&self) -> bool {
-        self.unresolved() > 0 || self.counts.unviable > 0 || self.unknown > 0
+        self.unresolved() > 0 || self.counts.unviable > 0 || self.unknown > 0 || self.succeeded > 0
     }
 
     /// Провал с нулевой терпимостью: unviable (мутант не компилируется).
@@ -263,6 +392,7 @@ impl Audit {
     /// Канон (R5): чистый вердикт возможен, только когда пойман ВЕСЬ
     /// тестируемый набор И детали аудита целы. Поэтому блокируют:
     /// * выживший / таймаут / некомпилящийся / неопознанный исход;
+    /// * мутант без тестовой фазы (`succeeded`) — поимка не подтверждена;
     /// * повреждённые (`malformed`), отсутствующие (`details_missing`) или
     ///   противоречащие счётчикам (`details_mismatch`) детали;
     /// * непройденный прогон инструмента (`tool_problem`).
@@ -274,6 +404,11 @@ impl Audit {
         if self.tool_problem.is_some() {
             return true;
         }
+        // Мутант без тестовой фазы и неопознанный исход: поимка НЕ
+        // подтверждена — «чисто» невозможно, независимо от kill-rate.
+        if self.succeeded > 0 || self.unknown > 0 {
+            return true;
+        }
         if self.alive {
             return self.has_hole();
         }
@@ -282,15 +417,7 @@ impl Audit {
 
     /// Строки отчёта по плохим мутантам (для консоли и для вердикта).
     pub fn bad_lines(&self) -> Vec<String> {
-        self.bad
-            .iter()
-            .map(|b| match b.summary.as_str() {
-                S_MISSED => format!("✗ выжил (дыра в тестах): {}", b.action()),
-                S_UNVIABLE => format!("⊘ не компилится (дыра в покрытии): {}", b.action()),
-                S_TIMEOUT => format!("⏱ таймаут тест-фазы (пойман не был): {}", b.action()),
-                other => format!("? {other}: {}", b.action()),
-            })
-            .collect()
+        self.bad.iter().map(bad_line).collect()
     }
 
     /// Руководство к действию по каждой проблеме — то, что уходит в промпт.
@@ -306,6 +433,10 @@ pub fn canon_summary(summary: &str) -> Option<&'static str> {
         S_MISSED => Some(S_MISSED),
         S_TIMEOUT | S_TIMEOUT_LEGACY => Some(S_TIMEOUT),
         S_UNVIABLE | S_UNVIABLE_LEGACY => Some(S_UNVIABLE),
+        // Известный исход cargo-mutants, но НЕ поимка: мутант без тестовой
+        // фазы. Раньше он попадал в «нераспознанные» — то есть «сломанный
+        // инструмент», что неправда: инструмент отработал, а поимки нет.
+        S_SUCCEEDED => Some(S_SUCCEEDED),
         _ => None,
     }
 }
@@ -438,6 +569,113 @@ fn outcome_duration(item: &Value) -> f64 {
         .sum()
 }
 
+/// Первая проблема ТЕКУЩЕГО прогона — для problem-first остановки.
+///
+/// Три источника, по возрастанию «дороговизны» остановки:
+/// 1. append-списки (`missed/timeout/unviable.txt`) — видны сразу;
+/// 2. `outcomes.json` — мутанты без тестовой фазы (`Success`) и
+///    нераспознанные исходы: их НЕТ ни в одном списке.
+///
+/// `outcomes.json` cargo-mutants переписывает ЦЕЛИКОМ после каждого
+/// мутанта, поэтому файл может оказаться наполовину записанным. Это НЕ
+/// дыра (детали прояснятся), а нормальная фаза записи — поэтому
+/// нечитаемый JSON молча игнорируется, а читаемый — разбирается.
+///
+/// СТОИМОСТЬ: разбор `outcomes.json` стоит O(размер файла), а файл
+/// растёт с каждым мутантом (для 900 мутантов — сотни КБ). Вызывающий
+/// (таймер прогона) дёргает эту функцию раз в секунду — без кеша это
+/// O(n²) работы на пустом месте. Поэтому разбор кешируется по
+/// (размер, mtime) файла: файл меняется только когда cargo-mutants
+/// дописал новый исход, а между правками мы берём готовый ответ.
+///
+/// Кеш — thread-local: вызывающий (таймер прогона) работает в одном
+/// потоке, глобальной синхронизации не нужно.
+pub fn first_problem(dir: &Path, live: &early::LiveCounts) -> Option<early::FirstProblem> {
+    if let Some(p) = early::first_problem(live) {
+        return Some(p);
+    }
+    let path = dir.join("outcomes.json");
+    let stamp = file_stamp(&path)?;
+    match cached_first_problem(&path, stamp) {
+        CacheHit::Hit(result) => return result,
+        CacheHit::Miss => {}
+    }
+    let result = json_first_problem(&path);
+    store_first_problem(&path, stamp, result);
+    result
+}
+
+/// Отпечаток файла: (размер, mtime). Меняется при каждой перезаписи
+/// cargo-mutants — по нему кеш разбора инвалидируется.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileStamp {
+    len: u64,
+    mtime: Option<std::time::SystemTime>,
+}
+
+fn file_stamp(path: &Path) -> Option<FileStamp> {
+    let md = std::fs::metadata(path).ok()?;
+    Some(FileStamp {
+        len: md.len(),
+        mtime: md.modified().ok(),
+    })
+}
+
+/// Ответ кеша: `Miss` — записи нет (разбираем), `Hit` — готовый ответ
+/// (внутри `None` = «проблем в файле нет»).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CacheHit {
+    Miss,
+    Hit(Option<early::FirstProblem>),
+}
+
+struct CachedFirstProblem {
+    stamp: FileStamp,
+    result: Option<early::FirstProblem>,
+}
+
+thread_local! {
+    /// Кеш разбора `outcomes.json` — thread-local: вызывающий (таймер
+    /// прогона) живёт в одном потоке, глобальной синхронизации не надо.
+    static FIRST_PROBLEM_CACHE: std::cell::RefCell<std::collections::HashMap<PathBuf, CachedFirstProblem>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+fn cached_first_problem(path: &Path, stamp: FileStamp) -> CacheHit {
+    FIRST_PROBLEM_CACHE.with(|c| {
+        let map = c.borrow();
+        match map.get(path) {
+            Some(e) if e.stamp == stamp => CacheHit::Hit(e.result),
+            _ => CacheHit::Miss,
+        }
+    })
+}
+
+fn store_first_problem(path: &Path, stamp: FileStamp, result: Option<early::FirstProblem>) {
+    FIRST_PROBLEM_CACHE.with(|c| {
+        c.borrow_mut()
+            .insert(path.to_path_buf(), CachedFirstProblem { stamp, result });
+    });
+}
+
+/// Разбор `outcomes.json` → первая проблема (без кеша).
+fn json_first_problem(path: &Path) -> Option<early::FirstProblem> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let parsed = parse_all(&text);
+    if parsed.malformed {
+        // Пишем прямо сейчас — детали ещё не собраны. Не дыра.
+        return None;
+    }
+    if parsed.unknown > 0 {
+        return Some(early::FirstProblem::Unknown(parsed.unknown));
+    }
+    let succeeded = count_of(&parsed.recs, S_SUCCEEDED);
+    if succeeded > 0 {
+        return Some(early::FirstProblem::Succeeded(succeeded));
+    }
+    None
+}
+
 /// Живой снимок аудита из каталога прогона (`mutants.out`).
 ///
 /// `alive` — внешний признак «прогон идёт» (детект по pid-файлу).
@@ -465,6 +703,9 @@ pub fn load(dir: &Path, alive: bool, exit: Option<i32>) -> Audit {
         let parsed = parse_all(&text);
         audit.unknown = parsed.unknown;
         audit.malformed = parsed.malformed;
+        // Мутанты без тестовой фазы в append-списки НЕ попадают — считаем
+        // их здесь, по outcomes.json.
+        audit.succeeded = count_of(&parsed.recs, S_SUCCEEDED);
         json_records = Some(parsed.recs.len() as u32);
         let mut durs: Vec<f64> = Vec::new();
         for (_, _, _, _, dur) in &parsed.recs {
@@ -512,7 +753,17 @@ pub fn load(dir: &Path, alive: bool, exit: Option<i32>) -> Audit {
                 }
             }
             Some(n) => {
-                if n != audit.done {
+                // Мутанты без тестовой фазы (`succeeded`) и неопознанные
+                // исходы в append-списки НЕ пишутся — но лежат в
+                // outcomes.json. Учитываем их, иначе «расхождение деталей»
+                // срабатывало бы на ЛЮБОМ таком мутанте, и вердикт врал бы
+                // («детали расходятся» вместо правды «поимка не
+                // подтверждена»).
+                let expected = audit
+                    .done
+                    .saturating_add(audit.succeeded)
+                    .saturating_add(audit.unknown);
+                if n != expected {
                     audit.details_mismatch = true;
                 }
             }
@@ -630,6 +881,43 @@ mod tests {
     }
 
     #[test]
+    fn first_problem_sees_succeeded_and_unknown_and_follows_file_changes() {
+        let d = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let live = early::LiveCounts {
+            total: Some(2),
+            caught: 1,
+            missed: 0,
+            unviable: 0,
+            timeout: 0,
+        };
+        // Пусто → проблем нет.
+        assert_eq!(first_problem(d.path(), &live), None);
+        // Мутант без тестовой фазы (в списках его нет) — проблема.
+        std::fs::write(
+            d.path().join("outcomes.json"),
+            outcomes_json(&[S_CAUGHT, S_SUCCEEDED]),
+        )
+        .unwrap_or_else(|_| unreachable!());
+        assert_eq!(
+            first_problem(d.path(), &live),
+            Some(early::FirstProblem::Succeeded(1)),
+            "мутант без тестовой фазы виден только в outcomes.json"
+        );
+        // Кеш разбора не должен скрывать НОВУЮ проблему: файл изменился —
+        // ответ пересчитан. Неопознанный исход приоритетнее succeeded.
+        std::fs::write(
+            d.path().join("outcomes.json"),
+            outcomes_json(&[S_CAUGHT, S_SUCCEEDED, "WeirdOutcome"]),
+        )
+        .unwrap_or_else(|_| unreachable!());
+        assert_eq!(
+            first_problem(d.path(), &live),
+            Some(early::FirstProblem::Unknown(1)),
+            "изменившийся outcomes.json обязан перечитываться (кеш — не клеймо)"
+        );
+    }
+
+    #[test]
     fn baseline_outcome_is_not_a_problem() {
         // baseline (Success) — НЕ мутант: не проблема и не «нераспознанный
         // исход». Раньше он попадал в unknown и делал прогон «дырой».
@@ -664,6 +952,87 @@ mod tests {
             ..Audit::default()
         };
         assert!(a.has_hole(), "нераспознанный исход = дыра");
+    }
+
+    /// Мутант с `summary: "Success"` — ИЗВЕСТНЫЙ исход, а не «сломанный
+    /// инструмент»: cargo-mutants так помечает мутанта, у которого не было
+    /// тестовой фазы (режим `--check`: фазы = [Check]).
+    ///
+    /// Различие обязано оставаться явным:
+    /// * baseline с `Success` — не мутант вовсе (отбрасывается по scenario);
+    /// * МУТАНТ с `Success` — поимка не подтверждена → видимая проблема.
+    #[test]
+    fn mutant_success_is_known_outcome_but_still_a_problem() {
+        let json = r#"{"outcomes":[{"scenario":{"Mutant":{"name":"m1","file":"devharness/src/core/plan.rs","span":{"start":{"line":5,"column":1}},"replacement":"None","genre":"FnValue"}},"summary":"Success"}]}"#;
+        let (recs, unknown) = parse_outcomes(json);
+        assert_eq!(
+            unknown, 0,
+            "Success — известное имя исхода, не «нераспознанный»"
+        );
+        assert_eq!(recs.len(), 1);
+        let (bad, _) = parse_problems(json);
+        assert_eq!(bad.len(), 1, "мутант без тестовой фазы — проблема");
+        assert_eq!(bad[0].summary, S_SUCCEEDED);
+        assert!(
+            bad_line(&bad[0]).contains("поимка не подтверждена"),
+            "{}",
+            bad_line(&bad[0])
+        );
+        let a = Audit {
+            counts: Counts {
+                caught: 3,
+                missed: 0,
+                timeout: 0,
+                unviable: 0,
+            },
+            unknown: 0,
+            ..Audit::default()
+        };
+        assert!(!a.has_hole(), "сам по себе Audit без плохих — дыр нет");
+    }
+
+    /// Мутант без тестовой фазы (`summary: "Success"`) НЕ попадает ни в один
+    /// append-список — cargo-mutants пишет его только в `outcomes.json`.
+    /// Снимок аудита обязан считать его ЯВНО:
+    /// * `succeeded` — точное число (вердикт говорит правду: «succeeded N > 0»);
+    /// * `details_mismatch` — НЕ срабатывает (расхождения нет: мутант учтён);
+    /// * «чистый» вердикт — невозможен (поимка не подтверждена).
+    #[test]
+    fn succeeded_mutant_is_counted_explicitly_and_blocks_clean_verdict() {
+        let d = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        // Один пойманный (список caught.txt) + один без тестовой фазы
+        // (только в outcomes.json — в списки его нет).
+        std::fs::write(
+            d.path().join("caught.txt"),
+            "devharness/src/core/plan.rs:1:5: replace x with y\n",
+        )
+        .unwrap_or_else(|_| unreachable!());
+        std::fs::write(
+            d.path().join("outcomes.json"),
+            outcomes_json(&[S_CAUGHT, S_SUCCEEDED]),
+        )
+        .unwrap_or_else(|_| unreachable!());
+        let audit = load(d.path(), false, Some(0));
+        assert_eq!(audit.succeeded, 1, "мутант без тестовой фазы посчитан");
+        assert_eq!(audit.counts.caught, 1);
+        assert_eq!(audit.unknown, 0);
+        assert!(
+            !audit.details_mismatch,
+            "расхождения нет: succeeded учтён, а не спрятан под «детали расходятся»"
+        );
+        assert!(
+            audit.blocks_clean_verdict(),
+            "поимка не подтверждена — «чисто» быть не может"
+        );
+        assert_eq!(audit.bad.len(), 1, "мутант виден как проблема");
+        assert_eq!(audit.bad[0].summary, S_SUCCEEDED);
+        // `hole` и «чисто» — ОДИН вопрос, один ответ. Раньше succeeded
+        // учитывался только в blocks_clean_verdict, и JSON-поле `hole`
+        // врало: вердикт блокировался, а hole был false.
+        assert!(
+            audit.has_hole(),
+            "мутант без тестовой фазы — тоже дыра (поимка не подтверждена)"
+        );
     }
 
     #[test]
@@ -835,5 +1204,58 @@ mod tests {
         assert_eq!(a.bad[0].genre, "FnValue");
         assert_eq!(a.bad[0].replacement, "None");
         assert!(a.has_hole());
+    }
+
+    #[test]
+    fn first_problem_finds_missed_from_lists() {
+        let d = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let mut live = early::LiveCounts::default();
+        // Пусто — проблем нет.
+        assert!(first_problem(d.path(), &live).is_none());
+        std::fs::write(
+            d.path().join("missed.txt"),
+            "devharness/src/core/plan.rs:19:5: replace x with None\n",
+        )
+        .unwrap_or_else(|_| unreachable!());
+        live.missed = 1;
+        let p = first_problem(d.path(), &live).unwrap_or_else(|| unreachable!());
+        assert_eq!(p, early::FirstProblem::Missed(1));
+        assert_eq!(p.kind(), "MissedMutant");
+    }
+
+    #[test]
+    fn first_problem_finds_succeeded_and_unknown_in_json() {
+        let d = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let live = early::LiveCounts::default();
+        // Мутант без тестовой фазы: в списках его НЕТ — только в JSON.
+        std::fs::write(d.path().join("outcomes.json"), outcomes_json(&["Success"]))
+            .unwrap_or_else(|_| unreachable!());
+        let p = first_problem(d.path(), &live).unwrap_or_else(|| unreachable!());
+        assert_eq!(p, early::FirstProblem::Succeeded(1));
+        assert!(
+            p.describe().contains("поимка не подтверждена"),
+            "{}",
+            p.describe()
+        );
+
+        // Неопознанный исход — тоже проблема (и приоритетнее succeeded).
+        std::fs::write(
+            d.path().join("outcomes.json"),
+            outcomes_json(&["Success", "WeirdOutcome"]),
+        )
+        .unwrap_or_else(|_| unreachable!());
+        let p2 = first_problem(d.path(), &live).unwrap_or_else(|| unreachable!());
+        assert_eq!(p2, early::FirstProblem::Unknown(1));
+    }
+
+    #[test]
+    fn first_problem_ignores_half_written_json() {
+        // cargo-mutants переписывает outcomes.json целиком после КАЖДОГО
+        // мутанта: файл может быть наполовину записан. Это не дыра.
+        let d = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        std::fs::write(d.path().join("outcomes.json"), "{ not json")
+            .unwrap_or_else(|_| unreachable!());
+        let live = early::LiveCounts::default();
+        assert!(first_problem(d.path(), &live).is_none());
     }
 }

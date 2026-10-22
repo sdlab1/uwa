@@ -293,6 +293,7 @@ mod tests {
                 scope: ".".into(),
                 min_kill: 80,
                 early: false,
+                first_problem: false,
                 cov: false,
                 survivors: false,
             }),

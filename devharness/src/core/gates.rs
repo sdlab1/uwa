@@ -135,6 +135,23 @@ pub struct MutationStats {
     pub missed: u32,
     pub timeout: u32,
     pub unviable: u32,
+    /// Мутанты, у которых НЕ БЫЛО тестовой фазы (cargo-mutants печатает их
+    /// как «N succeeded»): они собрались, но их не тестировали — поимка не
+    /// подтверждена. Это НЕ поимка (killed = только `CaughtMutant`) и НЕ дыра
+    /// покрытия (тесты не запускались), но «чисто» быть не может.
+    ///
+    /// Источник: `LabOutcome::add` (cargo-mutants 27.1.0) считает
+    /// `SummaryOutcome::Success` ДЛЯ МУТАНТА (baseline в счётчики не
+    /// попадает) — это режим `--check`, где фазы = [Check], без Test.
+    pub succeeded: u32,
+    /// Мутанты с НЕОПОЗНАННЫМ исходом (итог cargo-mutants содержит слово,
+    /// которого нет в контракте 27.1.0 — например «2 weird»).
+    ///
+    /// Исход неизвестен → «пойман или нет» неизвестно → поимка НЕ
+    /// подтверждена → чистый вердикт невозможен. Взят из `outcomes.json`
+    /// (в append-списки такие исходы не пишутся) — отсюда и путь
+    /// «остановленный прогон»: счётчики списков этого не видят.
+    pub unknown: u32,
 }
 
 pub fn parse_mutation_output(log: &str) -> Option<MutationStats> {
@@ -231,6 +248,7 @@ fn parse_mutants_summary_line(line: &str) -> Option<MutationStats> {
     let mut missed: u32 = 0;
     let mut unviable: u32 = 0;
     let mut timeout: u32 = 0;
+    let mut succeeded: u32 = 0;
     for tok in outcomes.split(',') {
         let mut w = tok.split_whitespace();
         let n: u32 = w.next()?.parse().ok()?;
@@ -240,6 +258,9 @@ fn parse_mutants_summary_line(line: &str) -> Option<MutationStats> {
             "caught" => killed = n,
             "unviable" => unviable = n,
             "timeout" | "timeouts" => timeout = n,
+            // Мутант без тестовой фазы (--check): собрался, но не тестировался.
+            // Известный исход, но поимка НЕ подтверждена (см. MutationStats).
+            "succeeded" => succeeded = n,
             _ => return None,
         }
     }
@@ -249,7 +270,74 @@ fn parse_mutants_summary_line(line: &str) -> Option<MutationStats> {
         missed,
         timeout,
         unviable,
+        succeeded,
+        // Нераспознанный исход делает Строку неразбираемой целиком
+        // (см. parse_mutation_line) — здесь он невозможен.
+        unknown: 0,
     })
+}
+
+/// Итоговая строка cargo-mutants РАСПОЗНАНА, но в ней НЕИЗВЕСТНЫЙ исход
+/// мутанта (например «2 weird, 3 caught»).
+///
+/// Это не «инструмент сломан» (EnvBlocked) — это видимая проблема: исход
+/// мутанта неизвестен, значит неизвестно, пойман он или нет, и «чистый»
+/// вердикт невозможен. Канон: неизвестный исход мутанта = дыра (Fail).
+///
+/// Отличие от «строки итога нет вообще» (инструмент не распознан) — здесь
+/// строка итога ЕСТЬ и по форме правильная, но один из сегментов неизвестен.
+pub fn parse_unknown_outcome_reason(log: &str) -> Option<String> {
+    for line in log.lines() {
+        let Some((before, after)) = line.split_once(" tested") else {
+            continue;
+        };
+        let mut words = before.rsplit(' ');
+        if !matches!(words.next(), Some("mutants") | Some("mutant")) {
+            continue;
+        }
+        if words
+            .next()
+            .and_then(|w| w.trim().parse::<u32>().ok())
+            .is_none()
+        {
+            continue;
+        }
+        let Some(colon) = after.find(':') else {
+            continue;
+        };
+        let between = after.get(..colon).unwrap_or("");
+        let mid = between.trim_start();
+        if !(mid.is_empty() || mid.starts_with("in ")) {
+            continue;
+        }
+        let Some(outcomes) = after.get(colon.saturating_add(1)..) else {
+            continue;
+        };
+        for tok in outcomes.split(',') {
+            let mut w = tok.split_whitespace();
+            // Сегмент исхода — это «<число> <слово>» (summary_string):
+            // «3 caught», «1 missed», «2 unviable», «1 timeouts».
+            let Some(n) = w.next() else { continue };
+            if n.parse::<u32>().is_err() {
+                continue;
+            }
+            let Some(word) = w.next() else { continue };
+            match word {
+                "missed" | "caught" | "unviable" | "timeout" | "timeouts" => {}
+                // «succeeded» — известный исход cargo-mutants (мутант без
+                // тестовой фазы), НЕ неизвестный: его ловит judge, а не этот
+                // парсер (иначе «неизвестный исход» врал бы про инструмент).
+                "succeeded" => {}
+                other => {
+                    return Some(format!(
+                        "неизвестный исход мутанта «{other}» в итоге прогона: {}",
+                        line.trim()
+                    ));
+                }
+            }
+        }
+    }
+    None
 }
 
 fn parse_legacy_muex_line(line: &str) -> Option<MutationStats> {
@@ -265,6 +353,9 @@ fn parse_legacy_muex_line(line: &str) -> Option<MutationStats> {
         missed: mutants.saturating_sub(killed),
         timeout: 0,
         unviable: 0,
+        // легаси-формат (muex) сегмента «succeeded» не имеет.
+        succeeded: 0,
+        unknown: 0,
     })
 }
 
@@ -927,6 +1018,43 @@ pub fn judge_mutation_stats(stats: &MutationStats, min_kill: u32) -> Verdict {
             ),
         };
     }
+    // succeeded = мутант без тестовой фазы (--check): собрался, но НЕ
+    // тестировался. Это не поимка (killed = только CaughtMutant) и не дыра
+    // покрытия (тесты не запускались) — но поимка НЕ подтверждена, значит
+    // «чисто» быть не может. Отдельный случай, а не «неизвестный исход».
+    if stats.succeeded > 0 {
+        return Verdict::Fail {
+            gate: Gate::Mutate,
+            tail: format!(
+                "succeeded {} > 0: мутант собран, но тестовая фаза не выполнялась — поимка \
+                 не подтверждена (это не killed и не missed: тесты не запускались). \
+                 Прогон мутатора без тестов (--check) гейтом не засчитывается \
+                 (mutants {}, killed {}, missed {}, timeout {})",
+                stats.succeeded, stats.mutants, stats.killed, stats.missed, stats.timeout
+            ),
+        };
+    }
+    // unknown = исход не из контракта cargo-mutants: «пойман или нет» —
+    // НЕИЗВЕСТНО. Значит поимка не подтверждена, а чистый вердикт невозможен.
+    // Отдельный случай от `succeeded`: здесь мы даже не знаем, был ли
+    // тест-фазой пройден (исход не опознан).
+    if stats.unknown > 0 {
+        return Verdict::Fail {
+            gate: Gate::Mutate,
+            tail: format!(
+                "unknown {} > 0: неопознанный исход мутанта — «пойман или нет» НЕИЗВЕСТНО, \
+                 поимка не подтверждена (mutants {}, killed {}, missed {}, timeout {}, \
+                 unviable {}, succeeded {})",
+                stats.unknown,
+                stats.mutants,
+                stats.killed,
+                stats.missed,
+                stats.timeout,
+                stats.unviable,
+                stats.succeeded
+            ),
+        };
+    }
     // Знаменатель: unviable вычитается (тестами его не поймать).
     let testable = stats.mutants.saturating_sub(stats.unviable);
     if testable == 0 {
@@ -956,7 +1084,7 @@ pub fn judge_mutation_stats(stats: &MutationStats, min_kill: u32) -> Verdict {
                 "missed {} > 0: выживший мутант — дыра в покрытии (поимки нет, это не \
                  «почти пойман»): чинить тесты, пока мутант не станет CaughtMutant\n\
                  kill-rate {rate}% (порог {min_kill}%): mutants {}, testable {}, \
-                 killed (caught) {}, missed {}, timeout {}, unviable {}",
+                 killed (caught) {}, missed {}, timeout {}, unviable {}, succeeded {}",
                 stats.missed,
                 stats.mutants,
                 testable,
@@ -964,6 +1092,7 @@ pub fn judge_mutation_stats(stats: &MutationStats, min_kill: u32) -> Verdict {
                 stats.missed,
                 stats.timeout,
                 stats.unviable,
+                stats.succeeded,
             ),
         };
     }
@@ -973,8 +1102,14 @@ pub fn judge_mutation_stats(stats: &MutationStats, min_kill: u32) -> Verdict {
         Verdict::Fail {
             gate: Gate::Mutate,
             tail: format!(
-                "kill-rate {rate}% < {min_kill}%: mutants {}, testable {}, killed (caught) {}, missed {}, timeout {}, unviable {}",
-                stats.mutants, testable, stats.killed, stats.missed, stats.timeout, stats.unviable
+                "kill-rate {rate}% < {min_kill}%: mutants {}, testable {}, killed (caught) {}, missed {}, timeout {}, unviable {}, succeeded {}",
+                stats.mutants,
+                testable,
+                stats.killed,
+                stats.missed,
+                stats.timeout,
+                stats.unviable,
+                stats.succeeded
             ),
         }
     }
@@ -1087,6 +1222,7 @@ mod tests {
                 scope: "lib".into(),
                 min_kill: 90,
                 early: false,
+                first_problem: false,
                 cov: false,
                 survivors: false,
             }),
@@ -1104,6 +1240,8 @@ mod tests {
                 missed: 1,
                 timeout: 0,
                 unviable: 0,
+                succeeded: 0,
+                unknown: 0,
             })
         );
         assert_eq!(
@@ -1118,6 +1256,8 @@ mod tests {
                 missed: 8,
                 timeout: 0,
                 unviable: 0,
+                succeeded: 0,
+                unknown: 0,
             })
         );
         assert_eq!(parse_mutation_output("мусор"), None);
@@ -1140,6 +1280,8 @@ mod tests {
                 missed: 1,
                 timeout: 0,
                 unviable: 0,
+                succeeded: 0,
+                unknown: 0,
             })
         );
         // singular + без «in <dur>» (show_times=false)
@@ -1151,6 +1293,8 @@ mod tests {
                 missed: 0,
                 timeout: 0,
                 unviable: 0,
+                succeeded: 0,
+                unknown: 0,
             })
         );
         // все сегменты сразу: missed, caught, unviable, timeouts — в порядке summary_string
@@ -1165,6 +1309,8 @@ mod tests {
                 missed: 10,
                 timeout: 2,
                 unviable: 3,
+                succeeded: 0,
+                unknown: 0,
             })
         );
         // прогресс-строка nutmeg («N/M mutants tested, ...») — НЕ итог
@@ -1181,8 +1327,87 @@ mod tests {
                 missed: 2,
                 timeout: 0,
                 unviable: 0,
+                succeeded: 0,
+                unknown: 0,
             })
         );
+    }
+
+    /// «succeeded» — ИЗВЕСТНЫЙ исход cargo-mutants, но не поимка.
+    ///
+    /// Источник: `LabOutcome::add` (27.1.0) считает `SummaryOutcome::Success`
+    /// ДЛЯ МУТАНТА (baseline в счётчики не попадает) — это режим `--check`,
+    /// где фазы = [Check], без Test: мутант собран, но НЕ проверен.
+    ///
+    /// Раньше такой сегмент не знался → строка итога не парсилась вовсе →
+    /// «инструмент не распознан» (Env): ложный блокер на честном прогоне.
+    #[test]
+    fn mutation_succeeded_segment_is_known_and_not_a_kill() {
+        let stats = parse_mutation_output("5 mutants tested in 3s: 2 succeeded, 3 caught")
+            .unwrap_or_else(|| unreachable!("итог должен распознаться"));
+        assert_eq!(stats.succeeded, 2);
+        assert_eq!(stats.killed, 3, "поимка = только caught");
+        assert_eq!(
+            stats.missed, 0,
+            "тесты не запускались — это не дыра покрытия"
+        );
+        // «succeeded» — известный исход, а НЕ «неизвестный исход мутанта».
+        assert_eq!(
+            parse_unknown_outcome_reason("5 mutants tested in 3s: 2 succeeded, 3 caught"),
+            None
+        );
+        // а вот настоящий неизвестный исход — ловится.
+        let weird = parse_unknown_outcome_reason("5 mutants tested in 3s: 2 weird, 3 caught")
+            .unwrap_or_else(|| unreachable!("неизвестный исход должен быть найден"));
+        assert!(weird.contains("weird"), "{weird}");
+    }
+
+    /// Поимка не подтверждена → чистый вердикт невозможен (F-3/R5).
+    #[test]
+    fn mutation_succeeded_blocks_clean_verdict() {
+        let stats = MutationStats {
+            mutants: 5,
+            killed: 3,
+            missed: 0,
+            timeout: 0,
+            unviable: 0,
+            succeeded: 2,
+            unknown: 0,
+        };
+        match judge_mutation_stats(&stats, 90) {
+            Verdict::Fail { gate, tail } => {
+                assert_eq!(gate, Gate::Mutate);
+                assert!(tail.contains("succeeded 2 > 0"), "{tail}");
+            }
+            other => panic!("непроверенный мутант обязан быть Fail: {other:?}"),
+        }
+    }
+
+    /// Неопознанный исход мутанта → поимка НЕ подтверждена → Fail.
+    ///
+    /// Грабли, которые закрывает этот тест: неопознанный исход ВИДЕН
+    /// только в `outcomes.json` (в append-списки cargo-mutants его не
+    /// пишет). Остановленный problem-first прогон смотрит именно туда —
+    /// без `unknown` в статах kill-rate считался бы по пойманным и
+    /// вердикт был бы ЗЕЛЁНЫМ при неподтверждённой поимке.
+    #[test]
+    fn mutation_unknown_blocks_clean_verdict() {
+        let stats = MutationStats {
+            mutants: 101,
+            killed: 100,
+            missed: 0,
+            timeout: 0,
+            unviable: 0,
+            succeeded: 0,
+            unknown: 1,
+        };
+        match judge_mutation_stats(&stats, 90) {
+            Verdict::Fail { gate, tail } => {
+                assert_eq!(gate, Gate::Mutate);
+                assert!(tail.contains("unknown 1 > 0"), "{tail}");
+            }
+            other => panic!("неопознанный исход обязан быть Fail: {other:?}"),
+        }
     }
 
     #[test]
@@ -1282,6 +1507,8 @@ mod tests {
             missed: 0,
             timeout: 0,
             unviable: 3,
+            succeeded: 0,
+            unknown: 0,
         };
         assert!(
             matches!(
@@ -1296,6 +1523,8 @@ mod tests {
             missed: 0,
             timeout: 1,
             unviable: 0,
+            succeeded: 0,
+            unknown: 0,
         };
         assert!(
             matches!(judge_mutation_stats(&timeout, 90), Verdict::Fail { .. }),
@@ -1307,6 +1536,8 @@ mod tests {
             missed: 0,
             timeout: 0,
             unviable: 0,
+            succeeded: 0,
+            unknown: 0,
         };
         assert!(
             matches!(judge_mutation_stats(&clean, 90), Verdict::Pass),
