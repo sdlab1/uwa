@@ -1173,3 +1173,150 @@ pub fn run(args: &[String]) -> i32 {
     let owned: Vec<String> = args.to_vec();
     send(&owned)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn block_of(to: &str, subject: &str, tags: &[&str], body: &str) -> String {
+        let mut b = format!("[10:00] ОТ: sender — КОМУ: {to}\nID: abcd1234\nТРЕД: 11112222\nТЕМА: {subject}\n");
+        if !tags.is_empty() {
+            b.push_str(&format!("ТЭГИ: {}\n", tags.join(", ")));
+        }
+        b.push_str(body);
+        b
+    }
+
+    #[test]
+    fn split_log_keeps_blocks_and_header() {
+        let text = format!("# шапка\n{SEP}\n{}{SEP}\n", block_of("a", "тема", &[], "тело"));
+        let (header, blocks) = split_log(&text);
+        assert!(header.contains("шапка"), "шапка сохраняется: {header}");
+        assert_eq!(blocks.len(), 1, "один блок: {blocks:?}");
+        assert!(blocks[0].contains("ТЕМА: тема"));
+    }
+
+    #[test]
+    fn split_log_tolerates_file_starting_with_block() {
+        // канал, созданный promote'ом: файл начинается с блока, без шапки
+        let text = format!("{}{SEP}\n", block_of("a", "тема", &[], "тело"));
+        let (_header, blocks) = split_log(&text);
+        assert_eq!(blocks.len(), 1, "блок без шапки не теряется: {blocks:?}");
+    }
+
+    #[test]
+    fn join_log_roundtrip() {
+        let blocks = vec![block_of("a", "t1", &["x"], "b1"), block_of("b", "t2", &[], "b2")];
+        let text = join_log("# h\n", &blocks);
+        let (_h, back) = split_log(&text);
+        assert_eq!(back.len(), 2, "оба блока на месте: {back:?}");
+    }
+
+    #[test]
+    fn parse_place_splits_path_and_line() {
+        assert_eq!(
+            parse_place("devharness/src/core/load.rs:42"),
+            ("devharness/src/core/load.rs".to_string(), Some(42))
+        );
+        assert_eq!(
+            parse_place("devharness/src/core/load.rs"),
+            ("devharness/src/core/load.rs".to_string(), None)
+        );
+    }
+
+    #[test]
+    fn block_sender_and_recipients_parse_header() {
+        let b = block_of("a, b", "тема", &[], "тело");
+        assert_eq!(block_sender(&b), "sender");
+        assert_eq!(block_recipients(&b), "a, b");
+    }
+
+    #[test]
+    fn block_tags_reads_several() {
+        let b = block_of("a", "тема", &["ошибка", "ревью"], "тело");
+        let tags = block_tags(&b);
+        assert_eq!(tags.len(), 2, "оба тэга: {tags:?}");
+        assert!(tags.iter().any(|t| t == "ошибка"));
+        assert!(tags.iter().any(|t| t == "ревью"));
+    }
+
+    #[test]
+    fn thread_participants_cover_sender_and_recipients() {
+        let blocks = vec![block_of("a, b", "тема", &[], "тело")];
+        let who = thread_participants(&blocks);
+        assert!(who.iter().any(|w| w == "sender"), "отправитель: {who:?}");
+        assert!(who.iter().any(|w| w == "a"), "адресат a: {who:?}");
+        assert!(who.iter().any(|w| w == "b"), "адресат b: {who:?}");
+    }
+
+    #[test]
+    fn code_region_marks_pointed_line_and_keeps_context() {
+        let dir = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let path = dir.path().join("f.rs");
+        let body = (1..=12)
+            .map(|n| format!("line{n}"))
+            .collect::<Vec<String>>()
+            .join("\n");
+        std::fs::write(&path, body).unwrap_or_default();
+        let (p, plain, marked) = code_region(&path.to_string_lossy(), Some(6)).unwrap_or_default();
+        assert!(p.ends_with("f.rs"), "путь: {p}");
+        assert!(plain.contains("line5") && plain.contains("line6"), "контекст: {plain}");
+        assert!(marked.contains('»'), "маркер указанной строки: {marked}");
+        assert!(marked.contains("line5"), "контекст в вырезке: {marked}");
+    }
+
+    #[test]
+    fn code_region_without_line_returns_first_lines() {
+        let dir = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let path = dir.path().join("g.rs");
+        std::fs::write(&path, "a\nb\nc\n").unwrap_or_default();
+        let (_p, plain, _marked) = code_region(&path.to_string_lossy(), None).unwrap_or_default();
+        assert!(plain.contains('a'), "первые строки: {plain}");
+    }
+
+    #[test]
+    fn build_message_carries_thread_place_and_tags() {
+        let att = Attachment {
+            place: Some("devharness/src/core/load.rs".to_string()),
+            snippet: Some("  42 | let x = 1;\n".to_string()),
+        };
+        let msg = build_message(
+            "me",
+            &["peer".to_string()],
+            "ошибка",
+            &["ошибка".to_string()],
+            "тело",
+            "thr",
+            &att,
+        );
+        assert!(msg.contains("ОТ: me"), "отправитель: {msg}");
+        assert!(msg.contains("КОМУ: peer"), "адресат: {msg}");
+        assert!(msg.contains("ТРЕД: thr"), "тред: {msg}");
+        assert!(msg.contains("МЕСТО: devharness/src/core/load.rs"), "место: {msg}");
+        assert!(msg.contains("ВЫРЕЗКА:"), "вырезка: {msg}");
+        assert!(msg.contains("ТЭГИ: ошибка"), "тэги: {msg}");
+    }
+
+    #[test]
+    fn short_id_differs_for_same_fields() {
+        // одинаковые поля в одну минуту -> разные ID (иначе forward даёт ID оригинала)
+        let a = short_id("me", "s", "b", "10:00");
+        let b = short_id("me", "s", "b", "10:00");
+        assert_ne!(a, b, "ID должны различаться: {a} {b}");
+    }
+
+    #[test]
+    fn ago_formats_relative_time() {
+        let now = unix_now();
+        assert_eq!(ago(now), "0 с назад");
+        assert!(ago(now.saturating_sub(120)).ends_with("мин назад"));
+        assert!(ago(now.saturating_sub(7200)).ends_with("ч назад"));
+    }
+
+    #[test]
+    fn safe_name_strips_path_separators() {
+        assert_eq!(safe_name("../evil"), ".._evil");
+        assert_eq!(safe_name(""), "agent");
+        assert_eq!(safe_name("ok-name_1"), "ok-name_1");
+    }
+}
