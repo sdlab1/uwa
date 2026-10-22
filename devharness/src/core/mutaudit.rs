@@ -659,21 +659,78 @@ fn store_first_problem(path: &Path, stamp: FileStamp, result: Option<early::Firs
 }
 
 /// Разбор `outcomes.json` → первая проблема (без кеша).
+///
+/// Горячий путь: cargo-mutants переписывает `outcomes.json` ЦЕЛИКОМ после
+/// каждого мутанта, а problem-first спрашивает про первую проблему раз в
+/// секунду. Полный разбор (`parse_all`) строит дерево `serde_json::Value` на
+/// весь файл — сотни КБ, тысячи аллокаций, и это O(n²) за прогон. Здесь
+/// нужен только ИТОГ каждого мутанта, поэтому файл читается типизированным
+/// разбором: serde пропускает непрошенные поля на своей стороне (имя
+/// мутанта, файл, span, `phase_results` не аллоцируются вовсе).
 fn json_first_problem(path: &Path) -> Option<early::FirstProblem> {
     let text = std::fs::read_to_string(path).ok()?;
-    let parsed = parse_all(&text);
-    if parsed.malformed {
+    let Some((succeeded, unknown)) = scan_summaries(&text) else {
         // Пишем прямо сейчас — детали ещё не собраны. Не дыра.
         return None;
+    };
+    if unknown > 0 {
+        return Some(early::FirstProblem::Unknown(unknown));
     }
-    if parsed.unknown > 0 {
-        return Some(early::FirstProblem::Unknown(parsed.unknown));
-    }
-    let succeeded = count_of(&parsed.recs, S_SUCCEEDED);
     if succeeded > 0 {
         return Some(early::FirstProblem::Succeeded(succeeded));
     }
     None
+}
+
+/// Итоги мутантов из `outcomes.json` без построения дерева значений.
+///
+/// Возвращает `(успешных-без-тестовой-фазы, нераспознанных)` либо `None`,
+/// если файл нечитаем или не является этим JSON.
+///
+/// Baseline (сценарий без «Mutant») — НЕ мутант: его `Success` не
+/// проблема, а его незнакомый summary не проблема мутанта.
+fn scan_summaries(text: &str) -> Option<(u32, u32)> {
+    let parsed: SummaryScan = serde_json::from_str(text).ok()?;
+    let mut succeeded = 0u32;
+    let mut unknown = 0u32;
+    for entry in parsed.outcomes {
+        let is_mutant = entry.scenario.and_then(|s| s.mutant).is_some();
+        if !is_mutant {
+            continue;
+        }
+        match entry.summary.as_deref().map(canon_summary) {
+            Some(Some(S_SUCCEEDED)) => succeeded = succeeded.saturating_add(1),
+            Some(Some(_)) => {}
+            // Нет поля `summary` или значение незнакомое — исход НЕ ПОНЯТ.
+            _ => unknown = unknown.saturating_add(1),
+        }
+    }
+    Some((succeeded, unknown))
+}
+
+/// Файл `outcomes.json` в виде, который нужен problem-first: только итоги.
+#[derive(Debug, serde::Deserialize)]
+struct SummaryScan {
+    #[serde(default)]
+    outcomes: Vec<SummaryEntry>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct SummaryEntry {
+    /// Сценарий: у мутанта — `{"Mutant": {...}}`, у baseline — иное.
+    #[serde(default)]
+    scenario: Option<ScenarioShape>,
+    #[serde(default)]
+    summary: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ScenarioShape {
+    /// Достаточно знать, что сценарий — мутант. Содержимое (имя, файл,
+    /// span, замена, жанр) не нужно и не аллоцируется: `IgnoredAny`
+    /// заставляет serde пропустить значение на своей стороне.
+    #[serde(rename = "Mutant", default)]
+    mutant: Option<serde::de::IgnoredAny>,
 }
 
 /// Живой снимок аудита из каталога прогона (`mutants.out`).
@@ -1246,6 +1303,30 @@ mod tests {
         .unwrap_or_else(|_| unreachable!());
         let p2 = first_problem(d.path(), &live).unwrap_or_else(|| unreachable!());
         assert_eq!(p2, early::FirstProblem::Unknown(1));
+    }
+
+    /// Быстрый путь (только итоги) и полный разбор должны говорить одно и
+    /// то же, а baseline (`Success` без сценария «Mutant») — проблемой быть
+    /// не должен: это не мутант.
+    #[test]
+    fn summary_scan_matches_full_parse_and_ignores_baseline() {
+        let json = concat!(
+            r#"{"outcomes":["#,
+            r#"{"scenario":{"Baseline":{"name":"build baseline"}},"summary":"Success"},"#,
+            r#"{"scenario":{"Mutant":{"name":"m1","file":"a.rs","span":{"start":{"line":1,"column":1}}}},"summary":"Success"},"#,
+            r#"{"scenario":{"Mutant":{"name":"m2","file":"a.rs","span":{"start":{"line":2,"column":1}}}},"summary":"CaughtMutant"},"#,
+            r#"{"scenario":{"Mutant":{"name":"m3","file":"a.rs","span":{"start":{"line":3,"column":1}}}},"summary":"WeirdOutcome"}"#,
+            r#"]}"#
+        );
+        let (succeeded, unknown) = scan_summaries(json).unwrap_or_else(|| unreachable!());
+        assert_eq!(succeeded, 1, "baseline Success — не мутант");
+        assert_eq!(unknown, 1, "незнакомый исход мутанта");
+        // Полный разбор говорит то же самое.
+        let parsed = parse_all(json);
+        assert_eq!(parsed.unknown, 1);
+        assert_eq!(count_of(&parsed.recs, S_SUCCEEDED), 1);
+        // Нечитаемый файл — не дыра (пишем прямо сейчас).
+        assert!(scan_summaries("{ not json").is_none());
     }
 
     #[test]
