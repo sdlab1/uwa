@@ -628,10 +628,14 @@ fn red_mutate_phase(
         std::fs::write(&mpath, &rep.log).ok();
         timing.stage("redmut", store, id);
         match rep.verdict {
-            Verdict::EnvBlocked { .. } => {
+            Verdict::EnvBlocked { missing } => {
+                // Причина — из вердикта (инструмент / load-гейт / сборка):
+                // универсальная фраза «инструмент не распознан» здесь тоже
+                // врала (тот же дефект, что и в обычном MUTATE-гейте).
                 eprintln!(
-                    "{}FAIL: RED-MUT env-блокер — инструмент не распознан (лог: {}){}",
+                    "{}FAIL: RED-MUT env-блокер. Блокер СРЕДЫ, не работа агента: {} (лог: {}){}",
                     c.r,
+                    missing,
                     mpath.display(),
                     c.z
                 );
@@ -1327,18 +1331,16 @@ fn gate_ladder(
         // чужой (lint/review) копией Pass, а Fail уносил бы Pass в
         // GateStop → failure_kind(Pass) паниковал (gates.rs unreachable).
         match &rep.verdict {
-            Verdict::EnvBlocked { .. } => {
+            Verdict::EnvBlocked { missing } => {
+                // Причина — ИЗ ВЕРДИКТА: её различают источники (инструмент
+                // не распознан / load-гейт / сборка / diff-фильтр). Раньше
+                // тут стояла универсальная фраза «инструмент не распознан»,
+                // и при блокировке по нагрузке оператор полчаса искал
+                // несуществующий cargo-mutants вместо разгрузки машины.
                 return Err(GateStop {
-                    verdict: Verdict::EnvBlocked {
-                        missing: format!(
-                            "{}FAIL: mutation env-блокер — инструмент не распознан. Блокер СРЕДЫ, не работа агента: установи (gobot: muex; rust: cargo-mutants) или исправь MUTATE в .harness/config. Детали: {}{}",
-                            c.r,
-                            mpath.display(),
-                            c.z
-                        ),
-                    },
+                    verdict: mutate_env_blocked(missing, &mpath),
                     log: rep.log,
-                })
+                });
             }
             Verdict::Fail { .. } => {
                 // Хвост лога — в консоль: «FAIL: kill-rate …» и причина
@@ -1359,7 +1361,7 @@ fn gate_ladder(
                 return Err(GateStop {
                     verdict: rep.verdict.clone(),
                     log: rep.log,
-                })
+                });
             }
             Verdict::Pass => {
                 // P7-2.3: SAMPLE — решение «доверяем выборке» (rule-of-three).
@@ -2172,6 +2174,23 @@ fn mutate_skip_log(m: &MutateCfg, files: &[String]) -> String {
         .collect()
 }
 
+/// Env-блокер мутационного гейта: ПРИЧИНА из вердикта гейта.
+///
+/// Причины разные (инструмент не распознан, load-гейт, сборка, битый
+/// diff-фильтр), и оператор должен видеть, какая именно сработала: одна
+/// универсальная фраза («инструмент не распознан») уводила в сторону
+/// отсутствующего cargo-mutants, когда на самом деле машина была
+/// перегружена. Поэтому текст причины переносится как есть, без
+/// подмены.
+fn mutate_env_blocked(missing: &str, log_path: &Path) -> Verdict {
+    Verdict::EnvBlocked {
+        missing: format!(
+            "FAIL: mutation env-блокер. Блокер СРЕДЫ, не работа агента: {missing}. Детали: {}",
+            log_path.display()
+        ),
+    }
+}
+
 /// Один прогон → лог + вердикт + статы. `label` = "mutation" /
 /// "red-mutation" (или "{label} <файл>" для per-file), `key` — ключ конфига
 fn finish(m: &MutateCfg, run: MutRun, label: &str, key: &str, gate: Gate) -> MutReport {
@@ -2323,12 +2342,12 @@ fn finish(m: &MutateCfg, run: MutRun, label: &str, key: &str, gate: Gate) -> Mut
         }
         return MutReport {
             log: format!(
-                "{label} env: инструмент не распознан (ни 'N mutants tested in T: C caught, M missed', ни 'Mutants: N, Killed: M'); {key}='{}'\n",
+                "{label} env: инструмент не распознан (ни 'N mutants tested in T: C caught, M missed', ни 'Mutants: N, Killed: M'); {key}='{}' — установи (gobot: muex; rust: cargo-mutants) или исправь {key} в .harness/config\n",
                 m.tool
             ),
             verdict: Verdict::EnvBlocked {
                 missing: format!(
-                    "{label} env: инструмент не распознан (ни 'N mutants tested in T: C caught, M missed', ни 'Mutants: N, Killed: M'); {key}='{}'",
+                    "{label} env: инструмент не распознан (ни 'N mutants tested in T: C caught, M missed', ни 'Mutants: N, Killed: M'); {key}='{}' — установи (gobot: muex; rust: cargo-mutants) или исправь {key} в .harness/config",
                     m.tool
                 ),
             },
@@ -2996,6 +3015,66 @@ mod tests {
             Verdict::Fail { tail, .. } => assert!(tail.contains("succeeded 2 > 0"), "{tail}"),
             other => panic!("непроверенный мутант обязан быть Fail: {other:?}"),
         }
+    }
+
+    #[test]
+    fn env_blocked_keeps_the_real_reason() {
+        // Ревью соседа: env-блокер всегда печатался как «инструмент не
+        // распознан», хотя блокировал его load-гейт — оператор полчаса
+        // искал отсутствующий cargo-mutants вместо разгрузки машины.
+        // Причина блокера обязана быть в вердикте.
+        let m = MutateCfg {
+            tool: "cargo-mutants".into(),
+            scope: "lib".into(),
+            min_kill: 90,
+            early: false,
+            first_problem: false,
+            cov: false,
+            survivors: false,
+        };
+        // 1) load-гейт: причина — нагрузка.
+        let rep = super::finish(
+            &m,
+            super::MutRun::Blocked("load 9.7 > порог 8.0".into()),
+            "mutation",
+            "MUTATE",
+            Gate::Mutate,
+        );
+        let Verdict::EnvBlocked { missing } = &rep.verdict else {
+            panic!("ожидался EnvBlocked: {:?}", rep.verdict)
+        };
+        assert!(
+            missing.contains("load 9.7"),
+            "причина потерялась: {missing}"
+        );
+        assert!(
+            !missing.contains("не распознан"),
+            "универсальная фраза врёт: {missing}"
+        );
+        // 2) инструмент не распознан: тут причина про инструмент, и
+        //    подсказка «установи / исправь MUTATE» обязана быть.
+        let rep = super::finish(&m, super::MutRun::Env, "mutation", "MUTATE", Gate::Mutate);
+        let Verdict::EnvBlocked { missing } = &rep.verdict else {
+            panic!("ожидался EnvBlocked: {:?}", rep.verdict)
+        };
+        assert!(missing.contains("не распознан"), "{missing}");
+        assert!(missing.contains("установи"), "нет подсказки: {missing}");
+        // 3) call-site не подменяет причину универсальной фразой.
+        let v = super::mutate_env_blocked(
+            "mutation env-blocked: load 9.7 > порог 8.0",
+            std::path::Path::new("/tmp/devh-mutate.log"),
+        );
+        let Verdict::EnvBlocked { missing } = v else {
+            panic!("ожидался EnvBlocked")
+        };
+        assert!(
+            missing.contains("load 9.7"),
+            "причина потерялась: {missing}"
+        );
+        assert!(
+            !missing.contains("не распознан"),
+            "call-site врёт о причине: {missing}"
+        );
     }
 
     #[test]
