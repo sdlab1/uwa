@@ -2129,6 +2129,239 @@ impl MutateSandbox {
         let text = fs::read_to_string(self.root.join(rel)).unwrap_or_default();
         serde_json::from_str(&text).unwrap_or(serde_json::Value::Null)
     }
+
+    /// Дождаться, пока супервизор запишет себя и группу cargo-mutants.
+    fn wait_running(&self, timeout: std::time::Duration) -> (i32, i32) {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            let v = self.read_json(".harness/mutate/state.json");
+            let pid = v.get("pid").and_then(|x| x.as_i64()).unwrap_or(0) as i32;
+            let pgid = v.get("pgid").and_then(|x| x.as_i64()).unwrap_or(0) as i32;
+            if pid > 0 && pgid > 0 {
+                return (pid, pgid);
+            }
+            if std::time::Instant::now() > deadline {
+                return (0, 0);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+}
+
+/// Процесс ещё существует (в т.ч. зомби — для «живости» нам это неважно:
+/// тут нужно лишь «файл /proc/<pid> есть»).
+fn proc_exists(pid: i32) -> bool {
+    pid > 0 && Path::new(&format!("/proc/{pid}")).exists()
+}
+
+/// Убить процесс по pid (жёстко, как паника терминала).
+fn kill_pid(pid: i32) {
+    if pid > 0 {
+        unsafe {
+            libc::kill(pid, libc::SIGKILL);
+        }
+    }
+}
+
+/// Убить всю группу процессов.
+fn kill_group(pgid: i32) {
+    if pgid > 1 {
+        unsafe {
+            libc::kill(-pgid, libc::SIGKILL);
+        }
+    }
+}
+
+/// Дождаться, пока процесс перестанет существовать.
+fn wait_gone(pid: i32, timeout: std::time::Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() < deadline {
+        if !proc_exists(pid) {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    !proc_exists(pid)
+}
+
+/// АВАРИЯ СУПЕРВИЗОРА: супервизор убит, состояние осталось «running».
+///
+/// Что должно быть:
+/// - `devh mutate status` → «оборвался», rc=2 (не «идёт», не «чисто»);
+/// - `devh mutate verdict` → rc=2 (результата нет);
+/// - `devh next` → перезапуск ТОЙ ЖЕ командой (флаги из состояния).
+#[test]
+fn section50_supervisor_crash_is_aborted_not_running() {
+    let sb = MutateSandbox::new("crash");
+    let (rc, out) = sb.run_env(
+        &[
+            "mutate",
+            "start",
+            "--",
+            "--config",
+            "devharness/cargo-mutants.toml",
+        ],
+        &[("STUB_CAUGHT", "1"), ("STUB_SLEEP", "60")],
+    );
+    assert_eq!(rc, 0, "start: {out}");
+
+    let (pid, pgid) = sb.wait_running(std::time::Duration::from_secs(30));
+    assert!(pid > 0 && pgid > 0, "супервизор записал себя и группу");
+    kill_pid(pid);
+    assert!(
+        wait_gone(pid, std::time::Duration::from_secs(10)),
+        "супервизор мёртв"
+    );
+
+    // Статус: оборвался (не «не запущен», не «идёт»).
+    let (rc, out) = sb.run(&["mutate", "status"]);
+    assert_eq!(rc, 2, "оборванный аудит — rc=2: {out}");
+    assert!(contains(&out, "оборвался"), "{out}");
+    assert!(
+        !contains(&out, "аудит не запущен"),
+        "аудит стартовал и упал — «не запущен» врёт: {out}"
+    );
+
+    // Вердикт: результата нет.
+    let (rc, out) = sb.run(&["mutate", "verdict"]);
+    assert_eq!(rc, 2, "оборванный аудит — вердикт rc=2: {out}");
+    assert!(contains(&out, "оборвался"), "{out}");
+
+    // Оракул: перезапуск ТОЙ ЖЕ командой (флаги из состояния).
+    let (rc, out) = sb.run(&["next"]);
+    assert_eq!(rc, 0, "next всегда rc=0: {out}");
+    assert!(
+        contains(
+            &out,
+            "devh mutate start --config devharness/cargo-mutants.toml"
+        ),
+        "оракул предлагает перезапуск тем же прогоном: {out}"
+    );
+
+    // Уборка: осиротевшая группа cargo-mutants — наш процесс, гасим её.
+    kill_group(pgid);
+}
+
+/// Осиротевшая группа: супервизор мёртв, cargo-mutants жив.
+///
+/// `devh mutate stop` гасит ИМЕННО эту группу, посторонний процесс не
+/// трогает, а состояние остаётся «running»: финальный статус пишет ТОЛЬКО
+/// супервизор, аварийный путь не имеет права писать «stopped» от его имени.
+#[test]
+fn section51_orphan_group_is_killed_exactly() {
+    let sb = MutateSandbox::new("orphan");
+    let (rc, out) = sb.run_env(
+        &[
+            "mutate",
+            "start",
+            "--",
+            "--config",
+            "devharness/cargo-mutants.toml",
+        ],
+        &[("STUB_CAUGHT", "1"), ("STUB_SLEEP", "60")],
+    );
+    assert_eq!(rc, 0, "start: {out}");
+
+    let (pid, pgid) = sb.wait_running(std::time::Duration::from_secs(30));
+    assert!(pid > 0 && pgid > 0, "супервизор записал себя и группу");
+
+    // Посторонний процесс в СВОЕЙ группе — его stop не должен тронуть.
+    let mut bystander = Command::new("sleep")
+        .arg("60")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap_or_else(|_| unreachable!());
+    let bystander_pid = bystander.id() as i32;
+
+    kill_pid(pid);
+    assert!(
+        wait_gone(pid, std::time::Duration::from_secs(10)),
+        "супервизор мёртв"
+    );
+
+    let (rc, out) = sb.run(&["mutate", "stop"]);
+    assert_eq!(rc, 2, "остановка оборванного аудита — rc=2: {out}");
+    assert!(contains(&out, "сирота"), "{out}");
+    assert!(contains(&out, "погашена"), "{out}");
+
+    assert!(
+        wait_gone(pgid, std::time::Duration::from_secs(15)),
+        "осиротевшая группа cargo-mutants погашена (pgid {pgid})"
+    );
+    assert!(
+        proc_exists(bystander_pid),
+        "посторонний процесс не тронут (pid {bystander_pid})"
+    );
+
+    // Инвариант владения: финальный статус пишет только супервизор.
+    let st = sb.read_json(".harness/mutate/state.json");
+    assert_eq!(
+        st.get("state").and_then(|s| s.as_str()),
+        Some("running"),
+        "аварийный stop не пишет «stopped» от имени супервизора: {st}"
+    );
+
+    // И вердикт после аварийной остановки — результата нет (rc=2).
+    let (rc, out) = sb.run(&["mutate", "verdict"]);
+    assert_eq!(rc, 2, "результата нет — вердикт rc=2: {out}");
+
+    let _ = bystander.kill();
+    let _ = bystander.wait();
+}
+
+/// Упавший аудит с ЧАСТИЧНЫМИ данными не должен выглядеть «чисто».
+///
+/// Раньше проверка «супервизор мёртв» жила только в ветке «мутантов вообще
+/// нет»: если mutants.out успел накопить данные, вердикт считался по
+/// неполной выборке — и упавший аудит проходил как «вердикт: чисто» (rc=0).
+#[test]
+fn section52_crashed_audit_with_partial_data_is_not_clean() {
+    let sb = AuditSandbox::new("crashed", 5, 0, 0, 0, Some(0));
+    // Мёртвый pid супервизора: процесс отработал и был перебран.
+    let mut child = Command::new("bash")
+        .arg("-c")
+        .arg("exit 0")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap_or_else(|_| unreachable!());
+    let dead_pid = child.id() as i32;
+    child.wait().unwrap_or_else(|_| unreachable!());
+
+    // Состояние — «running», но супервизора уже нет.
+    let state = serde_json::json!({
+        "state": "running",
+        "pid": dead_pid,
+        "exit": serde_json::Value::Null,
+        "started": 1,
+        "finished": serde_json::Value::Null,
+        "args": ["--config", "devharness/cargo-mutants.toml"],
+        "cwd": sb.root.to_string_lossy(),
+        "mode": "copy",
+        "pgid": 0,
+    });
+    fs::write(
+        sb.root.join(".harness/mutate/state.json"),
+        serde_json::to_string_pretty(&state).unwrap_or_default(),
+    )
+    .unwrap_or_else(|_| unreachable!());
+
+    let (rc, out) = sb.run(&["mutate", "verdict"]);
+    assert_eq!(rc, 2, "упавший аудит — вердикт rc=2: {out}");
+    assert!(contains(&out, "оборвался"), "{out}");
+    assert!(
+        !contains(&out, "вердикт: чисто"),
+        "упавший аудит не может быть чистым: {out}"
+    );
+
+    let (rc, out) = sb.run(&["mutate", "status"]);
+    assert_eq!(rc, 2, "упавший аудит — status rc=2: {out}");
+    assert!(contains(&out, "оборвался"), "{out}");
+
+    let (rc, out) = sb.run(&["mutate", "problems"]);
+    assert_eq!(rc, 1, "problems видит оборванный аудит: {out}");
+    assert!(contains(&out, "оборвался"), "{out}");
 }
 
 #[test]

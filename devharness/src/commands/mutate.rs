@@ -863,16 +863,20 @@ fn report_new_problems(
 fn status(root: &Path, args: &[String]) -> anyhow::Result<()> {
     let eff = effective_args(root, args);
     let audit = snapshot(root, &eff);
-    if audit.total.is_none() && audit.done == 0 && !audit.alive {
+    let aborted_state = aborted(root);
+    // Диагноз ПЕРЕД «аудит не запущен»: аудит стартовал, а супервизор умер.
+    // Сказать «не запущен» здесь = солгать оператору (он потом скажет
+    // «а я его запускал!»).
+    if let Some(st) = aborted_state.as_ref() {
+        println!(
+            "⚠ аудит оборвался: супервизор (pid {}) мёртв, состояние не завершено — результата нет",
+            st.pid
+        );
+    }
+    if audit.total.is_none() && audit.done == 0 && !audit.alive && aborted_state.is_none() {
         // Аудита нет вообще — это не «чисто», это «нечего смотреть».
         println!("аудит не запущен (нет mutants.out) — devh mutate start <args>");
         crate::commands::die(2);
-    }
-    if let Some(st) = aborted(root) {
-        println!(
-            "⚠ аудит оборвался: супервизор (pid {}) мёртв, состояние не завершено",
-            st.pid
-        );
     }
     if stopped(root).is_some() {
         println!("⚠ аудит остановлен по требованию оператора — результата нет (вердикт = rc 2)");
@@ -889,6 +893,7 @@ fn status(root: &Path, args: &[String]) -> anyhow::Result<()> {
             "succeeded": audit.succeeded,
             "kill_rate": audit.kill_rate(),
             "alive": audit.alive,
+            "aborted": aborted_state.is_some(),
             "exit": audit.exit,
             "malformed": audit.malformed,
             "details_missing": audit.details_missing,
@@ -901,6 +906,11 @@ fn status(root: &Path, args: &[String]) -> anyhow::Result<()> {
             "{}",
             serde_json::to_string_pretty(&json).unwrap_or_default()
         );
+        // Оборванный аудит: результата нет → вердикт выносить не по чему
+        // (rc=2, среда не готова), даже если частичные данные уже накопились.
+        if aborted_state.is_some() {
+            crate::commands::die(2);
+        }
         // Проблема видна СЕЙЧАС — даже если аудит ещё идёт (problem-first).
         if audit.blocks_clean_verdict() {
             crate::commands::die(1);
@@ -912,6 +922,10 @@ fn status(root: &Path, args: &[String]) -> anyhow::Result<()> {
     println!("{}", frame(&audit, &cur, elapsed_secs(root)));
     for l in report_lines(&audit) {
         println!("{l}");
+    }
+    if aborted_state.is_some() {
+        println!("аудит оборвался — результата нет, вердикт не выносим (devh next: перезапуск)");
+        crate::commands::die(2);
     }
     // Проблема видна СЕЙЧАС — даже если аудит ещё идёт (problem-first).
     if audit.blocks_clean_verdict() {
@@ -1004,7 +1018,8 @@ fn watch(root: &Path, args: &[String]) -> anyhow::Result<()> {
 fn problems(root: &Path, args: &[String]) -> anyhow::Result<()> {
     let eff = effective_args(root, args);
     let audit = snapshot(root, &eff);
-    if audit.total.is_none() && audit.done == 0 && !audit.alive {
+    let aborted_state = aborted(root);
+    if audit.total.is_none() && audit.done == 0 && !audit.alive && aborted_state.is_none() {
         println!("аудит не запущен — нечего чинить (devh mutate start <args>)");
         crate::commands::die(2);
     }
@@ -1016,6 +1031,13 @@ fn problems(root: &Path, args: &[String]) -> anyhow::Result<()> {
             "⚠ аудит остановлен по требованию оператора — результата нет (вердикт = rc 2)"
                 .to_string(),
         );
+    }
+    if let Some(st) = aborted_state {
+        extra.push(format!(
+            "⚠ аудит оборвался: супервизор (pid {}) мёртв, состояние не завершено — \
+             результата нет (вердикт = rc 2), перезапустить тем же прогоном",
+            st.pid
+        ));
     }
     if let Some(t) = &audit.tool_problem {
         extra.push(format!("⚠ инструмент: {t}"));
@@ -1096,18 +1118,19 @@ fn verdict(root: &Path) -> anyhow::Result<()> {
         println!("аудит остановлен по требованию оператора — результата нет, вердикт не выносим");
         crate::commands::die(2);
     }
+    // Супервизор мёртв, а состояние — «running»: результата НЕТ. Проверка
+    // ДО любой арифметики: упавший аудит с частичными данными не должен
+    // выглядеть «чисто» (раньше это вылезало, если mutants.out успел
+    // накопить данные — вердикт считался по неполной выборке).
+    if let Some(st) = aborted(root) {
+        println!(
+            "аудит оборвался (супервизор pid {} мёртв, состояние не завершено) — \
+             результата нет, вердикт не выносим",
+            st.pid
+        );
+        crate::commands::die(2);
+    }
     if audit.total.is_none() && audit.done == 0 {
-        if let Some(st) = aborted(root) {
-            // Супервизор мёртв, а состояние — «running»: результата НЕТ.
-            // Это не «дыра в коде» (rc=1), а «окружение не готово» (rc=2):
-            // вердикт выносить не по чему. То же для `status`/`problems`.
-            println!(
-                "аудит оборвался (супервизор pid {} мёртв, состояние не завершено) — \
-                 результата нет, вердикт не выносим",
-                st.pid
-            );
-            crate::commands::die(2);
-        }
         println!("аудит не запущен — нечего вердиктовать (devh mutate start <args>)");
         crate::commands::die(2);
     }
