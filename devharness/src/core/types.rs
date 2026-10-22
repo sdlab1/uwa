@@ -44,7 +44,9 @@ pub struct MutateCfg {
     /// Problem-first: останов синхронного прогона на ПЕРВОЙ проблеме
     /// (выжил / таймаут / не собрался / без тестовой фазы / неизвестный
     /// исход). По умолчанию ВКЛЮЧЁН: проблема actionable, ждать конца
-    /// прогона незачем. `HARNESS_MUTATE_FIRST_PROBLEM=0` — выключатель.
+    /// прогона незачем. Выключатель: `MUTATE_FIRST_PROBLEM=0` в
+    /// `.harness/config` (или `HARNESS_MUTATE_FIRST_PROBLEM=0` в окружении);
+    /// пустое значение и мусор гейт НЕ отключают.
     pub first_problem: bool,
     /// P7-2.4: покрытийный отбор тестов (llvm-cov -> nextest -E).
     /// По умолчанию выключен (требует nightly rustc для -Zinstrument-coverage).

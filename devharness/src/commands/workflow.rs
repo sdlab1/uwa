@@ -38,7 +38,7 @@ pub const RULES: &str = r#"=== ПРАВИЛА ===
   R2  внешнего watcher'а нет; наблюдение — родное (inotify), без sleep-циклов
   R3  дублирующих документов-«вторых источников истины» нет (MUTATION_WORKFLOW.md удалён)
   R4  пойман = ТОЛЬКО CaughtMutant; kill-rate = 100 * caught / (done - unviable)
-  R5  выживший/таймаут/unviable/неопознанный исход/битые детали → финальный вердикт НЕ может быть «чисто»
+  R5  выживший/таймаут/unviable/собран-но-не-протестирован/неопознанный исход/битые детали → финальный вердикт НЕ может быть «чисто»
   R6  Unviable — дыра с нулевой терпимостью (чинить код, пока мутант не собирается)
   R7  живой вывод — событийный (inotify), без внешнего скрипта и без sleep-цикла агента
   R8  сьюты запускаются ТОЛЬКО через `devh test` (полный лог + итог PASS/FAIL в stdout и в коде возврата)
@@ -47,7 +47,8 @@ pub const RULES: &str = r#"=== ПРАВИЛА ===
   R11 фоновый аудит не трогает дерево агента (--in-place запрещён для `devh mutate start`)
   R12 артефакты аудита — read-only для агента (правка руками = читерство, результат обнуляется)
   R13 никаких «ручных» команд в bash: всё, что нужно от харнесса, делается его подкомандами
-  R14 не гадать: непонятно, что делать дальше → `devh next` печатает ровно одну следующую команду"#;
+  R14 не гадать: непонятно, что делать дальше → `devh next` печатает ровно одну следующую команду
+  R15 problem-first: первая проблема останавливает СИНХРОННЫЙ гейт и уходит в fix-промпт (файл, строка, замена, жанр); выключается MUTATE_FIRST_PROBLEM=0"#;
 
 /// Автомат состояний S0–S11.
 pub const STATES: &str = r#"=== СОСТОЯНИЯ (маршрут) ===
@@ -82,7 +83,9 @@ pub const COMMANDS: &str = r#"=== КОМАНДЫ ===
   devh test --list             список проверок сьюта
   devh test --case <N|имя>     точечная проверка (фильтр отчёта)
   devh mutate start|status|watch|problems|verdict|stop   мутационный аудит
-  devh msg send|read|watch|list|prune   канал сообщений между агентами (координация 2+ агентов)
+  devh msg send|reply|read|watch|list|sent|find|thread|close
+                              канал сообщений между агентами (письма, треды,
+                              consume-on-read: прочитанное удаляется; --to all)
   devh next                    оракул: ровно одна следующая команда (всегда rc=0)
   devh workflow                печать этого канона из кода"#;
 
@@ -104,6 +107,16 @@ pub const SAFETY: &str = r#"=== БЕЗОПАСНОСТЬ (соседние аг�
   Процессы соседнего агента НЕ убивать: ждать или останавливать только свой прогон.
   Порог нагрузки: HARNESS_MUTATE_MAX_LOAD (по умолчанию max(4, 2*CPU)), off — отключить."#;
 
+/// Ключи конфигурации мутационного контура.
+pub const CONFIG: &str = r#"=== КЛЮЧИ (.harness/config; переопределение — HARNESS_<KEY>) ===
+  MUTATE                    команда cargo-mutants для гейта (пусто = гейт выключен)
+  MUTATE_SCOPE              что мутировать: lib | all
+  MIN_KILL                  минимальный kill-rate (в %) для зелёного гейта
+  MUTATE_EARLY              ранний выход (DOOM/SAMPLE) — по умолчанию выключен
+  MUTATE_FIRST_PROBLEM      problem-first (по умолчанию ВКЛЮЧЁН): стоп на первой проблеме
+  RED_MUTATE                отдельный контур RED-мутаций (пусто = выключен)
+  RED_MIN_KILL / RED_EXPECT порог kill-rate и ожидаемая причина падения RED-теста"#;
+
 /// Печать канона.
 pub fn workflow() {
     println!("{SOURCE_ORDER}");
@@ -120,6 +133,8 @@ pub fn workflow() {
     println!();
     println!("{SAFETY}");
     println!();
+    println!("{CONFIG}");
+    println!();
     println!("{}", mutate::CANON);
 }
 
@@ -130,7 +145,8 @@ mod tests {
     #[test]
     fn canon_mentions_all_rules() {
         for r in [
-            "R1", "R2", "R3", "R4", "R5", "R6", "R7", "R8", "R9", "R10", "R11", "R12", "R13", "R14",
+            "R1", "R2", "R3", "R4", "R5", "R6", "R7", "R8", "R9", "R10", "R11", "R12", "R13",
+            "R14", "R15",
         ] {
             assert!(RULES.contains(r), "канон не упоминает {r}");
         }
@@ -158,5 +174,17 @@ mod tests {
         assert!(EXIT_CODES.contains("0 — успех"));
         assert!(EXIT_CODES.contains("1 — actionable"));
         assert!(EXIT_CODES.contains("2 — среда"));
+    }
+
+    #[test]
+    fn canon_covers_problem_first_and_config_keys() {
+        assert!(RULES.contains("R15"), "канон не упоминает problem-first");
+        assert!(RULES.contains("MUTATE_FIRST_PROBLEM=0"));
+        assert!(CONFIG.contains("MUTATE_FIRST_PROBLEM"));
+        assert!(CONFIG.contains("MIN_KILL"));
+        assert!(COMMANDS.contains("devh msg"));
+        // Мутантный Success (собран, но не протестирован) — блокирующий исход.
+        assert!(mutate::CANON.contains("непротестирован"));
+        assert!(mutate::CANON.contains("baseline"));
     }
 }

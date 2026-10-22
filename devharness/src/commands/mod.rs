@@ -82,11 +82,20 @@ pub fn load_config(root: &Path) -> anyhow::Result<RunConfig> {
         g(k).map(|v| matches!(v.trim(), "1" | "true" | "yes"))
             .unwrap_or(d)
     };
-    // Флаг, включённый ПО УМОЛЧАНИЮ: выключается явным 0/false/no/off
-    // (garbage тоже трактуем как «выключено» — тише и безопаснее).
+    // Флаг, включённый ПО УМОЛЧАНИЮ: выключается ТОЛЬКО явным 0/false/no/off.
+    // Пустое значение = «не задано» (остаётся дефолт). Мусор («да», «1x»)
+    // гейт НЕ отключает: строгий режим включается, а не выключается — иначе
+    // опечатка тихо ослабила бы проверку.
     let boolv_on = |k: &str, d: bool| {
-        g(k).map(|v| !matches!(v.trim(), "0" | "false" | "no" | "off" | ""))
-            .unwrap_or(d)
+        g(k).map(|v| {
+            let t = v.trim();
+            if t.is_empty() {
+                d
+            } else {
+                !matches!(t, "0" | "false" | "no" | "off")
+            }
+        })
+        .unwrap_or(d)
     };
     let ignored_allowlist = {
         let path = g("IGNORED_ALLOWLIST")
@@ -394,5 +403,53 @@ mod tests {
         .unwrap_or_else(|_| unreachable!());
         let over = load_config(d.path()).unwrap_or_else(|_| unreachable!());
         assert_eq!(over.review_diff_max, 7, "REVIEW_DIFF_MAX из конфига");
+    }
+
+    #[test]
+    fn mutate_first_problem_is_default_on_and_only_explicit_off_disables() {
+        let d = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        std::fs::create_dir_all(d.path().join(".harness")).unwrap_or_else(|_| unreachable!());
+        let conf = d.path().join(".harness/config");
+        let write = |body: &str| {
+            std::fs::write(&conf, body).unwrap_or_else(|_| unreachable!());
+        };
+        let first = |cfg: &RunConfig| {
+            let m = cfg.mutate.as_ref().expect("MUTATE должен быть задан");
+            let r = cfg
+                .red_mutate
+                .as_ref()
+                .expect("RED_MUTATE должен быть задан");
+            (m.first_problem, r.first_problem)
+        };
+
+        // 1. Дефолт: включено в обоих контурах.
+        write("VERIFY='true'\nMUTATE='cargo mutants'\nRED_MUTATE='cargo mutants'\n");
+        let cfg = load_config(d.path()).unwrap_or_else(|_| unreachable!());
+        assert_eq!(
+            first(&cfg),
+            (true, true),
+            "problem-first включён по умолчанию"
+        );
+
+        // 2. Явное выключение — выключает оба контура.
+        write(
+            "VERIFY='true'\nMUTATE='cargo mutants'\nRED_MUTATE='cargo mutants'\nMUTATE_FIRST_PROBLEM=0\n",
+        );
+        let cfg = load_config(d.path()).unwrap_or_else(|_| unreachable!());
+        assert_eq!(first(&cfg), (false, false), "явный 0 выключает");
+
+        // 3. Пустое значение = «не задано» → дефолт (включено).
+        write(
+            "VERIFY='true'\nMUTATE='cargo mutants'\nRED_MUTATE='cargo mutants'\nMUTATE_FIRST_PROBLEM=\n",
+        );
+        let cfg = load_config(d.path()).unwrap_or_else(|_| unreachable!());
+        assert_eq!(first(&cfg), (true, true), "пустое значение не отключает");
+
+        // 4. Мусор не отключает гейт (иначе опечатка тихо ослабила бы проверку).
+        write(
+            "VERIFY='true'\nMUTATE='cargo mutants'\nRED_MUTATE='cargo mutants'\nMUTATE_FIRST_PROBLEM=да\n",
+        );
+        let cfg = load_config(d.path()).unwrap_or_else(|_| unreachable!());
+        assert_eq!(first(&cfg), (true, true), "мусор не отключает");
     }
 }
