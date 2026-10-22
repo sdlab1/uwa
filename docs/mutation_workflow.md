@@ -1,33 +1,3 @@
-# Канонический workflow харнесса (`devh`)
-
-> Этот файл СГЕНЕРИРОВАН из кода (`devh workflow`). Не править руками:
-> канон живёт в `devharness/src/commands/workflow.rs` и
-> `devharness/src/commands/mutate.rs`.
-
-## Что изменилось (2026-10-22)
-
-Раньше мутационный аудит вёлся внешним скриптом
-(`devharness/tools/mutants-watch.sh`), а полный сьют запускался через
-`bash devharness/test.sh`. Оба входа требовали «руками», а логи разбирались
-ad-hoc. Теперь у харнесса ровно четыре входа:
-
-| вход | что это | код возврата |
-| --- | --- | --- |
-| `devh mutate ...` | единственный вход в мутационный аудит (cargo-mutants внутри) | 0 / 1 / 2 |
-| `devh test` | единственный вход в полный сьют (`devharness/test.sh` внутри) | 0 / 1 / 2 |
-| `devh next` | оракул следующего шага (ровно одна команда) | всегда 0 |
-| `devh workflow` | печать этого канона из кода | 0 |
-
-Внешний watcher и корневой `MUTATION_WORKFLOW.md` удалены (без обёрток и
-fallback): наблюдение живёт в харнессе (`core/watch.rs`: inotify + poll +
-труба завершения процесса), без sleep-циклов.
-
-Координация соседних агентов — тоже через харнесс: `devh msg`
-(письма, треды, consume-on-read; `--to all` — всем). Старый файловый канал
-`/tmp/messages.txt` больше не канон.
-
-## Канон (из кода)
-
 === ИСТОЧНИКИ ИСТИНЫ (по убыванию авторитета) ===
   1. код харнесса (commands/workflow.rs, commands/mutate.rs)
   2. devh workflow   — печать канона из кода
@@ -70,7 +40,8 @@ fallback): наблюдение живёт в харнессе (`core/watch.rs`:
   S7  аудит завершён, есть дыра                → devh mutate problems
   S8  аудит завершён, чисто                    → devh commit <ID> / devh merge <ID>
   S9  ничего не начато, но есть спеки          → devh auto --from specs/ --max 5
-  S10 лимит фиксов исчерпан                    → devh abort <ID>
+  S10 гейт красный: блокер среды (код 2)     → devh run <ID> (снять блокер, перепрогнать)
+      гейт красный по существу (код 1)        → devh abort <ID>
   S11 мусор: старые worktree/логи              → devh clean / devh sweep --maxsize 20G
 
 === КОМАНДЫ ===
@@ -90,9 +61,12 @@ fallback): наблюдение живёт в харнессе (`core/watch.rs`:
   devh test --list             список проверок сьюта
   devh test --case <N|имя>     точечная проверка (фильтр отчёта)
   devh mutate start|status|watch|problems|verdict|stop   мутационный аудит
-  devh msg send|reply|read|watch|thread|threads|close|list|sent|find|acks|pending
-                              канал сообщений между агентами (письма, треды,
-                              consume-on-read: прочитанное удаляется; --to all)
+  devh msg send|reply|read|watch|thread|threads|close|list|sent|find|acks|pending|presence
+  devh msg send --to <агент> --subject "..." --body "..."   письмо агенту (несколько --to — несколько адресатов)
+  devh msg read                                                 прочитать письма (consume-on-read: прочитанное удаляется)
+  devh msg watch --agent <мне>                                 оповещение: письма в stdout + popup + звук (дедуп по ID)
+  devh msg send ... --at путь[:строка] | --diff файл          указание на код по контексту (устойчиво к сдвигу строк)
+  devh msg presence                                  кто онлайн и когда был последний раз (heartbeat от watch)
   devh next                    оракул: ровно одна следующая команда (всегда rc=0)
   devh workflow                печать этого канона из кода
 
@@ -166,52 +140,3 @@ Problem-first (синхронный гейт внутри devh run):
     ОСТАНАВЛИВАЕТ гейт и уходит в fix-промпт: файл, строка, замена, жанр;
   • остановка бьёт ТОЛЬКО по своей process group — фоновый devh mutate идёт дальше;
   • выключается: MUTATE_FIRST_PROBLEM=0 (по умолчанию включено).
-```
-
-## Семантика мутационного исхода (cargo-mutants 27.1.0)
-
-| исход | что значит | попадает в killed? |
-| --- | --- | --- |
-| `Success` (baseline) | базовая сборка прошла — это НЕ мутант | нет |
-| `Success` (мутант) | мутант собрался, но НЕ протестирован (например `--check`) | нет, чинить (блокирует чистый вердикт) |
-| `CaughtMutant` | тест поймал мутанта | **да** (единственный успех) |
-| `MissedMutant` | выжил — дыра в тестах | нет, чинить |
-| `Timeout` | тест-фаза не уложилась — поимки не было | нет, чинить |
-| `Unviable` | мутант не компилируется | нет, чинить код (нулевая терпимость) |
-| `Failure` / неизвестный исход | неопознанный исход мутанта | нет, чинить |
-
-Формулы: `killed = caught`, `testable = done - unviable`,
-`kill_rate = 100 * caught / testable`, `unresolved = missed + timeout`.
-
-Пока есть missed / timeout / unviable / непротестированный мутант / неизвестный
-исход / отсутствуют или повреждены детали аудита — финальный вердикт НЕ может
-быть «чисто».
-
-## Problem-first
-
-Проблема (выживший/таймаут/unviable/непротестированный/неопознанный исход)
-попадает в отчёт и в `problems.json` сразу, с `file:line`, заменой и жанром —
-это то, что уходит в следующий fix-промпт. Агент начинает чинить, не дожидаясь
-конца аудита.
-
-Синхронный in-place гейт (внутри `devh run`) останавливает **только свою**
-process group; фоновый `devh mutate` идёт до конца и не мутирует дерево агента
-(только copy-режим или отдельная worktree).
-
-По умолчанию problem-first **включён** (`MUTATE_FIRST_PROBLEM`). Выключается
-явно: `MUTATE_FIRST_PROBLEM=0` в `.harness/config` (или
-`HARNESS_MUTATE_FIRST_PROBLEM=0` в окружении). Пустое значение и мусор гейт не
-отключают — опечатка не должна тихо ослаблять проверку.
-
-## Файлы артефактов аудита
-
-```
-.harness/mutate/state.json      состояние прогона (running/done/failed/stopped)
-.harness/mutate/problems.json   живой список проблем (file:line, замена, жанр)
-.harness/mutate/verdict.json    финальный вердикт (счётчики, kill-rate)
-.harness/mutate/live.log        живые кадры + журнал доложившихся проблем
-.harness/mutate/cargo.log       полный stdout/stderr cargo-mutants
-.harness/mutate/supervisor.log  лог супервизора
-```
-
-Артефакты аудита — read-only для агента: правка руками = читерство.
