@@ -40,6 +40,93 @@ impl ProcError {
     }
 }
 
+/// Жив ли процесс — и ЗОМБИ живым НЕ считается.
+///
+/// `kill(pid, 0)` успешен и для зомби (процесс умер, но его не перебрали) —
+/// а зомби не работает. Мёртвый супервизор-зомби уводил бы `devh mutate
+/// status` в вечное «идёт», а оракул `devh next` — в вечное «ждём
+/// прогона». Поэтому состояние `Z`/`X` из `/proc/<pid>/stat` считается
+/// смертью.
+pub fn pid_alive(pid: i32) -> bool {
+    if pid <= 0 {
+        return false;
+    }
+    if unsafe { libc::kill(pid, 0) } != 0 {
+        return false;
+    }
+    !process_is_zombie(pid)
+}
+
+/// Жива ли группа процессов — есть ли в ней хоть один НЕ-зомби.
+///
+/// `kill(-pgid, 0)` успешен и для группы, где остались одни зомби (лидер
+/// умер, тело не перебрали): такая группа ничего не делает, но выглядит
+/// живой — и `devh mutate stop` считал бы сироту живым, хотя гасить нечего.
+/// Поэтому сканируем `/proc/*/stat` и ищем членов группы со состоянием не
+/// `Z`/`X`. Скан дорогой, поэтому зовём его только на stop-пути.
+///
+/// Вне Linux (нет `/proc`) судим только по `kill`.
+pub fn group_alive(pgid: i32) -> bool {
+    if pgid <= 1 {
+        return false;
+    }
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return unsafe { libc::kill(-pgid, 0) == 0 };
+    };
+    for entry in entries.flatten() {
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if name.is_empty() || !name.bytes().all(|b| b.is_ascii_digit()) {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(entry.path().join("stat")) else {
+            continue;
+        };
+        // `pid (comm) state ppid pgrp ...`: comm бывает со скобками и
+        // пробелами — состояние идёт после ПОСЛЕДНЕЙ `)`.
+        let Some(rest) = text.rsplit_once(") ").map(|(_, r)| r) else {
+            continue;
+        };
+        let mut fields = rest.split_whitespace();
+        let Some(state) = fields.next() else {
+            continue;
+        };
+        let Some(_ppid) = fields.next() else {
+            continue;
+        };
+        let Some(pgrp) = fields.next().and_then(|p| p.parse::<i32>().ok()) else {
+            continue;
+        };
+        if pgrp != pgid {
+            continue;
+        }
+        if state.starts_with('Z') || state.starts_with('X') {
+            continue;
+        }
+        return true;
+    }
+    false
+}
+
+/// Процесс в состоянии зомби (`Z`) или мёртв (`X`).
+///
+/// `pid (comm) state ...`: имя процесса может содержать скобки и пробелы,
+/// поэтому состояние идёт после ПОСЛЕДНЕЙ `)`.
+fn process_is_zombie(pid: i32) -> bool {
+    let Ok(text) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+        // Без /proc (не Linux) судим только по `kill`: процесс есть.
+        return false;
+    };
+    let Some(rest) = text.rsplit_once(") ").map(|(_, r)| r) else {
+        return false;
+    };
+    match rest.split_whitespace().next() {
+        Some(state) => state.starts_with('Z') || state.starts_with('X'),
+        None => false,
+    }
+}
+
 /// F-0.4 (N8): добить процессную группу после того, как лидер вышел САМ.
 /// `try_wait` собирает только прямого ребёнка (`bash -c`); агент, ушедший в
 /// фон (демон, `... &`, `disown`, double-fork), остаётся в той же группе и
@@ -336,4 +423,99 @@ pub fn run_monitored<T>(
         stopped,
         hard_killed,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::{Child, Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    /// Ребёнок в СВОЕЙ группе (`process_group(0)`): проверка живости группы
+    /// не должна задевать группу самого теста.
+    fn spawn_own_group(cmd: &str) -> Child {
+        Command::new("bash")
+            .arg("-c")
+            .arg(cmd)
+            .process_group(0)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap_or_else(|e| panic!("spawn {cmd}: {e}"))
+    }
+
+    /// Ждём, пока ребёнок перейдёт в зомби (родитель его не reap'ит).
+    fn wait_zombie(pid: i32) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if process_is_zombie(pid) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        false
+    }
+
+    #[test]
+    fn pid_alive_rejects_nonpositive() {
+        assert!(!pid_alive(0));
+        assert!(!pid_alive(-1));
+        assert!(!pid_alive(i32::MIN));
+    }
+
+    #[test]
+    fn pid_alive_false_for_missing_pid() {
+        // pid выше pid_max не существует никогда.
+        assert!(!pid_alive(i32::MAX));
+    }
+
+    #[test]
+    fn pid_alive_true_for_running_process() {
+        let mut child = spawn_own_group("sleep 30");
+        let pid = child.id() as i32;
+        assert!(pid_alive(pid), "живой процесс должен считаться живым");
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    #[test]
+    fn zombie_pid_is_dead() {
+        let mut child = spawn_own_group("exit 0");
+        let pid = child.id() as i32;
+        assert!(wait_zombie(pid), "ребёнок должен стать зомби");
+        assert!(
+            !pid_alive(pid),
+            "зомби не должен считаться живым супервизором"
+        );
+        let _ = child.wait();
+    }
+
+    #[test]
+    fn group_with_only_zombie_is_dead() {
+        let mut child = spawn_own_group("exit 0");
+        let pid = child.id() as i32;
+        let pgid = pid;
+        assert!(wait_zombie(pid), "ребёнок должен стать зомби");
+        assert!(
+            !group_alive(pgid),
+            "группа из одного зомби не должна считаться живой"
+        );
+        let _ = child.wait();
+    }
+
+    #[test]
+    fn group_with_live_member_is_alive() {
+        let mut child = spawn_own_group("sleep 30");
+        let pgid = child.id() as i32;
+        assert!(group_alive(pgid), "группа с живым членом — жива");
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    #[test]
+    fn group_alive_rejects_invalid_pgid() {
+        assert!(!group_alive(0));
+        assert!(!group_alive(-1));
+        assert!(!group_alive(1));
+    }
 }

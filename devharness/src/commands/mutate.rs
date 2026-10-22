@@ -63,6 +63,7 @@ use crate::core::mutaudit::{self, Audit};
 use crate::core::tui;
 use crate::core::watch::{Event, Watcher};
 use crate::shell::color::colors;
+use crate::shell::proc::{group_alive, pid_alive};
 
 /// Каталог артефактов аудита внутри `.harness/`.
 const WORK: &str = "mutate";
@@ -212,13 +213,6 @@ fn now_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
-}
-
-fn pid_alive(pid: i32) -> bool {
-    if pid <= 0 {
-        return false;
-    }
-    unsafe { libc::kill(pid, 0) == 0 }
 }
 
 /// Есть ли живой прогон прямо сейчас.
@@ -1277,14 +1271,6 @@ fn stop(root: &Path) -> anyhow::Result<()> {
     println!("остановка запрошена (супервизор погасит cargo-mutants сам)");
     println!("финальный статус: devh mutate status");
     Ok(())
-}
-
-/// Жива ли группа процессов (есть ли в ней хоть один процесс).
-fn group_alive(pgid: i32) -> bool {
-    if pgid <= 1 {
-        return false;
-    }
-    unsafe { libc::kill(-pgid, 0) == 0 }
 }
 
 #[cfg(test)]

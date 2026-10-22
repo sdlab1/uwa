@@ -1,4 +1,5 @@
 use crate::shell::color::colors;
+use crate::shell::proc::pid_alive;
 use crate::shell::store::Store;
 
 pub fn ps(store: &Store) {
@@ -11,7 +12,7 @@ pub fn ps(store: &Store) {
         };
         found = found.saturating_add(1);
         let pid: i32 = pid_text.trim().parse().unwrap_or(0);
-        if pid > 0 && kill_ok(pid) {
+        if pid > 0 && pid_alive(pid) {
             let el = pid_path
                 .metadata()
                 .and_then(|m| m.modified())
@@ -41,7 +42,7 @@ pub fn ps(store: &Store) {
     let ap = store.auto_pid_path();
     if let Ok(pid_text) = std::fs::read_to_string(&ap) {
         let pid: i32 = pid_text.trim().parse().unwrap_or(0);
-        if pid > 0 && kill_ok(pid) {
+        if pid > 0 && pid_alive(pid) {
             let el = ap
                 .metadata()
                 .and_then(|m| m.modified())
@@ -58,8 +59,4 @@ pub fn ps(store: &Store) {
     if found == 0 {
         println!("нет прогонов в полёте");
     }
-}
-
-fn kill_ok(pid: i32) -> bool {
-    unsafe { libc::kill(pid, 0) == 0 }
 }

@@ -332,7 +332,7 @@ fn item_alive(store: &Store, id: &ItemId) -> bool {
     let Ok(pid) = text.trim().parse::<i32>() else {
         return false;
     };
-    pid > 0 && unsafe { libc::kill(pid, 0) == 0 }
+    crate::shell::proc::pid_alive(pid)
 }
 
 #[cfg(test)]
