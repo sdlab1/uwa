@@ -1193,7 +1193,10 @@ mod tests {
         let (header, blocks) = split_log(&text);
         assert!(header.contains("шапка"), "шапка сохраняется: {header}");
         assert_eq!(blocks.len(), 1, "один блок: {blocks:?}");
-        assert!(blocks[0].contains("ТЕМА: тема"));
+        assert!(
+            blocks.first().is_some_and(|b| b.contains("ТЕМА: тема")),
+            "тема в блоке: {blocks:?}"
+        );
     }
 
     #[test]
@@ -1252,6 +1255,7 @@ mod tests {
     #[test]
     fn code_region_marks_pointed_line_and_keeps_context() {
         let dir = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        // (tempdir без unwrap — репо запрещает expect/unwrap в проде)
         let path = dir.path().join("f.rs");
         let body = (1..=12)
             .map(|n| format!("line{n}"))
@@ -1268,6 +1272,7 @@ mod tests {
     #[test]
     fn code_region_without_line_returns_first_lines() {
         let dir = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        // (tempdir без unwrap — репо запрещает expect/unwrap в проде)
         let path = dir.path().join("g.rs");
         std::fs::write(&path, "a\nb\nc\n").unwrap_or_default();
         let (_p, plain, _marked) = code_region(&path.to_string_lossy(), None).unwrap_or_default();
