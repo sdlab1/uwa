@@ -246,7 +246,11 @@ pub fn dispatch(cmd: &Cmd, root: &Path) -> anyhow::Result<()> {
         }
         _ => {}
     }
-    let cfg = load_config(root)?;
+    // Канал сообщений (devh msg) не требует .harness/config: хранилище — $DEVH_MSG_HOME.
+    let cfg = match cmd {
+        Cmd::Msg { .. } => RunConfig::default(),
+        _ => load_config(root)?,
+    };
     match cmd {
         Cmd::Init => unreachable!(),
         Cmd::Next => unreachable!(),
@@ -330,13 +334,13 @@ pub fn dispatch(cmd: &Cmd, root: &Path) -> anyhow::Result<()> {
         )?,
         Cmd::Escapes => escapes::escapes(&store, &cfg, root)?,
         Cmd::Mutate { sub, args } => mutate::mutate(root, sub, args)?,
+        // Канал агентов: свой код возврата (0 — ок, иначе ненулевой).
         Cmd::Msg { args } => {
-            // Канал агентов: свой код возврата (0 — ок, иначе ненулевой).
-            let code = crate::shell::msg::run(args);
-            if code == 0 {
-                return Ok(());
+            let rc = crate::shell::msg::run(args);
+            if rc != 0 {
+                eprintln!("devh msg: код возврата {rc}");
+                die(rc);
             }
-            anyhow::bail!("devh msg: код возврата {code}");
         }
     }
     Ok(())
