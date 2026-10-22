@@ -68,7 +68,13 @@ pub fn init(root: &Path) -> anyhow::Result<()> {
         // --iterate (P7-3) — пропуск пойманных ранее: допустим ТОЛЬКО с нашим
         // kill-cache (отпечаток дерева .rs+тестов гейтит outcomes.json);
         // пустой остаток («No mutants to filter») гейт называет «0 мутантов».
-        mutate = "CARGO_PROFILE_TEST_INCREMENTAL=true cargo mutants --in-place --test-tool nextest --baseline=skip --timeout-multiplier 2 --iterate --in-diff \"{diff}\"".into();
+        // CARGO_PROFILE_TEST_OPT_LEVEL=0 — второй рычаг (замер §9.28): узкое
+        // место мутационной сборки — codegen с оптимизацией, а не линковка
+        // (линковка 1с из 26-54с) и не debuginfo (debug=none в цикле не дал
+        // эффекта). На настоящих мутантах: build 30.7с → 8.7с, на мутанта
+        // 34.7с → 13.5с (×2.3-2.6). Только профиль test; прод-сборка не
+        // затронута ([profile.dev] opt-level = "s").
+        mutate = "CARGO_PROFILE_TEST_INCREMENTAL=true CARGO_PROFILE_TEST_OPT_LEVEL=0 cargo mutants --in-place --test-tool nextest --baseline=skip --timeout-multiplier 2 --iterate --in-diff \"{diff}\"".into();
         mutate_scope = rust_mutate_scope(root);
     }
     if mutate_scope.is_empty() {
