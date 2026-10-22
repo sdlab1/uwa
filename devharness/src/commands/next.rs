@@ -144,17 +144,32 @@ fn item_next(
 ) -> Option<Next> {
     let wt = worktree::path_for(cfg, root, &it.id);
     let rs = runstate::read(store, &it.id)?;
-    // S10: бюджет фиксов (или класс отказа) исчерпан — работа сдана.
+    // S10: гейт красный — работа сдана.
     if rs.phase == Phase::GateFailed {
         let gate = if rs.gate.is_empty() {
             "гейт"
         } else {
             rs.gate.as_str()
         };
+        // Блокер СРЕДЫ (код 2) — не приговор работе: проверку остановила
+        // среда (нагрузка, инструмент, сборка), а не качество правок.
+        // Выбрасывать работу из-за чужой нагрузки нельзя (`devh abort`
+        // удаляет ветку и worktree) → честный ответ: снять блокер и
+        // перепроверить гейты.
+        if rs.code == 2 {
+            return Some(Next::new(
+                &format!("devh run {}", it.id.dir_name()),
+                &format!(
+                    "{}: {gate} заблокирован средой (код 2) — работа не признана плохой: \
+                     сними блокер среды и перепрогони гейты",
+                    it.id.dir_name()
+                ),
+            ));
+        }
         return Some(Next::new(
             &format!("devh abort {}", it.id.dir_name()),
             &format!(
-                "{}: {gate} красный, бюджет исчерпан — списать item (или переформулировать: devh hint)",
+                "{}: {gate} красный — сдача: списать item (или переформулировать: devh hint)",
                 it.id.dir_name()
             ),
         ));
@@ -589,6 +604,76 @@ mod tests {
             .unwrap_or_else(|_| unreachable!());
         let n = decide(store.root(), &cfg, &store);
         assert_eq!(n.command, "devh run W-001", "без дайджеста → перепроверка");
+    }
+
+    #[test]
+    fn env_blocked_gate_does_not_throw_the_work_away() {
+        // Блокер СРЕДЫ (код 2) — гейт не прошёл из-за нагрузки/инструмента,
+        // а не из-за правок. `devh abort` удаляет ветку и worktree, поэтому
+        // предлагать его здесь = выбросить хорошую работу из-за чужой
+        // нагрузки. Честный ответ — снять блокер и перепроверить гейты.
+        let d = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let (cfg, store, it) = sandbox(d.path());
+        let wt = worktree::path_for(&cfg, store.root(), &it.id);
+        let head = git::short_head(&wt);
+        runstate::write(
+            &store,
+            &it.id,
+            &runstate::RunState::gate_failed("mutation", 2, &head),
+        )
+        .unwrap_or_else(|_| unreachable!());
+        let n = item_next(store.root(), &cfg, &store, &it).unwrap_or_else(|| unreachable!());
+        assert_eq!(
+            n.command, "devh run W-001",
+            "блокер среды — работа не плоха, выбрасывать её нельзя"
+        );
+        assert!(
+            n.why.contains("сред"),
+            "причина должна называть среду: {}",
+            n.why
+        );
+    }
+
+    #[test]
+    fn failed_gate_marker_points_to_abort_with_honest_reason() {
+        // Гейт красный по существу (код 1) — работа сдана. Формулировка не
+        // должна врать «бюджет исчерпан», если исчерпание — не причина.
+        let d = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let (cfg, store, it) = sandbox(d.path());
+        let wt = worktree::path_for(&cfg, store.root(), &it.id);
+        let head = git::short_head(&wt);
+        runstate::write(
+            &store,
+            &it.id,
+            &runstate::RunState::gate_failed("red-post", 1, &head),
+        )
+        .unwrap_or_else(|_| unreachable!());
+        let n = item_next(store.root(), &cfg, &store, &it).unwrap_or_else(|| unreachable!());
+        assert_eq!(n.command, "devh abort W-001");
+        assert!(
+            n.why.contains("red-post"),
+            "причина должна называть гейт: {}",
+            n.why
+        );
+        assert!(
+            !n.why.contains("бюджет исчерпан"),
+            "причина не обязана быть «бюджет исчерпан»: {}",
+            n.why
+        );
+    }
+
+    #[test]
+    fn closed_item_with_leftover_worktree_points_to_clean() {
+        // S11: item закрыт, а его worktree остался — это мусор, а не работа.
+        // Оракул обязан предложить уборку (`devh clean`), а не новый прогон.
+        let d = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let (cfg, store, it) = sandbox(d.path());
+        std::fs::write(store.item_dir(&it.id).join("status"), "done")
+            .unwrap_or_else(|_| unreachable!());
+        let wt = worktree::path_for(&cfg, store.root(), &it.id);
+        assert!(wt.is_dir(), "worktree закрытого item'а остался");
+        let n = decide(store.root(), &cfg, &store);
+        assert_eq!(n.command, "devh clean", "S11: мусор → уборка");
     }
 
     #[test]
