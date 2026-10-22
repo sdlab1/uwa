@@ -56,14 +56,19 @@ def main() -> int:
     ap.add_argument("--suspect-file", required=True, help="паттерны имён мутантов, по строке на паттерн")
     ap.add_argument("--no-run", action="store_true")
     ap.add_argument("--out-json", default=None)
+    ap.add_argument("--files", default=None, help="перезапустить только эти файлы (через запятую)")
+    ap.add_argument("--profile", default="new", choices=["new", "old"])
+    ap.add_argument("--orig", default=None, help="база для сверки (исходный outcomes.json); по умолчанию snapshots.orig.json")
     args = ap.parse_args()
 
     run_dir = Path(args.run_dir).resolve()
-    outcomes_path = run_dir / "mutants.out" / "outcomes.json"
-    if not outcomes_path.is_file():
-        print(f"нет {outcomes_path}")
+    # База (исходные вердикты) — отдельный файл: outcomes.json перезаписывается
+    # НА ЛЕТУ текущим прогоном, и подстановка «прочитанного» ломает выбор скоупа.
+    orig_path = Path(args.orig) if args.orig else (run_dir / "mutants.out" / "outcomes.orig.json")
+    if not orig_path.is_file():
+        print(f"нет базы для сверки: {orig_path}")
         return 2
-    rows = mutant_rows(load_outcomes(outcomes_path))
+    rows = mutant_rows(load_outcomes(orig_path))
     patterns = [
         line.strip()
         for line in Path(args.suspect_file).read_text(encoding="utf-8", errors="replace").splitlines()
@@ -71,6 +76,9 @@ def main() -> int:
     ]
     picked = [r for r in rows if any(p in r["name"] for p in patterns)]
     files = sorted({r["file"] for r in picked})
+    if args.files:
+        want = {f.strip() for f in args.files.split(",") if f.strip()}
+        files = [f for f in files if f in want]
     print(f"мутантов всего в прогоне: {len(rows)}; подходящих под паттерны: {len(picked)}")
     print(f"файлов к перезапуску: {len(files)}")
     for f in files:
@@ -79,6 +87,7 @@ def main() -> int:
     if args.no_run:
         return 0
 
+    orig = orig_path
     cmd = [
         "cargo-mutants", "mutants", "--in-place", "--test-tool", "nextest",
         "--baseline=skip", "--timeout-multiplier", "2", "-p", "devh",
@@ -88,13 +97,16 @@ def main() -> int:
         cmd += ["-f", f]
     env = dict(os.environ)
     env["HARNESS_MUTATE_MAX_LOAD"] = "off"  # снимаем load-флак (§9.29)
+    if args.profile == "new":
+        env["CARGO_PROFILE_TEST_INCREMENTAL"] = "true"
+        env["CARGO_PROFILE_TEST_OPT_LEVEL"] = "0"
     print("запуск: " + " ".join(cmd))
     rc = subprocess.call(cmd, cwd=run_dir, env=env)
     if rc != 0:
         print(f"прогон вернул rc={rc}")
         return rc
 
-    new_rows = mutant_rows(load_outcomes(run_dir / "mutants.out" / "outcomes.json"))
+    new_rows = mutant_rows(load_outcomes(orig))
     new_by_name = {r["name"]: r for r in new_rows}
     diffs = []
     for r in picked:
