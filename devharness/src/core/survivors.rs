@@ -34,7 +34,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::core::killmap::{self, FileDelta};
-use crate::core::mutaudit::{S_CAUGHT, S_MISSED, S_TIMEOUT, S_UNVIABLE};
+use crate::core::mutaudit::{S_CAUGHT, S_MISSED, S_SUCCEEDED, S_TIMEOUT, S_UNVIABLE};
 
 /// Имя файла отпечатков увиденных выживших (в `.harness/`).
 const SEEN_FILE: &str = "survivors-seen.json";
@@ -73,7 +73,23 @@ impl Outcome {
         self.summary == S_TIMEOUT
     }
 
+    /// Мутант без тестовой фазы (собран, но НЕ протестирован, `--check`).
+    ///
+    /// Это НЕ дыра покрытия: тесты не запускались, поймать было нечего.
+    /// В очередь слепых мест он НЕ идёт — иначе прогон без тестов залил бы
+    /// очередь тысячами строк и «зажёг» seen-дедуп на всех местах (а
+    /// настоящие выжившие на тех же местах потом не попали бы в очередь).
+    /// Вердикт при этом мутант блокирует: поимка не подтверждена — см.
+    /// `gates::judge_mutation_stats` (ветка `succeeded`).
+    pub fn is_succeeded(&self) -> bool {
+        self.summary == S_SUCCEEDED
+    }
+
     /// Непойманный мутант = руководство к действию (выживший ИЛИ таймаут).
+    ///
+    /// Осознанно НЕ включает `succeeded` (см. `is_succeeded`) и неопознанные
+    /// исходы: те — не «слепота тестов», а respectively «тестов не было» и
+    /// «инструмент сказал не-понятно». Их считает вердикт.
     pub fn is_action(&self) -> bool {
         self.is_survivor() || self.is_timeout()
     }
@@ -1312,6 +1328,68 @@ mod tests {
         // битый JSON — тоже тишина + WARN внутри парсера
         fake_run_dir(&wt, "{битый");
         assert!(collect_after_run(&wt, "cargo mutants", &obs, "mutation").is_none());
+    }
+
+    /// Мутант без тестовой фазы (`Success` на мутанте) — НЕ дыра покрытия:
+    /// тесты не запускались. В очередь он не идёт (иначе прогон без тестов
+    /// залил бы очередь и «сжёг» seen-дедуп на всех местах), но вердикт его
+    /// блокирует — см. gates::judge_mutation_stats.
+    #[test]
+    fn succeeded_mutants_do_not_flood_the_queue() {
+        let t = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let wt = t.path().join("wt");
+        let obs = t.path().join(".harness");
+        std::fs::create_dir_all(&obs).unwrap_or_else(|_| unreachable!());
+        let json = r#"{"outcomes":[
+          {"scenario":{"Mutant":{"name":"a.rs:1:1: replace x with y","file":"a.rs","span":{"start":{"line":1,"column":1}},"genre":"FnValue"}},"summary":"Success"},
+          {"scenario":{"Mutant":{"name":"b.rs:2:1: replace p with q","file":"b.rs","span":{"start":{"line":2,"column":1}},"genre":"FnValue"}},"summary":"Success"},
+          {"scenario":{"Mutant":{"name":"c.rs:3:1: replace m with n","file":"c.rs","span":{"start":{"line":3,"column":1}},"genre":"FnValue"}},"summary":"MissedMutant"}
+        ]}"#;
+        fake_run_dir(&wt, json);
+        let line = collect_after_run(&wt, "cargo mutants", &obs, "mutation")
+            .unwrap_or_else(|| unreachable!());
+        assert_eq!(
+            line, "survivors: 1 → observations.md (fn-value 1)",
+            "без тестовой фазы — не в очереди"
+        );
+        let queue =
+            std::fs::read_to_string(obs.join("observations.md")).unwrap_or_else(|_| unreachable!());
+        assert_eq!(queue.lines().count(), 1, "только настоящий выживший");
+        assert!(queue.contains("c.rs:3"), "{queue}");
+        assert_eq!(
+            load_seen(&obs).len(),
+            1,
+            "seen-дедуп не сожжён на местах без тестовой фазы"
+        );
+        // killmap: без тестовой фазы — не ни поимка, ни дыра покрытия.
+        let km = killmap::Killmap::load(&obs);
+        assert!(!km.files.contains_key("a.rs"), "{:?}", km.files);
+        assert!(!km.files.contains_key("b.rs"), "{:?}", km.files);
+    }
+
+    /// Неопознанный исход мутанта — не «слепота тестов»: в очередь не идёт,
+    /// но считается предупреждением (и блокирует вердикт гейта).
+    #[test]
+    fn unknown_summary_is_warned_but_not_queued() {
+        let t = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let wt = t.path().join("wt");
+        let obs = t.path().join(".harness");
+        std::fs::create_dir_all(&obs).unwrap_or_else(|_| unreachable!());
+        let json = r#"{"outcomes":[
+          {"scenario":{"Mutant":{"name":"a.rs:1:1: replace x with y","file":"a.rs","span":{"start":{"line":1,"column":1}},"genre":"FnValue"}},"summary":"Какой-тоНовыйВид"}
+        ]}"#;
+        fake_run_dir(&wt, json);
+        assert!(
+            collect_after_run(&wt, "cargo mutants", &obs, "mutation").is_none(),
+            "неопознанный исход — не выживший: в очередь не идёт"
+        );
+        assert!(
+            !obs.join("observations.md").exists(),
+            "очередь не создаётся неопознанным исходом"
+        );
+        let (out, warn) = parse_outcomes(json);
+        assert_eq!(warn, 1, "неопознанный исход — один WARN");
+        assert!(out.is_empty());
     }
 
     #[test]
