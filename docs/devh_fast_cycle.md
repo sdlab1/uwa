@@ -130,7 +130,7 @@ additional_cargo_args = ["--cap-lints"]     # опционально: убира
 
 ## P4. Измеримость (чтобы ловить регрессии)
 
-- `timing.stage` уже пишет стадии — добавить в `mutate_gate` стадии `mutate:build`, `mutate:test`, и запись `perf.log` строки: `task, mutants, killed, missed, build_s, test_s, total_s`;
+- `timing.stage` уже пишет стадии — добавить в `mutate_gate` стадии `mutate:build`, `mutate:test`, и запись `perf.log` строки. Фактический формат (в коде — `run.rs::perf_mutate`): `task,mutants,killed,missed,timeout,unviable,succeeded,kill_pct,mutate_s`. Отдельных колонок `build_s`/`test_s` в нём нет и быть не должно: cargo-mutants отдаёт только общий итог «N mutants tested in T», фазы не разделяет — выдумывать их нельзя;
 - `devh bench` (или флаг `devh run --bench`): один холодный прогон цикла + baseline, чтобы сравнивать «до/после» на числах, а не на ощущениях.
 
 ---
@@ -164,7 +164,7 @@ P0 (парсер) — самый дешёвый и самый полезный: 
 | P1c `.cargo/mutants.toml` + шаблон | готово | `b26867b` | batch-шаблон `{files}` в конфиге; doctor теперь проверяет версию cargo-mutants ≥25 и наличие `.cargo/mutants.toml` |
 | P2 быстрые тесты | готово | `237ea7e` | см. ниже — предпосылка плана («Notify вместо sleep-поллинга») оказалась устаревшей, реальный байт — sleep-оракулы в тестах |
 | P3 sweep/doctor | готово | `814ee70` | `devh sweep` (проверен боевом: снял 3 реальных сироты `/tmp/devh-1428311232-W-039`, `/tmp/s10`, `/tmp/s10v2`), `devh doctor` +5 проверок (проверен: cargo-mutants 27.1.0 ok, sccache 53% ok, 3 сироты WARN) |
-| P4 perf.log | готово | — | `perf_mutate` пишет `logs/perf.log` (`run.rs:1044`); стадии `mutate:build`/`mutate:test` уже пишет `timing.stage` |
+| P4 perf.log | готово | — | `perf_mutate` пишет `logs/perf.log` (`run.rs::perf_mutate`); формат строки — `task,mutants,killed,missed,timeout,unviable,succeeded,kill_pct,mutate_s` (синхронизировано с кодом 2026-10-22); стадии `mutate:build`/`mutate:test` уже пишет `timing.stage` |
 
 ### P2 — что реально ускорило (замеры этой машины, контенция load≈24)
 
