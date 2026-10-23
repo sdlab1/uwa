@@ -11,6 +11,7 @@ pub mod killmap;
 pub mod load;
 pub mod modelrank;
 pub mod mutaudit;
+pub mod mutate_cache;
 pub mod mutate_outcomes;
 pub mod plan;
 pub mod rate;
