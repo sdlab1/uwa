@@ -1,10 +1,10 @@
-pub mod chaos_state;
 pub mod complexity;
 pub mod contract;
 pub mod coverage;
 pub mod diff_scope;
 pub mod digest;
 pub mod early;
+pub mod autonomy_sample;
 pub mod early_exit;
 pub mod escapes;
 pub mod gates;
