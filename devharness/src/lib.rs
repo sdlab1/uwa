@@ -88,6 +88,12 @@ pub enum Cmd {
         /// Аргументы после `msg`: send|read|watch|list|prune + флаги.
         args: Vec<String>,
     },
+    /// Git — ТОЛЬКО через харнесс: ведомый заперт в своём worktree,
+    /// привилегированные операции (merge/push) — только ведущему.
+    Git {
+        /// Аргументы после `git`: status|diff|log|add|commit|merge|push|worktree.
+        args: Vec<String>,
+    },
     /// Учёт запусков и гейт нагрузки: build 15 мин / аудит 2 ч / CPU<=80%.
     Rate {
         /// Подкоманда: status | check | limit | reset.
@@ -227,6 +233,15 @@ impl Cmd {
                         .trailing_var_arg(true)
                         .allow_hyphen_values(true)
                         .help("аргументы: send|read|watch|list|prune + флаги"),
+                ),
+            Command::new("git")
+                .about("git только через devh: ведомый — в своём worktree, merge/push — ведущему")
+                .arg(
+                    Arg::new("args")
+                        .num_args(0..)
+                        .trailing_var_arg(true)
+                        .allow_hyphen_values(true)
+                        .help("подкоманда: status|diff|log|add|commit|merge|push|worktree"),
                 ),
             Command::new("rate")
                 .about("учёт запусков и гейт нагрузки: build 15 мин / аудит 2 ч / CPU<=80%")
@@ -410,6 +425,16 @@ impl Cmd {
                     .map(|v| v.cloned().collect::<Vec<String>>())
                     .unwrap_or_default();
                 Ok(Cmd::Msg { args })
+            }
+            Some("git") => {
+                let m = matches
+                    .subcommand_matches("git")
+                    .unwrap_or_else(|| unreachable!());
+                let args = m
+                    .get_many::<String>("args")
+                    .map(|v| v.cloned().collect::<Vec<String>>())
+                    .unwrap_or_default();
+                Ok(Cmd::Git { args })
             }
             Some("rate") => {
                 let m = matches

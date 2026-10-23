@@ -499,6 +499,9 @@ pub fn orch(root: &Path, sub: &str, args: &[String]) -> anyhow::Result<()> {
         "install-hook" => install_hook_cmd(root),
         "lead" => lead_cmd(root, args),
         "role" => role_cmd(root, args),
+        "elevate" => elevate(root, args),
+        "passwd" => passwd_cmd(root, args),
+        "watchdog" => crate::commands::watchdog::run(root, args),
         "welcome" => welcome(root),
         "onboard" => onboard(root, args),
         "help" | "--help" | "-h" => {
@@ -527,8 +530,11 @@ fn print_help() {
   commit <ID> [--message M] [--path path]...  коммит по задаче (только зелёный DoD)
   guard-commit               гейт для pre-commit хука
   install-hook               установить pre-commit хук
-  lead [--set ADDR] [--notify]  актуальный ведущий / назначение
-  role --agent X --role lead|worker
+  lead [--set ADDR] [--notify]  актуальный ведущий / назначение (смена — по паролю)
+  role --agent X --role lead|worker  роль (lead — только ведущий и по паролю)
+  elevate <агент> [--password P]     выдать роль lead (только текущий ведущий, по паролю)
+  passwd [--password P]              задать/сменить пароль ведущего (только ведущий)
+  watchdog [--minutes 20] [--dry-run]  сторож простоя: отзыв задач, освобождение worktree
   welcome                    пакет новичка
   onboard --agent NAME [--task T] [--p P1] [--zone Z] [--dod ...] [--check ...]
   fail <ID> --f N --reason R провалена
@@ -2212,6 +2218,23 @@ pub fn install_hook_cmd(root: &Path) -> anyhow::Result<()> {
 pub fn lead_cmd(root: &Path, args: &[String]) -> anyhow::Result<()> {
     let mut reg = load(root);
     if let Some(target) = flag(args, "--set") {
+        // Смена ведущего — привилегированная операция: если ведущий уже есть,
+        // её выполняет только он и только по паролю. Первичное назначение —
+        // bootstrap (ведущего ещё нет); пароль ставится сразу после:
+        // devh orch passwd.
+        if reg.lead.is_some() {
+            let caller =
+                crate::core::identity::canonical(&crate::core::identity::current().name);
+            let (lead, _) = lead_of(&reg);
+            let lead_canon = lead.as_ref().map(|l| crate::core::identity::canonical(l));
+            if lead_canon.as_deref() != Some(caller.as_str()) {
+                return Err(anyhow!(
+                    "devh orch lead --set: ведущего меняет только ведущий (текущий: {})",
+                    lead_canon.unwrap_or_else(|| "не назначен".to_string())
+                ));
+            }
+            check_lead_password(root, args)?;
+        }
         let raw = target.trim().to_string();
         let canon = crate::core::identity::canonical(&raw);
         if canon != raw {
@@ -2276,9 +2299,49 @@ pub fn role_cmd(root: &Path, args: &[String]) -> anyhow::Result<()> {
             "devh orch role: роль «{role}» неизвестна (допустимо: lead|worker)"
         ));
     }
-    let mut reg = load(root);
-    let canon = crate::core::identity::canonical(&agent);
-    if agent_index(&reg, &canon).is_none() {
+    let reg = load(root);
+    let caller = crate::core::identity::canonical(&crate::core::identity::current().name);
+    let (lead, _) = lead_of(&reg);
+    let lead_canon = lead.as_ref().map(|l| crate::core::identity::canonical(l));
+    if lead_canon.as_deref() != Some(caller.as_str()) {
+        return Err(anyhow!(
+            "devh orch role: роль меняет только ведущий (текущий ведущий: {})",
+            lead_canon.unwrap_or_else(|| "не назначен".to_string())
+        ));
+    }
+    if role == ROLE_LEAD {
+        // Подъём до lead — только по паролю ведущего (иначе ведомый
+        // назначил бы себя ведущим и обошёл все гейты).
+        check_lead_password(root, args)?;
+    }
+    let mut reg = reg;
+    apply_role(&mut reg, &agent, &role);
+    save(root, &reg)?;
+    println!(
+        "devh orch: {} — роль {role}",
+        crate::core::identity::canonical(&agent)
+    );
+    Ok(())
+}
+
+/// Проверить пароль ведущего (флаг `--password` или `DEVH_LEAD_PASSWORD`).
+fn check_lead_password(root: &Path, args: &[String]) -> anyhow::Result<()> {
+    if !crate::commands::leadpass::is_set(root) {
+        anyhow::bail!("devh orch: пароль ведущего не задан — сначала: devh orch passwd");
+    }
+    let password = crate::commands::leadpass::password_from(args).ok_or_else(|| {
+        anyhow!("devh orch: нужен пароль ведущего (--password или DEVH_LEAD_PASSWORD)")
+    })?;
+    if !crate::commands::leadpass::verify(root, &password) {
+        anyhow::bail!("devh orch: неверный пароль ведущего");
+    }
+    Ok(())
+}
+
+/// Проставить роль агенту в реестре (общая часть role/elevate).
+fn apply_role(reg: &mut Registry, agent: &str, role: &str) {
+    let canon = crate::core::identity::canonical(agent);
+    if agent_index(reg, &canon).is_none() {
         reg.agents.push(AgentState {
             name: canon.clone(),
             ..Default::default()
@@ -2291,12 +2354,12 @@ pub fn role_cmd(root: &Path, args: &[String]) -> anyhow::Result<()> {
             }
         }
     }
-    let idx = agent_index(&reg, &canon).unwrap_or_else(|| unreachable!());
+    let idx = agent_index(reg, &canon).unwrap_or_else(|| unreachable!());
     if let Some(a) = reg.agents.get_mut(idx) {
-        a.role = Some(role.clone());
+        a.role = Some(role.to_string());
     }
     if role == ROLE_LEAD {
-        reg.lead = Some(canon.clone());
+        reg.lead = Some(canon);
     } else if reg
         .lead
         .as_ref()
@@ -2306,8 +2369,55 @@ pub fn role_cmd(root: &Path, args: &[String]) -> anyhow::Result<()> {
     {
         reg.lead = None;
     }
+}
+
+/// `devh orch elevate <агент>` — выдать роль lead.
+/// Только текущий ведущий и только по паролю (двойная защита: и владелец
+/// роли, и знание пароля).
+fn elevate(root: &Path, args: &[String]) -> anyhow::Result<()> {
+    let reg = load(root);
+    let caller = crate::core::identity::canonical(&crate::core::identity::current().name);
+    let (lead, _) = lead_of(&reg);
+    let lead_canon = lead.as_ref().map(|l| crate::core::identity::canonical(l));
+    if lead_canon.as_deref() != Some(caller.as_str()) {
+        return Err(anyhow!(
+            "devh orch elevate: выдаёт только текущий ведущий (текущий: {})",
+            lead_canon.unwrap_or_else(|| "не назначен".to_string())
+        ));
+    }
+    let target = positional(args)
+        .first()
+        .cloned()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow!("devh orch elevate: нужен агент"))?;
+    check_lead_password(root, args)?;
+    let mut reg = reg;
+    apply_role(&mut reg, &target, ROLE_LEAD);
     save(root, &reg)?;
-    println!("devh orch: {canon} — роль {role}");
+    println!(
+        "devh orch: {} — роль lead (elevate по паролю)",
+        crate::core::identity::canonical(&target)
+    );
+    Ok(())
+}
+
+/// `devh orch passwd [--password P]` — задать/сменить пароль ведущего.
+fn passwd_cmd(root: &Path, args: &[String]) -> anyhow::Result<()> {
+    let reg = load(root);
+    let caller = crate::core::identity::canonical(&crate::core::identity::current().name);
+    let (lead, _) = lead_of(&reg);
+    let lead_canon = lead.as_ref().map(|l| crate::core::identity::canonical(l));
+    if lead_canon.as_deref() != Some(caller.as_str()) {
+        return Err(anyhow!(
+            "devh orch passwd: пароль меняет только ведущий (текущий: {})",
+            lead_canon.unwrap_or_else(|| "не назначен".to_string())
+        ));
+    }
+    let password = crate::commands::leadpass::password_from(args)
+        .ok_or_else(|| anyhow!("devh orch passwd: нужен пароль (--password или DEVH_LEAD_PASSWORD)"))?;
+    crate::commands::leadpass::set_password(root, &password)?;
+    println!("devh orch: пароль ведущего задан (.harness/orch/lead.key, права 0600)");
     Ok(())
 }
 

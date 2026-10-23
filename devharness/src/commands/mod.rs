@@ -4,7 +4,9 @@ pub mod bg;
 pub mod commit;
 pub mod doctor;
 pub mod escapes;
+pub mod gitfacade;
 pub mod init;
+pub mod leadpass;
 pub mod merge;
 pub mod misc;
 pub mod mutate;
@@ -17,6 +19,7 @@ pub mod run;
 pub mod survivors;
 pub mod test;
 pub mod tickets;
+pub mod watchdog;
 pub mod workflow;
 pub mod wtman;
 
@@ -427,6 +430,8 @@ pub fn dispatch(cmd: &Cmd, root: &Path) -> anyhow::Result<()> {
         Cmd::Escapes => escapes::escapes(&store, &cfg, root)?,
         Cmd::Mutate { sub, args } => mutate::mutate(root, sub, args)?,
         Cmd::Rate { sub, args } => rate::rate(root, &sub, args)?,
+        // Git — только через харнесс: ведомый заперт в своём worktree.
+        Cmd::Git { args } => gitfacade::git_cmd(root, &args)?,
         // Канал агентов: свой код возврата (0 — ок, иначе ненулевой).
         Cmd::Msg { args } => {
             let rc = crate::shell::msg::run(args);
