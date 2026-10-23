@@ -35,13 +35,19 @@ impl SlotManager {
         }
     }
 
-    /// Освободить слот. Возвращает task_id следующей задачи из очереди, если есть.
+    /// Освободить слот. Если есть задача в очереди — она сразу занимает свободный слот.
+    /// Возвращает task_id задачи, которая заняла слот (или None, если очередь пуста).
     pub fn release(&mut self) -> Option<String> {
         if self.occupied == 0 {
             return None;
         }
         self.occupied -= 1;
-        self.queue.pop_front()
+        if let Some(next_task) = self.queue.pop_front() {
+            self.occupied += 1; // следующая задача сразу занимает слот
+            Some(next_task)
+        } else {
+            None
+        }
     }
 
     /// Текущее количество занятых слотов.
@@ -106,8 +112,11 @@ mod tests {
         assert!(sm.acquire("t3".into()));
         assert!(!sm.acquire("t4".into()));
         assert_eq!(sm.queue().len(), 1);
-        sm.release();
-        assert_eq!(sm.occupied, 2);
+        sm.release(); // t1 done -> t4 gets slot
+        assert_eq!(
+            sm.occupied, 3,
+            "освобождённый слот сразу занят следующей из очереди"
+        );
     }
 
     #[test]
