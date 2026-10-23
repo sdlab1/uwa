@@ -1727,15 +1727,16 @@ fn send(args: &[String]) -> i32 {
             let agent = me(m.value("agent").as_deref());
             let sent_text = fs::read_to_string(outbox_path(&safe_name(&agent))).unwrap_or_default();
             let (_h, sent_blocks) = split_log(&sent_text);
-            // Читаем acks из канонического ящика + всех синонимов.
+            // Читаем acks из канонического ящика + всех синонимов + legacy имён.
             let mut acks_text = String::new();
-            let canon = crate::core::identity::canonical(&agent);
-            for name in
-                std::iter::once(canon.clone()).chain(crate::core::identity::aliases_of(&canon))
-            {
-                if let Ok(t) = fs::read_to_string(acks_path(&safe_name(&name))) {
-                    acks_text.push_str(&t);
-                    acks_text.push('\n');
+            // Читаем ВСЕ acks-файлы: старые acks могли быть записаны
+            // под синонимом/legacy-именем отправителя.
+            if let Ok(dir) = fs::read_dir(acks_dir()) {
+                for e in dir.flatten() {
+                    if let Ok(t) = fs::read_to_string(e.path()) {
+                        acks_text.push_str(&t);
+                        acks_text.push('\n');
+                    }
                 }
             }
             let read_ids: Vec<String> = acks_text
