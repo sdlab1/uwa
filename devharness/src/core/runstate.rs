@@ -124,6 +124,15 @@ impl RunState {
         self
     }
 
+    /// Вердикт доверяем только если дайджест не пуст (для GatesOk/Committed).
+    /// Пустой дайджест = fail-closed: содержимое не проверено.
+    pub fn is_trusted(&self) -> bool {
+        match self.phase {
+            Phase::GatesOk | Phase::Committed => !self.digest.is_empty(),
+            _ => true,
+        }
+    }
+
     /// Прогон идёт — финального вердикта ещё нет.
     pub fn in_progress(head: &str) -> Self {
         Self {
@@ -255,6 +264,40 @@ mod tests {
             read(&store, &id).is_none(),
             "старый маркер не снят — оракул предложил бы commit по чужому вердикту"
         );
+    }
+
+    #[test]
+    fn empty_digest_not_trusted_for_gates_ok() {
+        let st = RunState::gates_ok("sha");
+        assert!(!st.is_trusted(), "пустой дайджест → не доверяем");
+        let st = RunState::gates_ok("sha").with_digest("abc");
+        assert!(st.is_trusted(), "непустой дайджест → доверяем");
+    }
+
+    #[test]
+    fn empty_digest_not_trusted_for_committed() {
+        let st = RunState::committed("sha");
+        assert!(!st.is_trusted(), "пустой дайджест → не доверяем");
+        let st = RunState::committed("sha").with_digest("abc");
+        assert!(st.is_trusted(), "непустой дайджест → доверяем");
+    }
+
+    #[test]
+    fn stale_tmp_does_not_block_write() {
+        // Незакрытый run-state.tmp не должен блокировать следующую запись.
+        let d = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let store = Store::new(d.path());
+        let id = ItemId(6);
+        // Создаём stale tmp-файл.
+        let tmp = store.item_dir(&id).join("run-state.tmp");
+        std::fs::create_dir_all(store.item_dir(&id)).unwrap_or_else(|_| unreachable!());
+        std::fs::write(&tmp, "stale").unwrap_or_else(|_| unreachable!());
+        // Запись должна пройти (tmp перезаписывается).
+        write(&store, &id, &RunState::gates_ok("sha").with_digest("abc"))
+            .unwrap_or_else(|_| unreachable!());
+        assert!(read(&store, &id).is_some(), "маркер записан");
+        // tmp-файл удалён (rename).
+        assert!(!tmp.exists(), "tmp-файл удалён после rename");
     }
 
     #[test]
