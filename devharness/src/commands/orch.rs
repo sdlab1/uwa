@@ -2187,11 +2187,12 @@ fn git_output(root: &Path, args: &[&str]) -> anyhow::Result<String> {
         .current_dir(root)
         .output()?;
     if !out.status.success() {
-        return Err(anyhow!(
-            "git {}: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
+        // В ошибку берём stderr И stdout: git часть сообщений ("nothing to
+        // commit") печатает в stdout, а часть (текст хука) — в stderr.
+        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        let std_out = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        let detail = if err.is_empty() { std_out } else { err };
+        return Err(anyhow!("git {}: {}", args.join(" "), detail));
     }
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
@@ -2237,7 +2238,29 @@ pub fn commit_cmd(root: &Path, args: &[String]) -> anyhow::Result<()> {
         flag(args, "--message").unwrap_or_else(|| format!("chore(task {id}): {}", task.title));
     let mut commit_args = vec!["commit", "-m", message.as_str(), "--"];
     commit_args.extend(paths.iter().map(String::as_str));
-    git_output(root, &commit_args)?;
+    if let Err(e) = git_output(root, &commit_args) {
+        // Ничего не поменялось: работа уже в истории — привязываем задачу к HEAD,
+        // чтобы DoD-гейт можно было закрыть (иначе задача навсегда «в работе»).
+        let msg = e.to_string();
+        if !msg.contains("nothing to commit")
+            && !msg.contains("nothing added to commit")
+            && !msg.contains("no changes added to commit")
+        {
+            return Err(e);
+        }
+        let sha = git_output(root, &["rev-parse", "HEAD"])?;
+        let mut reg = load(root);
+        if let Some(idx) = find_task_index(&reg, &id) {
+            let task = reg.tasks.get_mut(idx).expect("индекс найден");
+            task.commit_sha = Some(sha.clone());
+            task.updated = now();
+        }
+        save(root, &reg)?;
+        println!(
+            "devh orch: изменений нет — задача {id} привязана к текущему HEAD ({sha}): {message}"
+        );
+        return Ok(());
+    }
     let sha = git_output(root, &["rev-parse", "HEAD"])?;
     let mut reg = load(root);
     if let Some(idx) = find_task_index(&reg, &id) {
@@ -2958,6 +2981,47 @@ mod tests {
     fn complete_dod(root: &Path, id: &str) {
         run(root, "dod", &[id, "--ack", "1"]).expect("dod ack");
         run(root, "verify", &[id]).expect("verify");
+    }
+
+    /// Git-репо для тестов коммита (tempdir + init + один коммит).
+    fn git_repo_fixture() -> (tempfile::TempDir, std::path::PathBuf) {
+        let d = tempdir().expect("tmp");
+        let root = d.path().join("repo");
+        std::fs::create_dir_all(&root).expect("mkdir");
+        let g = |args: &[&str]| {
+            let _ = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&root)
+                .output();
+        };
+        g(&["init", "-q", "-b", "main"]);
+        g(&["config", "user.email", "t@example.com"]);
+        g(&["config", "user.name", "T"]);
+        // Хуки выключаем: тест не должен зависеть от pre-commit окружения.
+        g(&["config", "core.hooksPath", "/dev/null"]);
+        assert!(root.join(".git").exists(), "git init не создал репозиторий");
+        std::fs::write(root.join("a.txt"), "1\n").expect("write");
+        g(&["add", "-A"]);
+        g(&["commit", "-qm", "base"]);
+        (d, root)
+    }
+
+    /// Работа уже в истории: коммитить нечего — задача всё равно должна
+    /// получить commit_sha, иначе DoD-гейт её никогда не закроет.
+    #[test]
+    fn commit_binds_task_to_head_when_nothing_to_commit() {
+        let (_d, root) = git_repo_fixture();
+        let id = add_task(&root, &me(), "P2", "уже в истории");
+        run(&root, "start", &[id.as_str()]).expect("start");
+        run(&root, "dod", &[id.as_str(), "--zone", "a.txt"]).expect("dod zone");
+        run(&root, "dod", &[id.as_str(), "--ack", "критерий приёмки"]).expect("ack");
+        run(&root, "verify", &[id.as_str()]).expect("verify");
+        run(&root, "commit", &[id.as_str(), "--path", "a.txt"]).expect("commit");
+        let reg = load(&root);
+        let sha = reg.tasks.first().and_then(|t| t.commit_sha.clone());
+        assert!(sha.is_some(), "commit_sha проставлен: {reg:?}");
+        // И DoD-гейт после этого остаётся зелёным.
+        run(&root, "done", &[id.as_str(), "--f", "F1"]).expect("done");
     }
 
     #[test]
