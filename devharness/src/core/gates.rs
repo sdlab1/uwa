@@ -451,11 +451,35 @@ fn freeze_allowed(file: &str, allow: &[String], test_edit: bool) -> bool {
 
 /// Глоб allowlist'а: `*` только на концах (суффикс/префикс), иначе точное.
 /// `**` на конце = тот же каталог (`src/**` ≡ `src/*` — plan C1 так и пишет).
+/// `**/` в начале = путь в любой вложенности, включая корень
+/// (`**/cargo-mutants.toml` матчит и `cargo-mutants.toml`, и
+/// `devharness/cargo-mutants.toml`).
 /// Общий матчер харнесса: FREEZE-гейт (A6) и contract.toml (C1) — одна
 /// грамматика на весь скоуп, иначе контракт и гейт разъедутся.
 /// `src/*` = весь каталог; `*.md` = все markdown; серединный `*` не
 /// поддерживается — спека ставит глобы на границах, а не внутри имён.
 pub(crate) fn freeze_glob(pat: &str, file: &str) -> bool {
+    // `**/` — рекурсивный префикс: остаток совпадает либо в корне, либо после
+    // границы каталога в любой вложенности. Проверка до `*`-префикса важна:
+    // иначе `**/x` попал бы в ветку suffix и превратился в поиск `/x`.
+    if let Some(rest) = pat.strip_prefix("**/") {
+        if !rest.is_empty() {
+            // Проверяем сам путь и каждый его хвост после `/`: так рекурсивный
+            // префикс работает и для корня (`**/*.md` → `README.md`), и для
+            // вложенного пути (`**/src/*` → `a/src/x.rs`).
+            let mut candidate = file;
+            loop {
+                if freeze_glob(rest, candidate) {
+                    return true;
+                }
+                let Some((_, tail)) = candidate.split_once('/') else {
+                    break;
+                };
+                candidate = tail;
+            }
+            return false;
+        }
+    }
     // серия `**` на конце (её пишет и план C1: touch = ["src/**"]) схлопывается
     // в обычный `*`-суффикс: `src/**` = `src/*` = весь каталог.
     match pat.strip_suffix('*') {
@@ -1930,6 +1954,31 @@ test result: FAILED. 1 passed; 1 failed";
         assert!(freeze_glob("*.md", "docs/x.md"));
         assert!(freeze_glob("src/calc.rs", "src/calc.rs"));
         assert!(!freeze_glob("src/*", "tests/a.rs"));
+    }
+
+    #[test]
+    fn freeze_glob_double_star_prefix_matches_root_and_nested_paths() {
+        // `**/` — рекурсивный префикс: файл может лежать в корне или в любом
+        // вложенном каталоге, но имя после `**/` обязано совпасть целиком.
+        assert!(freeze_glob(
+            "**/cargo-mutants.toml",
+            "cargo-mutants.toml"
+        ));
+        assert!(freeze_glob(
+            "**/cargo-mutants.toml",
+            "devharness/cargo-mutants.toml"
+        ));
+        assert!(freeze_glob(
+            "**/cargo-mutants.toml",
+            "a/b/cargo-mutants.toml"
+        ));
+        assert!(freeze_glob("**/*.md", "README.md"));
+        assert!(freeze_glob("**/*.md", "docs/guide.md"));
+        assert!(!freeze_glob("**/*.md", "README.mdx"));
+        assert!(!freeze_glob(
+            "**/cargo-mutants.toml",
+            "cargo-mutants.toml.bak"
+        ));
     }
 
     #[test]
