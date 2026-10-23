@@ -36,7 +36,11 @@ pub fn agent_prompt(
     // видит их в промпте (идентификация автоматическая). Письма не съедены:
     // прочитать и подтвердить — `devh msg read`.
     let agent_name = crate::core::identity::current().name;
-    let brief = crate::shell::msg::unread_brief(&agent_name);
+    let brief = if crate::shell::msg::auto_notify_enabled() {
+        crate::shell::msg::unread_brief(&agent_name)
+    } else {
+        String::new()
+    };
     if !brief.is_empty() {
         extra.push_str(&brief);
         extra.push('\n');

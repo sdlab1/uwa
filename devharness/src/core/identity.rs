@@ -118,20 +118,38 @@ fn binding_path_in(home: &Path, key: &str) -> PathBuf {
         .join(format!("{}.json", key_hash(key)))
 }
 
-/// Прочитать привязанное имя (None — привязки нет).
-fn read_binding_in(home: &Path, key: &str) -> Option<String> {
+/// Привязка имени к ключу сессии.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Binding {
+    /// Имя агента.
+    name: String,
+    /// Имя закреплено ЯВНО (`devh msg claim`) — такое перекрывает `DEVH_AGENT`.
+    claimed: bool,
+}
+
+/// Прочитать привязку (None — привязки нет).
+fn read_binding_in(home: &Path, key: &str) -> Option<Binding> {
     let text = fs::read_to_string(binding_path_in(home, key)).ok()?;
     let value: serde_json::Value = serde_json::from_str(&text).ok()?;
     let name = value.get("name")?.as_str()?.trim().to_string();
     if name.is_empty() {
-        None
-    } else {
-        Some(name)
+        return None;
     }
+    let claimed = value
+        .get("claimed")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    Some(Binding { name, claimed })
 }
 
 /// Записать привязку (атомарно: tmp + rename).
-fn write_binding_in(home: &Path, key: &str, name: &str, label: &str) -> io::Result<()> {
+fn write_binding_in(
+    home: &Path,
+    key: &str,
+    name: &str,
+    label: &str,
+    claimed: bool,
+) -> io::Result<()> {
     let path = binding_path_in(home, key);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
@@ -140,6 +158,7 @@ fn write_binding_in(home: &Path, key: &str, name: &str, label: &str) -> io::Resu
         "key": key,
         "name": name,
         "label": label,
+        "claimed": claimed,
         "updated": unix_now(),
     });
     let tmp = path.with_extension("json.tmp");
@@ -148,9 +167,12 @@ fn write_binding_in(home: &Path, key: &str, name: &str, label: &str) -> io::Resu
     Ok(())
 }
 
-/// Имя из сессии: `session-<4hex>` / `goose-<4hex>` / `tty-<4hex>` / `cwd-<4hex>`.
+/// Имя из сессии: `session-<8hex>` / `goose-<8hex>` / `tty-<8hex>` / `cwd-<8hex>`.
+///
+/// Хэш — 8 hex (32 бита): при 4 hex (16 бит) два агента из ~256 сессий
+/// получали одно имя ( birthday-коллизия), а письма одного уходили другому.
 fn auto_name(label: &str, key: &str) -> String {
-    let short: String = key_hash(key).chars().take(4).collect();
+    let short = key_hash(key);
     let prefix = match label {
         "session" => "ag",
         other => other,
@@ -275,9 +297,30 @@ fn read_starttime(pid: u32) -> String {
 }
 
 /// Терминал процесса (`/dev/pts/N`), если есть.
+///
+/// Часть fd бывает закрыта — тогда `read_link` падает. Раньше это обрывало
+/// весь поиск (`?` возвращал None из функции), и агент без терминала терял
+/// устойчивый ключ сессии. Теперь закрытые fd пропускаются, и дополнительно
+/// смотрим родителя: агента часто запускают с перенаправленными
+/// stdout/stderr, а терминал остаётся у шелла-родителя.
 fn tty_name() -> Option<String> {
+    if let Some(t) = tty_of(std::process::id()) {
+        return Some(t);
+    }
+    if let Some(ppid) = read_ppid(std::process::id()) {
+        if let Some(t) = tty_of(ppid) {
+            return Some(t);
+        }
+    }
+    None
+}
+
+/// Терминал конкретного процесса (fd 0, 1, 2).
+fn tty_of(pid: u32) -> Option<String> {
     for fd in [0, 1, 2] {
-        let target = std::fs::read_link(format!("/proc/self/fd/{fd}")).ok()?;
+        let Ok(target) = fs::read_link(format!("/proc/{pid}/fd/{fd}")) else {
+            continue;
+        };
         let text = target.to_string_lossy().to_string();
         if text.starts_with("/dev/pts/") || text.starts_with("/dev/tty") {
             return Some(text);
@@ -287,6 +330,13 @@ fn tty_name() -> Option<String> {
 }
 
 /// Имя агента по контексту (без записи привязки).
+///
+/// Порядок: явный флаг → ЯВНО закреплённое имя (`devh msg claim`) →
+/// `DEVH_AGENT` → авто-привязка → авто-имя по контексту сессии.
+///
+/// `claim` перекрывает `DEVH_AGENT` намеренно: это явное решение агента,
+/// а `DEVH_AGENT` — наследие (его ставят в окружении разом для всех
+/// сессий). Иначе `devh msg claim` молча ничего не делал.
 pub fn resolve(explicit: Option<&str>) -> Identity {
     if let Some(name) = explicit.map(str::trim).filter(|s| !s.is_empty()) {
         return Identity {
@@ -295,6 +345,19 @@ pub fn resolve(explicit: Option<&str>) -> Identity {
             key: "explicit".to_string(),
             fresh: false,
         };
+    }
+    let (key, label) = context();
+    let home = msg_home();
+    let binding = read_binding_in(&home, &key);
+    if let Some(b) = binding.as_ref() {
+        if b.claimed {
+            return Identity {
+                name: b.name.clone(),
+                source: Source::Stored,
+                key,
+                fresh: false,
+            };
+        }
     }
     if let Ok(env) = std::env::var("DEVH_AGENT") {
         let env = env.trim().to_string();
@@ -307,18 +370,16 @@ pub fn resolve(explicit: Option<&str>) -> Identity {
             };
         }
     }
-    let (key, label) = context();
-    let home = msg_home();
-    if let Some(name) = read_binding_in(&home, &key) {
+    if let Some(b) = binding {
         return Identity {
-            name,
+            name: b.name,
             source: Source::Stored,
             key,
             fresh: false,
         };
     }
     let name = auto_name(&label, &key);
-    let _ = write_binding_in(&home, &key, &name, &label);
+    let _ = write_binding_in(&home, &key, &name, &label, false);
     let source = match label.as_str() {
         "session" => Source::Session,
         "tty" => Source::Tty,
@@ -338,12 +399,12 @@ pub fn current() -> Identity {
     resolve(None)
 }
 
-/// Закрепить своё имя за текущей сессией.
+/// Закрепить своё имя за текущей сессией (перекрывает `DEVH_AGENT`).
 pub fn claim(raw: &str) -> Result<Identity, String> {
     let name = sanitize_name(raw)?;
     let (key, label) = context();
     let home = msg_home();
-    write_binding_in(&home, &key, &name, &label)
+    write_binding_in(&home, &key, &name, &label, true)
         .map_err(|e| format!("не записать привязку: {e}"))?;
     Ok(Identity {
         name,
@@ -377,9 +438,10 @@ mod tests {
     fn auto_name_has_prefix_and_hash() {
         let n = auto_name("goose", "proc:123:456");
         assert!(n.starts_with("goose-"), "имя: {n}");
-        assert_eq!(n.len(), "goose-".len().saturating_add(4));
+        assert_eq!(n.len(), "goose-".len().saturating_add(8));
         let s = auto_name("session", "session:abc");
         assert!(s.starts_with("ag-"), "имя: {s}");
+        assert_eq!(s.len(), "ag-".len().saturating_add(8));
     }
 
     #[test]
@@ -394,13 +456,34 @@ mod tests {
         let dir = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
         let home = dir.path();
         assert!(read_binding_in(home, "proc:1:2").is_none());
-        write_binding_in(home, "proc:1:2", "deepseek", "goose").unwrap_or_default();
+        write_binding_in(home, "proc:1:2", "deepseek", "goose", false).unwrap_or_default();
         assert_eq!(
             read_binding_in(home, "proc:1:2"),
-            Some("deepseek".to_string())
+            Some(Binding {
+                name: "deepseek".to_string(),
+                claimed: false
+            })
         );
         // другой ключ — другое имя
         assert!(read_binding_in(home, "proc:9:9").is_none());
+    }
+
+    #[test]
+    fn claimed_binding_wins_over_env() {
+        let dir = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let home = dir.path();
+        write_binding_in(home, "proc:1:2", "minimax", "goose", true).unwrap_or_default();
+        let binding = read_binding_in(home, "proc:1:2");
+        assert!(binding.as_ref().is_some_and(|b| b.claimed));
+    }
+
+    #[test]
+    fn tty_lookup_skips_closed_fds() {
+        // Закрытые fd не должны обрывать поиск: функция возвращает Option,
+        // а не падает и не «слепнет» на первом нечитаемом fd.
+        let t = tty_of(std::process::id());
+        assert!(t.is_none() || t.is_some_and(|x| x.starts_with("/dev/")));
+        assert_eq!(tty_of(u32::MAX), None, "несуществующий pid — None");
     }
 
     #[test]

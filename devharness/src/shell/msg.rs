@@ -303,28 +303,53 @@ fn inbox_path(agent: &str) -> PathBuf {
     inbox_dir().join(format!("{agent}.log"))
 }
 
+/// Свой ящик агента.
+fn own_inbox_path(agent: &str) -> PathBuf {
+    inbox_path(&safe_name(agent))
+}
+
+/// Legacy-ящик «default» (письма старой схемы, где имя не задавали).
+fn legacy_inbox_path() -> PathBuf {
+    inbox_path("default")
+}
+
 /// Ящики входящих агента: свой + legacy «default».
 ///
 /// Legacy нужен для перехода: письма, отправленные старой схемой (без
 /// явного имени), лежат в `default.log` — агент с авто-именем обязан их
 /// видеть, иначе они потерялись бы навсегда.
 fn inbox_files(agent: &str) -> Vec<PathBuf> {
-    let own = inbox_path(&safe_name(agent));
+    let own = own_inbox_path(agent);
     let mut files = vec![own.clone()];
-    let legacy = inbox_path("default");
+    let legacy = legacy_inbox_path();
     if own != legacy && legacy.exists() {
         files.push(legacy);
     }
     files
 }
 
+/// Письма из одного файла-ящика.
+fn blocks_in_file(path: &Path) -> Vec<String> {
+    let text = fs::read_to_string(path).unwrap_or_default();
+    let (_header, blocks) = split_log(&text);
+    blocks
+}
+
+/// Письма из СВОЕГО ящика (их можно съедать).
+fn own_blocks(agent: &str) -> Vec<String> {
+    blocks_in_file(&own_inbox_path(agent))
+}
+
+/// Письма из legacy-ящика (общие для всех старых сессий — только читать).
+fn legacy_blocks() -> Vec<String> {
+    blocks_in_file(&legacy_inbox_path())
+}
+
 /// Непрочитанные письма агента (из всех его ящиков).
 fn inbox_blocks(agent: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for path in inbox_files(agent) {
-        let text = fs::read_to_string(&path).unwrap_or_default();
-        let (_header, blocks) = split_log(&text);
-        out.extend(blocks);
+        out.extend(blocks_in_file(&path));
     }
     out
 }
@@ -485,8 +510,10 @@ pub struct MsgView {
 pub fn parse_view(block: &str) -> MsgView {
     let mut v = MsgView::default();
     let mut body: Vec<String> = Vec::new();
+    let mut snippet: Vec<String> = Vec::new();
     let mut in_snippet = false;
     let mut in_body = false;
+    let mut body_marker = false;
     let mut first = true;
     for line in block.lines() {
         if in_body {
@@ -495,14 +522,21 @@ pub fn parse_view(block: &str) -> MsgView {
         }
         if in_snippet {
             // вырезка кода заканчивается на следующем заголовке
-            if line.starts_with("ТЭГИ: ") || line.starts_with("ТЕЛО:") {
+            if line.starts_with("ТЭГИ: ") {
                 in_snippet = false;
+            } else if line.starts_with("ТЕЛО:") {
+                in_snippet = false;
+                in_body = true;
+                body_marker = true;
+                continue;
             } else {
+                snippet.push(line.to_string());
                 continue;
             }
         }
         if line.starts_with("ТЕЛО:") {
             in_body = true;
+            body_marker = true;
             continue;
         }
         if let Some(rest) = line.strip_prefix("ID: ") {
@@ -548,6 +582,13 @@ pub fn parse_view(block: &str) -> MsgView {
         // строка без заголовка — начало тела (старый формат)
         in_body = true;
         body.push(line.to_string());
+    }
+    // Старый формат (без маркера `ТЕЛО:`): вырезку не выбрасываем, а
+    // возвращаем в тело — иначе текст письма терялся целиком.
+    if !body_marker && !snippet.is_empty() {
+        let mut merged = snippet;
+        merged.extend(body);
+        body = merged;
     }
     v.body = body.join("\n").trim().to_string();
     v
@@ -679,6 +720,26 @@ fn mark_notified(agent: &str, ids: &[String]) {
             let _ = writeln!(f, "{id} {}", unix_now());
         }
     }
+    prune_notified(&path);
+}
+
+/// Файл «уже показанных» не должен расти бесконечно: оставляем хвост.
+fn prune_notified(path: &Path) {
+    const MAX_LINES: usize = 4000;
+    const MAX_BYTES: u64 = 256 * 1024;
+    let Ok(meta) = fs::metadata(path) else {
+        return;
+    };
+    let Ok(text) = fs::read_to_string(path) else {
+        return;
+    };
+    let lines: Vec<&str> = text.lines().collect();
+    if lines.len() <= MAX_LINES && meta.len() <= MAX_BYTES {
+        return;
+    }
+    let start = lines.len().saturating_sub(MAX_LINES);
+    let tail = lines[start..].join("\n");
+    let _ = fs::write(path, format!("{tail}\n"));
 }
 
 /// Авто-уведомление: новые входящие показываются красиво (в stderr) при
@@ -687,6 +748,11 @@ fn mark_notified(agent: &str, ids: &[String]) {
 /// Письма НЕ съедаются: consume-on-read остаётся за `devh msg read`.
 /// Показ дедуплицируется по ID (файл `notified/<агент>.log`).
 pub fn auto_notify(agent: &str) -> usize {
+    // Проверка ВНУТРИ функции: вызывающий код не должен был бы помнить
+    // про гаситель (иначе другой путь вызова снова «забыл» бы его).
+    if !auto_notify_enabled() {
+        return 0;
+    }
     let blocks = inbox_blocks(agent);
     if blocks.is_empty() {
         return 0;
@@ -818,7 +884,7 @@ fn notify(id: &str, text: &str) {
         .unwrap_or("")
         .trim();
     let summary = format!("{sender}: {subject} — {first_body}");
-    if env_flag("DEVH_MSG_POPUP") {
+    if env_flag_opt("DEVH_MSG_POPUP").unwrap_or_else(has_display) {
         let _ = Command::new("notify-send")
             .arg("-t")
             .arg(NOTIFY_TIMEOUT_MS.to_string())
@@ -835,10 +901,44 @@ fn notify(id: &str, text: &str) {
 
 /// Флаг окружения «включено»: по умолчанию да; выключает 0/false/no/off.
 fn env_flag(name: &str) -> bool {
+    env_flag_opt(name).unwrap_or(true)
+}
+
+/// Флаг окружения с умолчанием: `Some(вкл/выкл)` — явное решение,
+/// `None` — переменной нет (тогда действует умолчание).
+fn env_flag_opt(name: &str) -> Option<bool> {
     match std::env::var(name) {
-        Ok(v) => !matches!(v.trim(), "0" | "false" | "no" | "off"),
-        Err(_) => true,
+        Ok(v) => Some(!matches!(v.trim(), "0" | "false" | "no" | "off")),
+        Err(_) => None,
     }
+}
+
+/// Есть ли графическая сессия (popup без неё бессмыслен — notify-send не
+/// откроется, только потратит время на запуск процесса).
+fn has_display() -> bool {
+    ["DISPLAY", "WAYLAND_DISPLAY"].iter().any(|v| {
+        std::env::var(v)
+            .map(|x| !x.trim().is_empty())
+            .unwrap_or(false)
+    })
+}
+
+/// Авто-уведомления включены?
+///
+/// В сьюте/тестах — выключены: иначе каждый запуск `devh` внутри тестов
+/// читал бы РЕАЛЬНЫЙ ящик `/tmp/devh-msg`, печатал реальные письма в
+/// stderr, запускал notify-send/paplay и помечал реальные уведомления
+/// показанными. Гасится `DEVH_MSG_NO_AUTO=1` или `HARNESS_TEST=1`.
+pub fn auto_notify_enabled() -> bool {
+    for var in ["DEVH_MSG_NO_AUTO", "HARNESS_TEST"] {
+        if let Ok(v) = std::env::var(var) {
+            let v = v.trim();
+            if matches!(v, "1" | "true" | "yes" | "on") {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 /// Разбор аргументов вручную (KISS: «проход как есть»).
@@ -1085,6 +1185,9 @@ fn send(args: &[String]) -> i32 {
             let filter = m.value("tag");
             let mut shown = 0usize;
             for path in inbox_files(&agent) {
+                // legacy-ящик общий для всех старых сессий: его только читаем,
+                // но НЕ съедаем — иначе одно письмо забирал себе кто-то один.
+                let legacy = path == legacy_inbox_path() && path != own_inbox_path(&agent);
                 let text = fs::read_to_string(&path).unwrap_or_default();
                 let (header, blocks) = split_log(&text);
                 let mut kept: Vec<String> = Vec::new();
@@ -1094,9 +1197,14 @@ fn send(args: &[String]) -> i32 {
                         Some(t) => block_tags(b).iter().any(|x| x == t),
                     };
                     if matches {
-                        println!("{}", render_block(b));
+                        if legacy {
+                            println!("{}", render_block(b));
+                            println!("(legacy-ящик — письмо остаётся в общем ящике)");
+                        } else {
+                            println!("{}", render_block(b));
+                        }
                         shown = shown.saturating_add(1);
-                        if !peek {
+                        if !peek && !legacy {
                             let id = block_field(b, "ID: ").unwrap_or_default();
                             let sender = block_sender(b);
                             ack(&safe_name(&sender), &id, "прочитано");
@@ -1105,7 +1213,7 @@ fn send(args: &[String]) -> i32 {
                         kept.push(b.clone());
                     }
                 }
-                if !peek && shown > 0 {
+                if !peek && shown > 0 && !legacy {
                     let _ = fs::write(&path, join_log(&header, &kept));
                 }
             }
@@ -1131,6 +1239,8 @@ fn send(args: &[String]) -> i32 {
                 // heartbeat: «я на месте» — по нему соседи видят, кто онлайн
                 touch_presence(&agent, "watch");
                 for path in inbox_files(&agent) {
+                    // legacy-ящик общий: его не consume-on-read (см. «read»).
+                    let legacy = path == legacy_inbox_path() && path != own_inbox_path(&agent);
                     let text = fs::read_to_string(&path).unwrap_or_default();
                     let (header, blocks) = split_log(&text);
                     let fresh: Vec<String> = blocks
@@ -1150,7 +1260,7 @@ fn send(args: &[String]) -> i32 {
                             println!("{}", render_block(b));
                             notify(&id, b);
                         }
-                        if consume {
+                        if consume && !legacy {
                             let keep: Vec<String> = blocks
                                 .iter()
                                 .filter(|b| {
@@ -1194,7 +1304,13 @@ fn send(args: &[String]) -> i32 {
             println!("имя: {}", id.name);
             println!("источник: {}", id.source.as_str());
             println!("ключ: {}", id.key);
-            println!("непрочитанных: {}", inbox_blocks(&id.name).len());
+            println!("непрочитанных (своих): {}", own_blocks(&id.name).len());
+            println!("legacy (общий старый ящик): {}", legacy_blocks().len());
+            if id.source == crate::core::identity::Source::Cwd {
+                println!(
+                    "подсказка: ключ по каталогу не различает соседей — закрепите имя: devh msg claim <имя>"
+                );
+            }
             0
         }
         "threads" => {
@@ -1531,7 +1647,12 @@ mod tests {
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn with_msg_home<T>(home: &Path, f: impl FnOnce() -> T) -> T {
-        let guard = ENV_LOCK.lock().unwrap_or_else(|_| unreachable!());
+        // Отравление lock'а не должно «убивать» остальные тесты: забираем
+        // его и при отравленном (poison recovery) — иначе один упавший тест
+        // превращался в каскад «entered unreachable code».
+        let guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         std::env::set_var("DEVH_MSG_HOME", home);
         std::env::set_var("MSG_NOTIFY_DEDUPE", home.join("notified.dedupe"));
         std::env::set_var("DEVH_MSG_POPUP", "0");
@@ -1581,6 +1702,21 @@ ID: abcd1234\n\
         let v = parse_view(b);
         assert_eq!(v.subject, "t");
         assert_eq!(v.body, "тело старого письма");
+    }
+
+    #[test]
+    fn parse_view_keeps_body_of_old_letter_with_snippet() {
+        // Старый формат: вырезка и тело не разделены маркером ТЕЛО:.
+        // Раньше такой блок терялся целиком (вырезка «съедала» тело).
+        let b = "[10:00] ОТ: sender — КОМУ: a\nID: x\nТЕМА: t\n\
+ВЫРЕЗКА:\n\
+  42 | let x = 1;\n\
+тело старого письма";
+        let v = parse_view(b);
+        assert!(
+            v.body.contains("тело старого письма"),
+            "тело не потеряно: {v:?}"
+        );
     }
 
     #[test]
@@ -1638,6 +1774,75 @@ ID: abcd1234\n\
         assert!(brief.contains("ВХОДЯЩИЕ СООБЩЕНИЯ"), "{brief}");
         assert!(brief.contains("Письмо"), "{brief}");
         assert!(brief.contains("тело письма"), "{brief}");
+    }
+
+    #[test]
+    fn legacy_inbox_is_not_consumed() {
+        let dir = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let home = dir.path();
+        // legacy-ящик: письмо старой схемы (адресат «default»).
+        write_inbox(
+            home,
+            "default",
+            "[10:24] ОТ: deepseek — КОМУ: default\nID: bb22cc33\n\
+ТРЕД: t1\nТЕМА: Старое письмо\nТЕЛО:\nтекст\n",
+        );
+        let (shown, left) = with_msg_home(home, || {
+            let blocks = own_blocks("test-agent");
+            let legacy = legacy_blocks();
+            // читаем «legacy» — но не едим
+            let legacy_len = legacy.len();
+            let _ = blocks;
+            (legacy_len, blocks_in_file(&legacy_inbox_path()).len())
+        });
+        assert_eq!(shown, 1, "legacy-письмо видно");
+        assert_eq!(left, 1, "legacy-письмо НЕ съедено другим агентом");
+    }
+
+    #[test]
+    fn own_and_legacy_inboxes_are_separate() {
+        let dir = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let home = dir.path();
+        write_inbox(
+            home,
+            "test-agent",
+            "[10:24] ОТ: deepseek — КОМУ: test-agent\nID: aa11bb22\n\
+ТРЕД: t1\nТЕМА: Своё\nТЕЛО:\nсвоё тело\n",
+        );
+        write_inbox(
+            home,
+            "default",
+            "[10:24] ОТ: deepseek — КОМУ: default\nID: bb22cc33\n\
+ТРЕД: t1\nТЕМА: Старое\nТЕЛО:\nстарое тело\n",
+        );
+        with_msg_home(home, || {
+            assert_eq!(own_blocks("test-agent").len(), 1, "свой ящик");
+            assert_eq!(legacy_blocks().len(), 1, "legacy-ящик");
+            assert_eq!(inbox_blocks("test-agent").len(), 2, "видимы оба");
+        });
+    }
+
+    #[test]
+    fn auto_notify_can_be_disabled() {
+        // Гасится DEVH_MSG_NO_AUTO / HARNESS_TEST (сьют не должен трогать
+        // реальный ящик агентов).
+        let dir = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let home = dir.path();
+        write_inbox(
+            home,
+            "test-agent",
+            "[10:24] ОТ: deepseek — КОМУ: test-agent\nID: aa11bb22\n\
+ТРЕД: t1\nТЕМА: Письмо\nТЕЛО:\nтело\n",
+        );
+        with_msg_home(home, || {
+            std::env::set_var("DEVH_MSG_NO_AUTO", "1");
+            assert!(!auto_notify_enabled(), "NO_AUTO=1 выключает");
+            std::env::remove_var("DEVH_MSG_NO_AUTO");
+            std::env::set_var("HARNESS_TEST", "1");
+            assert!(!auto_notify_enabled(), "HARNESS_TEST=1 выключает");
+            std::env::remove_var("HARNESS_TEST");
+            assert!(auto_notify_enabled(), "по умолчанию включено");
+        });
     }
 
     fn block_of(to: &str, subject: &str, tags: &[&str], body: &str) -> String {

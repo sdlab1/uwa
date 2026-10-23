@@ -14,6 +14,14 @@ export GIT_AUTHOR_NAME=devh-test GIT_AUTHOR_EMAIL=devh-test@localhost
 export GIT_COMMITTER_NAME=devh-test GIT_COMMITTER_EMAIL=devh-test@localhost
 T="$(mktemp -d /tmp/devh-test-XXXXXX)"
 trap 'rm -rf "$T"' EXIT
+# ИЗОЛЯЦИЯ КАНАЛА devh msg: сьют не должен трогать реальные письма агентов.
+# Иначе каждый запуск devh внутри тестов читал бы реальный /tmp/devh-msg,
+# печатал реальные письма в stderr, запускал notify-send/paplay и помечал
+# реальные уведомления показанными (а письмо могло быть «съедено»).
+export DEVH_MSG_HOME="${DEVH_MSG_HOME:-$T/devh-msg}"
+export DEVH_MSG_NO_AUTO=1
+export DEVH_MSG_POPUP=0
+export DEVH_MSG_SOUND=0
 PASS=0; FAIL=0; SKIP=0
 FAIL_NAMES=()
 # ТОЧЕЧНАЯ ПРОВЕРКА (`devh test --case <N|имя>`): фильтр меняет ТОЛЬКО отчёт
