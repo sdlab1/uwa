@@ -142,9 +142,59 @@ pub fn latest_session_date(log_md: &str) -> Option<String> {
 
 **Тесты в `escapes.rs`:** 7 кейсов `corpus_freshness`; `level_line` для всех состояний. Интеграция: `report_stale_corpus_blocks_level`, `report_no_corpus_is_no_data_not_hundred`.
 
+**Тесты в `escapes.rs`:** 7 кейсов `corpus_freshness`; `level_line` для всех состояний. Интеграция: `report_stale_corpus_blocks_level`, `report_no_corpus_is_no_data_not_hundred`.
+
 ---
 
-## E1 — петля фальсификации (1 ч, но с двумя решениями внутри)
+### E3.2 Follow-up после реализации (E-3 в E_series.md)
+
+После того как E-3 (свежесть корпуса) реализован в коде (`escapes.rs`, `types.rs`, `commands/escapes.rs`), раздел E-3 в `E_series.md` нужно довести до актуального состояния:
+
+1. **Кодовые ссылки** — заменить псевдокод на реальные сигнатуры из `escapes.rs`:
+   - `pub const CORPUS_FRESH_DAYS: u32 = 14;`
+   - `pub fn corpus_freshness(corpus_date: &str, ref_date: &str, max_days: u32) -> Freshness`
+   - `pub enum Freshness { Fresh, Stale { age_days: i64, max_days: u32 }, #[default] Unknown }`
+   - `pub fn days_from_civil(y: i64, m: i64, d: i64) -> i64`
+   - `pub fn parse_date_days(s: &str) -> Option<i64>`
+   - `pub fn latest_session_date(log_md: &str) -> Option<String>`
+   - `pub fn sessions_in(log_md: &str) -> Vec<String>`
+   - `pub fn aggregate(store: &Store, max_days: u32) -> (escapes, streak, distrust, corpus, fresh)`
+
+2. **Таблица состояний Freshness** — обновить под реализацию:
+   - `Fresh` → `allows_level() = true`, `note() = None`
+   - `Stale { age_days, max_days }` → `allows_level() = false`, `note() = Some("устарел {age_days}д > {max_days}")`
+   - `Unknown` (default) → `allows_level() = false`, `note() = Some("дата не читается")`
+
+3. **Встраивание в autonomy_level** — документировать:
+   ```rust
+   pub fn autonomy_level(escapes, streak, corpus_kill, corpus_fresh) -> Level {
+       if escapes.iter().any(Escape::is_debt) { return Level::L0; }
+       let corpus_ok = corpus_fresh && corpus_kill >= PERFECT; // PERFECT = 1.0
+       // corpus_fresh = fresh.allows_level() = только Fresh
+       ...
+   }
+   ```
+
+4. **Конфиг и дефолты** — зафиксировать:
+   - `RunConfig.corpus_fresh_days: u32` default = `CORPUS_FRESH_DAYS = 14`
+   - `CONFIG_KEYS` в `commands/mod.rs` включает `CORPUS_FRESH_DAYS`
+   - `devh init` шаблон: `# CORPUS_FRESH_DAYS=14`
+
+5. **Doctor вывод** — пример:
+   ```
+   ⚠ корпус: 13/13 (2026-10-01, устарел 21д > 14) — уровень не растёт (перепрогон bash devharness/test.sh)
+   ```
+
+6. **Тесты** — перечислить ключевые:
+   - `corpus_freshness` (7 кейсов: Fresh/Stale/Unknown/граница/свежее-сессии/мусор/пусто)
+   - `level_line` для всех состояний
+   - интеграция: `report_stale_corpus_blocks_level`, `report_no_corpus_is_no_data_not_hundred`
+
+7. **Граница age == max** — тест `corpus_freshness("2026-10-01", "2026-10-15", 14) = Fresh` и `("2026-10-01", "2026-10-16", 14) = Stale` фиксирует: мутант `>`↔`>=` убивается.
+
+8. **Откат** — `CORPUS_FRESH_DAYS=0` → всегда Fresh (диагностика), `-1`/пусто/мусор → дефолт 14.
+
+---
 
 **Решение 1 — детерминизм выбора.** Сэмпл не «каждая N-я по времени», а **W-id % AUTONOMY_SAMPLE == 0**. Номера выдаёт харнесс → агент не может влиять на попадание в выборку, человек не выбирает удобные сессии:
 
