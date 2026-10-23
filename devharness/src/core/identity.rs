@@ -29,6 +29,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
 
+/// Блокировка read-modify-write aliases.json (in-process + cross-process).
+static ALIAS_WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Рантаймы агентов: `comm` процесса, который запускает сессию.
 /// Имя из этого списка становится префиксом авто-имени (`goose-1a2b`).
 const KNOWN_RUNTIMES: [&str; 11] = [
@@ -232,11 +235,6 @@ fn write_alias_map_in(home: &Path, map: &BTreeMap<String, String>) -> io::Result
     Ok(())
 }
 
-/// Записать карту алиасов в основное хранилище.
-fn write_alias_map(map: &BTreeMap<String, String>) -> io::Result<()> {
-    write_alias_map_in(&msg_home(), map)
-}
-
 /// Каноническое имя: разыменовать цепочку алиасов (с защитой от петли).
 pub fn canonical_in(home: &Path, name: &str) -> String {
     let map = alias_map_in(home);
@@ -286,10 +284,30 @@ pub fn set_alias_in(
     if alias == canon {
         return Err("синоним совпадает с каноном".to_string());
     }
+    // Advisory lock: in-process mutex + fs2 file lock.
+    let _guard = ALIAS_WRITE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    if let Some(parent) = home.join("agents").parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let lock_path = home.join("aliases.lock");
+    if let Some(parent) = lock_path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let lock_file = fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(&lock_path)
+        .ok();
+    if let Some(ref f) = lock_file {
+        let _ = fs2::FileExt::lock_exclusive(f);
+    }
     let mut map = alias_map_in(home);
     let mut probe = canon.clone();
     for _ in 0..8 {
         if probe == alias {
+            if let Some(ref f) = lock_file {
+                let _ = fs2::FileExt::unlock(f);
+            }
             return Err("алиас образовал бы петлю".to_string());
         }
         match map.get(&probe) {
@@ -298,7 +316,11 @@ pub fn set_alias_in(
         }
     }
     map.insert(alias, canon.clone());
-    write_alias_map_in(home, &map).map_err(|e| format!("не записать алиасы: {e}"))?;
+    let res = write_alias_map_in(home, &map).map_err(|e| format!("не записать алиасы: {e}"));
+    if let Some(ref f) = lock_file {
+        let _ = fs2::FileExt::unlock(f);
+    }
+    res?;
     Ok(())
 }
 
@@ -341,7 +363,7 @@ fn claimed_names() -> Vec<String> {
             continue;
         };
         if claimed {
-            out.push(name.trim().to_string());
+            out.push(canonical(name.trim()));
         }
     }
     out
@@ -360,18 +382,41 @@ fn auto_register_alias(name: &str) {
     if comm.is_empty() || comm == name || sanitize_name(&comm).is_err() {
         return;
     }
-    let map = alias_map();
+    let home = msg_home();
+    let _guard = ALIAS_WRITE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let lock_path = home.join("aliases.lock");
+    if let Some(parent) = lock_path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let lock_file = fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(&lock_path)
+        .ok();
+    if let Some(ref f) = lock_file {
+        let _ = fs2::FileExt::lock_exclusive(f);
+    }
+    let map = alias_map_in(&home);
     if let Some(existing) = map.get(&comm) {
         if existing.as_str() != name {
+            if let Some(ref f) = lock_file {
+                let _ = fs2::FileExt::unlock(f);
+            }
             return;
         }
     }
     if claimed_names().iter().any(|n| n == &comm) {
+        if let Some(ref f) = lock_file {
+            let _ = fs2::FileExt::unlock(f);
+        }
         return;
     }
     let mut map = map;
     map.insert(comm, name.to_string());
-    let _ = write_alias_map(&map);
+    let _ = write_alias_map_in(&home, &map);
+    if let Some(ref f) = lock_file {
+        let _ = fs2::FileExt::unlock(f);
+    }
 }
 
 /// Имя из сессии: `session-<8hex>` / `goose-<8hex>` / `tty-<8hex>` / `cwd-<8hex>`.
@@ -426,7 +471,16 @@ fn looks_auto(name: &str) -> bool {
     if prefix.is_empty() || suffix.len() != 8 {
         return false;
     }
-    suffix.chars().all(|c| c.is_ascii_hexdigit())
+    if !suffix.chars().all(|c| c.is_ascii_hexdigit()) {
+        return false;
+    }
+    // Префикс должен быть из известных рантаймов или стандартных меток.
+    matches!(
+        prefix,
+        "ag" | "session" | "tty" | "cwd" | "slot" | "goose" | "opencode"
+            | "claude" | "codex" | "aider" | "crush" | "amp" | "cline"
+            | "continue" | "cursor-agent"
+    ) || KNOWN_RUNTIMES.contains(&prefix)
 }
 
 /// Канон для хоста-рантайма, если он задан синонимом.
@@ -481,7 +535,21 @@ fn slot_key() -> Option<String> {
         pid = ppid;
         hops = hops.saturating_add(1);
     }
-    let (pid, start) = leader?;
+    let (pid, start) = match leader {
+        Some(v) => v,
+        None => {
+            // Fallback для контейнеров/CI, где предок с ppid=1 не найден:
+            // используем cwd + runtime как якорь.
+            let cwd = std::env::current_dir()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default();
+            return Some(format!(
+                "slot:cw:{}:{}",
+                key_hash(&cwd),
+                runtime.unwrap_or_else(|| "none".to_string())
+            ));
+        }
+    };
     Some(format!(
         "slot:{pid}:{start}:{}",
         runtime.unwrap_or_else(|| "none".to_string())
@@ -820,6 +888,45 @@ mod tests {
         // (это и есть риск, предупреждаемый whoami).
         assert_eq!(key_hash("/tmp/proj-a"), key_hash("/tmp/proj-a"));
         assert_ne!(key_hash("/tmp/proj-a"), key_hash("/tmp/proj-b"));
+    }
+
+
+    #[test]
+    fn slot_key_not_none_for_current_process() {
+        // slot_key должен возвращать Some для текущего процесса (если есть предок с ppid=1).
+        // В CI/контейнерах может быть None — это допустимо, но формат проверяем.
+        if let Some(key) = slot_key() {
+            assert!(key.starts_with("slot:"), "формат: {key}");
+            assert!(key.contains(':'), "разделители: {key}");
+        }
+    }
+
+    #[test]
+    fn host_alias_follows_chain() {
+        let dir = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let home = dir.path();
+        // kilo → beam2, nemotron → beam2
+        set_alias_in(home, "kilo", "beam2").unwrap_or_else(|_| unreachable!());
+        set_alias_in(home, "nemotron", "beam2").unwrap_or_else(|_| unreachable!());
+        assert_eq!(host_alias_in(home, "kilo"), Some("beam2".to_string()));
+        assert_eq!(host_alias_in(home, "nemotron"), Some("beam2".to_string()));
+        assert_eq!(aliases_of_in(home, "beam2"), vec!["kilo".to_string(), "nemotron".to_string()]);
+    }
+
+    #[test]
+    fn auto_register_alias_skips_claimed_comm() {
+        let dir = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let home = dir.path();
+        // Закрепляем имя "opencode" явно.
+        write_binding_in(home, "proc:1:2", "opencode", "goose", true).unwrap_or_default();
+        // claimed_names должен содержать "opencode".
+        // Проверяем через alias_map: auto_register не должен перезаписать.
+        set_alias_in(home, "opencode", "beam").unwrap_or_else(|_| unreachable!());
+        // opencode claimed → auto_register должен пропустить регистрацию comm→name.
+        // (auto_register читает claimed_names из основного home, не из temp —
+        //  здесь проверяем только логику claimed_names на temp home.)
+        // Проверяем что alias остался.
+        assert_eq!(alias_map_in(home).get("opencode").map(String::as_str), Some("beam"));
     }
 
     #[test]

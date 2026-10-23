@@ -99,13 +99,21 @@ fn presence_rows() -> Vec<(String, String, u64, Option<i32>)> {
             let Some(base) = name.strip_suffix(".txt") else {
                 continue;
             };
-            let agent = base
-                .rsplit_once('.')
-                .map(|(a, _)| a.to_string())
-                .unwrap_or_else(|| base.to_string());
             let Ok(raw) = fs::read_to_string(e.path()) else {
                 continue;
             };
+            // Имя агента берём из тела файла (agent=...), а не из имени файла:
+            // имена с точками («a.b.c») ломали rsplit_once('.').
+            // Fallback — старый разбор имени файла.
+            let agent = raw
+                .lines()
+                .find_map(|l| l.strip_prefix("agent=").map(|v| v.trim().to_string()))
+                .filter(|a| !a.is_empty())
+                .unwrap_or_else(|| {
+                    base.rsplit_once('.')
+                        .map(|(a, _)| a.to_string())
+                        .unwrap_or_else(|| base.to_string())
+                });
             let mut action = String::new();
             let mut ts: u64 = 0;
             let mut pid: Option<i32> = None;
@@ -775,9 +783,38 @@ fn prune_notified(path: &Path) {
     if lines.len() <= MAX_LINES && meta.len() <= MAX_BYTES {
         return;
     }
-    let start = lines.len().saturating_sub(MAX_LINES);
-    let tail = lines[start..].join("\n");
-    let _ = fs::write(path, format!("{tail}\n"));
+    let now = unix_now();
+    // Не резать ID, которые молодые (now - ts < 300): они нужны для дедупа.
+    // Удаляем только старые строки, сверх лимита.
+    let mut keep: Vec<&str> = Vec::new();
+    // Сначала собираем все молодые строки.
+    for line in lines.iter() {
+        let mut it = line.split_whitespace();
+        if let (Some(_k), Some(ts)) = (it.next(), it.next()) {
+            if let Ok(t) = ts.parse::<u64>() {
+                if now.saturating_sub(t) < 300 {
+                    keep.push(line);
+                    continue;
+                }
+            }
+        }
+    }
+    // Затем добавляем старые, пока не достигнем лимита.
+    for line in lines.iter() {
+        if keep.len() >= MAX_LINES {
+            break;
+        }
+        let mut it = line.split_whitespace();
+        let is_young = if let (Some(_k), Some(ts)) = (it.next(), it.next()) {
+            ts.parse::<u64>().map(|t| now.saturating_sub(t) < 300).unwrap_or(false)
+        } else {
+            false
+        };
+        if !is_young && !keep.contains(line) {
+            keep.push(line);
+        }
+    }
+    let _ = fs::write(path, format!("{}\n", keep.join("\n")));
 }
 
 /// Авто-уведомление: новые входящие показываются красиво (в stderr) при
@@ -809,6 +846,14 @@ pub fn auto_notify(agent: &str) -> usize {
     if fresh.is_empty() {
         return 0;
     }
+    // Flood protection: не больше 5 писем за раз.
+    let (shown, rest) = if fresh.len() > 5 {
+        (5usize, fresh.len() - 5)
+    } else {
+        (fresh.len(), 0usize)
+    };
+    let shown_ids: Vec<String> = ids.iter().take(shown).cloned().collect();
+    let shown_blocks: Vec<String> = fresh.iter().take(shown).cloned().collect();
     let c = crate::shell::color::colors();
     let col_y = c.y;
     let col_z = c.z;
@@ -817,46 +862,166 @@ pub fn auto_notify(agent: &str) -> usize {
         fresh.len(),
         agent
     );
-    for (b, id) in fresh.iter().zip(ids.iter()) {
+    for b in shown_blocks.iter() {
         eprintln!("{}", render_block(b));
-        notify(id, b);
     }
+    if rest > 0 {
+        eprintln!("… ещё {} (devh msg read)", rest);
+    }
+    // Один popup на всю пачку (не N popups).
+    notify_summary(&shown_ids, &shown_blocks);
     mark_notified(agent, &ids);
     fresh.len()
 }
 
 /// Краткая сводка входящих для промпта агента (без ANSI, коротко).
 pub fn unread_brief(agent: &str) -> String {
-    let blocks = inbox_blocks(agent);
-    if blocks.is_empty() {
+    // Считаем только consumable (свои + алиасные) блоки; legacy — отдельно.
+    let canon = crate::core::identity::canonical(agent);
+    let mut consumable: Vec<String> = Vec::new();
+    let own = own_inbox_path(&canon);
+    if own.exists() {
+        consumable.extend(blocks_in_file(&own));
+    }
+    for alias in crate::core::identity::aliases_of(&canon) {
+        let path = inbox_path(&safe_name(&alias));
+        if path != own && path.exists() {
+            consumable.extend(blocks_in_file(&path));
+        }
+    }
+    let legacy_count = if legacy_inbox_path().exists() && own != legacy_inbox_path() {
+        blocks_in_file(&legacy_inbox_path()).len()
+    } else {
+        0
+    };
+    if consumable.is_empty() && legacy_count == 0 {
         return String::new();
     }
     let mut out = String::new();
-    out.push_str(&format!(
-        "ВХОДЯЩИЕ СООБЩЕНИЯ (канал devh msg): {} непрочитанных — прочитать: devh msg read\n",
-        blocks.len()
-    ));
-    for b in blocks.iter().take(5) {
-        let v = parse_view(b);
+    if !consumable.is_empty() {
         out.push_str(&format!(
-            "  • [{}] {} → {} | тема: {} | тред: {} | id: {}\n",
-            v.stamp, v.sender, v.to, v.subject, v.thread, v.id
+            "ВХОДЯЩИЕ СООБЩЕНИЯ (канал devh msg): {} непрочитанных — прочитать: devh msg read\n",
+            consumable.len()
         ));
-        let first = v
-            .body
-            .lines()
-            .find(|l| !l.trim().is_empty())
-            .unwrap_or("")
-            .trim()
-            .to_string();
-        if !first.is_empty() {
-            out.push_str(&format!("    {first}\n"));
+        for b in consumable.iter().take(5) {
+            let v = parse_view(b);
+            out.push_str(&format!(
+                "  • [{}] {} → {} | тема: {} | тред: {} | id: {}\n",
+                v.stamp, v.sender, v.to, v.subject, v.thread, v.id
+            ));
+            let first = v
+                .body
+                .lines()
+                .find(|l| !l.trim().is_empty())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if !first.is_empty() {
+                out.push_str(&format!("    {first}\n"));
+            }
+        }
+        if consumable.len() > 5 {
+            out.push_str(&format!("  … ещё {}\n", consumable.len().saturating_sub(5)));
         }
     }
-    if blocks.len() > 5 {
-        out.push_str(&format!("  … ещё {}\n", blocks.len().saturating_sub(5)));
+    if legacy_count > 0 {
+        out.push_str(&format!("legacy: {} (общий ящик)\n", legacy_count));
     }
     out
+}
+
+/// Уведомление о пачке сообщений: один popup на всю пачку.
+fn notify_summary(ids: &[String], blocks: &[String]) {
+    use std::io::{Read, Seek, SeekFrom};
+    let path = match std::env::var("MSG_NOTIFY_DEDUPE") {
+        Ok(v) if !v.is_empty() => PathBuf::from(v),
+        _ => PathBuf::from(DEDUPE_PATH),
+    };
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let mut file = match fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&path)
+    {
+        Ok(f) => f,
+        Err(_) => return,
+    };
+    if fs2::FileExt::lock_exclusive(&file).is_err() {
+        return;
+    }
+    let mut raw = String::new();
+    let _ = file.seek(SeekFrom::Start(0));
+    let _ = file.read_to_string(&mut raw);
+    let now = unix_now();
+    // Если ВСЕ id уже были показаны недавно — пропускаем popup.
+    let mut all_seen = true;
+    for id in ids {
+        let mut found = false;
+        for line in raw.lines() {
+            let mut it = line.split_whitespace();
+            if let (Some(k), Some(ts)) = (it.next(), it.next()) {
+                if k == id {
+                    if let Ok(t) = ts.parse::<u64>() {
+                        if now.saturating_sub(t) < 300 {
+                            found = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        if !found {
+            all_seen = false;
+            break;
+        }
+    }
+    if all_seen && !ids.is_empty() {
+        let _ = fs2::FileExt::unlock(&file);
+        return;
+    }
+    let _ = file.seek(SeekFrom::End(0));
+    for id in ids {
+        let _ = writeln!(file, "{id} {now}");
+    }
+    let _ = fs2::FileExt::unlock(&file);
+
+    let mut parts: Vec<String> = Vec::new();
+    for b in blocks.iter() {
+        let v = parse_view(b);
+        let sender = if v.sender.is_empty() {
+            "агент"
+        } else {
+            v.sender.as_str()
+        };
+        let subject = if v.subject.is_empty() {
+            "новое сообщение".to_string()
+        } else {
+            v.subject.clone()
+        };
+        parts.push(format!("{sender}: {subject}"));
+    }
+    let summary = if parts.len() == 1 {
+        parts[0].clone()
+    } else {
+        format!("{} новых сообщений", parts.len())
+    };
+    if env_flag_opt("DEVH_MSG_POPUP").unwrap_or_else(has_display) {
+        let _ = Command::new("notify-send")
+            .arg("-t")
+            .arg(NOTIFY_TIMEOUT_MS.to_string())
+            .arg(format!("devh msg — {} новых", ids.len()))
+            .arg(summary.chars().take(220).collect::<String>())
+            .output();
+    }
+    if env_flag("DEVH_MSG_SOUND") {
+        let _ = Command::new("paplay")
+            .arg("/usr/share/sounds/freedesktop/stereo/message.oga")
+            .output();
+    }
 }
 
 /// Уведомление: один popup на сообщение (дедуп по ID под advisory-локом).
@@ -891,7 +1056,7 @@ fn notify(id: &str, text: &str) {
         if let (Some(k), Some(ts)) = (it.next(), it.next()) {
             if k == id {
                 if let Ok(t) = ts.parse::<u64>() {
-                    if now.saturating_sub(t) < 90 {
+                    if now.saturating_sub(t) < 300 {
                         let _ = fs2::FileExt::unlock(&file);
                         return;
                     }
@@ -1111,18 +1276,18 @@ fn deliver(from: &str, to: &[String], block: &str, thread: &str) -> Vec<String> 
             targets.push(t.clone());
         }
     }
+    // Канонизация ДО дедупа: два синонима (opencode, deepseek) → один канон.
     let mut unique: Vec<String> = Vec::new();
     for t in targets.iter() {
-        if !unique.iter().any(|x| x == t) {
-            unique.push(t.clone());
+        let canon = crate::core::identity::canonical(t);
+        if !unique.iter().any(|x| x == &canon) {
+            unique.push(canon);
         }
     }
     let msg_id = block_field(block, "ID: ").unwrap_or_default();
     let mut done: Vec<String> = Vec::new();
-    for t in unique.iter() {
-        // Синоним → канон: письмо к «opencode» приходит в ящик «deepseek».
-        let target = crate::core::identity::canonical(t);
-        let path = inbox_path(&safe_name(&target));
+    for target in unique.iter() {
+        let path = inbox_path(&safe_name(target));
         if append_message(&path, block) {
             done.push(target.clone());
             ack(&safe_name(from), &msg_id, "доставлено");
@@ -1286,7 +1451,22 @@ fn send(args: &[String]) -> i32 {
                 .unwrap_or(3);
             let consume = m.flag("consume");
             let once = m.flag("once");
+            let from_start = m.flag("from-start");
             let mut seen: Vec<String> = Vec::new();
+            // По умолчанию при старте НЕ вываливаем весь бэклог: помечаем
+            // существующие письма как seen. --from-start включает дамп.
+            if !from_start {
+                for path in inbox_files(&agent) {
+                    let text = fs::read_to_string(&path).unwrap_or_default();
+                    let (_header, blocks) = split_log(&text);
+                    for b in blocks.iter() {
+                        let id = block_field(b, "ID: ").unwrap_or_default();
+                        if !id.is_empty() && !seen.iter().any(|s| s == &id) {
+                            seen.push(id);
+                        }
+                    }
+                }
+            }
             println!(
                 "канал: {agent} (идентификация автоматическая; закрепить имя: devh msg claim <имя>)"
             );
@@ -2117,6 +2297,55 @@ ID: abcd1234\n\
         assert_eq!(ago(now), "0 с назад");
         assert!(ago(now.saturating_sub(120)).ends_with("мин назад"));
         assert!(ago(now.saturating_sub(7200)).ends_with("ч назад"));
+    }
+
+
+    #[test]
+    fn deliver_two_synonyms_one_message() {
+        let dir = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let home = dir.path();
+        // Создаём два алиаса → beam
+        crate::core::identity::set_alias_in(home, "opencode", "beam").unwrap_or_else(|_| unreachable!());
+        crate::core::identity::set_alias_in(home, "kilo", "beam").unwrap_or_else(|_| unreachable!());
+        // Устанавливаем DEVH_MSG_HOME на temp
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        std::env::set_var("DEVH_MSG_HOME", home);
+        std::env::set_var("MSG_NOTIFY_DEDUPE", home.join("notified.dedupe"));
+        std::env::set_var("DEVH_MSG_POPUP", "0");
+        std::env::set_var("DEVH_MSG_SOUND", "0");
+        let block = "[10:00] ОТ: sender — КОМУ: opencode, kilo\nID: test123\nТРЕД: t1\nТЕМА: test\nТЕЛО:\nbody\n";
+        let done = deliver("sender", &["opencode".to_string(), "kilo".to_string()], block, "t1");
+        // beam — канон для обоих, значит одно письмо
+        assert_eq!(done.len(), 1, "одно письмо, не два: {done:?}");
+        // Проверяем что в inbox/beam.log ровно один блок
+        let text = std::fs::read_to_string(home.join("inbox").join("beam.log")).unwrap_or_default();
+        let (_, blocks) = split_log(&text);
+        assert_eq!(blocks.len(), 1, "один блок в inbox: {blocks:?}");
+        std::env::remove_var("DEVH_MSG_HOME");
+        std::env::remove_var("MSG_NOTIFY_DEDUPE");
+        std::env::remove_var("DEVH_MSG_POPUP");
+        std::env::remove_var("DEVH_MSG_SOUND");
+        drop(_guard);
+    }
+
+    #[test]
+    fn set_alias_race_both_survive() {
+        use std::thread;
+        let dir = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let home = dir.path().to_path_buf();
+        let h1 = home.clone();
+        let h2 = home.clone();
+        let t1 = thread::spawn(move || {
+            crate::core::identity::set_alias_in(&h1, "alias-a", "canon-a").ok();
+        });
+        let t2 = thread::spawn(move || {
+            crate::core::identity::set_alias_in(&h2, "alias-b", "canon-b").ok();
+        });
+        t1.join().unwrap();
+        t2.join().unwrap();
+        let map = crate::core::identity::alias_map_in(&home);
+        assert!(map.contains_key("alias-a"), "alias-a должен быть: {map:?}");
+        assert!(map.contains_key("alias-b"), "alias-b должен быть: {map:?}");
     }
 
     #[test]
