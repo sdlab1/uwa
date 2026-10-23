@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+use super::tripwire::Mode;
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ItemId(pub u16);
 
@@ -114,6 +116,10 @@ pub struct RunConfig {
     /// не даёт права на уровень (уровень растёт только по свежему 100%).
     /// Референс — дата последней сессии log.md, НЕ wall clock.
     pub corpus_fresh_days: u32,
+    /// F-1: Tripwire — защита входов гейтов от правок агента.
+    pub tripwire: Mode,
+    /// Дополнительные защищённые глобы (относительно worktree).
+    pub protected: Vec<String>,
     pub msg_deny: Option<String>,
     pub rules: Option<PathBuf>,
     pub rules_log: Option<PathBuf>,
@@ -149,6 +155,8 @@ impl Default for RunConfig {
             review_diff_max: 2000,
             autonomy: true,
             corpus_fresh_days: crate::core::escapes::CORPUS_FRESH_DAYS,
+            tripwire: Mode::Off,
+            protected: Vec::new(),
             msg_deny: None,
             rules: None,
             rules_log: None,

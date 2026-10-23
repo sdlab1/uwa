@@ -12,6 +12,8 @@ pub enum Gate {
     /// A6: правки сессии вышли за заявленный scope (spec FILES: + FREEZE_ALLOW).
     /// Первый гейт лестницы — дешевле всех, fail-fast до VERIFY.
     Freeze,
+    /// F-1: агент правил защищённый вход гейта (config/tests/refs/HEAD).
+    Tripwire,
     Verify,
     NoIgnored,
     Lint,
@@ -32,6 +34,7 @@ impl Gate {
         match self {
             Gate::Red { .. } => "RED",
             Gate::Freeze => "FREEZE",
+            Gate::Tripwire => "TRIPWIRE",
             Gate::Verify => "VERIFY",
             Gate::NoIgnored => "NO-IGNORED",
             Gate::Lint => "LINT",
@@ -734,6 +737,10 @@ pub fn judge(gate: &Gate, raw: &Raw, cfg: &RunConfig) -> Verdict {
         Gate::Freeze => Verdict::Fail {
             gate: gate.clone(),
             tail: "freeze: гейт считается по диффу в run.rs, не по выводу команды".into(),
+        },
+        Gate::Tripwire => Verdict::Fail {
+            gate: gate.clone(),
+            tail: "tripwire: гейт считается по снимку в run.rs, не по выводу команды".into(),
         },
         Gate::Verify | Gate::Bench => exit_or_fail(gate, raw),
         Gate::NoIgnored if !cfg.no_ignored => Verdict::Pass,

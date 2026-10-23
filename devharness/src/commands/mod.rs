@@ -22,7 +22,7 @@ use crate::core::types::{CrapCfg, ItemId, MutateCfg, RunConfig};
 use crate::shell::store::{Item, Store};
 use crate::Cmd;
 
-pub const CONFIG_KEYS: [&str; 39] = [
+pub const CONFIG_KEYS: [&str; 41] = [
     "VERIFY",
     "BOOTSTRAP",
     "AGENT",
@@ -55,6 +55,8 @@ pub const CONFIG_KEYS: [&str; 39] = [
     "IGNORED_ALLOWLIST",
     "FREEZE",
     "FREEZE_ALLOW",
+    "TRIPWIRE",
+    "PROTECTED",
     "VERIFY_RETRIES",
     "LINT",
     "LINT_CMD",
@@ -96,6 +98,12 @@ pub fn load_config(root: &Path) -> anyhow::Result<RunConfig> {
             }
         })
         .unwrap_or(d)
+    };
+    let tripwire = match g("TRIPWIRE") {
+        Some(v) if !v.trim().is_empty() => {
+            crate::core::tripwire::Mode::parse(&v).map_err(|e| anyhow::anyhow!("devh: {e}"))?
+        }
+        _ => crate::core::tripwire::Mode::Off,
     };
     let ignored_allowlist = {
         let path = g("IGNORED_ALLOWLIST")
@@ -160,6 +168,16 @@ pub fn load_config(root: &Path) -> anyhow::Result<RunConfig> {
         no_ignored: boolv("NO_IGNORED", true),
         ignored_allowlist,
         freeze: boolv("FREEZE", false),
+        tripwire,
+        protected: g("PROTECTED")
+            .map(|v| {
+                v.split_whitespace()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(String::from)
+                    .collect()
+            })
+            .unwrap_or_default(),
         freeze_allow: g("FREEZE_ALLOW")
             .map(|v| {
                 v.split_whitespace()

@@ -5,4 +5,5 @@ pub mod msg;
 pub mod mutcache;
 pub mod proc;
 pub mod store;
+pub mod tripwire;
 pub mod worktree;

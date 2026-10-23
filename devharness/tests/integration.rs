@@ -4380,6 +4380,7 @@ fn section48_freeze_git_unreadable_is_env_blocked() {
             ),
             ("HARNESS_FREEZE", "1"),
             ("HARNESS_FREEZE_ALLOW", "done.txt"),
+            ("HARNESS_TRIPWIRE", "off"),
         ],
     );
     assert!(ok, "контроль (целый git) обязан быть зелёным: {out}");
@@ -4394,6 +4395,7 @@ fn section48_freeze_git_unreadable_is_env_blocked() {
             ("HARNESS_AGENT", stub.as_str()),
             ("HARNESS_FREEZE", "1"),
             ("HARNESS_FREEZE_ALLOW", "done.txt legit.sh"),
+            ("HARNESS_TRIPWIRE", "off"),
         ],
     );
     assert_eq!(code, 2, "нечитаемый дифф = блокер среды (rc=2): {out}");
@@ -4417,6 +4419,7 @@ fn section48b_lint_git_unreadable_is_env_blocked() {
             ("HARNESS_AGENT", stub.as_str()),
             ("HARNESS_LINT", "1"),
             ("HARNESS_VERIFY", "test -f done.txt"),
+            ("HARNESS_TRIPWIRE", "off"),
         ],
     );
     assert_eq!(code, 2, "lint: нечитаемый дифф = rc=2: {out}");

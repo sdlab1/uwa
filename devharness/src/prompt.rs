@@ -189,6 +189,10 @@ pub fn fix_prompt(gate: &Gate, tail: &str, cfg: &RunConfig, store: &Store, id: &
 Убери лишние файлы из диффа (они не в scope сессии) или, если правка ОБОСНОВАННА, остановись и попроси человека: он запишет обход — items/{id}/allow-test-edit (только для tests/**) или дополнит FILES: в спеке. Сам ослаблять/удалять проверки и трогать tests/** без записанного обхода запрещено. git не трогай. Обнови summary: {sum}",
             id = id.dir_name()
         ),
+        Gate::Tripwire => format!(
+            "TRIPWIRE: агент изменил защищённый вход гейтов (конфиг/тесты/refs/HEAD). Правки откатаны. Лог:\n\n{tail}\n\nНе трогай защищённые файлы и git. Если изменение ОБОСНОВАННО, остановись и попроси человека записать обход: items/{id}/allow-protected (путь | причина). git не трогай. Обнови summary: {sum}",
+            id = id.dir_name()
+        ),
         Gate::Red { .. } => format!(
             "RED-гейт не прошёл. Хвост лога:\n\n{tail}\n\nПочини. git не трогай. Обнови summary: {sum}"
         ),
@@ -268,6 +272,7 @@ mod tests {
             (Gate::Mutate, "Mutation-гейт"),
             (Gate::Bench, "Bench-гейт"),
             (Gate::Freeze, "FREEZE-гейт не прошёл"),
+            (Gate::Tripwire, "TRIPWIRE"),
             (
                 Gate::Red {
                     cmd: "true".into(),

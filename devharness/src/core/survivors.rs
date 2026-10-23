@@ -1183,6 +1183,65 @@ mod tests {
     }
 
     #[test]
+    fn outcome_predicates_are_exact() {
+        let cases = [
+            (S_MISSED, true, false, false, true),
+            (S_TIMEOUT, false, true, false, true),
+            (S_SUCCEEDED, false, false, true, false),
+            (S_CAUGHT, false, false, false, false),
+            (S_UNVIABLE, false, false, false, false),
+        ];
+        for (summary, survivor, timeout, succeeded, action) in cases {
+            let o = Outcome {
+                summary: summary.to_string(),
+                ..Default::default()
+            };
+            assert_eq!(o.is_survivor(), survivor, "{summary}: is_survivor");
+            assert_eq!(o.is_timeout(), timeout, "{summary}: is_timeout");
+            assert_eq!(o.is_succeeded(), succeeded, "{summary}: is_succeeded");
+            assert_eq!(o.is_action(), action, "{summary}: is_action");
+        }
+    }
+
+    #[test]
+    fn genre_tag_covers_every_known_arm() {
+        assert_eq!(genre_tag("FnValue"), "fn-value");
+        assert_eq!(genre_tag("BinaryOperator"), "binop");
+        assert_eq!(genre_tag("ComparisonOperator"), "cmp");
+        assert_eq!(genre_tag("MatchArm"), "match-arm");
+        assert_eq!(genre_tag("MatchArmGuard"), "guard");
+        assert_eq!(genre_tag("FutureGenre"), "other");
+    }
+
+    #[test]
+    fn civil_from_days_handles_epoch_leap_and_century_rules() {
+        let cases = [
+            (719_468, "1970-01-01"),
+            (719_467, "1969-12-31"),
+            (730_484, "2000-02-29"),
+            (730_485, "2000-03-01"),
+            (693_960, "1900-03-01"),
+            (693_959, "1900-02-28"),
+            (739_250, "2024-02-29"),
+            (739_251, "2024-03-01"),
+            (767_009, "2100-03-01"),
+            (306, "1-01-01"),
+            (-1, "0-02-29"),
+        ];
+        for (z, want) in cases {
+            assert_eq!(civil_from_days(z), want, "z={z}");
+        }
+    }
+
+    #[test]
+    fn parse_empty_file_falls_back_to_name_head() {
+        let j = r#"{"outcomes":[{"scenario":{"Mutant":{"name":"src/a.rs:3:1: replace f -> None","file":"","span":{"start":{"line":3,"column":1}}}},"summary":"MissedMutant"}]}"#;
+        let (out, warn) = parse_outcomes(j);
+        assert_eq!(warn, 0);
+        assert_eq!(out.first().map(|o| o.file.as_str()), Some("src/a.rs"));
+    }
+
+    #[test]
     fn parse_missing_file_falls_back_to_name_head() {
         let j = r#"{"outcomes":[{"scenario":{"Mutant":{"name":"src/a.rs:3:1: replace f -> None","span":{"start":{"line":3,"column":1}}}},"summary":"MissedMutant"}]}"#;
         let (out, warn) = parse_outcomes(j);

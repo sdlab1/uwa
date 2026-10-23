@@ -118,6 +118,8 @@ pub fn init(root: &Path) -> anyhow::Result<()> {
     let review = env_num_or("REVIEW", 1);
     let freeze = env_num_or("FREEZE", 1);
     let freeze_allow = env_or("FREEZE_ALLOW", "");
+    let tripwire = env_or("TRIPWIRE", "enforce");
+    let protected = env_or("PROTECTED", "");
     let mut c = String::new();
     c += "# devh config (source-ится bash'ем). Env-переменные HARNESS_* перекрывают.\n";
     c += &format!(
@@ -181,6 +183,8 @@ pub fn init(root: &Path) -> anyhow::Result<()> {
     c += &format!("FREEZE_ALLOW='{freeze_allow}'          # глобальный allowlist FREEZE: глобы через пробел ('src/* *.md'; per-item — секция FILES: в спеке)\n");
     c += "#   FREEZE: allowlist = FILES: спеки (items/W-NNN/files, глобы по строке) + FREEZE_ALLOW; пусто у обоих = гейт пропущен с логом\n";
     c += "#   правка tests/** — только через записанный обход items/W-NNN/allow-test-edit (симметрия no-crap): devh run остановится и попросит причину\n";
+    c += &format!("TRIPWIRE='{tripwire}'          # F-1: off|warn|enforce — защита входов гейтов от правок агента (снимок HEAD/refs/файлов + откат)\n");
+    c += &format!("PROTECTED='{protected}'         # доп. защищённые глобы через пробел (относительно worktree); allow — items/W-NNN/allow-protected: путь | причина\n");
     c += "# A8: повторов VERIFY при падении в раунде 1 (один retry под nice + sleep 2;\n";
     c += "#   прошёл -> сессия продолжается, но .harness/flaky.md + '⚠ flaky-suspect':\n";
     c += "#   молчаливого «прошёл» не существует. 0 = поведение как было.\n";

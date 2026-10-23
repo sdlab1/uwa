@@ -285,7 +285,9 @@ fn audit_next(root: &Path) -> Option<Next> {
             if problems > 0 {
                 Some(Next::new(
                     "devh mutate problems",
-                    &format!("мутационный аудит идёт, уже есть проблем: {problems} — чинить"),
+                    &format!(
+                        "мутационный аудит идёт, уже есть проблем: {problems} — чинить сразу, не ждать verdict (copy-режим: правки дерева безопасны)"
+                    ),
                 ))
             } else {
                 Some(Next::new(
@@ -435,6 +437,31 @@ mod tests {
         .unwrap_or_else(|_| unreachable!());
         let n = audit_next(d.path()).unwrap_or_else(|| unreachable!());
         assert_eq!(n.command, "devh mutate watch");
+    }
+
+    #[test]
+    fn running_audit_with_problem_points_to_problems_immediately() {
+        let d = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        std::fs::create_dir_all(d.path().join(".harness/mutate"))
+            .unwrap_or_else(|_| unreachable!());
+        std::fs::write(
+            d.path().join(".harness/mutate/state.json"),
+            format!(
+                r#"{{"state":"running","pid":{},"args":[]}}"#,
+                std::process::id()
+            ),
+        )
+        .unwrap_or_else(|_| unreachable!());
+        std::fs::create_dir_all(d.path().join("mutants.out")).unwrap_or_else(|_| unreachable!());
+        std::fs::write(
+            d.path().join("mutants.out/missed.txt"),
+            "devharness/src/core/survivors.rs:85:22: replace == with !=\n",
+        )
+        .unwrap_or_else(|_| unreachable!());
+        let n = audit_next(d.path()).unwrap_or_else(|| unreachable!());
+        assert_eq!(n.command, "devh mutate problems");
+        assert!(n.why.contains("не ждать verdict"), "{}", n.why);
+        assert!(n.why.contains("copy"), "{}", n.why);
     }
 
     #[test]

@@ -203,6 +203,11 @@ pub fn rev_list_count(wt: &Path, main: &str) -> anyhow::Result<u32> {
     Ok(s.trim().parse().unwrap_or(0))
 }
 
+pub fn reset_hard_clean(wt: &Path) -> anyhow::Result<()> {
+    git(wt, &["reset", "--hard", "HEAD"])?;
+    git(wt, &["clean", "-fd"]).map(|_| ())
+}
+
 pub fn tree_dirty(wt: &Path) -> bool {
     !git_out(wt, &["status", "--porcelain"]).trim().is_empty()
 }

@@ -6,6 +6,7 @@ use crate::core::gates::{
 };
 use crate::core::runstate;
 use crate::core::state::{self, ClaimAction, Event};
+use crate::core::tripwire::{CheckOutcome, Mode};
 use crate::core::types::{CrapCfg, ItemId, MutateCfg, RunConfig};
 use crate::prompt;
 use crate::shell::color::colors;
@@ -13,6 +14,7 @@ use crate::shell::git;
 use crate::shell::lock::{GlobalLock, ItemRunLock, MutateLock};
 use crate::shell::proc;
 use crate::shell::store::{item_rel, Store};
+use crate::shell::tripwire as tripwire_shell;
 use crate::shell::worktree;
 use crate::timing::Timing;
 
@@ -147,6 +149,20 @@ pub fn run(store: &Store, cfg: &RunConfig, id: &ItemId) -> anyhow::Result<()> {
     // `commit`/`merge` по маркеру ПРЕДЫДУЩЕГО прогона.
     mark_phase(store, id, &wt, runstate::Phase::InProgress);
     let red = red_pre_phase(store, cfg, id, &root, &wt, &agent, fresh, &mut timing)?;
+    let mut trip_incidents: u32 = 0;
+    let trip_armed = match cfg.tripwire {
+        Mode::Off => None,
+        _ => {
+            // N6: red-author пишет только items/W-NNN/red.cmd. Код в worktree,
+            // оставленный им «заодно», очищается до снимка — иначе tripwire
+            // увековечил бы незаявленную правку как доверенную базу.
+            if fresh && git::tree_dirty(&wt) {
+                println!(".. tripwire: дерево грязное после red-author — очищаю (N6)");
+                git::reset_hard_clean(&wt)?;
+            }
+            Some(tripwire_shell::arm(store, &wt, id, &cfg.protected)?)
+        }
+    };
     no_crap_notice(store, cfg, id);
     timing.stage("red-pre", store, id);
 
@@ -174,30 +190,58 @@ pub fn run(store: &Store, cfg: &RunConfig, id: &ItemId) -> anyhow::Result<()> {
             die(store, id, 1);
         }
 
+        // F-1: проверка ДО гейтов — агент не должен успеть повлиять на входы,
+        // которыми его судят. Если чисто — лестница; после лестницы (review
+        // тоже правит файлы) проверка повторяется.
+        let mut stop = tripwire_gate(
+            store,
+            cfg,
+            id,
+            &wt,
+            trip_armed.as_ref(),
+            &mut trip_incidents,
+            "agent",
+        );
+        if stop.is_none() {
+            match gate_ladder(store, cfg, &wt, id, &mut timing, round) {
+                Ok(()) => {
+                    stop = tripwire_gate(
+                        store,
+                        cfg,
+                        id,
+                        &wt,
+                        trip_armed.as_ref(),
+                        &mut trip_incidents,
+                        "gates",
+                    );
+                    if stop.is_none() {
+                        break;
+                    }
+                }
+                Err(s) => stop = Some(s),
+            }
+        }
         // P7/A1: единый роутинг вердикта — класс отказа (Fix/Env/Spec) и
         // бюджет решают судьбу раунда; код выхода даёт чистый decide_round.
-        match gate_ladder(store, cfg, &wt, id, &mut timing, round) {
-            Ok(()) => break,
-            Err(stop) => {
-                let kind = gates::failure_kind(&stop.verdict);
-                match gates::decide_round(round, cfg.max_fix, kind) {
-                    gates::RoundDecision::Continue => {
-                        let Verdict::Fail { gate, tail } = stop.verdict else {
-                            unreachable!("класс Fix несёт Fail-вердикт")
-                        };
-                        round = round.saturating_add(1);
-                        println!(
-                            ".. гейт {} упал — раунд фикса {}/{} (fix-раунд {})",
-                            gate.name(),
-                            round,
-                            cfg.max_fix,
-                            round
-                        );
-                        next_prompt = prompt::fix_prompt(&gate, &tail, cfg, store, id);
-                    }
-                    gates::RoundDecision::GiveUp { code } => {
-                        give_up(store, id, &stop, kind, code, cfg.max_fix, &wt)
-                    }
+        if let Some(stop) = stop {
+            let kind = gates::failure_kind(&stop.verdict);
+            match gates::decide_round(round, cfg.max_fix, kind) {
+                gates::RoundDecision::Continue => {
+                    let Verdict::Fail { gate, tail } = stop.verdict else {
+                        unreachable!("класс Fix несёт Fail-вердикт")
+                    };
+                    round = round.saturating_add(1);
+                    println!(
+                        ".. гейт {} упал — раунд фикса {}/{} (fix-раунд {})",
+                        gate.name(),
+                        round,
+                        cfg.max_fix,
+                        round
+                    );
+                    next_prompt = prompt::fix_prompt(&gate, &tail, cfg, store, id);
+                }
+                gates::RoundDecision::GiveUp { code } => {
+                    give_up(store, id, &stop, kind, code, cfg.max_fix, &wt)
                 }
             }
         }
@@ -219,7 +263,76 @@ pub fn run(store: &Store, cfg: &RunConfig, id: &ItemId) -> anyhow::Result<()> {
     );
 
     red_post(store, cfg, id, &wt, &red, &mut timing)?;
+    if let Some(stop) = tripwire_gate(
+        store,
+        cfg,
+        id,
+        &wt,
+        trip_armed.as_ref(),
+        &mut trip_incidents,
+        "red-post",
+    ) {
+        eprintln!(
+            "{}FAIL: tripwire после red-пост-гейта — правки откатаны, раундов больше нет{}",
+            colors().r,
+            colors().z
+        );
+        eprintln!(
+            "{}",
+            match &stop.verdict {
+                Verdict::Fail { tail, .. } => tail.as_str(),
+                _ => "",
+            }
+        );
+        die(store, id, 1);
+    }
     red_mutate_phase(store, cfg, id, &wt, &red, &mut timing)?;
+    if let Some(stop) = tripwire_gate(
+        store,
+        cfg,
+        id,
+        &wt,
+        trip_armed.as_ref(),
+        &mut trip_incidents,
+        "red-mutate",
+    ) {
+        eprintln!(
+            "{}FAIL: tripwire после RED-MUT — правки откатаны{}",
+            colors().r,
+            colors().z
+        );
+        eprintln!(
+            "{}",
+            match &stop.verdict {
+                Verdict::Fail { tail, .. } => tail.as_str(),
+                _ => "",
+            }
+        );
+        die(store, id, 1);
+    }
+    if let Some(stop) = tripwire_gate(
+        store,
+        cfg,
+        id,
+        &wt,
+        trip_armed.as_ref(),
+        &mut trip_incidents,
+        "pre-commit",
+    ) {
+        eprintln!(
+            "{}FAIL: tripwire перед коммитом — правки откатаны{}",
+            colors().r,
+            colors().z
+        );
+        eprintln!(
+            "{}",
+            match &stop.verdict {
+                Verdict::Fail { tail, .. } => tail.as_str(),
+                _ => "",
+            }
+        );
+        die(store, id, 1);
+    }
     // Все обязательные стадии прошли — теперь вердикт «гейты зелёные» честен.
     mark_phase(store, id, &wt, runstate::Phase::GatesOk);
     commit_push(store, cfg, id, &wt, round, &mut timing, &root)?;
@@ -1114,6 +1227,80 @@ fn contract_note(store: &Store, wt: &Path, id: &ItemId) -> Option<String> {
         id.dir_name(),
         findings.join("\n")
     ))
+}
+
+fn tripwire_gate(
+    store: &Store,
+    cfg: &RunConfig,
+    id: &ItemId,
+    wt: &Path,
+    armed: Option<&tripwire_shell::Armed>,
+    incidents: &mut u32,
+    phase: &str,
+) -> Option<GateStop> {
+    let c = colors();
+    let armed = armed?;
+    let _ = wt;
+    let rollback = |v: Vec<crate::core::tripwire::Violation>,
+                    die_now: bool,
+                    incidents: &mut u32|
+     -> Option<GateStop> {
+        let lines: Vec<String> = v.iter().map(|x| x.label()).collect();
+        let tail = lines.join("\n");
+        let _ = tripwire_shell::append_log(
+            store,
+            id,
+            &format!("{phase}: ROLLBACK {}", lines.join("; ")),
+        );
+        if let Err(e) = tripwire_shell::rollback(armed, &v) {
+            eprintln!(
+                "{}FAIL (tripwire/{phase}): откат не удался — {e}{}",
+                c.r, c.z
+            );
+            die(store, id, 2)
+        }
+        *incidents = incidents.saturating_add(1);
+        if die_now || *incidents > 1 {
+            eprintln!(
+                "{}FAIL: tripwire/{phase} — повторный инцидент, откат выполнен{}",
+                c.r, c.z
+            );
+            eprintln!("{tail}");
+            let _ = tripwire_shell::append_log(store, id, &format!("{phase}: DIE {tail}"));
+            die(store, id, 1)
+        }
+        Some(GateStop {
+            verdict: Verdict::Fail {
+                gate: Gate::Tripwire,
+                tail: tail.clone(),
+            },
+            log: tail,
+        })
+    };
+    match tripwire_shell::check(store, armed, id, cfg.tripwire, *incidents) {
+        CheckOutcome::Pass => None,
+        CheckOutcome::Env(e) => {
+            eprintln!("{}FAIL (tripwire/{phase}): блокер среды — {e}{}", c.r, c.z);
+            let _ = tripwire_shell::append_log(store, id, &format!("{phase}: ENV {e}"));
+            die(store, id, 2)
+        }
+        CheckOutcome::Warn(v) => {
+            for x in &v {
+                println!("{}⚠ tripwire/{phase}: {}{}", c.y, x.label(), c.z);
+            }
+            let _ = tripwire_shell::append_log(
+                store,
+                id,
+                &format!(
+                    "{phase}: WARN {}",
+                    v.iter().map(|x| x.label()).collect::<Vec<_>>().join("; ")
+                ),
+            );
+            None
+        }
+        CheckOutcome::RollbackAndFail(v) => rollback(v, false, incidents),
+        CheckOutcome::RollbackAndDie(v) => rollback(v, true, incidents),
+    }
 }
 
 fn gate_ladder(

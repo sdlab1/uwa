@@ -11,6 +11,7 @@ pub mod plan;
 pub mod runstate;
 pub mod state;
 pub mod survivors;
+pub mod tripwire;
 pub mod tui;
 pub mod types;
 pub mod watch;
