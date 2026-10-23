@@ -795,8 +795,16 @@ pub fn judge(gate: &Gate, raw: &Raw, cfg: &RunConfig) -> Verdict {
             },
         },
         Gate::Mutate => {
-            let min_kill = cfg.mutate.as_ref().map(|m| m.min_kill).unwrap_or(90);
-            judge_mutation(raw, min_kill)
+            let m = cfg.mutate.as_ref();
+            judge_mutation(
+                raw,
+                &MutPolicy {
+                    min_kill: m.map(|m| m.min_kill).unwrap_or(90),
+                    blind: m.map(|m| m.blind).unwrap_or_default(),
+                    // zero_ok заполняет judge_mutation по raw.log
+                    zero_ok: false,
+                },
+            )
         }
     }
 }
@@ -984,7 +992,70 @@ fn exit_or_fail(gate: &Gate, raw: &Raw) -> Verdict {
     }
 }
 
-fn judge_mutation(raw: &Raw, min_kill: u32) -> Verdict {
+/// F-3 (MUT_BLIND): что делать, когда «0 мутантов» пришло БЕЗ честной
+/// причины пустоты (`parse_no_mutants_reason` не нашёл exclude_re/skip/
+/// пустой diff). Слепая дыра W3: поимки не было вообще, но раньше это был
+/// тихий `Pass`.
+///
+/// Код-дефолт `off` (ничего не ломает), шаблон `devh init` ставит `warn`;
+/// `enforce` — блокиратор. Опечатка в режиме — `Err` (опечатка не должна
+/// молча менять режим гейта, как у `weaken::Mode`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BlindMode {
+    /// Прежнее поведение: 0 мутантов = честный пропуск (Pass).
+    #[default]
+    Off,
+    /// Pass, но ⚠ печатается оператору: дыра W3 не закрыта.
+    Warn,
+    /// Fail: 0 мутантов без честной причины = слепой гейт.
+    Enforce,
+}
+
+impl BlindMode {
+    pub fn parse(s: &str) -> Result<Self, String> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "off" | "0" | "false" | "no" => Ok(Self::Off),
+            "warn" => Ok(Self::Warn),
+            "enforce" | "1" | "true" | "yes" | "on" => Ok(Self::Enforce),
+            other => Err(format!(
+                "MUT_BLIND: неизвестный режим {other:?} (off|warn|enforce)"
+            )),
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Warn => "warn",
+            Self::Enforce => "enforce",
+        }
+    }
+}
+
+/// Политика мутационного судьи (`judge_mutation_stats`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MutPolicy {
+    pub min_kill: u32,
+    /// MUT_BLIND: off | warn | enforce (см. `BlindMode`).
+    pub blind: BlindMode,
+    /// Честная причина пустоты (`parse_no_mutants_reason`): exclude_re /
+    /// skip / пустой diff. Такой ноль — НЕ слепота: Pass независимо от
+    /// MUT_BLIND («охрана exclude_re / mutants::skip»).
+    pub zero_ok: bool,
+}
+
+impl Default for MutPolicy {
+    fn default() -> Self {
+        // min_kill 90 — тот же дефолт, что у MIN_KILL в конфиге.
+        Self {
+            min_kill: 90,
+            blind: BlindMode::Off,
+            zero_ok: false,
+        }
+    }
+}
+
+fn judge_mutation(raw: &Raw, p: &MutPolicy) -> Verdict {
     // Красный baseline: cargo-mutants печатает «cargo <phase> failed in an
     // unmutated tree, so no mutants were tested» и выходит с кодом 4
     // (ExitCode::BaselineFailed). Это FAIL гейта, а не Env-блокер: без
@@ -1000,11 +1071,18 @@ fn judge_mutation(raw: &Raw, min_kill: u32) -> Verdict {
             ),
         };
     }
+    // Честный пустой скоуп (F-3/MUT_BLIND-охрана): exclude_re/skip/пустой
+    // diff без строки итога — «нечего убивать», а не сломанный инструмент.
+    let p = MutPolicy {
+        zero_ok: parse_no_mutants_reason(&raw.log).is_some(),
+        ..*p
+    };
     match parse_mutation_output(&raw.log) {
+        None if p.zero_ok => Verdict::Pass,
         None => Verdict::EnvBlocked {
             missing: "mutation tool: вывод не распознан".into(),
         },
-        Some(stats) => judge_mutation_stats(&stats, min_kill),
+        Some(stats) => judge_mutation_stats(&stats, &p),
     }
 }
 
@@ -1021,11 +1099,38 @@ fn judge_mutation(raw: &Raw, min_kill: u32) -> Verdict {
 /// * `Timeout` — **открытый вопрос**: поимки не было;
 /// * `MissedMutant` — **открытый вопрос**: дыра в покрытии;
 /// * «почти чисто» (99% при одном выжившем) — **не чисто**: чистый вердикт
-///   возможен, только когда пойман ВЕСЬ тестируемый набор.
-pub fn judge_mutation_stats(stats: &MutationStats, min_kill: u32) -> Verdict {
+///   возможен, только когда пойман ВЕСЬ тестируемый набор;
+/// * 0 мутантов — **не автоматический Pass** (F-3/W3): честная причина
+///   (`MutPolicy::zero_ok`, exclude_re/skip/пустой diff) → Pass; иначе
+///   решает `MUT_BLIND` (`off`/`warn` = Pass, `enforce` = Fail).
+pub fn judge_mutation_stats(stats: &MutationStats, p: &MutPolicy) -> Verdict {
+    let min_kill = p.min_kill;
     if stats.mutants == 0 {
-        // Мутантов не было — нечего ловить (честный пропуск, не дыра).
-        return Verdict::Pass;
+        // Охрана exclude_re / mutants::skip: пустой скоуп объяснён — это
+        // «нечего убивать», а не слепая дыра (Pass при ЛЮБОМ MUT_BLIND).
+        if p.zero_ok {
+            return Verdict::Pass;
+        }
+        return match p.blind {
+            // Код-дефолт (и прежнее поведение): 0 мутантов = пропуск.
+            BlindMode::Off => Verdict::Pass,
+            // Шаблон init: Pass, но оператор видит, что дыра W3 не закрыта.
+            BlindMode::Warn => {
+                println!(
+                    "⚠ MUT_BLIND=warn: 0 мутантов без честной причины (exclude_re/skip/пустой \
+                     diff не найдены) — поимки нет вообще; enforce — блокиратор, off — без ⚠"
+                );
+                Verdict::Pass
+            }
+            BlindMode::Enforce => Verdict::Fail {
+                gate: Gate::Mutate,
+                tail: format!(
+                    "слепой гейт: 0 мутантов без честной причины (пустой скоуп не \
+                     подтверждён) — поимки нет вообще, «нечего ловить» не доказано \
+                     (MUT_BLIND=enforce)"
+                ),
+            },
+        };
     }
     // unviable = ПРОВАЛ (ноль терпимости): мутант не компилируется.
     if stats.unviable > 0 {
@@ -1263,6 +1368,7 @@ mod tests {
                 tool: "muex".into(),
                 scope: "lib".into(),
                 min_kill: 90,
+                blind: BlindMode::Off,
                 early: false,
                 first_problem: false,
                 cov: false,
@@ -1416,7 +1522,7 @@ mod tests {
             succeeded: 2,
             unknown: 0,
         };
-        match judge_mutation_stats(&stats, 90) {
+        match judge_mutation_stats(&stats, &pol(90)) {
             Verdict::Fail { gate, tail } => {
                 assert_eq!(gate, Gate::Mutate);
                 assert!(tail.contains("succeeded 2 > 0"), "{tail}");
@@ -1443,7 +1549,7 @@ mod tests {
             succeeded: 0,
             unknown: 1,
         };
-        match judge_mutation_stats(&stats, 90) {
+        match judge_mutation_stats(&stats, &pol(90)) {
             Verdict::Fail { gate, tail } => {
                 assert_eq!(gate, Gate::Mutate);
                 assert!(tail.contains("unknown 1 > 0"), "{tail}");
@@ -1534,13 +1640,145 @@ mod tests {
         }
     }
 
+    /// Политика судьи для тестов: min_kill задан, остальное — код-дефолт
+    /// (MUT_BLIND=off, zero_ok=false — прежнее поведение).
+    fn pol(min_kill: u32) -> MutPolicy {
+        MutPolicy {
+            min_kill,
+            ..Default::default()
+        }
+    }
+
+    /// F-3/W3: MUT_BLIND=enforce — 0 мутантов без честной причины ≠ Pass.
+    #[test]
+    fn mutpolicy_blind_gate_zero_unexplained_fails() {
+        let empty = MutationStats::default();
+        let p = MutPolicy {
+            min_kill: 90,
+            blind: BlindMode::Enforce,
+            zero_ok: false,
+        };
+        match judge_mutation_stats(&empty, &p) {
+            Verdict::Fail { gate, tail } => {
+                assert_eq!(gate, Gate::Mutate);
+                assert!(tail.contains("слепой гейт"), "{tail}");
+                assert!(tail.contains("0 мутантов"), "{tail}");
+            }
+            other => panic!("слепой гейт при enforce обязан быть Fail: {other:?}"),
+        }
+    }
+
+    /// Охрана exclude_re / mutants::skip: честная причина пустоты — Pass
+    /// даже при enforce (это «нечего убивать», а не слепота).
+    #[test]
+    fn mutpolicy_blind_gate_explained_empty_passes() {
+        let p = MutPolicy {
+            min_kill: 90,
+            blind: BlindMode::Enforce,
+            zero_ok: true,
+        };
+        assert!(matches!(
+            judge_mutation_stats(&MutationStats::default(), &p),
+            Verdict::Pass
+        ));
+        // Причины реально распознаются из лога (exclude/skip/пустой diff)
+        for why in [
+            " INFO No mutants found under the active filters",
+            "No mutants to filter",
+            "Diff file is empty",
+            "Diff changes no Rust source files",
+        ] {
+            assert!(
+                parse_no_mutants_reason(why).is_some(),
+                "причина не распознана: {why}"
+            );
+        }
+    }
+
+    /// Код-дефолт MUT_BLIND=off не ломает прежнее поведение (откат F-3),
+    /// warn — Pass с ⚠ наружу.
+    #[test]
+    fn mutpolicy_blind_gate_off_and_warn_pass() {
+        let empty = MutationStats::default();
+        for blind in [BlindMode::Off, BlindMode::Warn] {
+            let p = MutPolicy {
+                min_kill: 90,
+                blind,
+                zero_ok: false,
+            };
+            assert!(
+                matches!(judge_mutation_stats(&empty, &p), Verdict::Pass),
+                "{blind:?} обязан дать Pass"
+            );
+        }
+    }
+
+    /// Любой timeout > 0 блокирует «чисто» — порога нет (F-3).
+    #[test]
+    fn mutpolicy_timeout_any_fails() {
+        let stats = MutationStats {
+            mutants: 100,
+            killed: 99,
+            timeout: 1,
+            ..Default::default()
+        };
+        assert!(matches!(
+            judge_mutation_stats(&stats, &pol(90)),
+            Verdict::Fail { .. }
+        ));
+    }
+
+    /// Любой unviable > 0 блокирует «чисто» — ноль терпимости (F-3).
+    #[test]
+    fn mutpolicy_unviable_any_fails() {
+        let stats = MutationStats {
+            mutants: 100,
+            killed: 99,
+            unviable: 1,
+            ..Default::default()
+        };
+        assert!(matches!(
+            judge_mutation_stats(&stats, &pol(90)),
+            Verdict::Fail { .. }
+        ));
+    }
+
+    /// Синхронный судья: MUT_BLIND берётся из RunConfig.mutate, честная
+    /// причина пустоты — из raw.log (enforce + причина = Pass).
+    #[test]
+    fn mutpolicy_blind_gate_in_sync_judge() {
+        let mut c = cfg();
+        c.mutate.as_mut().unwrap().blind = BlindMode::Enforce;
+        // строка итога «0 mutants» БЕЗ причины — Fail (слепой гейт)
+        let blind_raw = raw(Some(0), "0 mutants tested in 0s: 0 caught");
+        match judge(&Gate::Mutate, &blind_raw, &c) {
+            Verdict::Fail { tail, .. } => assert!(tail.contains("слепой гейт"), "{tail}"),
+            other => panic!("enforce без причины обязан быть Fail: {other:?}"),
+        }
+        // та же строка + честная причина — Pass (охрана exclude/skip)
+        let honest_raw = raw(
+            Some(0),
+            " INFO No mutants to filter\n0 mutants tested in 0s: 0 caught",
+        );
+        assert!(matches!(
+            judge(&Gate::Mutate, &honest_raw, &c),
+            Verdict::Pass
+        ));
+        // код-дефолт off — прежнее поведение (0 мутантов = Pass)
+        let off = cfg();
+        assert!(matches!(
+            judge(&Gate::Mutate, &blind_raw, &off),
+            Verdict::Pass
+        ));
+    }
+
     #[test]
     fn mutation_stats_judge_is_the_single_source_of_truth() {
         // Канон одной таблицы: verdict по СТАТАМ (её используют и `devh run`,
         // и `devh mutate verdict`).
         let empty = MutationStats::default();
         assert!(
-            matches!(judge_mutation_stats(&empty, 90), Verdict::Pass),
+            matches!(judge_mutation_stats(&empty, &pol(90)), Verdict::Pass),
             "0 мутантов — честный пропуск"
         );
         let all_unviable = MutationStats {
@@ -1554,7 +1792,7 @@ mod tests {
         };
         assert!(
             matches!(
-                judge_mutation_stats(&all_unviable, 90),
+                judge_mutation_stats(&all_unviable, &pol(90)),
                 Verdict::Fail { .. }
             ),
             "все unviable — провал, а не «нечего ловить → Pass»"
@@ -1569,7 +1807,10 @@ mod tests {
             unknown: 0,
         };
         assert!(
-            matches!(judge_mutation_stats(&timeout, 90), Verdict::Fail { .. }),
+            matches!(
+                judge_mutation_stats(&timeout, &pol(90)),
+                Verdict::Fail { .. }
+            ),
             "таймаут — открытый вопрос"
         );
         let clean = MutationStats {
@@ -1582,7 +1823,7 @@ mod tests {
             unknown: 0,
         };
         assert!(
-            matches!(judge_mutation_stats(&clean, 90), Verdict::Pass),
+            matches!(judge_mutation_stats(&clean, &pol(90)), Verdict::Pass),
             "пойманы все — чисто"
         );
     }

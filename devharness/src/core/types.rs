@@ -40,6 +40,11 @@ pub struct MutateCfg {
     pub tool: String,
     pub scope: String,
     pub min_kill: u32,
+    /// F-3 (MUT_BLIND): слепой гейт — что делать, когда «0 мутантов» без
+    /// честной причины (exclude_re/skip/пустой diff не найдены): off —
+    /// прежний тихий Pass (код-дефолт), warn — Pass + ⚠, enforce — Fail
+    /// (дыра W3: поимки нет вообще). Ставится в шаблоне init (warn).
+    pub blind: crate::core::gates::BlindMode,
     /// P7-2.3: ранний выход — DOOM (kill-rate недостижим) / SAMPLE
     /// (rule-of-three при --shuffle). По умолчанию выключен.
     pub early: bool,

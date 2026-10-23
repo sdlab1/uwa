@@ -1636,7 +1636,17 @@ fn verdict(root: &Path) -> anyhow::Result<()> {
         unknown: audit.unknown,
     };
     let min_kill = min_kill_pct(root);
-    match gates::judge_mutation_stats(&stats, min_kill) {
+    // F-3 (MUT_BLIND): 0 мутантов без честной причины ≠ Pass. Причина
+    // пустоты (exclude_re/skip/пустой diff) — из лога этого прогона:
+    // найдена → «нечего убивать» (Pass при любом режиме).
+    let policy = gates::MutPolicy {
+        min_kill,
+        blind: blind_mode(root),
+        zero_ok: std::fs::read_to_string(work_dir(root).join(CARGO_LOG))
+            .map(|t| gates::parse_no_mutants_reason(&t).is_some())
+            .unwrap_or(false),
+    };
+    match gates::judge_mutation_stats(&stats, &policy) {
         gates::Verdict::Pass => {}
         gates::Verdict::Fail { tail, .. } => {
             println!("вердикт: ПРОВАЛ — {tail}");
@@ -1679,6 +1689,14 @@ fn min_kill_pct(root: &Path) -> u32 {
         .ok()
         .and_then(|c| c.mutate.map(|m| m.min_kill))
         .unwrap_or(90)
+}
+
+/// F-3 (MUT_BLIND): режим слепого гейта из конфига (код-дефолт off).
+fn blind_mode(root: &Path) -> crate::core::gates::BlindMode {
+    crate::commands::load_config(root)
+        .ok()
+        .and_then(|c| c.mutate.map(|m| m.blind))
+        .unwrap_or_default()
 }
 
 /// Сколько проблем видно ПРЯМО СЕЙЧАС (живой список + детали JSON).

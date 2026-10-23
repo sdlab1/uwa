@@ -2703,7 +2703,13 @@ fn finish(m: &MutateCfg, run: MutRun, label: &str, key: &str, gate: Gate) -> Mut
                     succeeded: stats.succeeded,
                     unknown: stats.unknown,
                 },
-                m.min_kill,
+                // F-3 (MUT_BLIND): 0 мутантов при ранней остановке без
+                // честной причины — решает режим, а не тихий Pass.
+                &gates::MutPolicy {
+                    min_kill: m.min_kill,
+                    blind: m.blind,
+                    zero_ok: false,
+                },
             ) {
                 Verdict::Fail { gate: g, tail } => {
                     log += &format!("{label} FAIL: {tail}\n");
@@ -2789,11 +2795,27 @@ fn finish(m: &MutateCfg, run: MutRun, label: &str, key: &str, gate: Gate) -> Mut
         // (он даёт `MutRun::Unknown` → Fail). Ноль = «неизвестных нет».
         unknown: 0,
     };
-    // 0 мутантов — честный пропуск (нечего мутировать), не дыра.
+    // 0 мутантов: честный причинный пропуск (MutRun::Empty с
+    // parse_no_mutants_reason) отсекается ВЫШЕ — сюда доходит только
+    // строка итога «0 mutants tested» без честной причины. Это слепая
+    // дыра W3: решает MUT_BLIND (F-3) — off: прежний тихий Pass,
+    // warn: Pass + ⚠, enforce: Fail (слепой гейт).
     if total == 0 {
+        let verdict = gates::judge_mutation_stats(
+            &gates::MutationStats::default(),
+            &gates::MutPolicy {
+                min_kill: m.min_kill,
+                blind: m.blind,
+                zero_ok: false,
+            },
+        );
+        let log = match &verdict {
+            Verdict::Fail { tail, .. } => format!("{label} FAIL: {tail}\n"),
+            _ => format!("{label}: 0 мутантов — нечего убивать, пропуск\n"),
+        };
         return MutReport {
-            log: format!("{label}: 0 мутантов — нечего убивать, пропуск\n"),
-            verdict: Verdict::Pass,
+            log,
+            verdict,
             stats: Some(stats),
             fatal: false,
             early: false,
@@ -2829,7 +2851,13 @@ fn finish(m: &MutateCfg, run: MutRun, label: &str, key: &str, gate: Gate) -> Mut
             succeeded,
             unknown: 0,
         },
-        m.min_kill,
+        // F-3 (MUT_BLIND): статы из строки итога; 0 мутантов без честной
+        // причины решает режим (см. блок total == 0 ниже — он раньше).
+        &gates::MutPolicy {
+            min_kill: m.min_kill,
+            blind: m.blind,
+            zero_ok: false,
+        },
     ) {
         Verdict::Fail { gate, tail } => {
             log += &format!("{label} FAIL: {tail}\n");
@@ -3105,15 +3133,26 @@ fn problem_actions(dir: &Path, base: &crate::core::mutaudit::BadBaseline) -> Vec
 /// Вывод мутатора → MutRun (классификация общая для run_logged/run_monitored).
 fn classify(log: &str) -> MutRun {
     match gates::parse_mutation_output(log) {
-        Some(s) => MutRun::Stats {
-            total: s.mutants,
-            killed: s.killed,
-            missed: s.missed,
-            timeout: s.timeout,
-            unviable: s.unviable,
-            succeeded: s.succeeded,
-            actions: Vec::new(),
-        },
+        Some(s) => {
+            // F-3 (MUT_BLIND): «0 mutants tested» + честная причина пустоты
+            // (exclude_re/skip/пустой diff) — это Empty (Pass при ЛЮБОМ
+            // режиме: охрана), а не слепая дыра. Без причины — Stats{0},
+            // и MUT_BLIND решает в finish.
+            if s.mutants == 0 {
+                if let Some(why) = gates::parse_no_mutants_reason(log) {
+                    return MutRun::Empty { why: EmptyWhy(why) };
+                }
+            }
+            MutRun::Stats {
+                total: s.mutants,
+                killed: s.killed,
+                missed: s.missed,
+                timeout: s.timeout,
+                unviable: s.unviable,
+                succeeded: s.succeeded,
+                actions: Vec::new(),
+            }
+        }
         // P7-2.2: пустой скоуп (--in-diff без мутантов на изменённых
         // строках, либо всё вычищен --iterate) — честный пропуск,
         // а не «инструмент не распознан».
@@ -3386,6 +3425,7 @@ mod tests {
             tool: "cargo-mutants".into(),
             scope: "lib".into(),
             min_kill: 90,
+            blind: Default::default(),
             early: false,
             first_problem: false,
             cov: false,
@@ -3431,6 +3471,7 @@ mod tests {
             tool: "cargo-mutants".into(),
             scope: "lib".into(),
             min_kill: 90,
+            blind: Default::default(),
             early: false,
             first_problem: false,
             cov: false,
@@ -3453,6 +3494,7 @@ mod tests {
             tool: "cargo-mutants".into(),
             scope: "lib".into(),
             min_kill: 90,
+            blind: Default::default(),
             early: false,
             first_problem: false,
             cov: false,
@@ -3910,6 +3952,7 @@ mod tests {
             tool: "cargo-mutants".into(),
             scope: "lib".into(),
             min_kill: 90,
+            blind: Default::default(),
             early: false,
             first_problem: false,
             cov: false,

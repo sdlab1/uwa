@@ -110,6 +110,7 @@ pub fn init(root: &Path) -> anyhow::Result<()> {
     let wt_root = env_or("WT_ROOT", "/tmp");
     let log_days = env_num_or("LOG_DAYS", 30);
     let min_kill = env_num_or("MIN_KILL", 90);
+    let mut_blind = env_or("MUT_BLIND", "warn");
     let bench = env_or("BENCH", "");
     let no_ignored = env_num_or("NO_IGNORED", 1);
     let ignored_allowlist = env_or("IGNORED_ALLOWLIST", "scripts/ignored-tests.txt");
@@ -150,6 +151,7 @@ pub fn init(root: &Path) -> anyhow::Result<()> {
     );
     c += &format!("MUTATE_SCOPE='{mutate_scope}'  # какие пути считать «прод-кодом» для мутаций\n");
     c += &format!("MIN_KILL={min_kill}           # минимальный kill-rate, %\n");
+    c += &format!("MUT_BLIND={mut_blind}          # F-3 слепой гейт: 0 мутантов без честной причины (exclude_re/skip/пустой diff) — off|warn|enforce; warn = Pass + ⚠, enforce = Fail (дыра W3)\n");
     c += "MUTATE_EARLY=0            # P7-2.3 ранний выход: DOOM (kill-rate недостижим) всегда, SAMPLE (rule-of-three ≥95%) — только с --shuffle в шаблоне\n";
     c += "MUTATE_FIRST_PROBLEM=1    # problem-first: стоп на ПЕРВОЙ проблеме (missed/timeout/unviable/succeeded/unknown) — файл/строка/замена/жанр уходят в fix-промпт; 0 = выкл (ждать полный прогон)\n";
     c += "MUTATE_COV=0              # P7-2.4 покрытийный отбор: llvm-cov -> nextest -E (требует nightly rustc)\n";

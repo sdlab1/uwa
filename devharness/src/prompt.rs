@@ -310,6 +310,7 @@ mod tests {
                 tool: "muex".into(),
                 scope: ".".into(),
                 min_kill: 80,
+                blind: Default::default(),
                 early: false,
                 first_problem: false,
                 cov: false,

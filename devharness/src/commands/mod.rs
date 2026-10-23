@@ -23,7 +23,7 @@ use crate::core::types::{CrapCfg, ItemId, MutateCfg, RunConfig};
 use crate::shell::store::{Item, Store};
 use crate::Cmd;
 
-pub const CONFIG_KEYS: [&str; 43] = [
+pub const CONFIG_KEYS: [&str; 44] = [
     "VERIFY",
     "BOOTSTRAP",
     "AGENT",
@@ -38,6 +38,7 @@ pub const CONFIG_KEYS: [&str; 43] = [
     "MUTATE",
     "MUTATE_SCOPE",
     "MIN_KILL",
+    "MUT_BLIND",
     "MUTATE_EARLY",
     "MUTATE_FIRST_PROBLEM",
     "MUTATE_COV",
@@ -114,6 +115,14 @@ pub fn load_config(root: &Path) -> anyhow::Result<RunConfig> {
         }
         _ => crate::core::tripwire::Mode::Off,
     };
+    // F-3 (MUT_BLIND): слепой гейт 0 мутантов. Опечатка в режиме = Err
+    // (опечатка не должна молча выключать блокиратор).
+    let mut_blind = match g("MUT_BLIND") {
+        Some(v) if !v.trim().is_empty() => {
+            crate::core::gates::BlindMode::parse(&v).map_err(|e| anyhow::anyhow!("devh: {e}"))?
+        }
+        _ => crate::core::gates::BlindMode::Off,
+    };
     let ignored_allowlist = {
         let path = g("IGNORED_ALLOWLIST")
             .filter(|s| !s.trim().is_empty())
@@ -149,6 +158,7 @@ pub fn load_config(root: &Path) -> anyhow::Result<RunConfig> {
                 tool,
                 scope: g("MUTATE_SCOPE").unwrap_or_else(|| "lib".into()),
                 min_kill: u32v("MIN_KILL", 90),
+                blind: mut_blind,
                 early: boolv("MUTATE_EARLY", false),
                 first_problem: boolv_on("MUTATE_FIRST_PROBLEM", true),
                 cov: boolv("MUTATE_COV", false),
@@ -160,6 +170,7 @@ pub fn load_config(root: &Path) -> anyhow::Result<RunConfig> {
                 tool,
                 scope: g("MUTATE_SCOPE").unwrap_or_else(|| "lib".into()),
                 min_kill: u32v("RED_MIN_KILL", 90),
+                blind: mut_blind,
                 early: boolv("MUTATE_EARLY", false),
                 first_problem: boolv_on("MUTATE_FIRST_PROBLEM", true),
                 cov: false,
