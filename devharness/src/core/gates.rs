@@ -1557,6 +1557,108 @@ mod tests {
         );
     }
 
+    /// F-3.3: 27.x и легаси (muex) на ОДНОМ логическом прогоне «все пойманы»
+    /// обязаны дать Pass. Легаси `Mutants: N, Killed: N` → missed=0; 27.x
+    /// `N caught` → missed=0. Вердикты равны.
+    #[test]
+    fn parser_27_and_legacy_agree_all_caught_passes() {
+        let p = MutPolicy::default();
+        let s27 = parse_mutation_output("10 mutants tested: 10 caught")
+            .unwrap_or_else(|| unreachable!("27.x итог должен распознаться"));
+        let leg = parse_mutation_output("Mutants: 10, Killed: 10")
+            .unwrap_or_else(|| unreachable!("легаси-итог должен распознаться"));
+        assert_eq!(s27.mutants, leg.mutants);
+        assert_eq!(s27.killed, leg.killed);
+        assert_eq!(s27.missed, leg.missed);
+        assert!(matches!(judge_mutation_stats(&s27, &p), Verdict::Pass));
+        assert!(matches!(judge_mutation_stats(&leg, &p), Verdict::Pass));
+    }
+
+    /// F-3.3: выживший мутант → Fail в ОБОИХ диалектах. Легаси схлопывает
+    /// пропуск в missed=N-K; 27.x печатает missed явно. Вердикт (missed>0)
+    /// совпадает.
+    #[test]
+    fn parser_27_and_legacy_agree_missed_fails() {
+        let p = MutPolicy::default();
+        let s27 = parse_mutation_output("10 mutants tested: 9 caught, 1 missed")
+            .unwrap_or_else(|| unreachable!("27.x итог должен распознаться"));
+        let leg = parse_mutation_output("Mutants: 10, Killed: 9")
+            .unwrap_or_else(|| unreachable!("легаси-итог должен распознаться"));
+        assert_eq!(s27.missed, 1);
+        assert_eq!(leg.missed, 1);
+        let vs = judge_mutation_stats(&s27, &p);
+        let vl = judge_mutation_stats(&leg, &p);
+        assert!(matches!(vs, Verdict::Fail { .. }), "27.x → {vs:?}");
+        assert!(matches!(vl, Verdict::Fail { .. }), "легаси → {vl:?}");
+    }
+
+    /// F-3.3: unviable/timeout/succeeded в 27.x и их схлопывание легаси в
+    /// missed — вердикт Fail в обоих. Сырые счётчики РАЗНЫХ (легаси не знает
+    /// unviable/timeout/succeeded — это граница формата), но ВЕРДИКТ равен:
+    /// каждый не-caught исход блокирует «чисто».
+    #[test]
+    fn parser_27_and_legacy_agree_unviable_timeout_succeeded_fail() {
+        let p = MutPolicy::default();
+        let cases: &[(&str, &str)] = &[
+            ("10 mutants tested: 9 caught, 1 unviable", "Mutants: 10, Killed: 9"),
+            ("10 mutants tested: 9 caught, 1 timeout", "Mutants: 10, Killed: 9"),
+            ("10 mutants tested: 9 caught, 1 succeeded", "Mutants: 10, Killed: 9"),
+        ];
+        for (s27, leg) in cases {
+            let a = parse_mutation_output(s27)
+                .unwrap_or_else(|| unreachable!("27.x итог должен распознаться: {s27}"));
+            let b = parse_mutation_output(leg)
+                .unwrap_or_else(|| unreachable!("легаси-итог должен распознаться: {leg}"));
+            let va = judge_mutation_stats(&a, &p);
+            let vb = judge_mutation_stats(&b, &p);
+            assert!(matches!(va, Verdict::Fail { .. }), "27.x «{s27}» → {va:?}");
+            assert!(matches!(vb, Verdict::Fail { .. }), "легаси «{leg}» → {vb:?}");
+            // вердикты (Pass/Fail) обязаны совпадать
+            assert_eq!(
+                matches!(va, Verdict::Pass),
+                matches!(vb, Verdict::Pass),
+                "расхождение вердикта: 27.x «{s27}» vs легаси «{leg}»"
+            );
+        }
+    }
+
+    /// F-3.3: мусор и edge-ввод НЕ паникуют и дают None (Env-блокер, а не
+    /// panic в рантайме). Прогресс-строки nutmeg и битые заголовки — None.
+    #[test]
+    fn parser_garbage_and_edge_inputs_never_panic() {
+        let garbage = [
+            "",
+            "мусор",
+            "mutants",                       // нет счётчика
+            "10 mutants tested",             // нет ':' с исходами
+            "10 mutants tested:",            // пустые исходы → parse пустого токена
+            "10 mutants tested: ,",          // пустые токены
+            "10 mutants tested: caught",     // нет числа
+            "10 mutants tested: x caught",   // не-число
+            "10 mutants tested: 5 weird",    // неизвестный исход
+            "8/10 mutants tested, 1 MISSED, 5s elapsed", // прогресс nutmeg
+            "Mutants:",                      // легаси без числа
+            "Mutants: x, Killed: y",         // легаси не-числа
+            "Mutants: 10, Killed:",          // легаси без killed
+            "N mutants tested: 1 caught",   // не-числовой счётчик
+        ];
+        for g in garbage {
+            // не паникует; либо None, либо валидная структура
+            if let Some(s) = parse_mutation_output(g) {
+                let _ = judge_mutation_stats(&s, &MutPolicy::default());
+            }
+        }
+        // часть гарантированно None (не распознана)
+        for g in [
+            "мусор",
+            "10 mutants tested",
+            "Mutants:",
+            "N mutants tested: 1 caught",
+        ] {
+            assert_eq!(parse_mutation_output(g), None, "«{g}» должно быть None");
+        }
+    }
+
     /// «succeeded» — ИЗВЕСТНЫЙ исход cargo-mutants, но не поимка.
     ///
     /// Источник: `LabOutcome::add` (27.1.0) считает `SummaryOutcome::Success`
