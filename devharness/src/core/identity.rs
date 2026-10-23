@@ -940,7 +940,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn slot_key_fallback_not_empty() {
         // В контейнерах/CI slot_key может вернуть fallback (cwd+runtime).
@@ -949,9 +948,14 @@ mod tests {
             assert!(key.starts_with("slot:"), "префикс slot: {key}");
         }
         // Fallback формат проверяем отдельно (не зависит от окружения).
-        let cwd = std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_default();
+        let cwd = std::env::current_dir()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
         let fallback = format!("slot:cw:{}:none", key_hash(&cwd));
-        assert!(fallback.starts_with("slot:cw:"), "fallback формат: {fallback}");
+        assert!(
+            fallback.starts_with("slot:cw:"),
+            "fallback формат: {fallback}"
+        );
     }
 
     #[test]
@@ -960,7 +964,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
         let home = dir.path();
         // Записываем claimed binding в слот-ключ (используем произвольный ключ).
-        write_binding_in(home, "slot:test:123:goose", "first-agent", "slot", true).unwrap_or_default();
+        write_binding_in(home, "slot:test:123:goose", "first-agent", "slot", true)
+            .unwrap_or_default();
         let b = read_binding_in(home, "slot:test:123:goose");
         assert!(b.as_ref().is_some_and(|x| x.claimed), "claimed binding");
         assert_eq!(b.as_ref().map(|x| x.name.as_str()), Some("first-agent"));

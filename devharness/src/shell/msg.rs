@@ -1321,7 +1321,11 @@ fn deliver(from: &str, to: &[String], block: &str, thread: &str) -> Vec<String> 
         let path = inbox_path(&safe_name(target));
         if append_message(&path, block) {
             done.push(target.clone());
-            ack(&safe_name(&crate::core::identity::canonical(from)), &msg_id, "доставлено");
+            ack(
+                &safe_name(&crate::core::identity::canonical(from)),
+                &msg_id,
+                "доставлено",
+            );
         }
     }
     let _ = append_message(&thread_path(thread), block);
@@ -1726,7 +1730,9 @@ fn send(args: &[String]) -> i32 {
             // Читаем acks из канонического ящика + всех синонимов.
             let mut acks_text = String::new();
             let canon = crate::core::identity::canonical(&agent);
-            for name in std::iter::once(canon.clone()).chain(crate::core::identity::aliases_of(&canon)) {
+            for name in
+                std::iter::once(canon.clone()).chain(crate::core::identity::aliases_of(&canon))
+            {
                 if let Ok(t) = fs::read_to_string(acks_path(&safe_name(&name))) {
                     acks_text.push_str(&t);
                     acks_text.push('\n');
