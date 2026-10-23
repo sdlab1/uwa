@@ -32,6 +32,15 @@ pub fn agent_prompt(
             extra.push_str(&block);
         }
     }
+    // Уведомления соседей: непрочитанные письма канала devh msg — агент
+    // видит их в промпте (идентификация автоматическая). Письма не съедены:
+    // прочитать и подтвердить — `devh msg read`.
+    let agent_name = crate::core::identity::current().name;
+    let brief = crate::shell::msg::unread_brief(&agent_name);
+    if !brief.is_empty() {
+        extra.push_str(&brief);
+        extra.push('\n');
+    }
     if let Some(rules) = &cfg.rules {
         extra.push_str(&format!(
             "Справочник проекта: {} — прочитай целиком. Это база известных граблей и уроков (технические знания: как здесь пишется код). Процессные правила уже вшиты в гейты харнесса. В тексте работы и в summary НЕ упоминай этот файл и todo/.\n",

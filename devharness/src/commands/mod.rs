@@ -252,6 +252,16 @@ pub fn resolve_id(store: &Store, arg: &Option<String>) -> anyhow::Result<ItemId>
 
 pub fn dispatch(cmd: &Cmd, root: &Path) -> anyhow::Result<()> {
     let store = Store::new(root);
+    // Авто-уведомление: новые входящие показываются красиво (stderr) при
+    // ЛЮБОМ вызове devh. Идентификация агента — автоматическая
+    // (core::identity): ни DEVH_AGENT, ни --agent задавать не нужно.
+    // Канал `devh msg` и живой `mutate watch` показывают письма сами.
+    let skip_notify = matches!(cmd, Cmd::Msg { .. } | Cmd::Init)
+        || matches!(cmd, Cmd::Mutate { sub, .. } if sub == "watch");
+    if !skip_notify {
+        let agent = crate::core::identity::current().name;
+        crate::shell::msg::auto_notify(&agent);
+    }
     if let Cmd::Init = cmd {
         return init::init(root);
     }

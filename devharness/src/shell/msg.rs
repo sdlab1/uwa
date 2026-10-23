@@ -303,6 +303,32 @@ fn inbox_path(agent: &str) -> PathBuf {
     inbox_dir().join(format!("{agent}.log"))
 }
 
+/// Ящики входящих агента: свой + legacy «default».
+///
+/// Legacy нужен для перехода: письма, отправленные старой схемой (без
+/// явного имени), лежат в `default.log` — агент с авто-именем обязан их
+/// видеть, иначе они потерялись бы навсегда.
+fn inbox_files(agent: &str) -> Vec<PathBuf> {
+    let own = inbox_path(&safe_name(agent));
+    let mut files = vec![own.clone()];
+    let legacy = inbox_path("default");
+    if own != legacy && legacy.exists() {
+        files.push(legacy);
+    }
+    files
+}
+
+/// Непрочитанные письма агента (из всех его ящиков).
+fn inbox_blocks(agent: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for path in inbox_files(agent) {
+        let text = fs::read_to_string(&path).unwrap_or_default();
+        let (_header, blocks) = split_log(&text);
+        out.extend(blocks);
+    }
+    out
+}
+
 fn outbox_path(agent: &str) -> PathBuf {
     outbox_dir().join(format!("{agent}.log"))
 }
@@ -326,11 +352,10 @@ fn safe_name(agent: &str) -> String {
     }
 }
 
+/// Кто я в канале. Имя — авто: контекст сессии (core::identity), а не
+/// ручной `DEVH_AGENT=...`; без него все агенты были «default».
 fn me(explicit: Option<&str>) -> String {
-    explicit
-        .map(str::to_string)
-        .or_else(|| std::env::var("DEVH_AGENT").ok().filter(|s| !s.is_empty()))
-        .unwrap_or_else(|| "default".to_string())
+    crate::core::identity::resolve(explicit).name
 }
 
 fn now_hm() -> String {
@@ -428,6 +453,168 @@ fn block_tags(block: &str) -> Vec<String> {
     }
 }
 
+/// Разобранное письмо — для красивого вывода и уведомлений.
+#[derive(Debug, Clone, Default)]
+pub struct MsgView {
+    pub stamp: String,
+    pub sender: String,
+    pub to: String,
+    pub id: String,
+    pub thread: String,
+    pub subject: String,
+    pub place: Option<String>,
+    pub tags: Vec<String>,
+    pub body: String,
+}
+
+/// Разобрать блок письма в структуру.
+///
+/// Формат (см. `build_message`):
+///   [ЧЧ:ММ] ОТ: <отправитель> — КОМУ: <кому>
+///   ID: <id>
+///   ТРЕД: <тред>
+///   ТЕМА: <тема>
+///   МЕСТО: <путь>              (необязательно)
+///   ВЫРЕЗКА: <код>            (необязательно)
+///   ТЭГИ: <тэг1>, <тэг2>      (необязательно)
+///   ТЕЛО:                     (маркер тела; в старых письмах его нет)
+///   <текст>
+///
+/// Старые письма (без маркера `ТЕЛО:`) разбираются по остальным заголовкам:
+/// тело — всё, что не является заголовком.
+pub fn parse_view(block: &str) -> MsgView {
+    let mut v = MsgView::default();
+    let mut body: Vec<String> = Vec::new();
+    let mut in_snippet = false;
+    let mut in_body = false;
+    let mut first = true;
+    for line in block.lines() {
+        if in_body {
+            body.push(line.to_string());
+            continue;
+        }
+        if in_snippet {
+            // вырезка кода заканчивается на следующем заголовке
+            if line.starts_with("ТЭГИ: ") || line.starts_with("ТЕЛО:") {
+                in_snippet = false;
+            } else {
+                continue;
+            }
+        }
+        if line.starts_with("ТЕЛО:") {
+            in_body = true;
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("ID: ") {
+            v.id = rest.trim().to_string();
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("ТРЕД: ") {
+            v.thread = rest.trim().to_string();
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("ТЕМА: ") {
+            v.subject = rest.trim().to_string();
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("МЕСТО: ") {
+            v.place = Some(rest.trim().to_string());
+            continue;
+        }
+        if line.starts_with("ТЭГИ: ") {
+            v.tags = line
+                .trim_start_matches("ТЭГИ: ")
+                .split(',')
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty())
+                .collect();
+            continue;
+        }
+        if line.starts_with("ВЫРЕЗКА:") {
+            in_snippet = true;
+            continue;
+        }
+        if first {
+            first = false;
+            v.stamp = line
+                .strip_prefix('[')
+                .and_then(|s| s.split_once(']'))
+                .map(|(a, _)| a.trim().to_string())
+                .unwrap_or_default();
+            v.sender = block_sender(block);
+            v.to = block_recipients(block);
+            continue;
+        }
+        // строка без заголовка — начало тела (старый формат)
+        in_body = true;
+        body.push(line.to_string());
+    }
+    v.body = body.join("\n").trim().to_string();
+    v
+}
+
+/// Ширина рамки письма.
+const MSG_WIDTH: usize = 76;
+
+/// Красивое представление письма: рамка, «отправитель → адресат», тема,
+/// тред/тэги/место и тело. Цвета — если терминал (см. `shell::color`).
+pub fn render_block(block: &str) -> String {
+    let v = parse_view(block);
+    let c = crate::shell::color::colors();
+    let col_c = c.c;
+    let col_b = c.b;
+    let col_d = c.d;
+    let col_z = c.z;
+    let mut out = String::new();
+    let rule = "━".repeat(MSG_WIDTH);
+    let thin = "─".repeat(MSG_WIDTH);
+    out.push_str(&format!("{col_c}{rule}{col_z}\n"));
+
+    let sender = if v.sender.is_empty() { "?" } else { v.sender.as_str() };
+    let to = if v.to.is_empty() { "?" } else { v.to.as_str() };
+    let title = format!("✉  {sender} → {to}");
+    let mut right_parts: Vec<String> = Vec::new();
+    if !v.stamp.is_empty() {
+        right_parts.push(v.stamp.clone());
+    }
+    if !v.id.is_empty() {
+        right_parts.push(format!("id {}", v.id));
+    }
+    let right = right_parts.join(" · ");
+    let used = title
+        .chars()
+        .count()
+        .saturating_add(right.chars().count())
+        .saturating_add(4);
+    let pad = MSG_WIDTH.saturating_sub(used);
+    out.push_str(&format!("{col_b}  {title:pad$}{col_d}  {right}{col_z}\n"));
+
+    if !v.subject.is_empty() {
+        out.push_str(&format!("{col_b}   Тема:  {}{col_z}\n", v.subject));
+    }
+    let mut meta: Vec<String> = Vec::new();
+    if !v.thread.is_empty() {
+        meta.push(format!("Тред: {}", v.thread));
+    }
+    if !v.tags.is_empty() {
+        meta.push(format!("Тэги: {}", v.tags.join(", ")));
+    }
+    if !meta.is_empty() {
+        out.push_str(&format!("{col_d}   {}{col_z}\n", meta.join("  ·  ")));
+    }
+    if let Some(place) = v.place.as_ref() {
+        out.push_str(&format!("{col_d}   Место: {place}{col_z}\n"));
+    }
+    out.push_str(&format!("{col_d}{thin}{col_z}\n"));
+    if !v.body.is_empty() {
+        for line in v.body.lines() {
+            out.push_str(&format!("   {line}\n"));
+        }
+    }
+    out.push_str(&format!("{col_c}{rule}{col_z}\n"));
+    out
+}
+
 /// Ростер агентов: все, у кого есть входящие или исходящие.
 fn roster() -> Vec<String> {
     let mut names: Vec<String> = Vec::new();
@@ -463,6 +650,109 @@ fn append_message(path: &Path, block: &str) -> bool {
         }
     }
     ok
+}
+
+/// Файл «уже показанных» уведомлений (на агента).
+fn notified_path(agent: &str) -> PathBuf {
+    home().join("notified").join(format!("{}.log", safe_name(agent)))
+}
+
+/// ID уже показанных уведомлений агента.
+fn notified_ids(agent: &str) -> Vec<String> {
+    let text = fs::read_to_string(notified_path(agent)).unwrap_or_default();
+    text.lines()
+        .filter_map(|l| l.split_whitespace().next().map(|s| s.to_string()))
+        .collect()
+}
+
+/// Запомнить показанные уведомления (чтобы не повторяться).
+fn mark_notified(agent: &str, ids: &[String]) {
+    if ids.is_empty() {
+        return;
+    }
+    let path = notified_path(agent);
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(&path) {
+        for id in ids {
+            let _ = writeln!(f, "{id} {}", unix_now());
+        }
+    }
+}
+
+/// Авто-уведомление: новые входящие показываются красиво (в stderr) при
+/// ЛЮБОМ вызове devh — агенту не нужно самому помнить про `devh msg read`.
+///
+/// Письма НЕ съедаются: consume-on-read остаётся за `devh msg read`.
+/// Показ дедуплицируется по ID (файл `notified/<агент>.log`).
+pub fn auto_notify(agent: &str) -> usize {
+    let blocks = inbox_blocks(agent);
+    if blocks.is_empty() {
+        return 0;
+    }
+    let seen = notified_ids(agent);
+    let mut fresh: Vec<String> = Vec::new();
+    let mut ids: Vec<String> = Vec::new();
+    for b in blocks.iter() {
+        let id = block_field(b, "ID: ").unwrap_or_default();
+        if id.is_empty() || seen.iter().any(|s| s == &id) {
+            continue;
+        }
+        fresh.push(b.clone());
+        ids.push(id);
+    }
+    if fresh.is_empty() {
+        return 0;
+    }
+    let c = crate::shell::color::colors();
+    let col_y = c.y;
+    let col_z = c.z;
+    eprintln!(
+        "\n{col_y}📬 {} новых сообщений для {} — прочитать: devh msg read{col_z}\n",
+        fresh.len(),
+        agent
+    );
+    for (b, id) in fresh.iter().zip(ids.iter()) {
+        eprintln!("{}", render_block(b));
+        notify(id, b);
+    }
+    mark_notified(agent, &ids);
+    fresh.len()
+}
+
+/// Краткая сводка входящих для промпта агента (без ANSI, коротко).
+pub fn unread_brief(agent: &str) -> String {
+    let blocks = inbox_blocks(agent);
+    if blocks.is_empty() {
+        return String::new();
+    }
+    let mut out = String::new();
+    out.push_str(&format!(
+        "ВХОДЯЩИЕ СООБЩЕНИЯ (канал devh msg): {} непрочитанных — прочитать: devh msg read\n",
+        blocks.len()
+    ));
+    for b in blocks.iter().take(5) {
+        let v = parse_view(b);
+        out.push_str(&format!(
+            "  • [{}] {} → {} | тема: {} | тред: {} | id: {}\n",
+            v.stamp, v.sender, v.to, v.subject, v.thread, v.id
+        ));
+        let first = v
+            .body
+            .lines()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if !first.is_empty() {
+            out.push_str(&format!("    {first}\n"));
+        }
+    }
+    if blocks.len() > 5 {
+        out.push_str(&format!("  … ещё {}\n", blocks.len().saturating_sub(5)));
+    }
+    out
 }
 
 /// Уведомление: один popup на сообщение (дедуп по ID под advisory-локом).
@@ -510,29 +800,45 @@ fn notify(id: &str, text: &str) {
     let _ = writeln!(file, "{id} {now}");
     let _ = fs2::FileExt::unlock(&file);
 
-    let subject = block_field(text, "ТЕМА: ").unwrap_or_else(|| "новое сообщение".to_string());
-    let sender = block_field(text, "ОТ: ").unwrap_or_default();
-    let first_body = text
+    let v = parse_view(text);
+    let subject = if v.subject.is_empty() {
+        "новое сообщение".to_string()
+    } else {
+        v.subject.clone()
+    };
+    let sender = if v.sender.is_empty() {
+        "агент"
+    } else {
+        v.sender.as_str()
+    };
+    let first_body = v
+        .body
         .lines()
-        .filter(|l| {
-            !l.starts_with('[')
-                && !l.starts_with("ID:")
-                && !l.starts_with("ТЕМА:")
-                && !l.starts_with("ТЭГИ:")
-        })
         .find(|l| !l.trim().is_empty())
         .unwrap_or("")
-        .to_string();
-    let summary = format!("{sender}: {subject} — {}", first_body.trim());
-    let _ = Command::new("notify-send")
-        .arg("-t")
-        .arg(NOTIFY_TIMEOUT_MS.to_string())
-        .arg("Сессии: сообщение")
-        .arg(summary.chars().take(220).collect::<String>())
-        .output();
-    let _ = Command::new("paplay")
-        .arg("/usr/share/sounds/freedesktop/stereo/message.oga")
-        .output();
+        .trim();
+    let summary = format!("{sender}: {subject} — {first_body}");
+    if env_flag("DEVH_MSG_POPUP") {
+        let _ = Command::new("notify-send")
+            .arg("-t")
+            .arg(NOTIFY_TIMEOUT_MS.to_string())
+            .arg(format!("devh msg — {sender}"))
+            .arg(summary.chars().take(220).collect::<String>())
+            .output();
+    }
+    if env_flag("DEVH_MSG_SOUND") {
+        let _ = Command::new("paplay")
+            .arg("/usr/share/sounds/freedesktop/stereo/message.oga")
+            .output();
+    }
+}
+
+/// Флаг окружения «включено»: по умолчанию да; выключает 0/false/no/off.
+fn env_flag(name: &str) -> bool {
+    match std::env::var(name) {
+        Ok(v) => !matches!(v.trim(), "0" | "false" | "no" | "off"),
+        Err(_) => true,
+    }
 }
 
 /// Разбор аргументов вручную (KISS: «проход как есть»).
@@ -646,7 +952,8 @@ fn build_message(
     if !tags.is_empty() {
         block.push_str(&format!("\nТЭГИ: {}", tags.join(", ")));
     }
-    block.push_str(&format!("\n{}\n", body.trim_end()));
+    // Явный маркер тела: без него вырезка кода (ВЫРЕЗКА:) неотличима от текста.
+    block.push_str(&format!("\nТЕЛО:\n{}\n", body.trim_end()));
     block
 }
 
@@ -768,7 +1075,7 @@ fn send(args: &[String]) -> i32 {
                 return 1;
             }
             for b in blocks.iter() {
-                println!("{b}{SEP}");
+                println!("{}", render_block(b));
             }
             0
         }
@@ -776,30 +1083,31 @@ fn send(args: &[String]) -> i32 {
             let agent = me(m.value("agent").as_deref());
             let peek = m.flag("peek");
             let filter = m.value("tag");
-            let path = inbox_path(&safe_name(&agent));
-            let text = fs::read_to_string(&path).unwrap_or_default();
-            let (header, blocks) = split_log(&text);
-            let mut kept: Vec<String> = Vec::new();
             let mut shown = 0usize;
-            for b in blocks.iter() {
-                let matches = match filter.as_ref() {
-                    None => true,
-                    Some(t) => block_tags(b).iter().any(|x| x == t),
-                };
-                if matches {
-                    println!("{b}{SEP}");
-                    shown = shown.saturating_add(1);
-                    if !peek {
-                        let id = block_field(b, "ID: ").unwrap_or_default();
-                        let sender = block_sender(b);
-                        ack(&safe_name(&sender), &id, "прочитано");
+            for path in inbox_files(&agent) {
+                let text = fs::read_to_string(&path).unwrap_or_default();
+                let (header, blocks) = split_log(&text);
+                let mut kept: Vec<String> = Vec::new();
+                for b in blocks.iter() {
+                    let matches = match filter.as_ref() {
+                        None => true,
+                        Some(t) => block_tags(b).iter().any(|x| x == t),
+                    };
+                    if matches {
+                        println!("{}", render_block(b));
+                        shown = shown.saturating_add(1);
+                        if !peek {
+                            let id = block_field(b, "ID: ").unwrap_or_default();
+                            let sender = block_sender(b);
+                            ack(&safe_name(&sender), &id, "прочитано");
+                        }
+                    } else {
+                        kept.push(b.clone());
                     }
-                } else {
-                    kept.push(b.clone());
                 }
-            }
-            if !peek && shown > 0 {
-                let _ = fs::write(&path, join_log(&header, &kept));
+                if !peek && shown > 0 {
+                    let _ = fs::write(&path, join_log(&header, &kept));
+                }
             }
             touch_presence(&agent, "read");
             if shown == 0 {
@@ -815,40 +1123,44 @@ fn send(args: &[String]) -> i32 {
                 .unwrap_or(3);
             let consume = m.flag("consume");
             let once = m.flag("once");
-            let path = inbox_path(&safe_name(&agent));
             let mut seen: Vec<String> = Vec::new();
+            println!(
+                "канал: {agent} (идентификация автоматическая; закрепить имя: devh msg claim <имя>)"
+            );
             loop {
                 // heartbeat: «я на месте» — по нему соседи видят, кто онлайн
                 touch_presence(&agent, "watch");
-                let text = fs::read_to_string(&path).unwrap_or_default();
-                let (header, blocks) = split_log(&text);
-                let fresh: Vec<String> = blocks
-                    .iter()
-                    .filter(|b| {
-                        let id = block_field(b, "ID: ").unwrap_or_default();
-                        !seen.iter().any(|s| s == &id)
-                    })
-                    .cloned()
-                    .collect();
-                if !fresh.is_empty() {
-                    for b in fresh.iter() {
-                        let id = block_field(b, "ID: ").unwrap_or_default();
-                        if !id.is_empty() {
-                            seen.push(id.clone());
+                for path in inbox_files(&agent) {
+                    let text = fs::read_to_string(&path).unwrap_or_default();
+                    let (header, blocks) = split_log(&text);
+                    let fresh: Vec<String> = blocks
+                        .iter()
+                        .filter(|b| {
+                            let id = block_field(b, "ID: ").unwrap_or_default();
+                            !seen.iter().any(|s| s == &id)
+                        })
+                        .cloned()
+                        .collect();
+                    if !fresh.is_empty() {
+                        for b in fresh.iter() {
+                            let id = block_field(b, "ID: ").unwrap_or_default();
+                            if !id.is_empty() {
+                                seen.push(id.clone());
+                            }
+                            println!("{}", render_block(b));
+                            notify(&id, b);
                         }
-                        println!("{b}{SEP}");
-                        notify(&id, b);
-                    }
-                    if consume {
-                        let keep: Vec<String> = blocks
-                            .iter()
-                            .filter(|b| {
-                                let id = block_field(b, "ID: ").unwrap_or_default();
-                                !seen.iter().any(|s| s == &id)
-                            })
-                            .cloned()
-                            .collect();
-                        let _ = fs::write(&path, join_log(&header, &keep));
+                        if consume {
+                            let keep: Vec<String> = blocks
+                                .iter()
+                                .filter(|b| {
+                                    let id = block_field(b, "ID: ").unwrap_or_default();
+                                    !seen.iter().any(|s| s == &id)
+                                })
+                                .cloned()
+                                .collect();
+                            let _ = fs::write(&path, join_log(&header, &keep));
+                        }
                     }
                 }
                 if once {
@@ -856,6 +1168,33 @@ fn send(args: &[String]) -> i32 {
                 }
                 std::thread::sleep(Duration::from_secs(interval));
             }
+            0
+        }
+        "claim" => {
+            // Закрепить имя за текущей сессией: дальше devh сам знает, кто я.
+            let raw = m.first();
+            if raw.is_empty() {
+                eprintln!("нужно имя: devh msg claim <имя>");
+                return 2;
+            }
+            match crate::core::identity::claim(&raw) {
+                Ok(id) => {
+                    println!("идентификация закреплена: {}", id.name);
+                    println!("ключ сессии: {}", id.key);
+                    0
+                }
+                Err(e) => {
+                    eprintln!("devh msg claim: {e}");
+                    1
+                }
+            }
+        }
+        "whoami" => {
+            let id = crate::core::identity::current();
+            println!("имя: {}", id.name);
+            println!("источник: {}", id.source.as_str());
+            println!("ключ: {}", id.key);
+            println!("непрочитанных: {}", inbox_blocks(&id.name).len());
             0
         }
         "threads" => {
@@ -1187,6 +1526,119 @@ pub fn run(args: &[String]) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Сериализация тестов, меняющих DEVH_MSG_HOME (env общий для процесса).
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn with_msg_home<T>(home: &Path, f: impl FnOnce() -> T) -> T {
+        let guard = ENV_LOCK.lock().unwrap_or_else(|_| unreachable!());
+        std::env::set_var("DEVH_MSG_HOME", home);
+        std::env::set_var("MSG_NOTIFY_DEDUPE", home.join("notified.dedupe"));
+        std::env::set_var("DEVH_MSG_POPUP", "0");
+        std::env::set_var("DEVH_MSG_SOUND", "0");
+        let out = f();
+        std::env::remove_var("DEVH_MSG_HOME");
+        std::env::remove_var("MSG_NOTIFY_DEDUPE");
+        std::env::remove_var("DEVH_MSG_POPUP");
+        std::env::remove_var("DEVH_MSG_SOUND");
+        drop(guard);
+        out
+    }
+
+    fn write_inbox(home: &Path, agent: &str, block: &str) {
+        let inbox = home.join("inbox");
+        std::fs::create_dir_all(&inbox).unwrap_or_default();
+        let text = format!("{block}{SEP}\n");
+        std::fs::write(inbox.join(format!("{agent}.log")), text).unwrap_or_default();
+    }
+
+    #[test]
+    fn parse_view_reads_headers_and_body() {
+        let b = "[10:24] ОТ: deepseek — КОМУ: minimax\n\
+ID: abcd1234\n\
+ТРЕД: thr-1\n\
+ТЕМА: F-2 — FREEZE\n\
+МЕСТО: devharness/src/commands/run.rs\n\
+ТЭГИ: f2, freeze\n\
+ТЕЛО:\n\
+строка тела\n\
+вторая строка";
+        let v = parse_view(b);
+        assert_eq!(v.stamp, "10:24");
+        assert_eq!(v.sender, "deepseek");
+        assert_eq!(v.to, "minimax");
+        assert_eq!(v.id, "abcd1234");
+        assert_eq!(v.thread, "thr-1");
+        assert_eq!(v.subject, "F-2 — FREEZE");
+        assert_eq!(v.place.as_deref(), Some("devharness/src/commands/run.rs"));
+        assert_eq!(v.tags.len(), 2, "тэги: {v:?}");
+        assert_eq!(v.body, "строка тела\nвторая строка");
+    }
+
+    #[test]
+    fn parse_view_reads_old_format_without_body_marker() {
+        let b = "[10:00] ОТ: sender — КОМУ: a\nID: x\nТЕМА: t\nтело старого письма";
+        let v = parse_view(b);
+        assert_eq!(v.subject, "t");
+        assert_eq!(v.body, "тело старого письма");
+    }
+
+    #[test]
+    fn parse_view_skips_code_snippet() {
+        let b = "[10:00] ОТ: sender — КОМУ: a\nID: x\n\
+ВЫРЕЗКА:\n\
+  42 | let x = 1;\n\
+ТЭГИ: code\n\
+ТЕЛО:\n\
+текст";
+        let v = parse_view(b);
+        assert_eq!(v.body, "текст", "вырезка не попала в тело: {v:?}");
+        assert_eq!(v.tags.len(), 1);
+    }
+
+    #[test]
+    fn render_block_is_readable() {
+        let b = "[10:24] ОТ: deepseek — КОМУ: minimax\nID: abcd1234\n\
+ТРЕД: thr-1\nТЕМА: Тема письма\nТЕЛО:\nтело";
+        let out = render_block(b);
+        assert!(out.contains("deepseek"), "{out}");
+        assert!(out.contains("minimax"), "{out}");
+        assert!(out.contains("Тема письма"), "{out}");
+        assert!(out.contains("thr-1"), "{out}");
+        assert!(out.contains("тело"), "{out}");
+        assert!(out.contains('━'), "рамка: {out}");
+    }
+
+    #[test]
+    fn auto_notify_shows_new_message_once() {
+        let dir = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let home = dir.path();
+        write_inbox(
+            home,
+            "test-agent",
+            "[10:24] ОТ: deepseek — КОМУ: test-agent\nID: aa11bb22\n\
+ТРЕД: t1\nТЕМА: Письмо\nТЕЛО:\nтело\n",
+        );
+        let (first, second) = with_msg_home(home, || (auto_notify("test-agent"), auto_notify("test-agent")));
+        assert_eq!(first, 1, "первый вызов показал письмо");
+        assert_eq!(second, 0, "повтор не дублирует (дедуп по ID)");
+    }
+
+    #[test]
+    fn unread_brief_lists_pending_messages() {
+        let dir = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let home = dir.path();
+        write_inbox(
+            home,
+            "test-agent",
+            "[10:24] ОТ: deepseek — КОМУ: test-agent\nID: aa11bb22\n\
+ТРЕД: t1\nТЕМА: Письмо\nТЕЛО:\nтело письма\n",
+        );
+        let brief = with_msg_home(home, || unread_brief("test-agent"));
+        assert!(brief.contains("ВХОДЯЩИЕ СООБЩЕНИЯ"), "{brief}");
+        assert!(brief.contains("Письмо"), "{brief}");
+        assert!(brief.contains("тело письма"), "{brief}");
+    }
 
     fn block_of(to: &str, subject: &str, tags: &[&str], body: &str) -> String {
         let mut b = format!("[10:00] ОТ: sender — КОМУ: {to}\nID: abcd1234\nТРЕД: 11112222\nТЕМА: {subject}\n");

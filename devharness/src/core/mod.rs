@@ -4,6 +4,7 @@ pub mod digest;
 pub mod early;
 pub mod escapes;
 pub mod gates;
+pub mod identity;
 pub mod killmap;
 pub mod load;
 pub mod mutaudit;
