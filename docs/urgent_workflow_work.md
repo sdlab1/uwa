@@ -77,16 +77,16 @@
   ведёт к `stop` (Running) или перепрогону (Finished), `verdict` — rc=2.
   Тесты `audit_stale_detects_tree_change_and_tolerates_old_state`,
   `stale_audit_stops_or_restarts_instead_of_chasing_problems`; lib 413/413.
-  Закоммичено `baf8b11`. Свежий аудит на новом дереве: 68/228, 0 проблем,
-  kr 100% (на момент записи).
+  Закоммичено `baf8b11`. Свежий аудит на новом дереве: **228/228, 0 проблем,
+  kr 100%, `devh mutate verdict` rc=0** (07:11).
 
 **Осталось до закрытия части D:**
 
-* F-1 + F-1.8.1 закоммичены (`a1679ea`, `baf8b11`); N4 (подпись кэша,
-  `items/W-NNN/mutcache.stamp`) готов в дереве; `devh test` — PASS 477;
-  осталась run-level приёмка tamper-сценариев — полировка F-1;
-* `devh test` (полный сьют) — после аудита: load guard иначе даёт rc=2;
-* `devh mutate verdict` по зоне — дождаться финала (0 missed на 68/228);
+* F-1/F-1.8.1/F-1.8.2/F-1.8.3 и N4 закоммичены; `devh test` — **PASS 477 /
+  FAIL 0**, `devh mutate verdict` — **rc=0** (228/228).
+* Добавлен `devh test --bg` / `--status`: полный сьют больше не блокирует
+  агента; лог сьюта — `.harness/logs/test-<ts>.log`, фон — `test-bg.log`.
+* Осталась run-level приёмка tamper-сценариев — полировка F-1; затем F-2.
 * 12 старых «проблем» `survivors.rs` закрыты тестами; свежий аудит их не
   подтверждает, отдельно чинить нечего.
 

@@ -29,7 +29,7 @@
 |---|---|---|---|
 | W1 | «Агент не трогает git» держится только на промпте; нет проверки HEAD/refs, нет защиты `red.cmd` и конфигов гейтов | `prompt.rs`, `run.rs` | F-1, F-7 |
 | W2 | FREEZE пропускается без `FILES:` (только лог); inline-тесты Rust в файлах из scope можно ослабить | `run.rs::freeze_gate`, `core/gates.rs::freeze_violations` | F-2 |
-| W3 | Мутгейт: 0 мутантов = Pass; `exclude_re`/`mutants::skip` не охраняются; timeout засчитан как «убит»; `commands/**` не мутируется | `gates.rs::judge_mutation`, `cargo-mutants.toml` | F-3 |
+| W3 | Мутгейт: 0 мутантов = Pass; `exclude_re`/`mutants::skip` не охраняются; `commands/**` не мутируется. Timeout/unviable уже не «пойман»: `timeout > 0` и `unviable > 0` → Fail | `gates.rs::judge_mutation`, `cargo-mutants.toml` | F-3 |
 | W4 | REVIEW — та же модель, самое мягкое звено | `run.rs::review_gate` | F-4 (+E5/C2) |
 | W5 | Хрупкий парсинг stdout инструментов (cargo-mutants, muex, CRAP) | `gates.rs::parse_*` | F-5 |
 | W6 | Автономия L0/L1/L2 только отображается | `escapes.rs`, `merge.rs` | F-6 |
@@ -68,8 +68,8 @@
 | `PROTECTED` | список по умолчанию (§F-1) | F-1 |
 | `FREEZE_REQUIRED` | `1` | F-2 |
 | `WEAKEN` | `enforce` | F-2 |
-| `MUT_MAX_TIMEOUT_PCT` | `10` | F-3 |
-| `MUT_MAX_UNVIABLE_PCT` | `50` | F-3 |
+| ~~`MUT_MAX_TIMEOUT_PCT`~~ | не вводится: `timeout > 0` = Fail | F-3 |
+| ~~`MUT_MAX_UNVIABLE_PCT`~~ | не вводится: `unviable > 0` = Fail | F-3 |
 | `MUT_BLIND` | `enforce` | F-3 |
 | `REVIEW_BLIND` | `1` | F-4 |
 | `REVIEW_AGENT` | `''` | F-4 |
@@ -458,13 +458,15 @@ RED: cargo test -p devh --lib mutpolicy_
 
 ### F-3.1 Политика
 
-Сейчас `killed = caught + timeout` слито в одно число **(проверено)**. Вводим отдельное `timeout` (`killed` остаётся суммой):
+Код уже не сливает timeout в killed: `killed` = только `CaughtMutant`,
+`timeout > 0` и `unviable > 0` → `Fail` (`gates.rs::judge_mutation_stats`).
+Поэтому процентные допуски (`max_timeout_pct`, `max_unviable_pct`) **не
+вводятся** — это ослабило бы текущий ноль терпимости. Остаётся добавить
+только слепой гейт и `changed_code_lines`:
 
 ```rust
 pub struct MutPolicy {
     pub min_kill: u32,
-    pub max_timeout_pct: u32,      // 10
-    pub max_unviable_pct: u32,     // 50, действует при mutants >= 10
     pub changed_code_lines: u32,   // из diff
 }
 pub fn judge_mutation(raw: &Raw, p: &MutPolicy) -> Verdict;
@@ -473,8 +475,8 @@ pub fn judge_mutation(raw: &Raw, p: &MutPolicy) -> Verdict;
 Порядок проверок (важен):
 1. baseline красный → как сейчас;
 2. `testable == 0 && changed_code_lines > 0` → `Fail` («слепой гейт: 0 мутантов на N строках кода»). Сегодня это тихий `Pass` (ветки `mutants: 0` и `testable == 0`);
-3. `timeout*100 > killed*max_timeout_pct` → `Fail` («тесты зависают, а не ловят»);
-4. `unviable*100 > mutants*max_unviable_pct` при `mutants >= 10` → `Fail` (гейт пустой);
+3. `timeout > 0` → `Fail` («тесты зависают, а не ловят»);
+4. `unviable > 0` → `Fail` (гейт пустой, ноль терпимости);
 5. затем текущее `rate >= min_kill`.
 
 ### F-3.2 `changed_code_lines`
@@ -494,7 +496,7 @@ pub fn judge_mutation(raw: &Raw, p: &MutPolicy) -> Verdict;
 
 ### Тесты (границы)
 
-`mutpolicy_timeout_at_threshold_passes` и `…_plus_one_fails`; то же для `unviable`; `mutpolicy_blind_gate_zero_mutants_nonzero_lines_fails`; `…_zero_lines_passes`; `mutpolicy_parser_divergence_is_env`; `changed_code_lines_skips_cfg_test_module`; `changed_code_lines_ignores_comments_and_blank`.
+`mutpolicy_timeout_any_fails` (порога нет); `mutpolicy_unviable_any_fails`; `mutpolicy_blind_gate_zero_mutants_nonzero_lines_fails`; `…_zero_lines_passes`; `mutpolicy_parser_divergence_is_env`; `changed_code_lines_skips_cfg_test_module`; `changed_code_lines_ignores_comments_and_blank`.
 
 **Стабы:** режимы `zero`, `timeouts`, `unviable` в микрорепо `tools/mutate.sh` (по образцу существующих `weak`/`violation`) и стабы `zero-mutant.sh`, `timeout-farm.sh`, `unviable-farm.sh`.
 **Грабли:** после п.1–3 меняется знаменатель, поэтому `MIN_KILL=90` пере-оценить на прогонах A-серии.
