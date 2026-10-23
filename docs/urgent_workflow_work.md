@@ -66,6 +66,9 @@
   Это не новые дыры, а copy-снимок ДО фикса. Аудит остановлен и
   перезапущен (pid 302941) по новому дереву; старые блоки не чиним
   повторно.
+* **F-1.8.3 сделана:** `devh mutate recheck <name>` — один мутант по имени,
+  отдельный `--output`, overlay `rechecked.json`; `problems/status` снимают
+  только `caught` на текущем дереве; `verdict` overlay не доверяет.
 * **F-1.8.2 сделана:** `devh mutate watch --until-problem` — блокирующий
   канал: первая проблема → rc=1 сразу, `--batch-ms N` копит похожие
   событиями, без sleep; тест `section00i_watch_until_problem_exits_on_first_problem`.

@@ -93,6 +93,7 @@ pub fn mutate(root: &Path, sub: &str, args: &[String]) -> anyhow::Result<()> {
         "status" => status(root, args),
         "watch" => watch(root, args),
         "problems" => problems(root, args),
+        "recheck" => recheck(root, args),
         "verdict" => verdict(root),
         "stop" => stop(root),
         // Внутренняя подкоманда: её запускает `start` (супервизор).
@@ -131,6 +132,9 @@ pub const CANON: &str = r#"devh mutate — единственный вход в 
                               замена, жанр, исход). rc=1, если есть проблемы.
                               Если дерево изменилось после старта, снимок
                               помечается протухшим: не чини уже исправленное.
+  devh mutate recheck <name>  перепроверить ОДНОГО мутанта по имени (секунды):
+                              cargo-mutants -F, отдельный --output. Caught →
+                              проблема закрыта в problems (overlay), иначе rc=1.
   devh mutate verdict         финальный вердикт: 0 = чисто, 1 = дыра
                               (выжил/таймаут/не компилится/неопознанный исход/
                               повреждённые детали/упавший инструмент),
@@ -143,6 +147,7 @@ pub const CANON: &str = r#"devh mutate — единственный вход в 
   • перед мержем           → verdict (код возврата — гейт)
   • «что сейчас?»         → status
   • «что чинить?»         → problems
+  • починил одного         → recheck <name>, затем перепрогон дельты
   • смотришь в терминал    → watch
   • дерево изменилось      → stop + перезапуск (next подскажет); verdict
     после старта               по старому снимку не выносится (rc=2)
@@ -946,7 +951,8 @@ fn report_new_problems(
 /// Мгновенный снимок. Ничего не ждёт: читает файлы и печатает кадр.
 fn status(root: &Path, args: &[String]) -> anyhow::Result<()> {
     let eff = effective_args(root, args);
-    let audit = snapshot(root, &eff);
+    let mut audit = snapshot(root, &eff);
+    filter_rechecked(root, &mut audit);
     let aborted_state = aborted(root);
     let stale = audit_stale(root);
     // Диагноз ПЕРЕД «аудит не запущен»: аудит стартовал, а супервизор умер.
@@ -1199,7 +1205,8 @@ fn watch(root: &Path, args: &[String]) -> anyhow::Result<()> {
 /// Руководство к действию: что именно чинить.
 fn problems(root: &Path, args: &[String]) -> anyhow::Result<()> {
     let eff = effective_args(root, args);
-    let audit = snapshot(root, &eff);
+    let mut audit = snapshot(root, &eff);
+    filter_rechecked(root, &mut audit);
     let aborted_state = aborted(root);
     if audit.total.is_none() && audit.done == 0 && !audit.alive && aborted_state.is_none() {
         println!("аудит не запущен — нечего чинить (devh mutate start <args>)");
@@ -1292,6 +1299,139 @@ fn problems(root: &Path, args: &[String]) -> anyhow::Result<()> {
         println!("  {l}");
     }
     crate::commands::die(1);
+}
+
+// ──────────────────────────────── recheck ────────────────────────────────
+
+const RECHECK_FILE: &str = "rechecked.json";
+
+/// Убрать из `--re`-флагов и `--output` старые значения: recheck задаёт свои.
+fn recheck_args(base: &[String], name: &str, out: &Path) -> Vec<String> {
+    let mut args: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < base.len() {
+        let a = &base[i];
+        let takes = matches!(
+            a.as_str(),
+            "--output" | "-o" | "--re" | "-F" | "--exclude-re" | "-E" | "--list" | "--in-diff"
+        );
+        if takes {
+            i = i.saturating_add(2);
+            continue;
+        }
+        if a.starts_with("--output=")
+            || a.starts_with("--re=")
+            || a.starts_with("--exclude-re=")
+            || a == "--iterate"
+            || a == "--in-place"
+        {
+            i = i.saturating_add(1);
+            continue;
+        }
+        args.push(a.clone());
+        i = i.saturating_add(1);
+    }
+    args.push("--re".to_string());
+    args.push(format!("^{}$", regex::escape(name)));
+    args.push("--output".to_string());
+    args.push(out.display().to_string());
+    args
+}
+
+/// `devh mutate recheck <name>`: один мутант по имени, отдельный output.
+/// Результат — overlay `rechecked.json`; вердикт по-прежнему требует
+/// перепрогона (recheck не доказывает «чисто» для всего аудита).
+fn recheck(root: &Path, args: &[String]) -> anyhow::Result<()> {
+    let name = args
+        .iter()
+        .filter(|a| !a.starts_with('-'))
+        .next()
+        .cloned()
+        .unwrap_or_default();
+    if name.trim().is_empty() {
+        println!("devh mutate recheck <имя мутанта> — имя из devh mutate problems");
+        crate::commands::die(1);
+    }
+    let base = effective_args(root, &[]);
+    if base.is_empty() {
+        println!("аудит не запускался — нет флагов для recheck (devh mutate start <args>)");
+        crate::commands::die(2);
+    }
+    let out = work_dir(root).join("recheck");
+    let _ = fs::remove_dir_all(&out);
+    fs::create_dir_all(&out)?;
+    let args = recheck_args(&base, &name, &out);
+    println!(".. recheck: cargo mutants {}", args.join(" "));
+    let res = Command::new("timeout")
+        .arg("600")
+        .arg("cargo")
+        .arg("mutants")
+        .args(&args)
+        .current_dir(root)
+        .stdin(Stdio::null())
+        .output()?;
+    let stdout = String::from_utf8_lossy(&res.stdout);
+    let stderr = String::from_utf8_lossy(&res.stderr);
+    let bad = mutaudit::live_bad(&out);
+    let found = bad.into_iter().find(|b| b.name == name);
+    let Some(found) = found else {
+        println!(
+            "recheck: исход для {name:?} не найден (rc {:?})\n{}\n{}",
+            res.status.code(),
+            tail(&stdout, 12),
+            tail(&stderr, 12)
+        );
+        crate::commands::die(2);
+    };
+    let caught = found.summary == mutaudit::S_CAUGHT;
+    let json = serde_json::json!({
+        "updated": now_secs(),
+        "tree_stamp": tree_stamp(root),
+        "name": found.name,
+        "summary": found.summary,
+        "file": found.file,
+        "line": found.line,
+        "replacement": found.replacement,
+        "genre": found.genre,
+        "caught": caught,
+    });
+    write_json_atomic(&work_dir(root), RECHECK_FILE, &json)?;
+    if caught {
+        println!(
+            "recheck: ✓ {} пойман на текущем дереве — проблема закрыта",
+            found.name
+        );
+        Ok(())
+    } else {
+        println!("recheck: {}", mutaudit::bad_line(&found));
+        crate::commands::die(1);
+    }
+}
+
+fn tail(text: &str, n: usize) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    lines[lines.len().saturating_sub(n)..].join("\n")
+}
+
+/// Overlay: убрать из списка проблемы, перепроверенные как Caught на
+/// ТЕКУЩЕМ дереве. Старый recheck (другое дерево) не применяется.
+fn filter_rechecked(root: &Path, audit: &mut Audit) {
+    let Ok(text) = fs::read_to_string(work_dir(root).join(RECHECK_FILE)) else {
+        return;
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return;
+    };
+    if v.get("tree_stamp").and_then(|x| x.as_str()) != Some(tree_stamp(root).as_str()) {
+        return;
+    }
+    if v.get("caught").and_then(|x| x.as_bool()) != Some(true) {
+        return;
+    }
+    let Some(name) = v.get("name").and_then(|x| x.as_str()) else {
+        return;
+    };
+    audit.bad.retain(|b| b.name != name);
 }
 
 // ──────────────────────────────── verdict ────────────────────────────────
@@ -1421,7 +1561,9 @@ fn min_kill_pct(root: &Path) -> u32 {
 /// уже следующий шаг (problem-first).
 pub fn live_problem_count(root: &Path) -> u32 {
     let eff = effective_args(root, &[]);
-    snapshot(root, &eff).bad.len() as u32
+    let mut audit = snapshot(root, &eff);
+    filter_rechecked(root, &mut audit);
+    audit.bad.len() as u32
 }
 
 /// Вердикт по завершённому аудиту: `Some(true)` — чисто, `Some(false)` —
@@ -1619,6 +1761,78 @@ mod tests {
             !out.iter().any(|l| l.contains("вердикт:")),
             "у идущего прогона финального вердикта нет: {out:?}"
         );
+    }
+
+    #[test]
+    fn recheck_args_strip_cache_and_set_exact_filter() {
+        let base: Vec<String> = [
+            "--config",
+            "devharness/cargo-mutants.toml",
+            "--iterate",
+            "--in-diff",
+            "d.diff",
+            "--output",
+            "old.out",
+            "-F",
+            "old",
+            "--test-tool",
+            "nextest",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let out = Path::new("/tmp/recheck");
+        let got = recheck_args(&base, "src/a.rs:1:5: replace x with None", out);
+        assert!(!got.iter().any(|a| a == "--iterate" || a == "--in-diff"));
+        assert!(!got.iter().any(|a| a == "old.out" || a == "old"));
+        assert!(got
+            .iter()
+            .any(|a| a == r"^src/a\.rs:1:5: replace x with None$"));
+        assert!(got.iter().any(|a| a == "/tmp/recheck"));
+    }
+
+    #[test]
+    fn rechecked_overlay_closes_only_caught_on_same_tree() {
+        let d = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        std::fs::create_dir_all(d.path().join(".harness/mutate"))
+            .unwrap_or_else(|_| unreachable!());
+        let write = |stamp: &str, caught: bool| {
+            fs::write(
+                d.path().join(".harness/mutate/rechecked.json"),
+                format!(r#"{{"tree_stamp":"{stamp}","caught":{caught},"name":"src/a.rs:1:5: x"}}"#),
+            )
+            .unwrap_or_else(|_| unreachable!());
+        };
+        let mut audit = Audit::default();
+        audit.bad = vec![
+            mutaudit::Bad {
+                name: "src/a.rs:1:5: x".to_string(),
+                ..mutaudit::Bad::default()
+            },
+            mutaudit::Bad {
+                name: "src/b.rs:2:5: y".to_string(),
+                ..mutaudit::Bad::default()
+            },
+        ];
+        // Не тот отпечаток — overlay не применяется.
+        write("other", true);
+        let mut a = audit.clone();
+        filter_rechecked(d.path(), &mut a);
+        assert_eq!(a.bad.len(), 2);
+        // Текущий отпечаток (не-git дерево → пустой) + caught — одна снята.
+        write("", true);
+        let mut a = audit.clone();
+        filter_rechecked(d.path(), &mut a);
+        assert_eq!(a.bad.len(), 1);
+        assert_eq!(
+            a.bad.first().map(|b| b.name.as_str()),
+            Some("src/b.rs:2:5: y")
+        );
+        // caught=false — не снимает.
+        write("", false);
+        let mut a = audit;
+        filter_rechecked(d.path(), &mut a);
+        assert_eq!(a.bad.len(), 2);
     }
 
     #[test]

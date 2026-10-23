@@ -347,6 +347,19 @@ stamp глобальный, поэтому правка любого исход�
 - Тест `section00i_watch_until_problem_exits_on_first_problem` (стаб: missed
   при живом аудите → rc=1 до «прогон завершён»).
 
+#### F-1.8.3 `mutate recheck <name>` (сделано)
+
+Перепроверка одного мутанта по имени: `cargo mutants --re '^<escaped name>$'`
+в отдельный `--output .harness/mutate/recheck`, без `--iterate/--in-diff/
+--in-place`. Результат пишется в `rechecked.json` (overlay, R12 не нарушен):
+`{tree_stamp, name, summary, caught}`.
+
+`problems`/`status`/`live_problem_count` снимают проблему только если overlay
+помечен `caught` и `tree_stamp` совпадает с ТЕКУЩИМ деревом. `verdict` overlay
+не использует: recheck не доказывает «чисто» для всего аудита — нужен
+перепрогон дельты. Тесты: `recheck_args_strip_cache_and_set_exact_filter`,
+`rechecked_overlay_closes_only_caught_on_same_tree`.
+
 ### Тесты
 
 `tripwire_diff_identical_is_empty`, `tripwire_detects_created_protected`, `tripwire_null_to_file_is_created`, `tripwire_head_moved`, `tripwire_allow_without_reason_ignored`, `tripwire_effective_filters_only_matching_glob`, `mutcache_rejects_forged_manifest_without_stamp`, `mutcache_accepts_manifest_with_valid_stamp`.
