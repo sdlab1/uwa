@@ -1,3 +1,4 @@
+pub mod complexity;
 pub mod contract;
 pub mod coverage;
 pub mod digest;
@@ -8,6 +9,7 @@ pub mod identity;
 pub mod killmap;
 pub mod load;
 pub mod mutaudit;
+pub mod modelrank;
 pub mod plan;
 pub mod runstate;
 pub mod state;
