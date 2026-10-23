@@ -36,8 +36,9 @@
   `blocks_clean=true` при aborted.
 * `docs/mutation_workflow.md` регенерирован из `devh workflow` (убраны
   случайные строки сборки в начале).
-* Проверки: `cargo test -p devh --lib` — **390 passed / 0 failed**;
-  `cargo test -p devh --test integration` — **69 passed / 0 failed**;
+* Проверки: `cargo test -p devh --lib` — **419 passed / 0 failed**;
+  `cargo test -p devh --test integration` — **70 passed / 0 failed**;
+  `devh test` — **PASS 477 / FAIL 0**.
   `rustfmt --check` по своим изменённым файлам — чисто.
 * `cargo fmt --check` по всему пакету по-прежнему красный из-за чужих
   файлов (`core/coverage.rs`, `shell/msg.rs`) — их не трогаем (чужая зона).
@@ -100,7 +101,7 @@
 | --- | --- | --- |
 | 1 | **код** (`devharness/src/**`) | единственный источник истины; всё остальное — его projections |
 | 2 | `devh workflow` (печать канона из кода) | то, что агент читает, чтобы узнать правила |
-| 3 | `devh mutate help`, `devh test --help` | локальные справки команд |
+| 3 | `devh mutate help`, `devh test --list` | локальные справки команд |
 | 4 | `docs/mutation_workflow.md`, `AGENTS.md` | человекочитаемые копии канона (генерируются из кода, тест сверяет) |
 | 5 | память goose (`devh-mutation-rule`) | **производная**: страховка от потери контекста, не источник |
 
@@ -209,11 +210,14 @@ devh mutate start --in-diff /tmp/delta.diff --test-tool nextest --baseline=skip 
 | Команда | Что делает | Что печатает | Код |
 | --- | --- | --- | --- |
 | `devh test` | полный `devharness/test.sh`, **полный лог** в `<store>/logs/test-<ts>.log` | живой прогресс секций + итог `PASS: N` / `FAIL: M` + путь лога | 0 (0 FAIL) / 1 (есть FAIL) / 2 (среда) |
-| `devh test --case N` | один кейс/секция (точечная проверка) | лог секции + итог | 0/1/2 |
+| `devh test --case N` | полный сьют; в отчёте считается только секция N (фильтр отчёта) | лог секции + общий итог | 0/1/2 |
+| `devh test --bg` | отцепленный полный сьют (`setsid`), PID в `test-bg.pid`, лог `test-bg.log` | OK + PID + путь лога | 0 / 2 (уже идёт) |
+| `devh test --status` | идёт / завершён; итог из `test-latest.log` | `PASS: N`, `FAIL: M`, путь лога | 2 (идёт/нет итога) / 0 / 1 |
 | `devh test --list` | список кейсов | список | 0 |
 
-Канон: полный прогон сьютов = `devh test`. `bash devharness/test.sh` руками —
-**не нужно** (лог всё равно пишется, тот же exit code доступен).
+Канон: полный прогон сьютов = `devh test`; `bash devharness/test.sh` руками
+**запрещено** (R8). `devh test` добавляет load-guard, `--case/--bg/--status`
+и канонический лог.
 
 ### A5.3 Остальной цикл (уже существует, канон зафиксирован)
 
@@ -303,7 +307,7 @@ devh mutate problems           # rc=1, если есть; блок на кажд
 
 ```
 devh test                       # полный прогон, полный лог, PASS/FAIL в stdout
-devh test --case 44             # точечно
+devh test --case 44             # полный сьют, в отчёте только секция 44
 ```
 
 rc=1 → читать **лог из вывода `devh test`** (путь печатается), не искать
@@ -350,7 +354,7 @@ rc=1 → читать **лог из вывода `devh test`** (путь печ�
 | НЕЛЬЗЯ | Почему | ПРАВИЛЬНО |
 | --- | --- | --- |
 | `cargo mutants ...` руками | второй вход, семантика исходов расходится, обходит гейт и логи | `devh mutate start <args>` |
-| `bash devharness/test.sh` | нет единого exit code/итога, агент импровизирует разбор лога | `devh test` |
+| `bash devharness/test.sh` | R8: второй вход обходит load-guard/--case/--bg/--status и канонический лог; агент начинает сам разбирать вывод | `devh test` |
 | `devharness/tools/mutants-watch.sh` | удалён (R2); скрипт = второй вход с собственной семантикой | `devh mutate watch` |
 | `sleep 60; <команда>` | цикл опроса вместо события; агент «спит» и не реагирует на проблемы | `devh mutate watch` (событийный) / `devh mutate status` |
 | `while pgrep -x cargo-mutants; do sleep 5; done` | то же, только в bash | `devh mutate watch --timeout N` / `devh mutate stop` |
@@ -515,7 +519,8 @@ fatal     = unviable > 0
 - `devh test` → запускает `devharness/test.sh`, **полный лог** в файл
   (`<store>/logs/test-<ts>.log`) + живой прогресс в stdout + **итог в stdout**
   (`PASS: N`, `FAIL: M`) + код возврата = 1 если есть FAIL, иначе 0.
-- `devh test --case <N>` — один кейс (для точечной проверки), если нужно.
+- `devh test --case <N>` — полный сьют, фильтр только по отчёту (не точечный запуск).
+- `devh test --bg` / `--status` — фоновый прогон и его итог без блокировки агента.
 - Канон в `AGENTS.md`: «полный прогон сьютов = `devh test`; руками
   `bash devharness/test.sh` — не нужно (лог всё равно пишется)».
 
@@ -594,9 +599,9 @@ fatal     = unviable > 0
 - [x] 13. `docs/mutation_workflow.md` + `AGENTS.md` (+ правки `docs/F_series.md`, `docs/rust_build.md`)
 - [x] 14. Память goose: `devh-mutation-rule` → новая формулировка (+ `devh-test-rule`, `devh-next-rule`)
 - [x] 15. integration: заменить `section00b` на контракт нативного CLI
-- [x] 16. `cargo build` + `cargo test -p devh` (unit 390 + integration 69) → зелено;
+- [x] 16. `cargo build` + `cargo test -p devh` (unit 419 + integration 70) → зелено;
       `rustfmt --check` по своим файлам — чисто (чужие файлы не форматируем)
-- [ ] 17. `devh test` (весь сьют) → **477 PASS / 0 FAIL**, корпус 48/48
+- [x] 17. `devh test` (весь сьют) → **477 PASS / 0 FAIL**, корпус 48/48
 - [ ] 18. Мутационный аудит **через `devh mutate`** по изменённой зоне → 0 missed / 0 timeout / 0 unviable
 - [ ] 19. Коммит через harness-овый git-workflow (не руками), без `git add -A`
       (доки — `git add -f`: `*.md` в `.gitignore`)
