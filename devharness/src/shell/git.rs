@@ -151,6 +151,28 @@ pub fn add_all(wt: &Path) -> anyhow::Result<()> {
     git(wt, &["add", "-A"]).map(|_| ())
 }
 
+/// Добавить в индекс ТОЛЬКО указанные пути (без `add -A`).
+/// Путь-скоуп — основа песочницы `devh git`: ведомый коммитит только свои
+/// файлы, чужие изменения в индекс не попадают.
+pub fn add_paths(wt: &Path, paths: &[String]) -> anyhow::Result<()> {
+    if paths.is_empty() {
+        anyhow::bail!("git add: пустой список путей");
+    }
+    let mut args: Vec<&str> = vec!["add", "--"];
+    args.extend(paths.iter().map(|p| p.as_str()));
+    git(wt, &args).map(|_| ())
+}
+
+/// Файлы, уже лежащие в индексе (staged) — для проверки «в коммит попадут
+/// только запрошенные пути».
+pub fn staged_names(wt: &Path) -> Vec<String> {
+    git_out(wt, &["diff", "--cached", "--name-only"])
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect()
+}
+
 pub fn has_staged(wt: &Path) -> bool {
     !git_ok(wt, &["diff", "--cached", "--quiet"])
 }
@@ -494,6 +516,14 @@ pub fn tree_entries(wt: &Path) -> anyhow::Result<Vec<crate::core::digest::Entry>
 pub fn tree_digest(wt: &Path) -> anyhow::Result<String> {
     let entries = tree_entries(wt)?;
     crate::core::digest::tree_digest(&entries).map_err(|e| anyhow::anyhow!("дайджест дерева: {e}"))
+}
+
+/// Unix-время последнего коммита в дереве (д�� сторожа простоя).
+pub fn last_commit_secs(wt: &Path) -> Option<u64> {
+    git_out(wt, &["log", "-1", "--format=%ct"])
+        .trim()
+        .parse::<u64>()
+        .ok()
 }
 
 pub fn short_head(wt: &Path) -> String {
