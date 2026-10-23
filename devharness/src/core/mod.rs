@@ -2,6 +2,7 @@ pub mod chaos_state;
 pub mod complexity;
 pub mod contract;
 pub mod coverage;
+pub mod coverage_index;
 pub mod diff_scope;
 pub mod digest;
 pub mod early;
