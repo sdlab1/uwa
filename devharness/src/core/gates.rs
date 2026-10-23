@@ -1055,6 +1055,82 @@ impl Default for MutPolicy {
     }
 }
 
+/// F-3.2: изменённые строки diff'а — (путь, номер строки НОВОЙ версии).
+///
+/// «Изменённая» = добавленная строка (`+` в unified diff): мутанты мутят
+/// текущее дерево, поэтому считается new-side; удалённая строка (`-`) в
+/// текущем файле своего номера уже не имеет, контекст (` `) — не изменён.
+/// Взгляд на diff ТОТ ЖЕ, что у гейта `--in-diff` (`git::diff_text`:
+/// `git add -N . && git diff HEAD [-- scope]`), — скоуп счётчика и скоуп
+/// мутатора не расходятся.
+///
+/// Битый или пустой diff — не паника, а пустое множество: «нечего считать»,
+/// а не «всё изменено» (fail-closed в сторону пустоты, а не вранья).
+pub fn changed_code_lines(diff: &str) -> std::collections::BTreeSet<(String, u32)> {
+    use std::collections::BTreeSet;
+    let mut out: BTreeSet<(String, u32)> = BTreeSet::new();
+    let mut file: Option<String> = None;
+    let mut new_line: u32 = 0;
+    let mut in_hunk = false;
+    for line in diff.lines() {
+        // Граница файла: заголовки вида `+++ ` встретить в ханке можно
+        // (добавленная строка «++ x»), поэтому вне ханка — заголовок,
+        // внутри — обычная строка тела.
+        if line.starts_with("diff --git ") {
+            in_hunk = false;
+            file = None;
+            continue;
+        }
+        if !in_hunk {
+            if let Some(rest) = line.strip_prefix("+++ ") {
+                let path = rest.split('\t').next().unwrap_or("").trim();
+                // /dev/null = файл удалён: новых строк у него нет.
+                file = path
+                    .strip_prefix("b/")
+                    .filter(|p| *p != "/dev/null")
+                    .map(str::to_string);
+                continue;
+            }
+            if line.starts_with("--- ") {
+                continue;
+            }
+        }
+        if let Some(rest) = line.strip_prefix("@@ ") {
+            match hunk_new_start(rest) {
+                Some(start) => {
+                    new_line = start;
+                    in_hunk = true;
+                }
+                None => in_hunk = false,
+            }
+            continue;
+        }
+        if !in_hunk {
+            continue;
+        }
+        match line.chars().next() {
+            Some('+') => {
+                if let Some(f) = &file {
+                    out.insert((f.clone(), new_line));
+                }
+                new_line += 1;
+            }
+            Some(' ') => new_line += 1,
+            // `-` (удаление) new-side не двигает; `\ No newline` — не строка.
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Начало new-side в заголовке ханка: `rest` — текст после `@@ `,
+/// вида `-10,0 +11,2 @@ пролог`. `None` — заголовок битый.
+fn hunk_new_start(rest: &str) -> Option<u32> {
+    let plus = rest.split_once(" +")?.1;
+    let digits: String = plus.chars().take_while(|c| c.is_ascii_digit()).collect();
+    digits.parse().ok()
+}
+
 fn judge_mutation(raw: &Raw, p: &MutPolicy) -> Verdict {
     // Красный baseline: cargo-mutants печатает «cargo <phase> failed in an
     // unmutated tree, so no mutants were tested» и выходит с кодом 4
@@ -2763,6 +2839,89 @@ test result: FAILED. 1 passed; 1 failed";
         assert_eq!(
             flaky_groups(&lines),
             vec![("lint".to_string(), 1), ("verify".to_string(), 1)]
+        );
+    }
+
+    #[test]
+    fn changed_code_lines_counts_only_added_lines_with_paths() {
+        let diff = "\
+diff --git a/src/a.rs b/src/a.rs
+index 111..222 100644
+--- a/src/a.rs
++++ b/src/a.rs
+@@ -10,0 +11,2 @@ fn old()
++added_one
++added_two
+diff --git a/src/b.rs b/src/b.rs
+--- a/src/b.rs
++++ b/src/b.rs
+@@ -3,2 +3,1 @@ fn tail()
+-removed
++replaced
+";
+        let got = changed_code_lines(diff);
+        assert!(
+            got.contains(&("src/a.rs".to_string(), 11))
+                && got.contains(&("src/a.rs".to_string(), 12)),
+            "строки внутри диффа (new-side) попадают: {got:?}"
+        );
+        assert!(
+            got.contains(&("src/b.rs".to_string(), 3)),
+            "заменённая строка попадает по своему new-номеру: {got:?}"
+        );
+        assert!(
+            !got.contains(&("src/a.rs".to_string(), 10))
+                && !got.contains(&("src/a.rs".to_string(), 13)),
+            "строка ВНЕ диффа не попадает: {got:?}"
+        );
+        assert!(
+            !got.contains(&("src/b.rs".to_string(), 1)),
+            "старая сторона удалённой строки — не new-side: {got:?}"
+        );
+        assert_eq!(got.len(), 3, "ровно три изменённые строки");
+    }
+
+    #[test]
+    fn changed_code_lines_empty_diff_is_empty() {
+        assert!(changed_code_lines("").is_empty(), "пустой diff — пусто");
+        assert!(changed_code_lines("\n\n").is_empty(), "пробельный — тоже");
+    }
+
+    #[test]
+    fn changed_code_lines_broken_diff_does_not_panic_and_counts_nothing() {
+        let broken = "\
+@@ —сломанный заголовок
++++ без-префикса-b
+diff --git x@@ + без цифр @@
++строка-в-битом-ханке
+@@ -1,2 @@@ хвост-мусор
++ещё-без-new-стороны
+";
+        // Ни паники, ни выдуманных строк: битые заголовки ханков пропускаются.
+        assert!(
+            changed_code_lines(broken).is_empty(),
+            "битый diff → пусто: никогда не паника"
+        );
+    }
+
+    #[test]
+    fn changed_code_lines_ignores_deletions_and_binary() {
+        let diff = "\
+diff --git a/gone.rs b/gone.rs
+deleted file mode 100644
+--- a/gone.rs
++++ /dev/null
+@@ -1,3 +0,0 @@
+-one
+-two
+-three
+diff --git a/img.png b/img.png
+index aaa..bbb 100644
+Binary files a/img.png and b/img.png differ
+";
+        assert!(
+            changed_code_lines(diff).is_empty(),
+            "удалённый файл и бинарник не дают изменённых строк"
         );
     }
 }
