@@ -1072,9 +1072,21 @@ fn model(root: &Path, args: &[String]) -> anyhow::Result<()> {
         .map_err(|e| anyhow!("devh orch: реестр занят ({e}) — повтори через секунду"))?;
 
     let agent = flag(args, "--agent").ok_or_else(|| anyhow!("devh orch model: нужен --agent"))?;
+    let agent = crate::core::identity::canonical(&agent);
     let new_model = flag(args, "--model");
     let new_runtime = flag(args, "--runtime");
+    // `--confirm`: ведущий подтверждает смену (агент прошёл посвящение) —
+    // фиксируем без подозрения и без понижения P очереди.
+    let confirmed = args.iter().any(|a| a == "--confirm");
     let mut reg = load(root);
+    let (lead, _) = lead_of(&reg);
+    let caller = crate::core::identity::canonical(&crate::core::identity::current().name);
+    if lead.as_deref() != Some(caller.as_str()) {
+        return Err(anyhow!(
+            "devh orch model: модель/рантайм фиксирует только ведущий (текущий ведущий: {})",
+            lead.as_deref().unwrap_or("не назначен")
+        ));
+    }
     if agent_index(&reg, &agent).is_none() {
         reg.agents.push(AgentState {
             name: agent.clone(),
@@ -1108,6 +1120,19 @@ fn model(root: &Path, args: &[String]) -> anyhow::Result<()> {
             new_model.clone().unwrap_or_else(|| "?".to_string()),
             new_runtime.clone().unwrap_or_else(|| "?".to_string())
         );
+        if confirmed {
+            // Ведущий подтвердил смену (агент прошёл посвящение): подозрение снимаем,
+            // очередь не штрафуем — смена не анонимная, а подтверждённая.
+            if let Some(a) = reg.agents.get_mut(idx) {
+                a.suspicion = None;
+            }
+            save(root, &reg)?;
+            println!(
+                "devh orch: {agent}: смена подтверждена ведущим (--confirm): {reason} — \
+                 подозрение снято, P очереди не менялась"
+            );
+            return Ok(());
+        }
         let touched = degrade_queue(&mut reg, &agent, &reason, None);
         save(root, &reg)?;
         println!(
@@ -2919,5 +2944,49 @@ mod tests {
         );
         assert!(t.acked.is_empty(), "подтверждения сброшены");
         assert!(t.evidence.is_empty(), "доказательства сброшены");
+    }
+
+    /// Смена модели/рантайма: без подтверждения — подозрение и штраф очереди;
+    /// с подтверждением ведущего (`--confirm`) — запись без штрафа, подозрение снято.
+    #[test]
+    fn model_confirm_records_change_without_suspicion() {
+        let tmp = tempdir().expect("tmp");
+        let root = tmp.path();
+        add_task(root, "beam", "P2", "работа ведомого");
+        let mut reg = load(root);
+        reg.lead = Some(me());
+        save(root, &reg).expect("save");
+
+        run(
+            root,
+            "model",
+            &["--agent", "beam", "--model", "mimo", "--runtime", "beam"],
+        )
+        .expect("смена модели");
+        let reg = load(root);
+        let a = reg.agents.iter().find(|a| a.name == "beam").expect("агент");
+        assert!(a.suspicion.is_some(), "без --confirm подозрение выставлено");
+        assert_eq!(reg.tasks[0].complexity, 1, "без --confirm P очереди понижен");
+
+        run(
+            root,
+            "model",
+            &[
+                "--agent",
+                "beam",
+                "--model",
+                "inkling",
+                "--runtime",
+                "opencode",
+                "--confirm",
+            ],
+        )
+        .expect("смена модели с подтверждением");
+        let reg = load(root);
+        let a = reg.agents.iter().find(|a| a.name == "beam").expect("агент");
+        assert_eq!(a.model.as_deref(), Some("inkling"), "модель зафиксирована");
+        assert_eq!(a.runtime.as_deref(), Some("opencode"), "рантайм зафиксирован");
+        assert!(a.suspicion.is_none(), "--confirm снимает подозрение");
+        assert_eq!(reg.tasks[0].complexity, 1, "--confirm не меняет P очереди");
     }
 }

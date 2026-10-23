@@ -253,6 +253,7 @@ impl Cmd {
                 )
                 .arg(
                     Arg::new("rest")
+                        .index(2)
                         .num_args(0..)
                         .trailing_var_arg(true)
                         .allow_hyphen_values(true)
