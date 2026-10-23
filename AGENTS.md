@@ -164,7 +164,7 @@ cd /home/user/project_uwa
 
 ```bash
 devh orch board                      # кто / задачи / P / C / F / зоны / очереди / worktree'и / ⚠
-devh orch list --agent beam          # таблица задач исполовителя (C-колонка, скрытие по потолку)
+devh orch list --agent beam          # таблица задач исполнителя (C-колонка, скрытие по потолку)
 devh orch add --agent beam --p P3 --c C7 --title "..." --zone devharness/src/... [--notify]
 devh orch start T-001                # задача взята в работу (+ авто-worktree)
 devh orch done T-001 --f F1          # выполнена, F = фактический уровень отказа
