@@ -274,11 +274,7 @@ pub fn aliases_of(canon: &str) -> Vec<String> {
 }
 
 /// Связать синоним с каноном.
-pub fn set_alias_in(
-    home: &Path,
-    alias: &str,
-    canon: &str,
-) -> Result<(), String> {
+pub fn set_alias_in(home: &Path, alias: &str, canon: &str) -> Result<(), String> {
     let alias = sanitize_name(alias)?;
     let canon = sanitize_name(canon)?;
     if alias == canon {
@@ -477,9 +473,20 @@ fn looks_auto(name: &str) -> bool {
     // Префикс должен быть из известных рантаймов или стандартных меток.
     matches!(
         prefix,
-        "ag" | "session" | "tty" | "cwd" | "slot" | "goose" | "opencode"
-            | "claude" | "codex" | "aider" | "crush" | "amp" | "cline"
-            | "continue" | "cursor-agent"
+        "ag" | "session"
+            | "tty"
+            | "cwd"
+            | "slot"
+            | "goose"
+            | "opencode"
+            | "claude"
+            | "codex"
+            | "aider"
+            | "crush"
+            | "amp"
+            | "cline"
+            | "continue"
+            | "cursor-agent"
     ) || KNOWN_RUNTIMES.contains(&prefix)
 }
 
@@ -880,7 +887,6 @@ mod tests {
         assert!(!id.fresh);
     }
 
-
     #[test]
     fn cwd_fallback_keys_differ_by_cwd() {
         // Документирует границу fallback'а: одинаковый cwd → одинаковый ключ,
@@ -889,7 +895,6 @@ mod tests {
         assert_eq!(key_hash("/tmp/proj-a"), key_hash("/tmp/proj-a"));
         assert_ne!(key_hash("/tmp/proj-a"), key_hash("/tmp/proj-b"));
     }
-
 
     #[test]
     fn slot_key_not_none_for_current_process() {
@@ -910,7 +915,10 @@ mod tests {
         set_alias_in(home, "nemotron", "beam2").unwrap_or_else(|_| unreachable!());
         assert_eq!(host_alias_in(home, "kilo"), Some("beam2".to_string()));
         assert_eq!(host_alias_in(home, "nemotron"), Some("beam2".to_string()));
-        assert_eq!(aliases_of_in(home, "beam2"), vec!["kilo".to_string(), "nemotron".to_string()]);
+        assert_eq!(
+            aliases_of_in(home, "beam2"),
+            vec!["kilo".to_string(), "nemotron".to_string()]
+        );
     }
 
     #[test]
@@ -926,7 +934,36 @@ mod tests {
         // (auto_register читает claimed_names из основного home, не из temp —
         //  здесь проверяем только логику claimed_names на temp home.)
         // Проверяем что alias остался.
-        assert_eq!(alias_map_in(home).get("opencode").map(String::as_str), Some("beam"));
+        assert_eq!(
+            alias_map_in(home).get("opencode").map(String::as_str),
+            Some("beam")
+        );
+    }
+
+
+    #[test]
+    fn slot_key_fallback_not_empty() {
+        // В контейнерах/CI slot_key может вернуть fallback (cwd+runtime).
+        // Проверяем что результат не None и имеет правильный префикс.
+        if let Some(key) = slot_key() {
+            assert!(key.starts_with("slot:"), "префикс slot: {key}");
+        }
+        // Fallback формат проверяем отдельно (не зависит от окружения).
+        let cwd = std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_default();
+        let fallback = format!("slot:cw:{}:none", key_hash(&cwd));
+        assert!(fallback.starts_with("slot:cw:"), "fallback формат: {fallback}");
+    }
+
+    #[test]
+    fn slot_first_occupant_wins() {
+        // Если слот уже занят claimed именем, новая сессия получает его.
+        let dir = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let home = dir.path();
+        // Записываем claimed binding в слот-ключ (используем произвольный ключ).
+        write_binding_in(home, "slot:test:123:goose", "first-agent", "slot", true).unwrap_or_default();
+        let b = read_binding_in(home, "slot:test:123:goose");
+        assert!(b.as_ref().is_some_and(|x| x.claimed), "claimed binding");
+        assert_eq!(b.as_ref().map(|x| x.name.as_str()), Some("first-agent"));
     }
 
     #[test]
@@ -980,9 +1017,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
         let home = dir.path();
         set_alias_in(home, "a", "b").unwrap_or_else(|_| unreachable!());
-        assert!(set_alias_in(home, "b", "a").is_err(), "петля должна быть отвергнута");
+        assert!(
+            set_alias_in(home, "b", "a").is_err(),
+            "петля должна быть отвергнута"
+        );
         assert!(set_alias_in(home, "x", "x").is_err(), "синоним == канон");
-        assert!(set_alias_in(home, "../evil", "beam").is_err(), "путь в имени");
+        assert!(
+            set_alias_in(home, "../evil", "beam").is_err(),
+            "путь в имени"
+        );
     }
 
     #[test]

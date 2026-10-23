@@ -753,11 +753,7 @@ fn append_message(path: &Path, block: &str) -> bool {
     // Атомарность при параллельных отправителях: advisory lock (fs2) +
     // один open handle + flush. Без этого два `devh msg send` могли
     // интерливить запись или потерять данные.
-    let mut f = match fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-    {
+    let mut f = match fs::OpenOptions::new().create(true).append(true).open(path) {
         Ok(f) => f,
         Err(_) => return false,
     };
@@ -839,7 +835,9 @@ fn prune_notified(path: &Path) {
         }
         let mut it = line.split_whitespace();
         let is_young = if let (Some(_k), Some(ts)) = (it.next(), it.next()) {
-            ts.parse::<u64>().map(|t| now.saturating_sub(t) < 300).unwrap_or(false)
+            ts.parse::<u64>()
+                .map(|t| now.saturating_sub(t) < 300)
+                .unwrap_or(false)
         } else {
             false
         };
@@ -1323,7 +1321,7 @@ fn deliver(from: &str, to: &[String], block: &str, thread: &str) -> Vec<String> 
         let path = inbox_path(&safe_name(target));
         if append_message(&path, block) {
             done.push(target.clone());
-            ack(&safe_name(from), &msg_id, "доставлено");
+            ack(&safe_name(&crate::core::identity::canonical(from)), &msg_id, "доставлено");
         }
     }
     let _ = append_message(&thread_path(thread), block);
@@ -1451,7 +1449,7 @@ fn send(args: &[String]) -> i32 {
                         matched_here = matched_here.saturating_add(1);
                         if !peek && !legacy {
                             let id = block_field(b, "ID: ").unwrap_or_default();
-                            let sender = block_sender(b);
+                            let sender = crate::core::identity::canonical(&block_sender(b));
                             ack(&safe_name(&sender), &id, "прочитано");
                         }
                     } else {
@@ -1526,7 +1524,9 @@ fn send(args: &[String]) -> i32 {
                         // Потребляем только если агент — текущий (свой ящик).
                         // Сторож чужого агента не должен красть письма.
                         let is_self = crate::core::identity::canonical(&agent)
-                            == crate::core::identity::canonical(&crate::core::identity::current().name);
+                            == crate::core::identity::canonical(
+                                &crate::core::identity::current().name,
+                            );
                         if consume && !legacy && is_self {
                             // Съедаем свежие (fresh) письма: удаляем их из ящика.
                             // Раньше фильтр был инвертирован — свежие оставались.
@@ -1723,7 +1723,15 @@ fn send(args: &[String]) -> i32 {
             let agent = me(m.value("agent").as_deref());
             let sent_text = fs::read_to_string(outbox_path(&safe_name(&agent))).unwrap_or_default();
             let (_h, sent_blocks) = split_log(&sent_text);
-            let acks_text = fs::read_to_string(acks_path(&safe_name(&agent))).unwrap_or_default();
+            // Читаем acks из канонического ящика + всех синонимов.
+            let mut acks_text = String::new();
+            let canon = crate::core::identity::canonical(&agent);
+            for name in std::iter::once(canon.clone()).chain(crate::core::identity::aliases_of(&canon)) {
+                if let Ok(t) = fs::read_to_string(acks_path(&safe_name(&name))) {
+                    acks_text.push_str(&t);
+                    acks_text.push('\n');
+                }
+            }
             let read_ids: Vec<String> = acks_text
                 .lines()
                 .filter(|l| l.contains("прочитано"))
@@ -2336,14 +2344,15 @@ ID: abcd1234\n\
         assert!(ago(now.saturating_sub(7200)).ends_with("ч назад"));
     }
 
-
     #[test]
     fn deliver_two_synonyms_one_message() {
         let dir = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
         let home = dir.path();
         // Создаём два алиаса → beam
-        crate::core::identity::set_alias_in(home, "opencode", "beam").unwrap_or_else(|_| unreachable!());
-        crate::core::identity::set_alias_in(home, "kilo", "beam").unwrap_or_else(|_| unreachable!());
+        crate::core::identity::set_alias_in(home, "opencode", "beam")
+            .unwrap_or_else(|_| unreachable!());
+        crate::core::identity::set_alias_in(home, "kilo", "beam")
+            .unwrap_or_else(|_| unreachable!());
         // Устанавливаем DEVH_MSG_HOME на temp
         let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         std::env::set_var("DEVH_MSG_HOME", home);
@@ -2351,7 +2360,12 @@ ID: abcd1234\n\
         std::env::set_var("DEVH_MSG_POPUP", "0");
         std::env::set_var("DEVH_MSG_SOUND", "0");
         let block = "[10:00] ОТ: sender — КОМУ: opencode, kilo\nID: test123\nТРЕД: t1\nТЕМА: test\nТЕЛО:\nbody\n";
-        let done = deliver("sender", &["opencode".to_string(), "kilo".to_string()], block, "t1");
+        let done = deliver(
+            "sender",
+            &["opencode".to_string(), "kilo".to_string()],
+            block,
+            "t1",
+        );
         // beam — канон для обоих, значит одно письмо
         assert_eq!(done.len(), 1, "одно письмо, не два: {done:?}");
         // Проверяем что в inbox/beam.log ровно один блок
@@ -2385,7 +2399,6 @@ ID: abcd1234\n\
         assert!(map.contains_key("alias-b"), "alias-b должен быть: {map:?}");
     }
 
-
     #[test]
     fn migrate_synonym_inboxes_no_duplicates() {
         let dir = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
@@ -2396,9 +2409,11 @@ ID: abcd1234\n\
         std::env::set_var("DEVH_MSG_POPUP", "0");
         std::env::set_var("DEVH_MSG_SOUND", "0");
         // Создаём алиас kilo → beam
-        crate::core::identity::set_alias_in(home, "kilo", "beam").unwrap_or_else(|_| unreachable!());
+        crate::core::identity::set_alias_in(home, "kilo", "beam")
+            .unwrap_or_else(|_| unreachable!());
         // Пишем письмо в оба ящика с одинаковым ID
-        let block = "[10:00] ОТ: sender — КОМУ: beam\nID: dup1\nТРЕД: t1\nТЕМА: test\nТЕЛО:\nbody\n";
+        let block =
+            "[10:00] ОТ: sender — КОМУ: beam\nID: dup1\nТРЕД: t1\nТЕМА: test\nТЕЛО:\nbody\n";
         let inbox = home.join("inbox");
         std::fs::create_dir_all(&inbox).unwrap_or_default();
         std::fs::write(inbox.join("beam.log"), format!("{block}{}\n", SEP)).unwrap_or_default();
@@ -2406,7 +2421,10 @@ ID: abcd1234\n\
         // Миграция
         migrate_synonym_inboxes("beam");
         // kilo.log должен быть удалён
-        assert!(!inbox.join("kilo.log").exists(), "kilo.log удалён после миграции");
+        assert!(
+            !inbox.join("kilo.log").exists(),
+            "kilo.log удалён после миграции"
+        );
         // beam.log должен содержать ровно один блок (дедуп)
         let text = std::fs::read_to_string(inbox.join("beam.log")).unwrap_or_default();
         let (_, blocks) = split_log(&text);
@@ -2427,11 +2445,15 @@ ID: abcd1234\n\
         std::env::set_var("MSG_NOTIFY_DEDUPE", home.join("notified.dedupe"));
         std::env::set_var("DEVH_MSG_POPUP", "0");
         std::env::set_var("DEVH_MSG_SOUND", "0");
-        crate::core::identity::set_alias_in(home, "kilo", "beam").unwrap_or_else(|_| unreachable!());
+        crate::core::identity::set_alias_in(home, "kilo", "beam")
+            .unwrap_or_else(|_| unreachable!());
         let files = inbox_files("beam");
         // После миграции только own + legacy (если есть)
         for f in &files {
-            assert!(!f.to_string_lossy().contains("kilo.log"), "нет kilo.log в списке: {f:?}");
+            assert!(
+                !f.to_string_lossy().contains("kilo.log"),
+                "нет kilo.log в списке: {f:?}"
+            );
         }
         std::env::remove_var("DEVH_MSG_HOME");
         std::env::remove_var("MSG_NOTIFY_DEDUPE");
