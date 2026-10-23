@@ -219,6 +219,23 @@ fn agent_index(reg: &Registry, name: &str) -> Option<usize> {
 /// Кто ведущий (lead) и откуда это известно.
 ///
 /// Приоритет: явное назначение в реестре → агент с ролью `lead` → None.
+/// Буфер ведущего: подготовленные задачи, готовые к выдаче (ещё не заняты).
+///
+/// Буфер — это ДОСКА ведущего: он наполняет её заранее, чтобы выдача работы
+/// ведомым не зависела от того, успеет ли ведущий что-то придумать.
+pub fn buffer_tasks<'a>(reg: &'a Registry, lead: Option<&str>) -> Vec<&'a Task> {
+    let Some(lead) = lead else {
+        return Vec::new();
+    };
+    reg.tasks
+        .iter()
+        .filter(|t| t.status == Status::Queued && &t.agent == lead)
+        .collect()
+}
+
+/// Норма буфера: сколько подготовленных задач должно лежать на доске ведущего.
+pub const BUFFER_MIN: usize = 10;
+
 pub fn lead_of(reg: &Registry) -> (Option<String>, &'static str) {
     if let Some(l) = reg.lead.as_ref() {
         let canon = crate::core::identity::canonical(l);
@@ -510,6 +527,9 @@ fn print_help() {
 
 /// `devh orch add`.
 fn add(root: &Path, args: &[String]) -> anyhow::Result<()> {
+    let _lock = crate::shell::lock::OutputLock::try_acquire(root, &path(root), "devh orch")
+        .map_err(|e| anyhow!("devh orch: реестр занят ({e}) — повтори через секунду"))?;
+
     let raw_agent = flag(args, "--agent").ok_or_else(|| anyhow!("devh orch add: нужен --agent"))?;
     let agent = crate::core::identity::canonical(&raw_agent);
     let p_raw = flag(args, "--p").ok_or_else(|| anyhow!("devh orch add: нужен --p 0..5"))?;
@@ -546,11 +566,15 @@ fn add(root: &Path, args: &[String]) -> anyhow::Result<()> {
     let caller = crate::core::identity::canonical(&crate::core::identity::current().name);
     // `--lead-self` — работа ведущего вне очереди (задача сразу в работе).
     let lead_self = args.iter().any(|a| a == "--lead-self");
-    if is_lead && agent == caller && !lead_self {
+    // `--buffer` — подготовленная задача в БУФЕР ведущего: висит на доске,
+    // готова к выдаче (devh orch reassign <ID> --agent <ведомый>), но ещё не занята.
+    let buffer = args.iter().any(|a| a == "--buffer");
+    if is_lead && agent == caller && !lead_self && !buffer {
         return Err(anyhow!(
             "devh orch add: ведущий не ставит задачи в собственную очередь — очередь для \
-             ведомых. Выдай задачу ведомому (--agent <ведомый>) или оформи свою работу \
-             как --lead-self (задача сразу в работе, вне очереди)"
+             ведомых. Выдай задачу ведомому (--agent <ведомый>), оформи свою работу \
+             как --lead-self (задача сразу в работе, вне очереди) или положи в БУФЕР \
+             (--buffer: подготовленная задача на доске, готовая к выдаче)"
         ));
     }
     if checks.is_empty() && !(is_lead && args.iter().any(|a| a == "--no-test")) {
@@ -702,6 +726,9 @@ fn start(root: &Path, args: &[String]) -> anyhow::Result<()> {
 
 /// `devh orch done|fail <ID> --f N`.
 fn close(root: &Path, args: &[String], status: Status) -> anyhow::Result<()> {
+    let _lock = crate::shell::lock::OutputLock::try_acquire(root, &path(root), "devh orch")
+        .map_err(|e| anyhow!("devh orch: реестр занят ({e}) — повтори через секунду"))?;
+
     let id = positional(args)
         .first()
         .cloned()
@@ -752,6 +779,9 @@ fn close(root: &Path, args: &[String], status: Status) -> anyhow::Result<()> {
 
 /// `devh orch revoke <ID> --reason R`.
 fn revoke(root: &Path, args: &[String]) -> anyhow::Result<()> {
+    let _lock = crate::shell::lock::OutputLock::try_acquire(root, &path(root), "devh orch")
+        .map_err(|e| anyhow!("devh orch: реестр занят ({e}) — повтори через секунду"))?;
+
     let id = positional(args)
         .first()
         .cloned()
@@ -778,6 +808,9 @@ fn revoke(root: &Path, args: &[String]) -> anyhow::Result<()> {
 
 /// `devh orch reassign <ID> --agent X`.
 fn reassign(root: &Path, args: &[String]) -> anyhow::Result<()> {
+    let _lock = crate::shell::lock::OutputLock::try_acquire(root, &path(root), "devh orch")
+        .map_err(|e| anyhow!("devh orch: реестр занят ({e}) — повтори через секунду"))?;
+
     let id = positional(args)
         .first()
         .cloned()
@@ -805,6 +838,9 @@ fn reassign(root: &Path, args: &[String]) -> anyhow::Result<()> {
 
 /// `devh orch degrade --agent X [--to P] [--reason R]`.
 fn degrade(root: &Path, args: &[String]) -> anyhow::Result<()> {
+    let _lock = crate::shell::lock::OutputLock::try_acquire(root, &path(root), "devh orch")
+        .map_err(|e| anyhow!("devh orch: реестр занят ({e}) — повтори через секунду"))?;
+
     let agent = flag(args, "--agent").ok_or_else(|| anyhow!("devh orch degrade: нужен --agent"))?;
     let floor = match flag(args, "--to") {
         Some(v) => Some(parse_level(&v, "уровень сложности")?),
@@ -820,6 +856,9 @@ fn degrade(root: &Path, args: &[String]) -> anyhow::Result<()> {
 
 /// `devh orch model --agent X --model M [--runtime R]`.
 fn model(root: &Path, args: &[String]) -> anyhow::Result<()> {
+    let _lock = crate::shell::lock::OutputLock::try_acquire(root, &path(root), "devh orch")
+        .map_err(|e| anyhow!("devh orch: реестр занят ({e}) — повтори через секунду"))?;
+
     let agent = flag(args, "--agent").ok_or_else(|| anyhow!("devh orch model: нужен --agent"))?;
     let new_model = flag(args, "--model");
     let new_runtime = flag(args, "--runtime");
@@ -957,6 +996,7 @@ fn board(root: &Path) -> anyhow::Result<()> {
     names.sort();
 
     let mut warns: Vec<String> = Vec::new();
+    let (board_lead, _) = lead_of(&reg);
     for name in names.iter() {
         let state = reg.agents.iter().find(|a| &a.name == name);
         let queued: Vec<&Task> = reg
@@ -1002,6 +1042,12 @@ fn board(root: &Path) -> anyhow::Result<()> {
                 );
             }
         }
+        // Буфер ведущего печатается отдельной секцией — не дублируем его в «очереди».
+        let queued: Vec<&Task> = if board_lead.as_deref() == Some(name.as_str()) {
+            Vec::new()
+        } else {
+            queued
+        };
         if !queued.is_empty() {
             println!("  очередь (свободны):");
             for t in queued.iter() {
@@ -1019,7 +1065,7 @@ fn board(root: &Path) -> anyhow::Result<()> {
                 );
             }
         }
-        if queued.len() < 2 {
+        if queued.len() < 2 && board_lead.as_deref() != Some(name.as_str()) {
             warns.push(format!(
                 "{name}: в очереди {} задач (<2, O1) — выдать задачу (devh orch add --agent {name} ...)",
                 queued.len()
@@ -1057,6 +1103,36 @@ fn board(root: &Path) -> anyhow::Result<()> {
                 }
             }
         }
+    }
+
+    // ── буфер ведущего ──
+    let buffer = buffer_tasks(&reg, board_lead.as_deref());
+    println!(
+        "\nБУФЕР ВЕДУЩЕГО ({} задач, готовы к выдаче: devh orch reassign <ID> --agent <ведомый>):",
+        buffer.len()
+    );
+    if buffer.is_empty() {
+        println!("    — пусто");
+    }
+    for t in buffer.iter() {
+        println!(
+            "    {} {:<7} P{} {:<24} {}",
+            t.id,
+            t.status.label(),
+            t.complexity,
+            if t.zones.is_empty() {
+                "зона не задана".to_string()
+            } else {
+                t.zones.join(",")
+            },
+            t.title
+        );
+    }
+    if buffer.len() < BUFFER_MIN {
+        warns.push(format!(
+            "буфер ведущего: {} задач (<{BUFFER_MIN}) — наполни доску: devh orch add --agent <lead> --buffer --dod ... --check ...",
+            buffer.len()
+        ));
     }
 
     if !warns.is_empty() {
@@ -1171,6 +1247,9 @@ fn dod_state(root: &Path, task: &Task) -> DodState {
 
 /// `devh orch dod <ID> [--add ...] [--ack ...] [--check ...] [--zone ...]`.
 pub fn dod_cmd(root: &Path, args: &[String]) -> anyhow::Result<()> {
+    let _lock = crate::shell::lock::OutputLock::try_acquire(root, &path(root), "devh orch")
+        .map_err(|e| anyhow!("devh orch: реестр занят ({e}) — повтори через секунду"))?;
+
     let id = positional(args)
         .first()
         .cloned()
@@ -1245,6 +1324,9 @@ fn output_tail(text: &str) -> String {
 
 /// `devh orch verify <ID>` — машинные проверки DoD.
 pub fn verify_cmd(root: &Path, args: &[String]) -> anyhow::Result<()> {
+    let _lock = crate::shell::lock::OutputLock::try_acquire(root, &path(root), "devh orch")
+        .map_err(|e| anyhow!("devh orch: реестр занят ({e}) — повтори через секунду"))?;
+
     let id = positional(args)
         .first()
         .cloned()
@@ -1337,6 +1419,9 @@ fn git_output(root: &Path, args: &[&str]) -> anyhow::Result<String> {
 
 /// `devh orch commit <ID>` — коммит только после зелёного DoD.
 pub fn commit_cmd(root: &Path, args: &[String]) -> anyhow::Result<()> {
+    let _lock = crate::shell::lock::OutputLock::try_acquire(root, &path(root), "devh orch")
+        .map_err(|e| anyhow!("devh orch: реестр занят ({e}) — повтори через секунду"))?;
+
     let id = positional(args)
         .first()
         .cloned()
