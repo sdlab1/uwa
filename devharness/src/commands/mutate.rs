@@ -60,6 +60,7 @@ use serde::{Deserialize, Serialize};
 use crate::core::early;
 use crate::core::gates::{self, MutationStats};
 use crate::core::mutaudit::{self, Audit};
+use crate::core::rate::{self, RateKind};
 use crate::core::tui;
 use crate::core::watch::{Event, Watcher};
 use crate::shell::color::colors;
@@ -366,6 +367,55 @@ fn effective_args(root: &Path, args: &[String]) -> Vec<String> {
 // ──────────────────────────────── start ────────────────────────────────
 
 /// Запуск аудита: супервизор в отдельной сессии + подсказка «что дальше».
+/// Чистая функция-гейт: можно ли запускать мутационный аудит.
+///
+/// Проверяет: (1) caller == lead (или lead не назначен — fail-open),
+/// (2) явный охват (файлы/--in-diff), (3) cadence & load через core::rate.
+/// Возвращает Ok(()) если можно, Err с текстом иначе.
+pub fn mutate_start_gate(
+    caller: &str,
+    lead: Option<&str>,
+    args: &[String],
+    last_run_secs: Option<u64>,
+    now_secs: u64,
+    load_pct: u32,
+) -> Result<(), String> {
+    // Lead check.
+    if let Some(lead_addr) = lead {
+        if caller != lead_addr {
+            return Err(format!(
+                "мутационный аудит запускает только ведущий (lead={})",
+                lead_addr
+            ));
+        }
+    }
+    // Scope check: нужен явный охват непроверенной зоны.
+    let has_explicit_scope = args.iter().any(|a| a.starts_with("--in-diff="))
+        || args
+            .iter()
+            .any(|a| !a.starts_with("-") && std::path::Path::new(a).exists());
+    if !has_explicit_scope {
+        return Err(
+            "нужен явный охват непроверенной зоны: укажите файлы или --in-diff <дифф>"
+                .to_string(),
+        );
+    }
+    // Cadence & load.
+    let policy = rate::RatePolicy::default();
+    let decision = rate::decide(RateKind::Mutation, now_secs, last_run_secs, load_pct, &policy);
+    match decision {
+        rate::Decision::Allowed => Ok(()),
+        rate::Decision::TooSoon { retry_in_secs } => Err(format!(
+            "мутационный аудит: прошло менее 2 ч с прошлого (осталось {} с) — подожди",
+            retry_in_secs
+        )),
+        rate::Decision::LoadTooHigh { load_pct, limit } => Err(format!(
+            "system load {}% > лимит {}% — тяжёлые прогоны запрещены",
+            load_pct, limit
+        )),
+    }
+}
+
 fn start(root: &Path, args: &[String]) -> anyhow::Result<()> {
     if let Some(st) = running(root) {
         println!(
@@ -378,6 +428,35 @@ fn start(root: &Path, args: &[String]) -> anyhow::Result<()> {
     if args.is_empty() {
         help();
         crate::commands::die(1);
+    }
+    // T-034: машинный гейт.
+    let reg = crate::commands::orch::load(root);
+    let (lead, _lead_src) = crate::commands::orch::lead_of(&reg);
+    let caller = crate::core::identity::canonical(&crate::core::identity::current().name);
+    let last_audit = if let Some(st) = running(root) {
+        Some(st.started)
+    } else {
+        let state_path = work_dir(root).join(STATE_FILE);
+        if let Ok(text) = std::fs::read_to_string(&state_path) {
+            serde_json::from_str::<State>(&text).ok().map(|s| s.started)
+        } else {
+            None
+        }
+    };
+    let load_pct = crate::core::load::load_average().map(|l| l as u32).unwrap_or(0);
+    match mutate_start_gate(
+        &caller,
+        lead.as_deref(),
+        &args,
+        last_audit,
+        crate::core::identity::unix_now(),
+        load_pct,
+    ) {
+        Ok(()) => {}
+        Err(msg) => {
+            eprintln!("devh mutate start: {}", msg);
+            crate::commands::die(2);
+        }
     }
     // R11: фоновый аудит не мутирует дерево агента.
     if args
@@ -2144,6 +2223,53 @@ mod tests {
             audit_dir(root, &["--output".to_string(), "/tmp/o".to_string()]),
             Path::new("/tmp/o/mutants.out")
         );
+    }
+
+    #[test]
+    fn mutate_start_gate_rejects_non_lead() {
+        let args = vec!["src/main.rs".to_string()];
+        let res = mutate_start_gate("worker", Some("lead"), &args, None, 1_000_000, 50);
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("мутационный аудит запускает только ведущий"));
+    }
+
+    #[test]
+    fn mutate_start_gate_fail_open_without_lead() {
+        let args = vec!["src/main.rs".to_string()];
+        let res = mutate_start_gate("worker", None, &args, None, 1_000_000, 50);
+        assert!(res.is_ok(), "без lead — fail-open");
+    }
+
+    #[test]
+    fn mutate_start_gate_rejects_no_scope() {
+        let args: Vec<String> = vec![];
+        let res = mutate_start_gate("lead", Some("lead"), &args, None, 1_000_000, 50);
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("нужен явный охват"));
+    }
+
+    #[test]
+    fn mutate_start_gate_rejects_too_soon() {
+        let args = vec!["src/main.rs".to_string()];
+        let last = 1_000_000u64 - 100; // 100 с назад < 7200
+        let res = mutate_start_gate("lead", Some("lead"), &args, Some(last), 1_000_000, 50);
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("менее 2 ч"));
+    }
+
+    #[test]
+    fn mutate_start_gate_rejects_high_load() {
+        let args = vec!["src/main.rs".to_string()];
+        let res = mutate_start_gate("lead", Some("lead"), &args, None, 1_000_000, 90);
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("system load"));
+    }
+
+    #[test]
+    fn mutate_start_gate_allows_valid() {
+        let args = vec!["src/main.rs".to_string()];
+        let res = mutate_start_gate("lead", Some("lead"), &args, None, 1_000_000, 50);
+        assert!(res.is_ok());
     }
 
     #[test]

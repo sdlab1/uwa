@@ -156,6 +156,15 @@ pub struct AgentState {
     /// Ждёт первого `orch welcome` (онбординг).
     #[serde(default)]
     pub pending_welcome: bool,
+    /// Личный worktree агента (путь) — выдаётся автоматически при `orch start`.
+    #[serde(default)]
+    pub worktree: Option<String>,
+    /// Ветка worktree агента.
+    #[serde(default)]
+    pub wt_branch: Option<String>,
+    /// Unix-время последней синхронизации worktree с главным репо.
+    #[serde(default)]
+    pub wt_synced_at: Option<u64>,
 }
 
 /// Реестр задач и исполнителей.
@@ -478,6 +487,7 @@ pub fn orch(root: &Path, sub: &str, args: &[String]) -> anyhow::Result<()> {
         "reassign" => reassign(root, args),
         "degrade" => degrade(root, args),
         "model" => model(root, args),
+        "wt" => wt(root, args),
         "zones" => zones(root),
         "dod" => dod_cmd(root, args),
         "verify" => verify_cmd(root, args),
@@ -524,6 +534,12 @@ fn print_help() {
   degrade --agent X [--to P] [--reason R]  понизить P очереди
   model --agent X --model M [--runtime R]   смена модели/рантайма => подозрение
   zones                      зоны ответственности по исполнителям
+  wt list                    учёт worktree'ов агентов (путь, ветка, грязное, ahead/behind)
+  wt assign <агент>           выдать worktree агенту (идемпотентно)
+  wt path <агент>             путь worktree агента (для скриптов)
+  wt sync <агент>|--all       подтянуть изменения главного репо в worktree'и
+  wt release <агент>          освободить worktree (грязное — не трогаем)
+  wt gc                       убрать осиротевшие worktree'и
 
 Реестр: .harness/orch/registry.json · шкалы: devh workflow §ШКАЛЫ"
     );
@@ -727,8 +743,39 @@ fn start(root: &Path, args: &[String]) -> anyhow::Result<()> {
     }
     let agent = owner;
     let p = reg.tasks[idx].complexity;
+    // Авто-выдача worktree: агент НЕ думает о путях — путь печатается сразу.
+    let cfg = crate::commands::load_config(root).unwrap_or_default();
+    let wt_issued = match crate::commands::wtman::ensure(&cfg, root, &agent) {
+        Ok((wpath, created)) => {
+            let branch = crate::commands::wtman::agent_branch(&agent);
+            if let Some(i) = agent_index(&reg, &agent) {
+                if let Some(st) = reg.agents.get_mut(i) {
+                    st.worktree = Some(wpath.to_string_lossy().to_string());
+                    st.wt_branch = Some(branch.clone());
+                    st.wt_synced_at = Some(ts);
+                }
+            }
+            Some((wpath, created, branch))
+        }
+        Err(e) => {
+            println!("devh orch: ⚠ worktree не выдан: {e}");
+            None
+        }
+    };
     save(root, &reg)?;
     println!("devh orch: {id} взята в работу ({agent}, P{p})");
+    if let Some((wpath, created, branch)) = wt_issued {
+        println!(
+            "worktree: {} ({}) — работай ТОЛЬКО здесь{}",
+            wpath.display(),
+            branch,
+            if created {
+                " [создан]"
+            } else {
+                " [уже был]"
+            }
+        );
+    }
     Ok(())
 }
 
@@ -949,6 +996,149 @@ fn list(root: &Path, args: &[String]) -> anyhow::Result<()> {
 }
 
 /// `devh orch zones` — кто какие зоны держит.
+/// `devh orch wt <list|assign|path|sync|release|gc> [агент]` — учёт и
+/// управление личными worktree'ами агентов.
+fn wt(root: &Path, args: &[String]) -> anyhow::Result<()> {
+    let sub = args.first().cloned().unwrap_or_else(|| "list".to_string());
+    let rest: Vec<String> = args.iter().skip(1).cloned().collect();
+    let agent = positional(&rest).first().cloned();
+    let cfg = crate::commands::load_config(root).unwrap_or_default();
+    match sub.as_str() {
+        "list" => {
+            let reg = load(root);
+            let mut names: Vec<String> = reg.agents.iter().map(|a| a.name.clone()).collect();
+            for p in crate::commands::wtman::registered_paths(root) {
+                if let Some(n) = p.file_name().and_then(|s| s.to_str()) {
+                    let n = n.rsplit('-').next().unwrap_or(n).to_string();
+                    if !names.contains(&n) {
+                        names.push(n);
+                    }
+                }
+            }
+            names.sort();
+            println!(
+                "{:<10} {:<52} {:<22} {:<8} {:<8}",
+                "агент", "worktree", "ветка", "грязн", "a/b"
+            );
+            for n in names.iter() {
+                let st = crate::commands::wtman::status(&cfg, root, n);
+                if !st.exists {
+                    continue;
+                }
+                println!(
+                    "{:<10} {:<52} {:<22} {:<8} {:<8}",
+                    n,
+                    st.path.display().to_string(),
+                    st.branch.clone().unwrap_or_else(|| "—".to_string()),
+                    if st.dirty { "ДА" } else { "нет" },
+                    format!("{}/{}", st.ahead, st.behind)
+                );
+            }
+            Ok(())
+        }
+        "assign" => {
+            let agent = agent.ok_or_else(|| anyhow!("devh orch wt assign: нужен агент"))?;
+            let (p, created) = crate::commands::wtman::ensure(&cfg, root, &agent)?;
+            let mut reg = load(root);
+            if agent_index(&reg, &agent).is_none() {
+                reg.agents.push(AgentState {
+                    name: agent.clone(),
+                    ..Default::default()
+                });
+            }
+            if let Some(i) = agent_index(&reg, &agent) {
+                if let Some(st) = reg.agents.get_mut(i) {
+                    st.worktree = Some(p.to_string_lossy().to_string());
+                    st.wt_branch = Some(crate::commands::wtman::agent_branch(&agent));
+                    st.wt_synced_at = Some(now());
+                }
+            }
+            save(root, &reg)?;
+            println!(
+                "{} {}",
+                p.display(),
+                if created {
+                    "[создан]"
+                } else {
+                    "[уже был]"
+                }
+            );
+            Ok(())
+        }
+        "path" => {
+            let agent = agent.ok_or_else(|| anyhow!("devh orch wt path: нужен агент"))?;
+            println!(
+                "{}",
+                crate::commands::wtman::agent_path(&cfg, root, &agent).display()
+            );
+            Ok(())
+        }
+        "sync" => {
+            let all = rest.iter().any(|a| a == "--all");
+            let mut targets: Vec<String> = Vec::new();
+            if all {
+                let reg = load(root);
+                for a in reg.agents.iter() {
+                    targets.push(a.name.clone());
+                }
+            } else {
+                targets.push(
+                    agent.ok_or_else(|| anyhow!("devh orch wt sync: нужен агент или --all"))?,
+                );
+            }
+            let mut reg = load(root);
+            for t in targets.iter() {
+                match crate::commands::wtman::sync(&cfg, root, t) {
+                    Ok(rep) => {
+                        println!("{}: {} — {}", t, rep.action.label(), rep.message);
+                        if let Some(i) = agent_index(&reg, t) {
+                            if let Some(st) = reg.agents.get_mut(i) {
+                                st.wt_synced_at = Some(now());
+                            }
+                        }
+                    }
+                    Err(e) => println!("{t}: ⚠ sync не выполнен: {e}"),
+                }
+            }
+            save(root, &reg)?;
+            Ok(())
+        }
+        "release" => {
+            let agent = agent.ok_or_else(|| anyhow!("devh orch wt release: нужен агент"))?;
+            let msg = crate::commands::wtman::release(&cfg, root, &agent)?;
+            let mut reg = load(root);
+            if let Some(i) = agent_index(&reg, &agent) {
+                if let Some(st) = reg.agents.get_mut(i) {
+                    st.worktree = None;
+                    st.wt_branch = None;
+                }
+            }
+            save(root, &reg)?;
+            println!("{msg}");
+            Ok(())
+        }
+        "gc" => {
+            let mut keep: Vec<std::path::PathBuf> = Vec::new();
+            let reg = load(root);
+            for a in reg.agents.iter() {
+                keep.push(crate::commands::wtman::agent_path(&cfg, root, &a.name));
+            }
+            let removed = crate::commands::wtman::gc(&cfg, root, &keep)?;
+            if removed.is_empty() {
+                println!("gc: удалять нечего");
+            } else {
+                for r in removed.iter() {
+                    println!("удалён: {r}");
+                }
+            }
+            Ok(())
+        }
+        other => Err(anyhow!(
+            "devh orch wt: неизвестная подкоманда «{other}» (list|assign|path|sync|release|gc)"
+        )),
+    }
+}
+
 fn zones(root: &Path) -> anyhow::Result<()> {
     let reg = load(root);
     for a in reg.agents.iter() {
@@ -1036,6 +1226,13 @@ fn board(root: &Path) -> anyhow::Result<()> {
         );
         if let Some(s) = susp.as_ref() {
             println!("  ⚠ подозрение: {s}");
+        }
+        if let Some(w) = state.and_then(|s| s.worktree.clone()) {
+            let synced = state
+                .and_then(|s| s.wt_synced_at)
+                .map(|t| format!("sync {}с назад", now().saturating_sub(t)))
+                .unwrap_or_else(|| "sync не делался".to_string());
+            println!("  worktree: {w} ({synced})");
         }
         if !active.is_empty() {
             println!("  в работе (взято — не выдаётся):");

@@ -115,7 +115,7 @@ fn key_hash(key: &str) -> String {
     digest.iter().take(4).map(|b| format!("{b:02x}")).collect()
 }
 
-fn unix_now() -> u64 {
+pub(crate) fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
