@@ -812,6 +812,16 @@ mod tests {
         assert!(!id.fresh);
     }
 
+
+    #[test]
+    fn cwd_fallback_keys_differ_by_cwd() {
+        // Документирует границу fallback'а: одинаковый cwd → одинаковый ключ,
+        // разный cwd → разный ключ. Коллизия только если cwd совпал
+        // (это и есть риск, предупреждаемый whoami).
+        assert_eq!(key_hash("/tmp/proj-a"), key_hash("/tmp/proj-a"));
+        assert_ne!(key_hash("/tmp/proj-a"), key_hash("/tmp/proj-b"));
+    }
+
     #[test]
     fn proc_helpers_read_current_process() {
         let pid = std::process::id();

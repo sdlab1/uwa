@@ -709,16 +709,23 @@ fn append_message(path: &Path, block: &str) -> bool {
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
-    let mut ok = fs::OpenOptions::new()
+    // Атомарность при параллельных отправителях: advisory lock (fs2) +
+    // один open handle + flush. Без этого два `devh msg send` могли
+    // интерливить запись или потерять данные.
+    let mut f = match fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(path)
-        .is_ok();
-    if ok {
-        if let Ok(mut f) = fs::OpenOptions::new().append(true).open(path) {
-            ok = writeln!(f, "{block}{SEP}").is_ok();
-        }
+    {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+    if fs2::FileExt::lock_exclusive(&f).is_err() {
+        return false;
     }
+    let ok = writeln!(f, "{block}{SEP}").is_ok();
+    let _ = f.flush();
+    let _ = fs2::FileExt::unlock(&f);
     ok
 }
 
@@ -1304,11 +1311,17 @@ fn send(args: &[String]) -> i32 {
                         // обрыв вывода (пайп/SIGPIPE) не должен оставлять
                         // письмо в ящике — иначе оно всплывёт снова.
                         if consume && !legacy {
+                            // Съедаем свежие (fresh) письма: удаляем их из ящика.
+                            // Раньше фильтр был инвертирован — свежие оставались.
+                            let fresh_ids: Vec<String> = fresh
+                                .iter()
+                                .map(|b| block_field(b, "ID: ").unwrap_or_default())
+                                .collect();
                             let keep: Vec<String> = blocks
                                 .iter()
                                 .filter(|b| {
                                     let id = block_field(b, "ID: ").unwrap_or_default();
-                                    !seen.iter().any(|s| s == &id)
+                                    !fresh_ids.iter().any(|s| s == &id)
                                 })
                                 .cloned()
                                 .collect();

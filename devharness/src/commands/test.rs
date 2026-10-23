@@ -389,10 +389,27 @@ fn bg(root: &Path, log_dir: &Path, args: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Проверка: лог новее pid-файла (принадлежит текущему фоновому прогону).
+///
+/// Лог считается относящимся к текущему фоновому прогону только если он
+/// НОВЕЕ pid-файла (mtime). Иначе — это лог прошлого прогона, и показывать
+/// его как результат текущего нельзя (rc=2).
+pub fn log_is_fresh(
+    log_mtime: Option<std::time::SystemTime>,
+    pid_mtime: Option<std::time::SystemTime>,
+) -> bool {
+    match (log_mtime, pid_mtime) {
+        (Some(lm), Some(pm)) => lm > pm,
+        (Some(_), None) => true,
+        _ => false,
+    }
+}
+
 /// `devh test --status`: идёт/завершён + итог из канонического лога.
 fn status(_root: &Path, log_dir: &Path) -> anyhow::Result<()> {
     let pid_path = log_dir.join("test-bg.pid");
-    if let Ok(text) = fs::read_to_string(&pid_path) {
+    // Запоминаем mtime pid-файла ДО удаления: по нему проверяем свежесть лога.
+    let pid_mtime = if let Ok(text) = fs::read_to_string(&pid_path) {
         let pid: i32 = text.trim().parse().unwrap_or(0);
         if pid > 0 && crate::shell::proc::pid_alive(pid) {
             let el = pid_path
@@ -408,12 +425,25 @@ fn status(_root: &Path, log_dir: &Path) -> anyhow::Result<()> {
             );
             crate::commands::die(2);
         }
+        let mt = pid_path.metadata().and_then(|m| m.modified()).ok();
         let _ = fs::remove_file(&pid_path);
-    }
+        mt
+    } else {
+        None
+    };
     let Some(log) = latest_log(log_dir) else {
         println!("devh test --status: фонового прогона и лога нет — среда не готова");
         crate::commands::die(2);
     };
+    // Guard: лог должен быть новее pid-файла — иначе это лог прошлого прогона.
+    let log_mtime = log.metadata().and_then(|m| m.modified()).ok();
+    if !log_is_fresh(log_mtime, pid_mtime) {
+        println!(
+            "devh test --status: нет свежего прогона (лог старше pid-файла): {}",
+            log.display()
+        );
+        crate::commands::die(2);
+    }
     let text = fs::read_to_string(&log)?;
     let Some(t) = parse_totals(&text) else {
         println!(
@@ -505,6 +535,30 @@ mod tests {
     fn case_names_are_read_from_log() {
         let text = "  PASS: первый кейс\n  FAIL: второй кейс\nне проверка\n";
         assert_eq!(case_names(text), vec!["первый кейс", "второй кейс"]);
+    }
+
+
+    #[test]
+    fn status_log_older_than_pid_is_not_fresh() {
+        use std::time::{Duration, SystemTime};
+        let pid_time = SystemTime::UNIX_EPOCH + Duration::from_secs(1000);
+        let log_older = SystemTime::UNIX_EPOCH + Duration::from_secs(500);
+        assert!(!log_is_fresh(Some(log_older), Some(pid_time)));
+    }
+
+    #[test]
+    fn status_log_newer_than_pid_is_fresh() {
+        use std::time::{Duration, SystemTime};
+        let pid_time = SystemTime::UNIX_EPOCH + Duration::from_secs(1000);
+        let log_newer = SystemTime::UNIX_EPOCH + Duration::from_secs(1500);
+        assert!(log_is_fresh(Some(log_newer), Some(pid_time)));
+    }
+
+    #[test]
+    fn status_log_without_pid_is_fresh() {
+        use std::time::{Duration, SystemTime};
+        let log_time = SystemTime::UNIX_EPOCH + Duration::from_secs(500);
+        assert!(log_is_fresh(Some(log_time), None));
     }
 
     #[test]
