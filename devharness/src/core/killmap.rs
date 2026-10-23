@@ -205,6 +205,19 @@ impl Killmap {
             })
             .collect()
     }
+
+    /// Топ-3 файлов по выжившим мутантам (missed). Дедуп по имени файла
+    /// (ключ карты — путь, дубли невозможны). Обрезка: не более 3.
+    /// Для P8-3 / T-039.
+    pub fn top_missed(&self) -> Vec<(String, u32)> {
+        let mut sorted: Vec<(String, u32)> = self
+            .files
+            .iter()
+            .map(|(f, s)| (f.clone(), s.missed))
+            .collect();
+        sorted.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        sorted.into_iter().take(3).collect()
+    }
 }
 
 #[cfg(test)]
@@ -490,5 +503,134 @@ mod tests {
         let km = Killmap::load(obs);
         assert_eq!(km.files.len(), 1, "старая карта читается");
         assert_eq!(km.files.get("a.rs").map(|f| f.timeout), Some(0));
+    }
+
+    // === T-039: агрегация killmap.json -> топ-3 по выжившим ===
+
+    #[test]
+    fn top_missed_empty_killmap_is_empty() {
+        let km = Killmap::default();
+        assert!(km.top_missed().is_empty(), "пустая карта — пустой топ");
+    }
+
+    #[test]
+    fn top_missed_sorts_by_missed_descending() {
+        let mut km = Killmap::default();
+        km.files.insert(
+            "a.rs".into(),
+            FileStat {
+                missed: 5,
+                ..FileStat::default()
+            },
+        );
+        km.files.insert(
+            "b.rs".into(),
+            FileStat {
+                missed: 10,
+                ..FileStat::default()
+            },
+        );
+        km.files.insert(
+            "c.rs".into(),
+            FileStat {
+                missed: 3,
+                ..FileStat::default()
+            },
+        );
+        let top = km.top_missed();
+        assert_eq!(top.len(), 3, "3 файла — не обрезается");
+        assert_eq!(top[0].0, "b.rs", "первым — максимум выживших (10)");
+        assert_eq!(top[0].1, 10);
+        assert_eq!(top[1].0, "a.rs");
+        assert_eq!(top[2].0, "c.rs");
+    }
+
+    #[test]
+    fn top_missed_truncates_to_three() {
+        let mut km = Killmap::default();
+        for i in 0..10 {
+            km.files.insert(
+                format!("f{i}.rs"),
+                FileStat {
+                    missed: (i as u32).saturating_mul(2),
+                    ..FileStat::default()
+                },
+            );
+        }
+        let top = km.top_missed();
+        assert_eq!(top.len(), 3, ">3 — обрезать до 3: {top:?}");
+        // Сортировка: наибольшие missed первыми (f9 = 18, f8 = 16, f7 = 14)
+        assert_eq!(top[0].0, "f9.rs");
+        assert_eq!(top[1].0, "f8.rs");
+        assert_eq!(top[2].0, "f7.rs");
+    }
+
+    #[test]
+    fn top_missed_dedup_by_file_key() {
+        // Ключ карты — путь файла; дубли невозможны по BTreeMap.
+        let mut km = Killmap::default();
+        km.files.insert(
+            "dup.rs".into(),
+            FileStat {
+                missed: 5,
+                ..FileStat::default()
+            },
+        );
+        // Повторная вставка с тем же ключом — заменяет, не дублирует.
+        km.files.insert(
+            "dup.rs".into(),
+            FileStat {
+                missed: 7,
+                ..FileStat::default()
+            },
+        );
+        let top = km.top_missed();
+        assert_eq!(top.len(), 1, "один ключ — один результат");
+        assert_eq!(top[0].1, 7, "последнее значение");
+    }
+
+    #[test]
+    fn top_missed_deterministic_sort_for_equal_missed() {
+        let mut km = Killmap::default();
+        km.files.insert(
+            "z.rs".into(),
+            FileStat {
+                missed: 3,
+                ..FileStat::default()
+            },
+        );
+        km.files.insert(
+            "a.rs".into(),
+            FileStat {
+                missed: 3,
+                ..FileStat::default()
+            },
+        );
+        km.files.insert(
+            "m.rs".into(),
+            FileStat {
+                missed: 3,
+                ..FileStat::default()
+            },
+        );
+        let top = km.top_missed();
+        assert_eq!(top.len(), 3);
+        // Равные missed: сортировка по имени по возрастанию (BTreeMap → ключи asc)
+        assert_eq!(top[0].0, "a.rs");
+        assert_eq!(top[1].0, "m.rs");
+        assert_eq!(top[2].0, "z.rs");
+    }
+
+    #[test]
+    fn top_missed_combines_with_existing_methods() {
+        // Интеграция: killmap с прогоном, затем агрегация + таблица.
+        let mut km = Killmap::default();
+        km.apply_run(&d(&[("core/load.rs", 0, 4, 1)]), "2026-10-23");
+        let top = km.top_missed();
+        assert!(!top.is_empty(), "есть выжившие — топ не пуст");
+        assert!(top[0].0.contains("core/load.rs"), "файл в топе: {top:?}");
+        // Таблица показывает все, агрегация — только топ.
+        let table = km.table(10);
+        assert_eq!(table.len(), 1, "таблица: 1 строка");
     }
 }
