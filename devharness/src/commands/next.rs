@@ -283,15 +283,16 @@ fn audit_next(root: &Path) -> Option<Next> {
             // иначе — наблюдать.
             let problems = crate::commands::mutate::live_problem_count(root);
             if problems > 0 {
-                return Some(Next::new(
+                Some(Next::new(
                     "devh mutate problems",
                     &format!("мутационный аудит идёт, уже есть проблем: {problems} — чинить"),
-                ));
+                ))
+            } else {
+                Some(Next::new(
+                    "devh mutate watch",
+                    "мутационный аудит идёт — смотреть живой прогресс",
+                ))
             }
-            return Some(Next::new(
-                "devh mutate watch",
-                "мутационный аудит идёт — смотреть живой прогресс",
-            ));
         }
         AuditState::Stopped | AuditState::Aborted => Some(Next::new(
             &restart_command(root),

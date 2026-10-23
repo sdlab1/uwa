@@ -461,6 +461,15 @@ pub fn corpus_path(store: &Store) -> std::path::PathBuf {
     store.dir.join("corpus.json")
 }
 
+/// Return type for [`aggregate`] — avoids clippy::type_complexity.
+type AggregateResult = (
+    Vec<Escape>,
+    u32,
+    bool,
+    Option<(u32, u32, String)>,
+    Freshness,
+);
+
 /// Агрегация «с пола»: ledger + log.md + corpus.json → строка уровня.
 /// Читает через store: никакой логики уровня в команде не остаётся.
 ///
@@ -472,16 +481,7 @@ pub fn corpus_path(store: &Store) -> std::path::PathBuf {
 /// из САМОГО log.md (дата последней сессии), а не из wall clock — уровень
 /// зависит от того, что сделано, не от того, когда смотрят. `max_days`
 /// приходит из конфига (`CORPUS_FRESH_DAYS`, дефолт [`CORPUS_FRESH_DAYS`]).
-pub fn aggregate(
-    store: &Store,
-    max_days: u32,
-) -> (
-    Vec<Escape>,
-    u32,
-    bool,
-    Option<(u32, u32, String)>,
-    Freshness,
-) {
+pub fn aggregate(store: &Store, max_days: u32) -> AggregateResult {
     let text = std::fs::read_to_string(ledger_path(store)).unwrap_or_default();
     let escapes = parse_escapes(&text);
     let log_md = std::fs::read_to_string(store.dir.join("log.md")).unwrap_or_default();
@@ -509,7 +509,11 @@ mod tests {
     fn parse_escapes_skips_comments_and_blank_lines() {
         let text = "# это комментарий\n\n2026-01-02 | W-001 | нашли | класс: blind:* | реакция: гейт: переделать\n";
         let parsed = parse_escapes(text);
-        assert_eq!(parsed.len(), 1, "комментарий и пустая строка — не побеги: {parsed:?}");
+        assert_eq!(
+            parsed.len(),
+            1,
+            "комментарий и пустая строка — не побеги: {parsed:?}"
+        );
     }
 
     /// Дата вида YYYY-MM-DD — ок; похожие строки — нет. Мутанты `||` -> `&&`

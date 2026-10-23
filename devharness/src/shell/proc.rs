@@ -71,7 +71,9 @@ pub fn group_alive(pgid: i32) -> bool {
         return false;
     }
     let Ok(entries) = std::fs::read_dir("/proc") else {
-        return unsafe { libc::kill(-pgid, 0) == 0 };
+        // pgid > 1, so 0 - pgid cannot overflow i32.
+        let neg_pgid = 0i32 - pgid;
+        return unsafe { libc::kill(neg_pgid, 0) == 0 };
     };
     for entry in entries.flatten() {
         let Some(name) = entry.file_name().to_str().map(str::to_owned) else {

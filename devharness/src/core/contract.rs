@@ -108,7 +108,7 @@ impl Contract {
             // многострочный массив: значение открыто '[', но не закрыто ']'
             let mut v = v.trim().to_string();
             if v.starts_with('[') && !v.ends_with(']') {
-                while let Some(next) = lines.next() {
+                for next in lines.by_ref() {
                     let t = next.trim();
                     v.push(' ');
                     v.push_str(t);

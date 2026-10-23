@@ -603,16 +603,16 @@ fn red_mutate_phase(
             die(store, id, 1);
         }
         let red_cmd = std::fs::read_to_string(&red.file).unwrap_or_default();
-        let rep = mutate_gate(
+        let rep = mutate_gate(MutateGateArgs {
             m,
             wt,
-            &store.dir,
+            obs: &store.dir,
             id,
-            Some(red_cmd.trim()),
-            "red-mutation",
-            "RED_MUTATE",
-            Gate::Mutate,
-        )
+            test: Some(red_cmd.trim()),
+            label: "red-mutation",
+            key: "RED_MUTATE",
+            gate: Gate::Mutate,
+        })
         .unwrap_or_else(|e| {
             eprintln!("{}{e}{}", c.r, c.z);
             mark_phase_named(
@@ -1319,16 +1319,16 @@ fn gate_ladder(
     }
 
     if let Some(m) = &cfg.mutate {
-        let rep = mutate_gate(
+        let rep = mutate_gate(MutateGateArgs {
             m,
             wt,
-            &store.dir,
+            obs: &store.dir,
             id,
-            None,
-            "mutation",
-            "MUTATE",
-            Gate::Mutate,
-        )
+            test: None,
+            label: "mutation",
+            key: "MUTATE",
+            gate: Gate::Mutate,
+        })
         .unwrap_or_else(|e| {
             eprintln!("{}{e}{}", c.r, c.z);
             die(store, id, 1);
@@ -1983,16 +1983,28 @@ fn outcomes_stamp(wt: &Path, tool: &str) -> Option<crate::core::mutaudit::FreshS
 ///   холодных;
 /// - `{file}`/`{module}` — по файлу на запуск (обратная совместимость);
 /// - без плейсхолдеров — запуск как задан, без scope-фильтра.
-fn mutate_gate(
-    m: &MutateCfg,
-    wt: &Path,
-    obs: &Path,
-    id: &ItemId,
-    test: Option<&str>,
-    label: &str,
-    key: &str,
+struct MutateGateArgs<'a> {
+    m: &'a MutateCfg,
+    wt: &'a Path,
+    obs: &'a Path,
+    id: &'a ItemId,
+    test: Option<&'a str>,
+    label: &'a str,
+    key: &'a str,
     gate: Gate,
-) -> anyhow::Result<MutReport> {
+}
+
+fn mutate_gate(args: MutateGateArgs<'_>) -> anyhow::Result<MutReport> {
+    let MutateGateArgs {
+        m,
+        wt,
+        obs,
+        id,
+        test,
+        label,
+        key,
+        gate,
+    } = args;
     // P7: in-place прогон = агент для этого дерева. Лок держится на весь
     // гейт (batch и per-file цикл) — §9.13 «отравленный коммит».
     let _mut = MutateLock::try_acquire(wt, label).map_err(|holder| {
@@ -2696,16 +2708,16 @@ impl TuiProgress {
             return None;
         }
         self.last_printed = done;
-        let row = crate::core::tui::line(
+        let row = crate::core::tui::line(crate::core::tui::LineArgs {
             done,
             total,
-            &counts,
-            self.avg_secs(done),
-            self.started.elapsed().as_secs_f64(),
-            "",
-            "",
-            &self.c,
-        );
+            n: &counts,
+            avg_secs: self.avg_secs(done),
+            elapsed_secs: self.started.elapsed().as_secs_f64(),
+            last: "",
+            cur: "",
+            c: &self.c,
+        });
         if row == self.last_row {
             return None; // ничего не изменилось — не зеркалим одну строку
         }

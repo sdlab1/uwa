@@ -123,7 +123,7 @@ pub fn doctor(store: &Store, cfg: &RunConfig, root: &Path) -> anyhow::Result<()>
                 store
                     .read(item_rel(&i.id, "spec.md"))
                     .as_deref()
-                    .map(|spec| crate::commands::new::observe_points(spec))
+                    .map(crate::commands::new::observe_points)
                     .filter(|p| !p.is_empty())
                     .is_none()
             })
@@ -156,7 +156,7 @@ pub fn doctor(store: &Store, cfg: &RunConfig, root: &Path) -> anyhow::Result<()>
                 store
                     .read(item_rel(&i.id, "spec.md"))
                     .as_deref()
-                    .map(|spec| crate::commands::new::file_globs(spec))
+                    .map(crate::commands::new::file_globs)
                     .filter(|g| !g.is_empty())
                     .is_none()
             })

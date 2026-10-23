@@ -25,7 +25,7 @@ pub struct Entry {
 /// на этом строится подмена содержимым.
 fn frame(h: &mut sha2::Sha256, b: &[u8]) {
     use sha2::Digest;
-    h.update(&(b.len() as u64).to_le_bytes());
+    h.update((b.len() as u64).to_le_bytes());
     h.update(b);
 }
 
@@ -50,7 +50,7 @@ pub fn tree_digest(entries: &[Entry]) -> Result<String, String> {
     h.update(b"devh-tree-v1\0");
     for e in idx {
         frame(&mut h, e.path.as_bytes());
-        h.update(&e.mode.to_le_bytes());
+        h.update(e.mode.to_le_bytes());
         frame(&mut h, &e.content);
     }
     Ok(hex(&h.finalize()))

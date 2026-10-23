@@ -547,7 +547,9 @@ pub fn parse_all(text: &str) -> Parsed {
 /// Исход — (канон-имя, файл, строка, полное имя, длительность сек).
 /// Baseline (`Success`) не мутант — он не считается ни проблемой, ни
 /// нераспознанным исходом.
-pub fn parse_outcomes(text: &str) -> (Vec<(String, String, u32, String, f64)>, u32) {
+type ParseOutcomesResult = (Vec<(String, String, u32, String, f64)>, u32);
+
+pub fn parse_outcomes(text: &str) -> ParseOutcomesResult {
     let parsed = parse_all(text);
     (parsed.recs, parsed.unknown)
 }

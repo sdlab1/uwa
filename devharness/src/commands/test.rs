@@ -166,7 +166,9 @@ pub fn test(root: &Path, args: &[String]) -> anyhow::Result<()> {
             crate::commands::die(2);
         }
         for (i, n) in names.iter().enumerate() {
-            println!("{:>4}. {}", i + 1, n);
+            // enumerate starts at 0; display 1-based without arithmetic on index.
+            let num = i.saturating_add(1);
+            println!("{:>4}. {}", num, n);
         }
         println!();
         println!("точечная проверка: devh test --case <N>");
@@ -178,15 +180,17 @@ pub fn test(root: &Path, args: &[String]) -> anyhow::Result<()> {
     let mut want_case = false;
     let mut i = 0;
     while i < args.len() {
-        if args[i] == "--case" {
-            want_case = true;
-            filter = args.get(i + 1).cloned();
-            i = i.saturating_add(2);
-            continue;
-        }
-        if let Some(rest) = args[i].strip_prefix("--case=") {
-            want_case = true;
-            filter = Some(rest.to_string());
+        if let Some(arg) = args.get(i) {
+            if arg == "--case" {
+                want_case = true;
+                filter = args.get(i.saturating_add(1)).cloned();
+                i = i.saturating_add(2);
+                continue;
+            }
+            if let Some(rest) = arg.strip_prefix("--case=") {
+                want_case = true;
+                filter = Some(rest.to_string());
+            }
         }
         i = i.saturating_add(1);
     }
@@ -313,7 +317,9 @@ fn resolve_case(arg: &str, log_dir: &Path, suite: &Path) -> String {
     }
     if let Ok(n) = arg.trim().parse::<usize>() {
         if n >= 1 && n <= names.len() {
-            return names[n - 1].clone();
+            // Bounds checked above; get is safe. Avoid arithmetic on n.
+            let idx = n.saturating_sub(1);
+            return names.get(idx).cloned().unwrap_or_else(|| unreachable!());
         }
         println!(
             "devh test --case {n}: нет такой проверки (в списке {} шт.) — devh test --list",

@@ -1,5 +1,3 @@
-    Finished `dev` profile [optimized + debuginfo] target(s) in 0.30s
-     Running `target/debug/devh workflow`
 === ИСТОЧНИКИ ИСТИНЫ (по убыванию авторитета) ===
   1. код харнесса (commands/workflow.rs, commands/mutate.rs)
   2. devh workflow   — печать канона из кода

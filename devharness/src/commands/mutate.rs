@@ -481,9 +481,11 @@ fn supervise(root: &Path, args: &[String]) -> anyhow::Result<()> {
     }
 
     // Наблюдатель: каталог прогона + его родитель (cargo-mutants создаёт
-    // mutants.out ПОСЛЕ старта) + каталог артефактов (финальные записи
-    // супервизора) + завершение процесса.
-    let mut watcher = match Watcher::new(&[&adir, root, &dir]) {
+    // mutants.out ПОСЛЕ старта) + завершение процесса. Каталог артефактов
+    // (`dir`) НЕ наблюдаем: супервизор сам пишет туда live.log/state.json —
+    // иначе каждое событие порождает новый кадр, кадр — новое событие
+    // (обратная связь: live.log рос на мегабайты в секунду).
+    let mut watcher = match Watcher::new(&[&adir, root]) {
         Ok(w) => w,
         Err(e) => {
             anyhow::bail!("devh mutate: inotify недоступен ({e}) — аудит без наблюдения");
@@ -498,6 +500,25 @@ fn supervise(root: &Path, args: &[String]) -> anyhow::Result<()> {
     let mut exited = false;
     let mut stop_sent = false;
     while !exited {
+        // Запрос остановки (`devh mutate stop` положил маркер) проверяем на
+        // КАЖДОЙ итерации, включая таймауты: каталог артефактов больше не
+        // под наблюдением (см. выше), поэтому события о маркере не будет.
+        // Супервизор САМ гасит своего ребёнка: он владеет завершением
+        // cargo-mutants. Группа ребёнка отдельная (setpgid), супервизор в
+        // неё не входит.
+        if !stop_sent && dir.join(STOP_MARKER).exists() {
+            stop_sent = true;
+            // Гасим ТОЛЬКО группу ребёнка: группа супервизора — он сам
+            // (setsid), её трогать нельзя, иначе не запишется финальный
+            // статус.
+            if pgid > 1 && pgid != std::process::id() as i32 {
+                // -pgid sends to process group; pgid > 1 so 0 - pgid cannot overflow i32.
+                let neg_pgid = 0i32 - pgid;
+                unsafe {
+                    libc::kill(neg_pgid, libc::SIGTERM);
+                }
+            }
+        }
         let events = match watcher.wait(POLL_MS) {
             Ok(ev) => ev,
             Err(_) => break,
@@ -508,21 +529,6 @@ fn supervise(root: &Path, args: &[String]) -> anyhow::Result<()> {
                     exited = true;
                 }
                 Event::Changed(_) | Event::DirCreated(_) => {
-                    // Запрос остановки (`devh mutate stop` положил маркер) —
-                    // супервизор САМ гасит своего ребёнка: он владеет
-                    // завершением cargo-mutants. Группа ребёнка отдельная
-                    // (setpgid), супервизор в неё не входит.
-                    if !stop_sent && dir.join(STOP_MARKER).exists() {
-                        stop_sent = true;
-                        // Гасим ТОЛЬКО группу ребёнка: группа супервизора —
-                        // он сам (setsid), её трогать нельзя, иначе не
-                        // запишется финальный статус.
-                        if pgid > 1 && pgid != std::process::id() as i32 {
-                            unsafe {
-                                libc::kill(-pgid, libc::SIGTERM);
-                            }
-                        }
-                    }
                     // Кадр рисуем по СОБЫТИЮ, а не по таймеру.
                     let audit = snapshot(root, &args);
                     write_frame(root, &args, &dir, false)?;
@@ -571,7 +577,7 @@ fn supervise(root: &Path, args: &[String]) -> anyhow::Result<()> {
         "stopped".to_string()
     } else {
         match exit {
-            Some(c) if c == 0 => "done".to_string(),
+            Some(0) => "done".to_string(),
             Some(_) => "failed".to_string(),
             None => "stopped".to_string(),
         }
@@ -620,16 +626,16 @@ fn frame(audit: &Audit, cur: &str, elapsed_secs: f64) -> String {
             format!("{sym} {}", b.describe())
         })
         .unwrap_or_default();
-    tui::line(
-        audit.done,
-        audit.total,
-        &audit.counts,
-        audit.avg_secs,
+    tui::line(tui::LineArgs {
+        done: audit.done,
+        total: audit.total,
+        n: &audit.counts,
+        avg_secs: audit.avg_secs,
         elapsed_secs,
-        &last,
+        last: &last,
         cur,
-        &c,
-    )
+        c: &c,
+    })
 }
 
 /// Сколько идёт прогон (по времени старта из state.json).
@@ -913,7 +919,7 @@ fn status(root: &Path, args: &[String]) -> anyhow::Result<()> {
             "details_missing": audit.details_missing,
             "details_mismatch": audit.details_mismatch,
             "tool_problem": audit.tool_problem,
-            "blocks_clean": audit.blocks_clean_verdict(),
+            "blocks_clean": audit.blocks_clean_verdict() || aborted_state.is_some(),
             "problems": problem_json(&audit),
         });
         println!(
@@ -931,15 +937,18 @@ fn status(root: &Path, args: &[String]) -> anyhow::Result<()> {
         }
         return Ok(());
     }
+    // Оборванный аудит: НЕ печатаем кадр и «вердикт» — при неполных данных
+    // kill-rate 100% и «чисто» были бы ложью (наблюдалось: 0/226 и
+    // «вердикт: чисто» при мёртвом супервизоре). Результата нет — rc=2.
+    if aborted_state.is_some() {
+        println!("аудит оборвался — результата нет, вердикт не выносим (devh next: перезапуск)");
+        crate::commands::die(2);
+    }
     let cur = current_mutant(&audit_dir(root, &eff));
     println!("{}", tui::legend(&colors()));
     println!("{}", frame(&audit, &cur, elapsed_secs(root)));
     for l in report_lines(&audit) {
         println!("{l}");
-    }
-    if aborted_state.is_some() {
-        println!("аудит оборвался — результата нет, вердикт не выносим (devh next: перезапуск)");
-        crate::commands::die(2);
     }
     // Проблема видна СЕЙЧАС — даже если аудит ещё идёт (problem-first).
     if audit.blocks_clean_verdict() {
@@ -955,8 +964,8 @@ fn watch(root: &Path, args: &[String]) -> anyhow::Result<()> {
     let mut timeout: u64 = 0;
     let mut i = 0;
     while i < args.len() {
-        if args[i] == "--timeout" {
-            if let Some(v) = args.get(i + 1) {
+        if args.get(i) == Some(&"--timeout".to_string()) {
+            if let Some(v) = args.get(i.saturating_add(1)) {
                 timeout = v.parse::<u64>().unwrap_or(0);
             }
             i = i.saturating_add(2);
@@ -993,6 +1002,15 @@ fn watch(root: &Path, args: &[String]) -> anyhow::Result<()> {
         let _ = std::io::stdout().flush();
         if !audit.alive {
             println!();
+            // Мёртвый супервизор с незавершённым состоянием — результата
+            // нет: «вердикт: чисто» по частичным данным был бы ложью.
+            if aborted(root).is_some() {
+                println!(
+                    "⚠ аудит оборвался: результата нет, вердикт не выносим \
+                     (devh next: перезапуск)"
+                );
+                crate::commands::die(2);
+            }
             for l in report_lines(&audit) {
                 println!("{l}");
             }
@@ -1277,8 +1295,10 @@ fn stop(root: &Path) -> anyhow::Result<()> {
             // гасит вызывающий — иначе мутатор продолжит крутиться.
             let pgid = st.pgid;
             if pgid > 1 && group_alive(pgid) {
+                // -pgid sends to process group; pgid > 1 so 0 - pgid cannot overflow i32.
+                let neg_pgid = 0i32 - pgid;
                 unsafe {
-                    libc::kill(-pgid, libc::SIGTERM);
+                    libc::kill(neg_pgid, libc::SIGTERM);
                 }
                 println!(
                     "супервизор мёртв (pid {}) — сирота cargo-mutants (группа {pgid}) \

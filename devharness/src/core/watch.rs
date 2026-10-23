@@ -195,29 +195,35 @@ impl Watcher {
             if n <= 0 {
                 break;
             }
-            let data = &buf[..n as usize];
+            let data = buf.get(..n as usize).unwrap_or(&[]);
             let mut pos = 0usize;
-            while pos + 16 <= data.len() {
-                let wd =
-                    i32::from_ne_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
-                let mask = u32::from_ne_bytes([
-                    data[pos + 4],
-                    data[pos + 5],
-                    data[pos + 6],
-                    data[pos + 7],
-                ]);
-                let len = u32::from_ne_bytes([
-                    data[pos + 12],
-                    data[pos + 13],
-                    data[pos + 14],
-                    data[pos + 15],
-                ]) as usize;
+            while pos <= data.len().saturating_sub(16) {
+                // Avoid arithmetic side effects by using saturating_add
+                let p4 = pos.saturating_add(4);
+                let p8 = pos.saturating_add(8);
+                let p12 = pos.saturating_add(12);
+                let p16 = pos.saturating_add(16);
+
+                let wd_bytes = data.get(pos..p4).unwrap_or(&[0; 4]);
+                let mut wd_arr = [0u8; 4];
+                wd_arr.copy_from_slice(wd_bytes);
+                let wd = i32::from_ne_bytes(wd_arr);
+                let mask_bytes = data.get(p4..p8).unwrap_or(&[0; 4]);
+                let mut mask_arr = [0u8; 4];
+                mask_arr.copy_from_slice(mask_bytes);
+                let mask = u32::from_ne_bytes(mask_arr);
+                let len_bytes = data.get(p12..p16).unwrap_or(&[0; 4]);
+                let mut len_arr = [0u8; 4];
+                len_arr.copy_from_slice(len_bytes);
+                let len = u32::from_ne_bytes(len_arr) as usize;
+
                 let name_start = pos.saturating_add(16);
                 let name_end = name_start.saturating_add(len);
                 let name = if name_end <= data.len() {
-                    let raw = &data[name_start..name_end];
+                    let raw = data.get(name_start..name_end).unwrap_or(&[]);
                     let end = raw.iter().position(|b| *b == 0).unwrap_or(raw.len());
-                    String::from_utf8_lossy(&raw[..end]).to_string()
+                    let name_raw = raw.get(..end).unwrap_or(&[]);
+                    String::from_utf8_lossy(name_raw).to_string()
                 } else {
                     String::new()
                 };

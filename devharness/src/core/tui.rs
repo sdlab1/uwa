@@ -142,16 +142,28 @@ pub fn eta(done: u32, total: Option<u32>, avg_secs: f64, c: &Colors) -> String {
 /// bash-версии): кадр длиннее консоли переносился на вторую физическую
 /// строку, а `\r` стирал только её половину — «одна строка на месте»
 /// превращалась в лестницу старых кадров.
-pub fn line(
-    done: u32,
-    total: Option<u32>,
-    n: &Counts,
-    avg_secs: f64,
-    elapsed_secs: f64,
-    last: &str,
-    cur: &str,
-    c: &Colors,
-) -> String {
+pub struct LineArgs<'a> {
+    pub done: u32,
+    pub total: Option<u32>,
+    pub n: &'a Counts,
+    pub avg_secs: f64,
+    pub elapsed_secs: f64,
+    pub last: &'a str,
+    pub cur: &'a str,
+    pub c: &'a Colors,
+}
+
+pub fn line(args: LineArgs<'_>) -> String {
+    let LineArgs {
+        done,
+        total,
+        n,
+        avg_secs,
+        elapsed_secs,
+        last,
+        cur,
+        c,
+    } = args;
     let clock = hhmmss();
     let testable = done.saturating_sub(n.unviable);
     // F-3: kill-rate — ТОЛЬКО по пойманным (`CaughtMutant`). Таймаут в
@@ -280,12 +292,30 @@ mod tests {
     fn line_shows_last_only_when_present() {
         let c = crate::shell::color::colors();
         let n = Counts::default();
-        let with = line(0, None, &n, 0.0, 0.0, "тест-последний", "", &c);
+        let with = line(LineArgs {
+            done: 0,
+            total: None,
+            n: &n,
+            avg_secs: 0.0,
+            elapsed_secs: 0.0,
+            last: "тест-последний",
+            cur: "",
+            c: &c,
+        });
         assert!(
             with.contains("тест-последний"),
             "непустой хвост показан: {with}"
         );
-        let without = line(0, None, &n, 0.0, 0.0, "", "", &c);
+        let without = line(LineArgs {
+            done: 0,
+            total: None,
+            n: &n,
+            avg_secs: 0.0,
+            elapsed_secs: 0.0,
+            last: "",
+            cur: "",
+            c: &c,
+        });
         assert!(
             !without.contains("тест-последний"),
             "пустой хвост не показан: {without}"
@@ -367,21 +397,21 @@ mod tests {
             std::env::set_var("COLUMNS", "200");
         }
         let c = colors();
-        let row = line(
-            3,
-            Some(4),
-            &Counts {
+        let row = line(LineArgs {
+            done: 3,
+            total: Some(4),
+            n: &Counts {
                 caught: 2,
                 missed: 1,
                 timeout: 0,
                 unviable: 0,
             },
-            12.0,
-            0.0,
-            "",
-            "core/escapes.rs:249",
-            &c,
-        );
+            avg_secs: 12.0,
+            elapsed_secs: 0.0,
+            last: "",
+            cur: "core/escapes.rs:249",
+            c: &c,
+        });
         let stripped = strip_ansi(&row);
         assert!(stripped.contains("75%"), "{stripped}");
         assert!(stripped.contains("avg 0.2 мин"), "{stripped}");
