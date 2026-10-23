@@ -1309,6 +1309,24 @@ pub fn guard_commit_cmd(root: &Path) -> anyhow::Result<()> {
         return Ok(());
     }
     let reg = load(root);
+    // Ведущий может коммитить инфраструктуру: предупреждаем, но не блокируем.
+    let (lead, _) = lead_of(&reg);
+    let caller = crate::core::identity::canonical(&crate::core::identity::current().name);
+    if lead.as_deref() == Some(caller.as_str()) {
+        for task in reg.tasks.iter().filter(|t| t.status == Status::Active) {
+            if !task.zones.iter().any(|zone| staged.iter().any(|p| zones_overlap(p, zone))) {
+                continue;
+            }
+            let state = dod_state(root, task);
+            if !state.complete {
+                eprintln!(
+                    "devh orch guard-commit: ⚠ ведущий ({caller}) коммитит зону активной задачи {} (DoD не выполнен: {})",
+                    task.id, state.missing
+                );
+            }
+        }
+        return Ok(());
+    }
     let mut errors = Vec::new();
     for task in reg.tasks.iter().filter(|t| t.status == Status::Active) {
         if !task.zones.iter().any(|zone| {

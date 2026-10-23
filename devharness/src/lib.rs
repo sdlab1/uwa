@@ -79,6 +79,8 @@ pub enum Cmd {
     },
     /// Оракул следующего шага: ровно одна исполняемая команда (всегда rc=0).
     Next,
+    /// Мини-описание агента: адрес, модель, рантайм, сводка system prompt.
+    About,
     /// Печать канонического workflow из кода (машинно-читаемая проекция).
     Workflow,
     /// Канал сообщений между агентами: координация 2+ агентов (по каналам/темам).
@@ -208,6 +210,8 @@ impl Cmd {
                 ),
             Command::new("next").about("оракул следующего шага: ровно одна команда (всегда rc=0)"),
             Command::new("workflow").about("печать канонического workflow из кода"),
+            Command::new("about")
+                .about("мини-описание агента: адрес, модель, рантайм, сводка system prompt"),
             Command::new("msg")
                 .about("канал сообщений между агентами: send|read|watch|list|prune")
                 .arg(
@@ -374,6 +378,7 @@ impl Cmd {
             }
             Some("next") => Ok(Cmd::Next),
             Some("workflow") => Ok(Cmd::Workflow),
+            Some("about") => Ok(Cmd::About),
             Some("msg") => {
                 let m = matches
                     .subcommand_matches("msg")

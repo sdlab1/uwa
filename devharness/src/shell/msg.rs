@@ -1626,6 +1626,11 @@ fn send(args: &[String]) -> i32 {
                 Ok(id) => {
                     println!("идентификация закреплена: {}", id.name);
                     println!("ключ сессии: {}", id.key);
+                    // Мини-описание сразу после claim: агент отвечает на вопрос
+                    // «какая ты модель / что у тебя в system prompt» (может быть
+                    // приблизительно — но работает в большинстве случаев).
+                    let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                    crate::commands::about::print_about(&root);
                     0
                 }
                 Err(e) => {
@@ -1633,6 +1638,12 @@ fn send(args: &[String]) -> i32 {
                     1
                 }
             }
+        }
+        "about" => {
+            // Мини-описание агента: адрес, модель, рантайм, сводка system prompt.
+            let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            crate::commands::about::print_about(&root);
+            0
         }
         "whoami" => {
             let id = crate::core::identity::current();
@@ -1649,6 +1660,10 @@ fn send(args: &[String]) -> i32 {
                     "подсказка: ключ по каталогу не различает соседей — закрепите имя: devh msg claim <имя>"
                 );
             }
+            // Модель/рантайм/роль — коротко (полный блок: devh msg about).
+            let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            let about = crate::commands::about::collect(&root);
+            println!("{}", crate::commands::about::short(&about));
             0
         }
         "threads" => {

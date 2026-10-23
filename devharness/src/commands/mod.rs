@@ -1,3 +1,4 @@
+pub mod about;
 pub mod auto;
 pub mod bg;
 pub mod commit;
@@ -299,6 +300,10 @@ pub fn dispatch(cmd: &Cmd, root: &Path) -> anyhow::Result<()> {
             workflow::workflow();
             return Ok(());
         }
+        Cmd::About => {
+            about::print_about(root);
+            return Ok(());
+        }
         Cmd::Test { args } => {
             test::test(root, args)?;
             return Ok(());
@@ -320,6 +325,7 @@ pub fn dispatch(cmd: &Cmd, root: &Path) -> anyhow::Result<()> {
         Cmd::Init => unreachable!(),
         Cmd::Next => unreachable!(),
         Cmd::Workflow => unreachable!(),
+        Cmd::About => unreachable!(),
         Cmd::Test { .. } => unreachable!(),
         Cmd::Orch { .. } => unreachable!(),
         Cmd::New {
