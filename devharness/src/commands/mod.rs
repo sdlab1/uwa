@@ -12,15 +12,17 @@ pub mod new;
 pub mod next;
 pub mod orch;
 pub mod ps;
+pub mod rate;
 pub mod run;
 pub mod survivors;
 pub mod test;
 pub mod tickets;
 pub mod workflow;
+pub mod wtman;
 
 use std::path::Path;
 
-use crate::core::types::{CrapCfg, ItemId, MutateCfg, RunConfig};
+use crate::core::types::{CrapCfg, ItemId, MutateCfg, RateCfg, RunConfig};
 use crate::shell::store::{Item, Store};
 use crate::Cmd;
 
@@ -216,6 +218,17 @@ pub fn load_config(root: &Path) -> anyhow::Result<RunConfig> {
         review_diff_max: u32v("REVIEW_DIFF_MAX", 2000),
         autonomy: boolv("AUTONOMY", true),
         corpus_fresh_days: u32v("CORPUS_FRESH_DAYS", crate::core::escapes::CORPUS_FRESH_DAYS),
+        // R18/R19/R20: нагрузочные окна (build 15 мин, аудит 2 ч, CPU 80%).
+        rate: Some(RateCfg {
+            build_max_secs: g("RATE_BUILD_MAX_DURATION")
+                .and_then(|v| v.trim().parse::<u32>().ok())
+                .unwrap_or(900),
+            mutate_max_secs: g("RATE_MUTATE_MAX_DURATION")
+                .and_then(|v| v.trim().parse::<u32>().ok())
+                .unwrap_or(7200),
+            cpu_max_pct: u32v("RATE_CPU_MAX_PCT", 80),
+            history_days: u32v("RATE_HISTORY_DAYS", 7),
+        }),
         msg_deny: g("MSG_DENY").filter(|s| !s.trim().is_empty()),
         rules: g("RULES").filter(|s| !s.trim().is_empty()).map(Into::into),
         rules_log: g("RULES_LOG")
@@ -413,6 +426,7 @@ pub fn dispatch(cmd: &Cmd, root: &Path) -> anyhow::Result<()> {
         )?,
         Cmd::Escapes => escapes::escapes(&store, &cfg, root)?,
         Cmd::Mutate { sub, args } => mutate::mutate(root, sub, args)?,
+        Cmd::Rate { sub, args } => rate::rate(root, &sub, args)?,
         // Канал агентов: свой код возврата (0 — ок, иначе ненулевой).
         Cmd::Msg { args } => {
             let rc = crate::shell::msg::run(args);

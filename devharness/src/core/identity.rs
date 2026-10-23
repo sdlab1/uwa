@@ -340,11 +340,6 @@ pub fn remove_alias(alias: &str) -> Result<bool, String> {
     remove_alias_in(&msg_home(), alias)
 }
 
-/// Имена, закреплённые кем-то явно (`devh msg claim`).
-fn claimed_names() -> Vec<String> {
-    claimed_names_in(&msg_home())
-}
-
 /// Те же имена, но в указанном хранилище (для тестов с отдельным home).
 fn claimed_names_in(home: &Path) -> Vec<String> {
     let mut out = Vec::new();
@@ -879,13 +874,15 @@ pub fn claim(raw: &str) -> Result<Identity, String> {
     Ok(finish(name, Source::Stored, key, false))
 }
 
-
 /// claim для тестов с явным home и key.
+#[cfg(test)]
 fn claim_with_home(home: &Path, name: &str, key: &str) -> Result<Identity, String> {
     let name = sanitize_name(name)?;
     let canon = canonical_in(home, &name);
     if canon != name {
-        return Err(format!("«{name}» — синоним агента «{canon}»; закрепляй каноническое имя"));
+        return Err(format!(
+            "«{name}» — синоним агента «{canon}»; закрепляй каноническое имя"
+        ));
     }
     let label = "test";
     // Проверка: имя уже закреплено ЧУЖИМ ключом? (тот же ключ — идемпотентно)
@@ -1067,7 +1064,6 @@ mod tests {
         assert_eq!(b.as_ref().map(|x| x.name.as_str()), Some("first-agent"));
     }
 
-
     #[test]
     fn claim_rejects_duplicate_by_different_key() {
         let dir = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
@@ -1078,7 +1074,10 @@ mod tests {
         let result = claim_with_home(home, "agent-a", "proc:9:9");
         assert!(result.is_err(), "повторный claim должен вернуть ошибку");
         let err = result.unwrap_err();
-        assert!(err.contains("уже закреплено другим агентом"), "ошибка: {err}");
+        assert!(
+            err.contains("уже закреплено другим агентом"),
+            "ошибка: {err}"
+        );
         // Исходная привязка не должна измениться.
         let b = read_binding_in(home, "proc:1:2");
         assert_eq!(b.as_ref().map(|b| b.name.as_str()), Some("agent-a"));

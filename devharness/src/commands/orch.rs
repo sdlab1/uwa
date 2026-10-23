@@ -243,7 +243,11 @@ pub fn lead_of(reg: &Registry) -> (Option<String>, &'static str) {
             return (Some(canon), "назначен в реестре");
         }
     }
-    if let Some(a) = reg.agents.iter().find(|a| a.role.as_deref() == Some(ROLE_LEAD)) {
+    if let Some(a) = reg
+        .agents
+        .iter()
+        .find(|a| a.role.as_deref() == Some(ROLE_LEAD))
+    {
         return (
             Some(crate::core::identity::canonical(&a.name)),
             "роль lead в реестре",
@@ -634,7 +638,11 @@ fn add(root: &Path, args: &[String]) -> anyhow::Result<()> {
         let mut body = format!(
             "Задача {id} (сложность P{complexity}): {title}. Зоны: {}.\n\
              Definition of Done — критерии:\n",
-            if zones.is_empty() { "не заданы".to_string() } else { zones.join(", ") }
+            if zones.is_empty() {
+                "не заданы".to_string()
+            } else {
+                zones.join(", ")
+            }
         );
         for (i, criterion) in task.dod.iter().enumerate() {
             body.push_str(&format!("  {}. {criterion}\n", i + 1));
@@ -772,7 +780,11 @@ fn close(root: &Path, args: &[String], status: Status) -> anyhow::Result<()> {
     save(root, &reg)?;
     println!(
         "devh orch: {id} {} ({agent}, F{f})",
-        if status == Status::Done { "выполнена" } else { "провалена" }
+        if status == Status::Done {
+            "выполнена"
+        } else {
+            "провалена"
+        }
     );
     Ok(())
 }
@@ -1219,9 +1231,10 @@ fn dod_state(root: &Path, task: &Task) -> DodState {
         .checks
         .iter()
         .filter(|check| {
-            task.evidence.iter().rev().any(|e| {
-                e.cmd == **check && e.ok && e.digest == digest
-            })
+            task.evidence
+                .iter()
+                .rev()
+                .any(|e| e.cmd == **check && e.ok && e.digest == digest)
         })
         .count();
     let mut missing = Vec::new();
@@ -1287,9 +1300,10 @@ pub fn dod_cmd(root: &Path, args: &[String]) -> anyhow::Result<()> {
                 continue;
             }
             let criterion = if let Ok(n) = ack.parse::<usize>() {
-                task.dod.get(n.saturating_sub(1)).cloned().ok_or_else(|| {
-                    anyhow!("devh orch dod: нет критерия с номером {n}")
-                })?
+                task.dod
+                    .get(n.saturating_sub(1))
+                    .cloned()
+                    .ok_or_else(|| anyhow!("devh orch dod: нет критерия с номером {n}"))?
             } else {
                 ack.to_string()
             };
@@ -1369,7 +1383,9 @@ pub fn verify_cmd(root: &Path, args: &[String]) -> anyhow::Result<()> {
         if !evidence_ok {
             all_ok = false;
         }
-        log.push_str(&format!("$ {check}\n{detail}\nкод={code} digest_before={before} digest_after={after}\n\n"));
+        log.push_str(&format!(
+            "$ {check}\n{detail}\nкод={code} digest_before={before} digest_after={after}\n\n"
+        ));
         {
             let task = reg.tasks.get_mut(idx).expect("индекс найден");
             task.evidence.push(Evidence {
@@ -1454,9 +1470,8 @@ pub fn commit_cmd(root: &Path, args: &[String]) -> anyhow::Result<()> {
     let mut git_args = vec!["add", "--"];
     git_args.extend(paths.iter().map(String::as_str));
     git_output(root, &git_args)?;
-    let message = flag(args, "--message").unwrap_or_else(|| {
-        format!("chore(task {id}): {}", task.title)
-    });
+    let message =
+        flag(args, "--message").unwrap_or_else(|| format!("chore(task {id}): {}", task.title));
     let mut commit_args = vec!["commit", "-m", message.as_str(), "--"];
     commit_args.extend(paths.iter().map(String::as_str));
     git_output(root, &commit_args)?;
@@ -1490,7 +1505,11 @@ pub fn guard_commit_cmd(root: &Path) -> anyhow::Result<()> {
     let caller = crate::core::identity::canonical(&crate::core::identity::current().name);
     if lead.as_deref() == Some(caller.as_str()) {
         for task in reg.tasks.iter().filter(|t| t.status == Status::Active) {
-            if !task.zones.iter().any(|zone| staged.iter().any(|p| zones_overlap(p, zone))) {
+            if !task
+                .zones
+                .iter()
+                .any(|zone| staged.iter().any(|p| zones_overlap(p, zone)))
+            {
                 continue;
             }
             let state = dod_state(root, task);
@@ -1505,9 +1524,11 @@ pub fn guard_commit_cmd(root: &Path) -> anyhow::Result<()> {
     }
     let mut errors = Vec::new();
     for task in reg.tasks.iter().filter(|t| t.status == Status::Active) {
-        if !task.zones.iter().any(|zone| {
-            staged.iter().any(|path| zones_overlap(path, zone))
-        }) {
+        if !task
+            .zones
+            .iter()
+            .any(|zone| staged.iter().any(|path| zones_overlap(path, zone)))
+        {
             continue;
         }
         let state = dod_state(root, task);
@@ -1539,7 +1560,11 @@ fn hook_path(root: &Path) -> PathBuf {
         _ => ".git/hooks/pre-commit".to_string(),
     };
     let p = PathBuf::from(raw);
-    if p.is_absolute() { p } else { root.join(p) }
+    if p.is_absolute() {
+        p
+    } else {
+        root.join(p)
+    }
 }
 
 fn install_hook_internal(root: &Path, verbose: bool) -> anyhow::Result<()> {
@@ -1550,15 +1575,21 @@ fn install_hook_internal(root: &Path, verbose: bool) -> anyhow::Result<()> {
     if let Ok(text) = fs::read_to_string(&path) {
         if text.contains(HOOK_MARKER) {
             if verbose {
-                println!("devh orch: pre-commit хук уже установлен: {}", path.display());
+                println!(
+                    "devh orch: pre-commit хук уже установлен: {}",
+                    path.display()
+                );
             }
             return Ok(());
         }
     }
-    let Some(parent) = path.parent() else { return Ok(()) };
+    let Some(parent) = path.parent() else {
+        return Ok(());
+    };
     fs::create_dir_all(parent)?;
     let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("devh"));
-    let script = format!(r#"#!/bin/sh
+    let script = format!(
+        r#"#!/bin/sh
 {HOOK_MARKER}
 DEVH_BIN="${{DEVH_BIN:-{exe}}}"
 if [ ! -x "$DEVH_BIN" ] || ! "$DEVH_BIN" orch help 2>/dev/null | grep -q 'guard-commit'; then
@@ -1566,7 +1597,9 @@ if [ ! -x "$DEVH_BIN" ] || ! "$DEVH_BIN" orch help 2>/dev/null | grep -q 'guard-
   exit 0
 fi
 exec "$DEVH_BIN" orch guard-commit
-"#, exe = exe.display());
+"#,
+        exe = exe.display()
+    );
     fs::write(&path, script)?;
     #[cfg(unix)]
     {
@@ -1598,11 +1631,14 @@ pub fn lead_cmd(root: &Path, args: &[String]) -> anyhow::Result<()> {
         let canon = assign_lead(&mut reg, &raw)?;
         save(root, &reg)?;
         println!("devh orch: ведущий (lead) теперь {canon}");
-        println!("  инструкции и письма теперь указывают на него; узнать актуального: devh orch lead");
+        println!(
+            "  инструкции и письма теперь указывают на него; узнать актуального: devh orch lead"
+        );
         if args.iter().any(|a| a == "--notify") {
-            let body = "Ты назначен ведущим (lead) оркестрации devh. Очередь и зоны — devh orch board, \
+            let body =
+                "Ты назначен ведущим (lead) оркестрации devh. Очередь и зоны — devh orch board, \
                         роли — devh orch lead. Отчёты ведомых приходят письмами на этот адрес."
-                .to_string();
+                    .to_string();
             let rc = crate::shell::msg::run(&[
                 "send".to_string(),
                 "--to".to_string(),
@@ -1622,9 +1658,7 @@ pub fn lead_cmd(root: &Path, args: &[String]) -> anyhow::Result<()> {
     println!("=== РОЛИ ===");
     match lead.as_ref() {
         Some(l) => println!("ведущий (lead): {l} — {src}"),
-        None => println!(
-            "ведущий (lead): НЕ НАЗНАЧЕН — назначь: devh orch lead --set <адрес>"
-        ),
+        None => println!("ведущий (lead): НЕ НАЗНАЧЕН — назначь: devh orch lead --set <адрес>"),
     }
     for a in reg.agents.iter() {
         println!(
@@ -1700,9 +1734,7 @@ fn print_welcome_packet(
     println!("=== ПАКЕТ НОВОГО АГЕНТА ===");
     println!("твой адрес: {addr} (источник: {source}, ключ: {key})");
     match lead {
-        Some(l) => println!(
-            "ведущий (lead): {l} ({lead_src}) · актуальный адрес: devh orch lead"
-        ),
+        Some(l) => println!("ведущий (lead): {l} ({lead_src}) · актуальный адрес: devh orch lead"),
         None => println!(
             "ведущий (lead): НЕ НАЗНАЧЕН · спроси в чате или назначь: devh orch lead --set <адрес>"
         ),
@@ -1732,9 +1764,7 @@ fn print_welcome_packet(
     println!("  1) каждый ход первым делом: devh msg read (consume-on-read)");
     println!("  2) бери первую задачу из своей очереди и не жди пинга");
     println!("  3) отчёт = ОДНО письмо ведущему:");
-    println!(
-        "       devh msg send --to {to} --subject \"<канон>: <задача> — готово\" \\"
-    );
+    println!("       devh msg send --to {to} --subject \"<канон>: <задача> — готово\" \\");
     println!(
         "         --body \"1) сделано: <file:line> 2) как проверено: <тест/команда> 3) доказательства: <вывод/цифры> 4) осталось/риски: <...>\""
     );
@@ -1746,7 +1776,9 @@ fn print_welcome_packet(
     println!("  7) полный канон: devh workflow · задачи: devh orch board");
     println!("\nЗАПРЕЩЕНО: cargo mutants руками (R1) · bash devharness/test.sh руками (R8) ·");
     println!("  git add -A / checkout / restore / stash / reset в общем дереве (R9) · --in-place (R11) ·");
-    println!("  запуск мутационного аудита — только ведущий (R17) · коммит без зелёного DoD (R16) ·");
+    println!(
+        "  запуск мутационного аудита — только ведущий (R17) · коммит без зелёного DoD (R16) ·"
+    );
     println!("  правка артефактов аудита (R12) · внешние watcher'ы (R2/R7/R13) · чужая зона (O5)");
 }
 
@@ -1772,9 +1804,11 @@ fn welcome(root: &Path) -> anyhow::Result<()> {
             let target_canon = crate::core::identity::canonical(&target);
             // Адрес новичка уже принадлежит другому агенту (в т.ч. ведущему) —
             // привязывать синоним нельзя: это увёл бы чужой ящик.
-            let foreign = reg.agents.iter().any(|a| {
-                a.name != target && crate::core::identity::canonical(&a.name) == addr
-            }) || lead.as_deref() == Some(addr.as_str());
+            let foreign = reg
+                .agents
+                .iter()
+                .any(|a| a.name != target && crate::core::identity::canonical(&a.name) == addr)
+                || lead.as_deref() == Some(addr.as_str());
             if foreign {
                 println!("⚠ ТВОЙ ТЕКУЩИЙ АДРЕС «{addr}» УЖЕ ЗАНЯТ ДРУГИМ АГЕНТОМ.");
                 println!("  Закрепи свой адрес, потом повтори эту команду:");
@@ -1830,8 +1864,8 @@ fn onboard_register(root: &Path, args: &[String]) -> anyhow::Result<Onboarded> {
         return Err(anyhow!("devh orch onboard: пустой --agent"));
     }
     let canon_agent = crate::core::identity::canonical(&agent);
-    let title = flag(args, "--task")
-        .unwrap_or_else(|| "первое задание (уточни у ведущего)".to_string());
+    let title =
+        flag(args, "--task").unwrap_or_else(|| "первое задание (уточни у ведущего)".to_string());
     let p_raw = flag(args, "--p").unwrap_or_else(|| "P1".to_string());
     let requested = parse_level(&p_raw, "уровень сложности")?;
     let complexity = requested.min(1); // NB3: новичку первое задание не сложнее P1
@@ -1839,11 +1873,19 @@ fn onboard_register(root: &Path, args: &[String]) -> anyhow::Result<Onboarded> {
     let runtime = flag(args, "--runtime");
     let model = flag(args, "--model");
     let dod: Vec<String> = flags_all(args, "--dod")
-        .into_iter().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+        .into_iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
     let checks: Vec<String> = flags_all(args, "--check")
-        .into_iter().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+        .into_iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
     if dod.is_empty() {
-        return Err(anyhow!("devh orch onboard: первое задание требует DoD (--dod <критерий>)"));
+        return Err(anyhow!(
+            "devh orch onboard: первое задание требует DoD (--dod <критерий>)"
+        ));
     }
     let mut reg = load(root);
     // Адрес не должен совпадать с чужим (в т.ч. с адресом ведущего).
@@ -2103,7 +2145,10 @@ mod tests {
         let err = run(root, "start", &[id.as_str()]).expect_err("second take must fail");
         assert!(err.to_string().contains("уже взята"), "{err}");
         let reg = load(root);
-        assert_eq!(reg.tasks.first().and_then(|t| t.started_by.clone()), Some(me()));
+        assert_eq!(
+            reg.tasks.first().and_then(|t| t.started_by.clone()),
+            Some(me())
+        );
     }
 
     #[test]

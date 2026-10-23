@@ -1333,7 +1333,7 @@ fn deliver(from: &str, to: &[String], block: &str, thread: &str) -> Vec<String> 
     done
 }
 
-fn send(args: &[String]) -> i32 {
+pub fn send(args: &[String]) -> i32 {
     let m = parse_args(args);
     match m.sub.as_str() {
         "send" | "reply" => {

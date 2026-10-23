@@ -35,6 +35,24 @@ impl std::fmt::Display for ItemId {
     }
 }
 
+/// Настройки rate-гейта (devh rate): нагрузочные окна R18/R19/R20.
+///
+/// build/check/test — не чаще 1 раза в 15 мин; мутационный аудит — не чаще
+/// 1 раза в 2 ч; CPU/system load — не выше 80%. None = дефолты
+/// (900 / 7200 / 80). Ключи конфига: RATE_BUILD_MAX_DURATION,
+/// RATE_MUTATE_MAX_DURATION, RATE_CPU_MAX_PCT, RATE_HISTORY_DAYS.
+#[derive(Debug, Clone)]
+pub struct RateCfg {
+    /// Лимит длительности build (секунды). Дефолт 900 (15 мин).
+    pub build_max_secs: u32,
+    /// Лимит длительности mutate/audit (секунды). Дефолт 7200 (2 ч).
+    pub mutate_max_secs: u32,
+    /// Лимит CPU%. Дефолт 80.
+    pub cpu_max_pct: u32,
+    /// Сколько дней хранить историю запусков. Дефолт 7.
+    pub history_days: u32,
+}
+
 #[derive(Debug, Clone)]
 pub struct MutateCfg {
     pub tool: String,
@@ -90,6 +108,9 @@ pub struct RunConfig {
     pub log_days: u32,
     pub mutate: Option<MutateCfg>,
     pub red_mutate: Option<MutateCfg>,
+    /// R18/R19/R20: нагрузочные окна (build 15 мин, аудит 2 ч, CPU 80%).
+    /// None = используются дефолты RateCfg (900/7200/80).
+    pub rate: Option<RateCfg>,
     /// P7 (red.expect): ожидаемая подпись падения red-фазы (regex). Глобальный
     /// дефолт; пер-тасковый источник — строка спеки `RED-EXPECT:` или маркер
     /// `# red-expect:` в red.cmd (приоритет: маркер → спека → этот ключ).
@@ -153,6 +174,7 @@ impl Default for RunConfig {
             log_days: 30,
             mutate: None,
             red_mutate: None,
+            rate: None,
             red_expect: None,
             crap: None,
             bench: None,
