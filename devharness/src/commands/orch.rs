@@ -488,6 +488,9 @@ pub fn orch(root: &Path, sub: &str, args: &[String]) -> anyhow::Result<()> {
         "degrade" => degrade(root, args),
         "model" => model(root, args),
         "wt" => wt(root, args),
+        "models" => models(root),
+        "identify" => identify(root, args),
+        "retune" => retune(root, args),
         "zones" => zones(root),
         "dod" => dod_cmd(root, args),
         "verify" => verify_cmd(root, args),
@@ -540,6 +543,10 @@ fn print_help() {
   wt sync <агент>|--all       подтянуть изменения главного репо в worktree'и
   wt release <агент>          освободить worktree (грязное — не трогаем)
   wt gc                       убрать осиротевшие worktree'и
+  models                      рейтинг моделей: сдано, F-распределение, потолок C
+  identify <агент> [--set M]  модель агента (--set — только ведущий)
+  retune <ID> [--c C --p P --title T --check CMD --zone PATH --dod TEXT]
+                               починка задачи без revoke/recreate (только ведущий)
 
 Реестр: .harness/orch/registry.json · шкалы: devh workflow §ШКАЛЫ"
     );
@@ -818,11 +825,23 @@ fn start(root: &Path, args: &[String]) -> anyhow::Result<()> {
             t.started_by.clone().unwrap_or_else(|| "-".to_string()),
         )
     };
-    if owner != caller {
+    // Self-service: задача из БУФЕРА ведущего — ведомый забирает её сам.
+    let from_buffer = lead.as_deref() == Some(owner.as_str()) && status == Status::Queued;
+    if owner != caller && !from_buffer {
         return Err(anyhow!(
             "devh orch start: задача {id} закреплена за {owner} — бери свою задачу \
              (devh orch list --agent {caller})"
         ));
+    }
+    // Потолок модели: задача выше потолка — не выдаётся.
+    if let Some(c) = reg.tasks[idx].c_level {
+        let ceiling = agent_ceiling(&reg, &caller);
+        if c > ceiling {
+            return Err(anyhow!(
+                "devh orch start: {id} — сложность C{c} выше потолка модели агента \
+                 (C{ceiling}); задача скрыта в devh orch list, рейтинг: devh orch models"
+            ));
+        }
     }
     if status != Status::Queued {
         return Err(anyhow!(
@@ -832,14 +851,22 @@ fn start(root: &Path, args: &[String]) -> anyhow::Result<()> {
         ));
     }
     let ts = now();
+    let agent = if from_buffer {
+        caller.clone()
+    } else {
+        owner.clone()
+    };
     {
         let t = reg.tasks.get_mut(idx).unwrap_or_else(|| unreachable!());
         t.status = Status::Active;
         t.started_by = Some(caller.clone());
         t.started_at = Some(ts);
         t.updated = ts;
+        if from_buffer {
+            // Забрал из буфера — задача теперь моя.
+            t.agent = agent.clone();
+        }
     }
-    let agent = owner;
     let p = reg.tasks[idx].complexity;
     // Авто-выдача worktree: агент НЕ думает о путях — путь печатается сразу.
     let cfg = crate::commands::load_config(root).unwrap_or_default();
@@ -861,7 +888,15 @@ fn start(root: &Path, args: &[String]) -> anyhow::Result<()> {
         }
     };
     save(root, &reg)?;
-    println!("devh orch: {id} взята в работу ({agent}, P{p})");
+    println!(
+        "devh orch: {id} взята в работу ({agent}, P{p} C{}){}",
+        reg.tasks[idx].c_level.unwrap_or(0),
+        if from_buffer {
+            " [из буфера ведущего]"
+        } else {
+            ""
+        }
+    );
     if let Some((wpath, created, branch)) = wt_issued {
         println!(
             "worktree: {} ({}) — работай ТОЛЬКО здесь{}",
@@ -1121,6 +1156,206 @@ fn list(root: &Path, args: &[String]) -> anyhow::Result<()> {
             "⚠ скрыто задач выше потолка модели (C{ceiling}): {hidden} — узнать: devh orch models"
         );
     }
+    Ok(())
+}
+
+/// `devh orch models` — рейтинг моделей: сдано, F-распределение, потолок C.
+fn models(root: &Path) -> anyhow::Result<()> {
+    let reg = load(root);
+    let records = model_records(&reg);
+    let stats = crate::core::modelrank::aggregate(&records);
+    if stats.is_empty() {
+        println!(
+            "(сданных задач с известной моделью пока нет — потолок по умолчанию C{})",
+            crate::core::complexity::ModelCeiling::DEFAULT
+        );
+    } else {
+        println!(
+            "{:<28} {:<8} {:<24} {:<8}",
+            "модель", "сдано", "F-распределение", "потолок"
+        );
+        for st in stats.iter() {
+            let f = st
+                .f_distribution
+                .iter()
+                .map(|(k, v)| format!("{k}:{v}"))
+                .collect::<Vec<String>>()
+                .join(" ");
+            println!(
+                "{:<28} {:<8} {:<24} C{:<7}",
+                st.model, st.tasks_done, f, st.ceiling
+            );
+        }
+    }
+    for a in reg.agents.iter() {
+        if registry_model(&reg, &a.name).is_none() {
+            println!(
+                "⚠ агент {} — модель неизвестна (потолок по умолчанию C{}): devh orch identify {}",
+                a.name,
+                crate::core::complexity::ModelCeiling::DEFAULT,
+                a.name
+            );
+        }
+    }
+    Ok(())
+}
+
+/// `devh orch identify <агент> [--set <модель>]` — кто какая модель.
+fn identify(root: &Path, args: &[String]) -> anyhow::Result<()> {
+    let pos = positional(args);
+    let agent = pos
+        .first()
+        .cloned()
+        .ok_or_else(|| anyhow!("devh orch identify: нужен агент"))?;
+    let canon = crate::core::identity::canonical(&agent);
+    let reg = load(root);
+    let (lead, _) = lead_of(&reg);
+    let caller = crate::core::identity::canonical(&crate::core::identity::current().name);
+    if let Some(m) = flag(args, "--set") {
+        if lead.as_deref() != Some(caller.as_str()) {
+            return Err(anyhow!(
+                "devh orch identify --set: модель назначает только ведущий"
+            ));
+        }
+        let m = m.trim().to_string();
+        if m.is_empty() {
+            return Err(anyhow!("devh orch identify --set: пустая модель"));
+        }
+        let mut reg = reg;
+        match agent_index(&reg, &canon) {
+            Some(i) => {
+                let a = reg.agents.get_mut(i).expect("индекс найден");
+                a.model = Some(m.clone());
+            }
+            None => reg.agents.push(AgentState {
+                name: canon.clone(),
+                model: Some(m.clone()),
+                ..Default::default()
+            }),
+        }
+        save(root, &reg)?;
+        println!("devh orch identify: {canon} — модель {m} (записано ведущим)");
+        return Ok(());
+    }
+    let (model, source) = model_of(root, &reg, &canon);
+    match model {
+        Some(m) => {
+            let records = model_records(&reg);
+            let ceiling = ceiling_for_model(&m, &records);
+            println!(
+                "devh orch identify: {canon} — модель {m} (источник: {source}), потолок C{ceiling}"
+            );
+        }
+        None => {
+            println!("devh orch identify: {canon} — модель НЕИЗВЕСТНА (источник: {source})");
+            // Спрашиваем агента письмом — один раз, без блокировки.
+            let lead_addr = lead.clone().unwrap_or_else(|| "ведущий".to_string());
+            let _ = crate::shell::msg::run(&[
+                "send".to_string(),
+                "--to".to_string(),
+                canon.clone(),
+                "--subject".to_string(),
+                "Идентификация модели".to_string(),
+                "--body".to_string(),
+                format!(
+                    "Ведущий определить модель. Ответь письмом: devh msg send --to {lead_addr} \
+                     --subject \"МОДЕЛЬ: <название>\" --body \"МОДЕЛЬ: <название>\""
+                ),
+            ]);
+        }
+    }
+    Ok(())
+}
+
+/// `devh orch retune <ID> [--c C --p P --title T --check CMD --zone PATH --dod TEXT]`
+/// — починка существующей задачи без revoke/recreate (только ведущий).
+fn retune(root: &Path, args: &[String]) -> anyhow::Result<()> {
+    let _lock = crate::shell::lock::OutputLock::try_acquire(root, &path(root), "devh orch")
+        .map_err(|e| anyhow!("devh orch: реестр занят ({e}) — повтори через секунду"))?;
+    let id = positional(args)
+        .first()
+        .cloned()
+        .ok_or_else(|| anyhow!("devh orch retune: нужен ID задачи"))?;
+    let mut reg = load(root);
+    let (lead, _) = lead_of(&reg);
+    let caller = crate::core::identity::canonical(&crate::core::identity::current().name);
+    if lead.as_deref() != Some(caller.as_str()) {
+        return Err(anyhow!("devh orch retune: починка задачи — только ведущий"));
+    }
+    let idx = find_task_index(&reg, &id)
+        .ok_or_else(|| anyhow!("devh orch retune: задача {id} не найдена"))?;
+    let mut changed: Vec<String> = Vec::new();
+    if let Some(raw) = flag(args, "--c") {
+        let c = parse_c_level(&raw)?;
+        if let Some(t) = reg.tasks.get_mut(idx) {
+            t.c_level = Some(c);
+        }
+        changed.push(format!("C{c}"));
+    }
+    if let Some(raw) = flag(args, "--p") {
+        let p = parse_level(&raw, "уровень сложности")?;
+        if let Some(t) = reg.tasks.get_mut(idx) {
+            t.complexity = p;
+        }
+        changed.push(format!("P{p}"));
+    }
+    if let Some(title) = flag(args, "--title") {
+        if let Some(t) = reg.tasks.get_mut(idx) {
+            t.title = title.clone();
+        }
+        changed.push(format!("заголовок «{title}»"));
+    }
+    let checks = flags_all(args, "--check");
+    if !checks.is_empty() {
+        if let Some(t) = reg.tasks.get_mut(idx) {
+            for c in checks.iter() {
+                let c = c.trim();
+                if !c.is_empty() && !t.checks.contains(&c.to_string()) {
+                    t.checks.push(c.to_string());
+                }
+            }
+        }
+        changed.push(format!("проверки ×{}", checks.len()));
+    }
+    let zones = flags_all(args, "--zone");
+    if !zones.is_empty() {
+        if let Some(t) = reg.tasks.get_mut(idx) {
+            for z in zones.iter() {
+                let z = z.trim();
+                if !z.is_empty() && !t.zones.contains(&z.to_string()) {
+                    t.zones.push(z.to_string());
+                }
+            }
+        }
+        changed.push(format!("зоны ×{}", zones.len()));
+    }
+    let dod = flags_all(args, "--dod");
+    if !dod.is_empty() {
+        if let Some(t) = reg.tasks.get_mut(idx) {
+            for d in dod.iter() {
+                let d = d.trim();
+                if !d.is_empty() {
+                    t.dod.push(d.to_string());
+                }
+            }
+        }
+        changed.push(format!("критерии ×{}", dod.len()));
+    }
+    if let Some(t) = reg.tasks.get_mut(idx) {
+        t.updated = now();
+        // Критерии изменились — подтверждения сбрасываем (DoD честный).
+        t.acked.clear();
+        t.evidence.clear();
+    }
+    save(root, &reg)?;
+    println!(
+        "devh orch retune: {id} обновлена: {}",
+        if changed.is_empty() {
+            "ничего не передано".to_string()
+        } else {
+            changed.join(", ")
+        }
+    );
     Ok(())
 }
 
