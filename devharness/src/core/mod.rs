@@ -1,3 +1,4 @@
+pub mod agent_router;
 pub mod chaos_state;
 pub mod complexity;
 pub mod contract;
