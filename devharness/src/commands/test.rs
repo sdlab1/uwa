@@ -537,7 +537,6 @@ mod tests {
         assert_eq!(case_names(text), vec!["первый кейс", "второй кейс"]);
     }
 
-
     #[test]
     fn status_log_older_than_pid_is_not_fresh() {
         use std::time::{Duration, SystemTime};
