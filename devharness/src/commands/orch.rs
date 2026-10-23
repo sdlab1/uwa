@@ -1286,6 +1286,28 @@ fn retune(root: &Path, args: &[String]) -> anyhow::Result<()> {
     let idx = find_task_index(&reg, &id)
         .ok_or_else(|| anyhow!("devh orch retune: задача {id} не найдена"))?;
     let mut changed: Vec<String> = Vec::new();
+    // Списковые флаги: присутствие без значения — ошибка (иначе «молча» ничего
+    // не меняем). Значения ЗАМЕНЯЮТ список (починка, а не дописывание).
+    let list_flag = |args: &[String], name: &str| -> anyhow::Result<Option<Vec<String>>> {
+        let present = args
+            .iter()
+            .any(|a| a == name || a.starts_with(&format!("{name}=")));
+        if !present {
+            return Ok(None);
+        }
+        let vals: Vec<String> = flags_all(args, name)
+            .into_iter()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .collect();
+        if vals.is_empty() {
+            anyhow::bail!("devh orch retune: {name} без значения — починить нечего");
+        }
+        Ok(Some(vals))
+    };
+    let checks = list_flag(args, "--check")?;
+    let zones = list_flag(args, "--zone")?;
+    let dod = list_flag(args, "--dod")?;
     if let Some(raw) = flag(args, "--c") {
         let c = parse_c_level(&raw)?;
         if let Some(t) = reg.tasks.get_mut(idx) {
@@ -1301,46 +1323,36 @@ fn retune(root: &Path, args: &[String]) -> anyhow::Result<()> {
         changed.push(format!("P{p}"));
     }
     if let Some(title) = flag(args, "--title") {
+        if title.trim().is_empty() {
+            anyhow::bail!("devh orch retune: --title без значения — починить нечего");
+        }
         if let Some(t) = reg.tasks.get_mut(idx) {
             t.title = title.clone();
         }
         changed.push(format!("заголовок «{title}»"));
     }
-    let checks = flags_all(args, "--check");
-    if !checks.is_empty() {
+    if let Some(vals) = checks {
         if let Some(t) = reg.tasks.get_mut(idx) {
-            for c in checks.iter() {
-                let c = c.trim();
-                if !c.is_empty() && !t.checks.contains(&c.to_string()) {
-                    t.checks.push(c.to_string());
-                }
-            }
+            t.checks = vals.clone();
         }
-        changed.push(format!("проверки ×{}", checks.len()));
+        changed.push(format!("проверки ×{}", vals.len()));
     }
-    let zones = flags_all(args, "--zone");
-    if !zones.is_empty() {
+    if let Some(vals) = zones {
         if let Some(t) = reg.tasks.get_mut(idx) {
-            for z in zones.iter() {
-                let z = z.trim();
-                if !z.is_empty() && !t.zones.contains(&z.to_string()) {
-                    t.zones.push(z.to_string());
-                }
-            }
+            t.zones = vals.clone();
         }
-        changed.push(format!("зоны ×{}", zones.len()));
+        changed.push(format!("зоны ×{}", vals.len()));
     }
-    let dod = flags_all(args, "--dod");
-    if !dod.is_empty() {
+    if let Some(vals) = dod {
         if let Some(t) = reg.tasks.get_mut(idx) {
-            for d in dod.iter() {
-                let d = d.trim();
-                if !d.is_empty() {
-                    t.dod.push(d.to_string());
-                }
-            }
+            t.dod = vals.clone();
         }
-        changed.push(format!("критерии ×{}", dod.len()));
+        changed.push(format!("критерии ×{}", vals.len()));
+    }
+    if changed.is_empty() {
+        anyhow::bail!(
+            "devh orch retune: ничего не менял — укажи --c/--p/--title/--check/--zone/--dod"
+        );
     }
     if let Some(t) = reg.tasks.get_mut(idx) {
         t.updated = now();
@@ -2765,5 +2777,37 @@ mod tests {
         assert!(zones_overlap("devharness/src", "devharness/src/lib.rs"));
         assert!(zones_overlap("devharness/src/lib.rs", "devharness/src"));
         assert!(!zones_overlap("devharness/src", "devharness/tests"));
+    }
+
+    #[test]
+    fn retune_replaces_fields_and_requires_flags() {
+        let tmp = tempdir().expect("tmp");
+        let root = tmp.path();
+        let id = add_task(root, &me(), "P1", "починить");
+        let mut reg = load(root);
+        reg.lead = Some(me());
+        save(root, &reg).expect("save");
+        let err = run(root, "retune", &[id.as_str()]).expect_err("без флагов — ошибка");
+        assert!(err.to_string().contains("ничего не менял"), "{err}");
+        run(
+            root,
+            "retune",
+            &[id.as_str(), "--check", "true", "--dod", "новый критерий"],
+        )
+        .expect("retune");
+        let reg = load(root);
+        let t = reg.tasks.first().expect("task");
+        assert_eq!(
+            t.checks,
+            vec!["true".to_string()],
+            "список проверок заменён"
+        );
+        assert_eq!(
+            t.dod,
+            vec!["новый критерий".to_string()],
+            "список критериев заменён"
+        );
+        assert!(t.acked.is_empty(), "подтверждения сброшены");
+        assert!(t.evidence.is_empty(), "доказательства сброшены");
     }
 }
