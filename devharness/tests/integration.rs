@@ -4707,3 +4707,23 @@ fn section50g_f2_allow_weaken_removes_finding() {
     let (ok, out) = sb.run_capture_env(&["run", "W-001"], &refs);
     assert!(ok, "allow-weaken снимает finding: {out}");
 }
+
+#[test]
+fn slot_continuity_key_format() {
+    // T-010: slot_key возвращает Some с префиксом slot: (или fallback slot:cw:).
+    // Модель в адрес не входит (имя не зависит от модели).
+    let key = devh::core::identity::slot_key();
+    if let Some(k) = key {
+        assert!(k.starts_with("slot:"), "slot_key формат: {k}");
+    }
+    // whoami должен показывать имя без модели.
+    let out = Command::new(devh_bin())
+        .args(["msg", "whoami"])
+        .output()
+        .unwrap_or_else(|_| unreachable!());
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("имя:"), "whoami показывает имя: {text}");
+    // Имя не содержит "mimo" или "flash" (модель не входит в адрес).
+    assert!(!text.contains("mimo"), "модель не в адресе: {text}");
+    assert!(!text.contains("flash"), "модель не в адресе: {text}");
+}

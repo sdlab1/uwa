@@ -523,7 +523,7 @@ fn host_alias(comm: &str) -> Option<String> {
 /// свой ящик и уходит в новое имя. Слот — это долгоживущий предок
 /// (редактор, ppid=1) + имя рантайма: рестарт рантайма слот не меняет,
 /// а разные рантаймы (goose / opencode) в одном редакторе разные.
-fn slot_key() -> Option<String> {
+pub fn slot_key() -> Option<String> {
     let runtime = runtime_ancestor().map(|(_, comm, _)| comm);
     let mut pid = std::process::id();
     let mut hops: u32 = 0;
