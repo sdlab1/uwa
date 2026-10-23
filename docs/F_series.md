@@ -333,6 +333,20 @@ stamp глобальный, поэтому правка любого исход�
 целиком (консервативно и безопасно). Точная разметка «этот блок stale, тот
 свежий» — отдельная задача после F-2.
 
+#### F-1.8.2 Блокирующий канал `watch --until-problem` (сделано)
+
+`devh mutate watch` умел только смотреть до финала/таймаута: агент, ждущий
+его, не получал проблему. Добавлен режим, который превращает наблюдение в
+канал «проблема → работа»:
+
+- `--until-problem` — выход rc=1, как только в снимке есть проблема; печатает
+  `problems`-блоки (файл:строка, замена, жанр).
+- `--batch-ms N` — окно накопления: дедлайн сдвигается при появлении новых
+  проблем; ожидание событийное (`inotify`), без sleep-цикла.
+- `--timeout N` сохранён; при отсутствии аудита — rc=2; stopped/aborted — rc=2.
+- Тест `section00i_watch_until_problem_exits_on_first_problem` (стаб: missed
+  при живом аудите → rc=1 до «прогон завершён»).
+
 ### Тесты
 
 `tripwire_diff_identical_is_empty`, `tripwire_detects_created_protected`, `tripwire_null_to_file_is_created`, `tripwire_head_moved`, `tripwire_allow_without_reason_ignored`, `tripwire_effective_filters_only_matching_glob`, `mutcache_rejects_forged_manifest_without_stamp`, `mutcache_accepts_manifest_with_valid_stamp`.

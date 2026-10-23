@@ -53,7 +53,7 @@ use std::io::Write;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -124,7 +124,9 @@ pub const CANON: &str = r#"devh mutate — единственный вход в 
                               rc=1, если уже есть проблемы. Ничего не ждёт.
   devh mutate watch           живой CLI: строка обновляется на месте по
                               событиям ФС (inotify), пока идёт прогон
-                              (--timeout N — ограничить секунды).
+                              (--timeout N — ограничить секунды;
+                               --until-problem — выйти на первой проблеме rc=1;
+                               --batch-ms N — окно накопления проблем).
   devh mutate problems        руководство к действию: что чинить (файл:строка,
                               замена, жанр, исход). rc=1, если есть проблемы.
                               Если дерево изменилось после старта, снимок
@@ -1029,23 +1031,62 @@ fn status(root: &Path, args: &[String]) -> anyhow::Result<()> {
 
 // ───────────────────────────────── watch ─────────────────────────────────
 
-/// Живой CLI: строка обновляется на месте по событиям ФС.
-fn watch(root: &Path, args: &[String]) -> anyhow::Result<()> {
-    let mut timeout: u64 = 0;
+/// Опции `watch` (чистый парсер — тестируется без inotify).
+#[derive(Debug, Default, PartialEq, Eq)]
+struct WatchOpts {
+    timeout: u64,
+    until_problem: bool,
+    batch_ms: u64,
+}
+
+fn parse_watch_opts(args: &[String]) -> WatchOpts {
+    let mut o = WatchOpts::default();
     let mut i = 0;
     while i < args.len() {
-        if args.get(i) == Some(&"--timeout".to_string()) {
-            if let Some(v) = args.get(i.saturating_add(1)) {
-                timeout = v.parse::<u64>().unwrap_or(0);
+        match args.get(i).map(String::as_str) {
+            Some("--timeout") => {
+                if let Some(v) = args.get(i.saturating_add(1)) {
+                    o.timeout = v.parse().unwrap_or(0);
+                }
+                i = i.saturating_add(2);
             }
-            i = i.saturating_add(2);
-        } else {
-            i = i.saturating_add(1);
+            Some("--batch-ms") => {
+                if let Some(v) = args.get(i.saturating_add(1)) {
+                    o.batch_ms = v.parse().unwrap_or(0);
+                }
+                i = i.saturating_add(2);
+            }
+            Some("--until-problem") => {
+                o.until_problem = true;
+                i = i.saturating_add(1);
+            }
+            _ => i = i.saturating_add(1),
         }
     }
+    o
+}
+
+/// Живой CLI: строка обновляется на месте по событиям ФС.
+///
+/// `--until-problem` превращает наблюдение в блокирующий канал
+/// «проблема → работа»: выход rc=1, как только в снимке появилась проблема.
+/// `--batch-ms N` даёт окно накопления (события ФС, не sleep-цикл): похожие
+/// проблемы приходят одной пачкой. Без флага поведение прежнее — смотреть до
+/// финала/таймаута.
+fn watch(root: &Path, args: &[String]) -> anyhow::Result<()> {
+    let opts = parse_watch_opts(args);
     let eff = effective_args(root, args);
     let adir = audit_dir(root, &eff);
     let start = now_secs();
+    let first_audit = snapshot(root, &eff);
+    if first_audit.total.is_none()
+        && first_audit.done == 0
+        && !first_audit.alive
+        && aborted(root).is_none()
+    {
+        println!("аудит не запущен (нет mutants.out) — devh mutate start <args>");
+        crate::commands::die(2);
+    }
     // Наблюдаем и каталог прогона, и каталог артефактов: супервизор пишет
     // туда финальные verdict/state — по этому событию watch замечает финал
     // сразу, а не по таймауту ожидания.
@@ -1057,6 +1098,8 @@ fn watch(root: &Path, args: &[String]) -> anyhow::Result<()> {
         }
     };
     let mut first = true;
+    let mut problem_deadline: Option<Instant> = None;
+    let mut last_problem_count = 0usize;
     loop {
         let audit = snapshot(root, &eff);
         let cur = current_mutant(&adir);
@@ -1070,6 +1113,27 @@ fn watch(root: &Path, args: &[String]) -> anyhow::Result<()> {
         print!("\r\x1b[K{line}");
         use std::io::Write as _;
         let _ = std::io::stdout().flush();
+
+        // Problem-first: блокирующий канал для агента. Выходим не по
+        // таймеру, а когда проблемы стабильны `batch_ms` (или сразу).
+        if opts.until_problem && !audit.bad.is_empty() {
+            let n = audit.bad.len();
+            let now = Instant::now();
+            if problem_deadline.is_none() || n != last_problem_count {
+                problem_deadline = Some(now + Duration::from_millis(opts.batch_ms));
+            }
+            last_problem_count = n;
+            let due = opts.batch_ms == 0 || problem_deadline.map(|d| now >= d).unwrap_or(false);
+            if due {
+                println!();
+                println!("проблем: {n}");
+                for l in problem_blocks(&audit) {
+                    println!("  {l}");
+                }
+                crate::commands::die(1);
+            }
+        }
+
         if !audit.alive {
             println!();
             // Мёртвый супервизор с незавершённым состоянием — результата
@@ -1079,6 +1143,10 @@ fn watch(root: &Path, args: &[String]) -> anyhow::Result<()> {
                     "⚠ аудит оборвался: результата нет, вердикт не выносим \
                      (devh next: перезапуск)"
                 );
+                crate::commands::die(2);
+            }
+            if stopped(root).is_some() {
+                println!("⚠ аудит остановлен — результата нет (вердикт = rc 2)");
                 crate::commands::die(2);
             }
             for l in report_lines(&audit) {
@@ -1091,13 +1159,25 @@ fn watch(root: &Path, args: &[String]) -> anyhow::Result<()> {
             }
             return Ok(());
         }
-        if timeout > 0 && now_secs().saturating_sub(start) >= timeout {
+        if opts.timeout > 0 && now_secs().saturating_sub(start) >= opts.timeout {
             println!();
-            println!("таймаут ожидания (--timeout {timeout}s) — аудит продолжается");
+            println!(
+                "таймаут ожидания (--timeout {}s) — аудит продолжается",
+                opts.timeout
+            );
             return Ok(());
         }
-        // Ждём СОБЫТИЯ (изменение файла прогона), а не такта.
-        match watcher.wait(POLL_MS) {
+        // Ждём СОБЫТИЯ (изменение файла прогона), а не такта. Если задано
+        // окно накопления — просыпаемся не позже его дедлайна.
+        let wait_ms = problem_deadline
+            .map(|d| {
+                d.saturating_duration_since(Instant::now())
+                    .as_millis()
+                    .min(POLL_MS as u128) as i32
+            })
+            .unwrap_or(POLL_MS)
+            .max(1);
+        match watcher.wait(wait_ms) {
             Ok(events) => {
                 let changed = events
                     .iter()
@@ -1539,6 +1619,22 @@ mod tests {
             !out.iter().any(|l| l.contains("вердикт:")),
             "у идущего прогона финального вердикта нет: {out:?}"
         );
+    }
+
+    #[test]
+    fn watch_opts_parse_until_problem_and_batch() {
+        let args: Vec<String> = ["--until-problem", "--batch-ms", "250", "--timeout", "5"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let o = parse_watch_opts(&args);
+        assert!(o.until_problem);
+        assert_eq!(o.batch_ms, 250);
+        assert_eq!(o.timeout, 5);
+        assert_eq!(parse_watch_opts(&[]), WatchOpts::default());
+        // битые числа не включают «вечный» таймаут/окно
+        let bad: Vec<String> = ["--batch-ms", "x"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(parse_watch_opts(&bad).batch_ms, 0);
     }
 
     #[test]

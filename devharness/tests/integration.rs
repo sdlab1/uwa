@@ -2453,6 +2453,37 @@ fn section00d_native_mutate_blocks_broken_details() {
     assert!(contains(&out, "инструмент"), "{out}");
 }
 
+/// P3: `watch --until-problem` — блокирующий канал «проблема → работа».
+/// Пока аудит идёт, команда не ждёт финала: первая missed-проблема даёт
+/// rc=1 и блоки, пригодные для fix-раунда.
+#[test]
+fn section00i_watch_until_problem_exits_on_first_problem() {
+    let sb = MutateSandbox::new("until");
+    let (rc, out) = sb.run_env(
+        &[
+            "mutate",
+            "start",
+            "--",
+            "--config",
+            "devharness/cargo-mutants.toml",
+        ],
+        &[
+            ("STUB_CAUGHT", "1"),
+            ("STUB_MISSED", "1"),
+            ("STUB_SLEEP", "2"),
+        ],
+    );
+    assert_eq!(rc, 0, "start: {out}");
+    let (rc, out) = sb.run(&["mutate", "watch", "--until-problem"]);
+    assert_eq!(rc, 1, "проблема — сразу rc=1, не ждать финала: {out}");
+    assert!(contains(&out, "проблем: 1"), "{out}");
+    assert!(contains(&out, "plan.rs"), "{out}");
+    assert!(
+        !contains(&out, "прогон завершён"),
+        "watch вышел ДО финала аудита: {out}"
+    );
+}
+
 /// Мутант без тестовой фазы (`summary: "Success"` у МУТАНТА) — поимка НЕ
 /// подтверждена: «чисто» быть не может. И вердикт должен называть
 /// ПРАВДИВУЮ причину («succeeded N > 0»), а не «детали расходятся со

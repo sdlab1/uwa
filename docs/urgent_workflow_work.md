@@ -66,6 +66,9 @@
   Это не новые дыры, а copy-снимок ДО фикса. Аудит остановлен и
   перезапущен (pid 302941) по новому дереву; старые блоки не чиним
   повторно.
+* **F-1.8.2 сделана:** `devh mutate watch --until-problem` — блокирующий
+  канал: первая проблема → rc=1 сразу, `--batch-ms N` копит похожие
+  событиями, без sleep; тест `section00i_watch_until_problem_exits_on_first_problem`.
 * **F-1.8.1 сделана:** `State.tree_stamp` (sha256 дерева без docs/*.md),
   `audit_stale`; `status`/`problems` помечают `stale`, `next` при stale
   ведёт к `stop` (Running) или перепрогону (Finished), `verdict` — rc=2.
