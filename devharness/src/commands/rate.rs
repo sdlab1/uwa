@@ -65,7 +65,7 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
-/// Записать запись о завершённом запуске.
+/// Записать запись о завершённом запуске (append-only).
 pub fn record_run(
     store: &Store,
     kind: &str,
@@ -83,7 +83,13 @@ pub fn record_run(
         ok,
     };
     let line = serde_json::to_string(&rec).unwrap_or_default();
-    fs::write(path, line)?;
+    use std::fs::OpenOptions;
+    use std::io::Write;
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)?;
+    writeln!(file, "{}", line)?;
     Ok(())
 }
 
