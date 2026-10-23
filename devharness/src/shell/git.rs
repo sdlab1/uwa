@@ -540,6 +540,87 @@ pub fn log_oneline(root: &Path, n: usize) -> String {
         .unwrap_or_default()
 }
 
+/// Коммиты ветки, которых нет в базе (`git log base..HEAD`).
+pub fn log_range(wt: &Path, base: &str, n: usize) -> anyhow::Result<String> {
+    let out = Command::new("git")
+        .args([
+            "log",
+            "--oneline",
+            &format!("-{n}"),
+            &format!("{base}..HEAD"),
+        ])
+        .current_dir(wt)
+        .output()
+        .map_err(|e| anyhow::anyhow!("devh: git log {base}..HEAD не запустился ({e})"))?;
+    if !out.status.success() {
+        anyhow::bail!(
+            "git log {base}..HEAD: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+/// Содержимое файла на ревизии (`git show <rev>:<path>`) — «что было до моей
+/// правки» без чужого checkout.
+pub fn show_file(wt: &Path, rev_path: &str) -> anyhow::Result<String> {
+    let out = Command::new("git")
+        .args(["show", rev_path])
+        .current_dir(wt)
+        .output()
+        .map_err(|e| anyhow::anyhow!("devh: git show {rev_path} не запустился ({e})"))?;
+    if !out.status.success() {
+        anyhow::bail!(
+            "git show {rev_path}: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+/// Диф/содержимое ревизии: `git show <rev> [-- <paths…>]`.
+pub fn show_rev(wt: &Path, rev: &str, paths: &[String]) -> anyhow::Result<String> {
+    let mut args: Vec<&str> = vec!["show", rev];
+    if !paths.is_empty() {
+        args.push("--");
+        args.extend(paths.iter().map(|p| p.as_str()));
+    }
+    git(wt, &args)
+}
+
+/// Локальные ветки дерева (для агента: убедиться, что он в своей ветке).
+pub fn branches(wt: &Path) -> Vec<String> {
+    git_out(wt, &["branch", "--format=%(refname:short)"])
+        .lines()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect()
+}
+
+/// Откатить указанные пути к `HEAD` (ТОЛЬКО рабочее дерево, индекс не трогаем).
+/// Вызывается фасадом `devh git restore --path …`: путь-скоуп + песочница
+/// worktree делают операцию безопасной.
+pub fn restore_paths(wt: &Path, paths: &[String]) -> anyhow::Result<()> {
+    if paths.is_empty() {
+        anyhow::bail!("git restore: пустой список путей");
+    }
+    let mut args: Vec<&str> = vec!["restore", "--source=HEAD", "--worktree", "--"];
+    args.extend(paths.iter().map(|p| p.as_str()));
+    git(wt, &args).map(|_| ())
+}
+
+/// Диф индекса относительно HEAD (`git diff --cached HEAD [-- paths]`).
+pub fn diff_cached(wt: &Path, scope: &str) -> anyhow::Result<String> {
+    let mut args: Vec<&str> = vec!["diff", "--cached", "HEAD"];
+    let scopes: Vec<&str> = scope.split_whitespace().collect();
+    if !scopes.is_empty() {
+        args.push("--");
+        args.extend(scopes.iter().copied());
+    }
+    git(wt, &args)
+}
+
 pub fn ls_remote_ok(root: &Path, remote: &str) -> bool {
     git_ok(root, &["ls-remote", "-q", remote, "HEAD"])
 }
@@ -759,6 +840,40 @@ mod tests {
             changed_files_scoped_all(d.path(), "uwa-core/src/*"),
             vec!["uwa-core/src/b.rs".to_string()]
         );
+    }
+
+    #[test]
+    fn restore_paths_reverts_only_given_file() {
+        let d = repo();
+        let _ = std::fs::write(d.path().join("a.txt"), "1\n");
+        let _ = std::fs::write(d.path().join("b.txt"), "1\n");
+        commit_all(&d);
+        let _ = std::fs::write(d.path().join("a.txt"), "2\n");
+        let _ = std::fs::write(d.path().join("b.txt"), "2\n");
+        restore_paths(d.path(), &["a.txt".to_string()]).unwrap_or_else(|_| unreachable!());
+        assert_eq!(
+            std::fs::read_to_string(d.path().join("a.txt")).unwrap_or_default(),
+            "1\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(d.path().join("b.txt")).unwrap_or_default(),
+            "2\n"
+        );
+    }
+
+    #[test]
+    fn show_file_and_diff_cached_read_history() {
+        let d = repo();
+        let _ = std::fs::write(d.path().join("a.txt"), "1\n");
+        commit_all(&d);
+        let _ = std::fs::write(d.path().join("a.txt"), "2\n");
+        let _ = git(d.path(), &["add", "a.txt"]);
+        let staged = diff_cached(d.path(), "").unwrap_or_else(|_| unreachable!());
+        assert!(staged.contains("+2"), "staged diff: {staged}");
+        let old = show_file(d.path(), "HEAD:a.txt").unwrap_or_else(|_| unreachable!());
+        assert_eq!(old.trim(), "1");
+        assert!(branches(d.path()).iter().any(|b| !b.is_empty()));
+        assert!(log_range(d.path(), "HEAD", 5).is_ok());
     }
 
     #[test]

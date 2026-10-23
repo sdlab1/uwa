@@ -243,7 +243,9 @@ pub fn buffer_tasks<'a>(reg: &'a Registry, lead: Option<&str>) -> Vec<&'a Task> 
 }
 
 /// Норма буфера: сколько подготовленных задач должно лежать на доске ведущего.
-pub const BUFFER_MIN: usize = 10;
+/// Норма 15-20 задач; больше 20 — тоже норма (запас на случай простоя ведущего:
+/// если ведущий завис, встанет вся работа — очередь должна это пережить).
+pub const BUFFER_MIN: usize = 15;
 
 pub fn lead_of(reg: &Registry) -> (Option<String>, &'static str) {
     if let Some(l) = reg.lead.as_ref() {
@@ -392,6 +394,25 @@ fn parse_level(v: &str, what: &str) -> anyhow::Result<u8> {
     Ok(n)
 }
 
+/// Разделы доски по агенту: (в работе, свободны в очереди).
+/// Взятая задача (Active) НИКОГДА не попадает в «свободны»: её нельзя взять
+/// второй раз (task taken) и она не должна предлагаться на доске.
+fn agent_sections<'a>(reg: &'a Registry, agent: &str) -> (Vec<&'a Task>, Vec<&'a Task>) {
+    let mut active: Vec<&Task> = Vec::new();
+    let mut queued: Vec<&Task> = Vec::new();
+    for t in reg.tasks.iter() {
+        if &t.agent != agent {
+            continue;
+        }
+        match t.status {
+            Status::Active => active.push(t),
+            Status::Queued => queued.push(t),
+            _ => {}
+        }
+    }
+    (active, queued)
+}
+
 /// Понизить P очереди исполнителя (не ниже P0) и поставить флаг подозрения.
 /// Возвращает число затронутых задач.
 fn degrade_queue(reg: &mut Registry, agent: &str, reason: &str, floor: Option<u8>) -> usize {
@@ -487,6 +508,7 @@ pub fn orch(root: &Path, sub: &str, args: &[String]) -> anyhow::Result<()> {
         "reassign" => reassign(root, args),
         "degrade" => degrade(root, args),
         "model" => model(root, args),
+        "bug" => bug(root, args),
         "wt" => wt(root, args),
         "models" => models(root),
         "identify" => identify(root, args),
@@ -542,6 +564,8 @@ fn print_help() {
   reassign <ID> --agent X    переназначить
   degrade --agent X [--to P] [--reason R]  понизить P очереди
   model --agent X --model M [--runtime R]   смена модели/рантайма => подозрение
+  bug <доклад> [--from A] [--agent X] [--p P1] [--zone path]
+                               баг devh -> задача В ПЕРВУЮ ОЧЕРЕДЬ (O21)
   zones                      зоны ответственности по исполнителям
   wt list                    учёт worktree'ов агентов (путь, ветка, грязное, ahead/behind)
   wt assign <агент>           выдать worktree агенту (идемпотентно)
@@ -1097,19 +1121,18 @@ fn model(root: &Path, args: &[String]) -> anyhow::Result<()> {
     let mut changed = false;
     {
         let a = reg.agents.get_mut(idx).unwrap_or_else(|| unreachable!());
+        // Первая фиксация модели/рантайма — тоже «смена»: раньше исполнитель был
+        // неизвестен (None), теперь конкретная модель → ведущий обязан подтвердить
+        // (--confirm), иначе подозрение + штраф очереди (O13).
         if let Some(m) = new_model.as_ref() {
-            if let Some(prev) = a.model.as_ref() {
-                if prev != m {
-                    changed = true;
-                }
+            if a.model.as_deref() != Some(m.as_str()) {
+                changed = true;
             }
             a.model = Some(m.clone());
         }
         if let Some(r) = new_runtime.as_ref() {
-            if let Some(prev) = a.runtime.as_ref() {
-                if prev != r {
-                    changed = true;
-                }
+            if a.runtime.as_deref() != Some(r.as_str()) {
+                changed = true;
             }
             a.runtime = Some(r.clone());
         }
@@ -1140,9 +1163,133 @@ fn model(root: &Path, args: &[String]) -> anyhow::Result<()> {
              проверь задачи (devh orch list --agent {agent}) и при необходимости отзови"
         );
     } else {
+        // `--confirm` без фактической смены (модель/рантайм уже такие) —
+        // подозрение всё равно снимаем: ведущий подтвердил исполнителя,
+        // иначе «ложное» подозрение невозможно снять (реальный баг).
+        if confirmed {
+            if let Some(a) = reg.agents.get_mut(idx) {
+                a.suspicion = None;
+            }
+        }
         save(root, &reg)?;
-        println!("devh orch: {agent}: модель/рантайм зафиксированы (подозрений нет)");
+        println!(
+            "devh orch: {agent}: модель/рантайм зафиксированы{}",
+            if confirmed {
+                " (подтверждено ведущим — подозрение снято)"
+            } else {
+                " (подозрений нет)"
+            }
+        );
     }
+    Ok(())
+}
+
+/// `devh orch bug <доклад> [--from <агент>] [--agent <исполнитель>] [--p P1] [--zone <путь>]`.
+///
+/// O21: жалобы и доклады агентов о багах devh — НЕ «в заметки», а задачи, и
+/// В ПЕРВУЮ ОЧЕРЕДЬ: баг системы важнее плановой работы. Задача вставляется в
+/// начало реестра, поэтому первыми её видят доска и `devh orch list`.
+/// Ведущий может указать исполнителя (--agent); ведомый — только в буфер ведущего.
+fn bug(root: &Path, args: &[String]) -> anyhow::Result<()> {
+    let _lock = crate::shell::lock::OutputLock::try_acquire(root, &path(root), "devh orch bug")
+        .map_err(|e| anyhow!("devh orch bug: реестр занят ({e}) — повтори через секунду"))?;
+    // Текст доклада — позиционные аргументы, кроме значений известных флагов.
+    const VALUE_FLAGS: [&str; 5] = ["--from", "--agent", "--p", "--zone", "--title"];
+    let mut report_parts: Vec<String> = Vec::new();
+    let mut i = 0usize;
+    while i < args.len() {
+        let a = args.get(i).cloned().unwrap_or_default();
+        if a.starts_with("--") {
+            let name = a.split('=').next().unwrap_or("").to_string();
+            if !a.contains('=') && VALUE_FLAGS.contains(&name.as_str()) {
+                i = i.saturating_add(2);
+            } else {
+                i = i.saturating_add(1);
+            }
+            continue;
+        }
+        if !a.starts_with('-') {
+            report_parts.push(a);
+        }
+        i = i.saturating_add(1);
+    }
+    let report = report_parts.join(" ").trim().to_string();
+    if report.is_empty() {
+        return Err(anyhow!(
+            "devh orch bug: нужен текст доклада — что сломалось (например: \
+             devh orch bug \"при start задача пропала с доски\" --from beam2)"
+        ));
+    }
+    let from = flag(args, "--from").unwrap_or_default();
+    let p_raw = flag(args, "--p").unwrap_or_else(|| "P1".to_string());
+    let complexity = parse_level(&p_raw, "уровень сложности")?;
+    let mut zones: Vec<String> = Vec::new();
+    for raw in flags_all(args, "--zone") {
+        for part in raw.split(',') {
+            let p = part.trim().to_string();
+            if !p.is_empty() && !zones.contains(&p) {
+                zones.push(p);
+            }
+        }
+    }
+    let mut reg = load(root);
+    let (lead, _) = lead_of(&reg);
+    let caller = crate::core::identity::canonical(&crate::core::identity::current().name);
+    let caller_is_lead = lead.as_deref() == Some(caller.as_str());
+    let lead_name = lead.clone().unwrap_or_else(|| caller.clone());
+    // Ведущий может назначить исполнителя; ведомый докладывает в буфер ведущего.
+    let target = match flag(args, "--agent") {
+        Some(a) if caller_is_lead => crate::core::identity::canonical(&a),
+        _ => lead_name.clone(),
+    };
+    reg.seq = reg.seq.saturating_add(1);
+    let id = format!("T-{:03}", reg.seq);
+    let ts = now();
+    let head = if from.trim().is_empty() {
+        report.clone()
+    } else {
+        format!("[{}] {}", from.trim(), report)
+    };
+    let short: String = head.chars().take(160).collect();
+    let title = format!("БАГ devh: {short}");
+    let task = Task {
+        id: id.clone(),
+        agent: target.clone(),
+        title: title.clone(),
+        complexity,
+        c_level: Some(crate::core::complexity::Complexity::from_p_level(complexity).0),
+        model: None,
+        model_source: None,
+        started_by: None,
+        started_at: None,
+        status: Status::Queued,
+        zones: zones.clone(),
+        fail_level: None,
+        note: head.clone(),
+        created: ts,
+        updated: ts,
+        dod: vec![
+            format!("Доклад: {head}"),
+            "воспроизвести, починить, закрыть тестом".to_string(),
+        ],
+        checks: Vec::new(),
+        acked: Vec::new(),
+        evidence: Vec::new(),
+        commit_sha: None,
+        override_reason: None,
+    };
+    if agent_index(&reg, &target).is_none() {
+        reg.agents.push(AgentState {
+            name: target.clone(),
+            ..Default::default()
+        });
+    }
+    // БАГИ — В ПЕРВУЮ ОЧЕРЕДЬ: в начало реестра, чтобы доска и list показывали первыми.
+    reg.tasks.insert(0, task);
+    save(root, &reg)?;
+    println!(
+        "devh orch bug: {id} — БАГ в первую очередь (P{complexity}), исполнитель {target}: {title}"
+    );
     Ok(())
 }
 
@@ -1234,6 +1381,11 @@ fn models(root: &Path) -> anyhow::Result<()> {
 
 /// `devh orch identify <агент> [--set <модель>]` — кто какая модель.
 fn identify(root: &Path, args: &[String]) -> anyhow::Result<()> {
+    let _lock =
+        crate::shell::lock::OutputLock::try_acquire(root, &path(root), "devh orch identify")
+            .map_err(|e| {
+                anyhow!("devh orch identify: реестр занят ({e}) — повтори через секунду")
+            })?;
     let pos = positional(args);
     let agent = pos
         .first()
@@ -1624,16 +1776,7 @@ fn board(root: &Path) -> anyhow::Result<()> {
     let (board_lead, _) = lead_of(&reg);
     for name in names.iter() {
         let state = reg.agents.iter().find(|a| &a.name == name);
-        let queued: Vec<&Task> = reg
-            .tasks
-            .iter()
-            .filter(|t| &t.agent == name && t.status == Status::Queued)
-            .collect();
-        let active: Vec<&Task> = reg
-            .tasks
-            .iter()
-            .filter(|t| &t.agent == name && t.status == Status::Active)
-            .collect();
+        let (active, queued) = agent_sections(&reg, name);
         let model = state
             .and_then(|s| s.model.clone())
             .unwrap_or_else(|| "—".to_string());
@@ -2241,6 +2384,8 @@ pub fn install_hook_cmd(root: &Path) -> anyhow::Result<()> {
 
 /// `devh orch lead [--set ADDR] [--notify]` — показать или назначить ведущего.
 pub fn lead_cmd(root: &Path, args: &[String]) -> anyhow::Result<()> {
+    let _lock = crate::shell::lock::OutputLock::try_acquire(root, &path(root), "devh orch lead")
+        .map_err(|e| anyhow!("devh orch lead: реестр занят ({e}) — повтори через секунду"))?;
     let mut reg = load(root);
     if let Some(target) = flag(args, "--set") {
         // Смена ведущего — привилегированная операция: если ведущий уже есть,
@@ -2248,8 +2393,7 @@ pub fn lead_cmd(root: &Path, args: &[String]) -> anyhow::Result<()> {
         // bootstrap (ведущего ещё нет); пароль ставится сразу после:
         // devh orch passwd.
         if reg.lead.is_some() {
-            let caller =
-                crate::core::identity::canonical(&crate::core::identity::current().name);
+            let caller = crate::core::identity::canonical(&crate::core::identity::current().name);
             let (lead, _) = lead_of(&reg);
             let lead_canon = lead.as_ref().map(|l| crate::core::identity::canonical(l));
             if lead_canon.as_deref() != Some(caller.as_str()) {
@@ -2311,6 +2455,8 @@ pub fn lead_cmd(root: &Path, args: &[String]) -> anyhow::Result<()> {
 
 /// `devh orch role --agent X --role lead|worker`.
 pub fn role_cmd(root: &Path, args: &[String]) -> anyhow::Result<()> {
+    let _lock = crate::shell::lock::OutputLock::try_acquire(root, &path(root), "devh orch role")
+        .map_err(|e| anyhow!("devh orch role: реестр занят ({e}) — повтори через секунду"))?;
     let agent = flag(args, "--agent")
         .ok_or_else(|| anyhow!("devh orch role: нужен --agent"))?
         .trim()
@@ -2400,6 +2546,8 @@ fn apply_role(reg: &mut Registry, agent: &str, role: &str) {
 /// Только текущий ведущий и только по паролю (двойная защита: и владелец
 /// роли, и знание пароля).
 fn elevate(root: &Path, args: &[String]) -> anyhow::Result<()> {
+    let _lock = crate::shell::lock::OutputLock::try_acquire(root, &path(root), "devh orch elevate")
+        .map_err(|e| anyhow!("devh orch elevate: реестр занят ({e}) — повтори через секунду"))?;
     let reg = load(root);
     let caller = crate::core::identity::canonical(&crate::core::identity::current().name);
     let (lead, _) = lead_of(&reg);
@@ -2439,8 +2587,9 @@ fn passwd_cmd(root: &Path, args: &[String]) -> anyhow::Result<()> {
             lead_canon.unwrap_or_else(|| "не назначен".to_string())
         ));
     }
-    let password = crate::commands::leadpass::password_from(args)
-        .ok_or_else(|| anyhow!("devh orch passwd: нужен пароль (--password или DEVH_LEAD_PASSWORD)"))?;
+    let password = crate::commands::leadpass::password_from(args).ok_or_else(|| {
+        anyhow!("devh orch passwd: нужен пароль (--password или DEVH_LEAD_PASSWORD)")
+    })?;
     crate::commands::leadpass::set_password(root, &password)?;
     println!("devh orch: пароль ведущего задан (.harness/orch/lead.key, права 0600)");
     Ok(())
@@ -2508,6 +2657,8 @@ fn print_welcome_packet(
 
 /// `devh orch welcome` — пакет новичка (NB2) + авто-привязка адреса.
 fn welcome(root: &Path) -> anyhow::Result<()> {
+    let _lock = crate::shell::lock::OutputLock::try_acquire(root, &path(root), "devh orch welcome")
+        .map_err(|e| anyhow!("devh orch welcome: реестр занят ({e}) — повтори через секунду"))?;
     let me = crate::core::identity::current();
     let mut reg = load(root);
     let (lead, lead_src) = lead_of(&reg);
@@ -2580,6 +2731,8 @@ struct Onboarded {
 
 /// `devh orch onboard --agent NAME ...` — регистрация + первое задание (NB1/NB3).
 fn onboard_register(root: &Path, args: &[String]) -> anyhow::Result<Onboarded> {
+    let _lock = crate::shell::lock::OutputLock::try_acquire(root, &path(root), "devh orch onboard")
+        .map_err(|e| anyhow!("devh orch onboard: реестр занят ({e}) — повтори через секунду"))?;
     let agent = flag(args, "--agent")
         .ok_or_else(|| anyhow!("devh orch onboard: нужен --agent NAME"))?
         .trim()
@@ -2853,11 +3006,40 @@ mod tests {
         let tmp = tempdir().expect("tmp");
         let root = tmp.path();
         add_task(root, "beam2", "P3", "штука");
+        let mut reg = load(root);
+        reg.lead = Some(me());
+        save(root, &reg).expect("save");
+        // Первая фиксация модели — тоже смена (было «неизвестно»): P очереди -1 (O13).
         run(root, "model", &["--agent", "beam2", "--model", "mimo"]).expect("model");
+        let p = load(root).tasks.first().map(|t| t.complexity);
+        assert_eq!(p, Some(2), "смена модели должна понизить P очереди");
+        // Повторная смена без --confirm — ещё один триггер: ещё -1.
         run(root, "model", &["--agent", "beam2", "--model", "beam"]).expect("model2");
         let reg = load(root);
-        let p = reg.tasks.first().map(|t| t.complexity);
-        assert_eq!(p, Some(2), "смена модели должна понизить P очереди");
+        assert_eq!(
+            reg.tasks.first().map(|t| t.complexity),
+            Some(1),
+            "второй триггер — ещё -1"
+        );
+        // --confirm: подозрение снято, P очереди не трогаем.
+        run(
+            root,
+            "model",
+            &["--agent", "beam2", "--model", "inkling", "--confirm"],
+        )
+        .expect("model3");
+        let reg = load(root);
+        let a = reg
+            .agents
+            .iter()
+            .find(|a| a.name == "beam2")
+            .expect("агент");
+        assert!(a.suspicion.is_none(), "--confirm снимает подозрение");
+        assert_eq!(
+            reg.tasks.first().map(|t| t.complexity),
+            Some(1),
+            "--confirm не штрафует очередь"
+        );
     }
 
     #[test]
@@ -2966,7 +3148,10 @@ mod tests {
         let reg = load(root);
         let a = reg.agents.iter().find(|a| a.name == "beam").expect("агент");
         assert!(a.suspicion.is_some(), "без --confirm подозрение выставлено");
-        assert_eq!(reg.tasks[0].complexity, 1, "без --confirm P очереди понижен");
+        assert_eq!(
+            reg.tasks[0].complexity, 1,
+            "без --confirm P очереди понижен"
+        );
 
         run(
             root,
@@ -2985,8 +3170,144 @@ mod tests {
         let reg = load(root);
         let a = reg.agents.iter().find(|a| a.name == "beam").expect("агент");
         assert_eq!(a.model.as_deref(), Some("inkling"), "модель зафиксирована");
-        assert_eq!(a.runtime.as_deref(), Some("opencode"), "рантайм зафиксирован");
+        assert_eq!(
+            a.runtime.as_deref(),
+            Some("opencode"),
+            "рантайм зафиксирован"
+        );
         assert!(a.suspicion.is_none(), "--confirm снимает подозрение");
         assert_eq!(reg.tasks[0].complexity, 1, "--confirm не меняет P очереди");
+    }
+
+    /// `--confirm` без фактической смены (модель/рантайм уже такие) —
+    /// подозрение всё равно снимается: иначе lead не может снять «ложное»
+    /// подозрение, оставшееся от прежней смены.
+    #[test]
+    fn model_confirm_clears_suspicion_without_change() {
+        let tmp = tempdir().expect("tmp");
+        let root = tmp.path();
+        add_task(root, "beam", "P2", "работа ведомого");
+        let mut reg = load(root);
+        reg.lead = Some(me());
+        save(root, &reg).expect("save");
+
+        run(
+            root,
+            "model",
+            &[
+                "--agent",
+                "beam",
+                "--model",
+                "inkling",
+                "--runtime",
+                "opencode",
+            ],
+        )
+        .expect("первая фиксация модели");
+        let reg = load(root);
+        let a = reg.agents.iter().find(|a| a.name == "beam").expect("агент");
+        assert!(
+            a.suspicion.is_some(),
+            "первая смена без --confirm дала подозрение"
+        );
+
+        // та же модель/рантайм + --confirm: изменений нет, но подозрение должно сняться
+        run(
+            root,
+            "model",
+            &[
+                "--agent",
+                "beam",
+                "--model",
+                "inkling",
+                "--runtime",
+                "opencode",
+                "--confirm",
+            ],
+        )
+        .expect("подтверждение без смены");
+        let reg = load(root);
+        let a = reg.agents.iter().find(|a| a.name == "beam").expect("агент");
+        assert!(
+            a.suspicion.is_none(),
+            "--confirm снимает подозрение и когда смены не было"
+        );
+    }
+
+    /// O21: доклад о баге devh -> задача в ПЕРВУЮ очередь (начало реестра).
+    #[test]
+    fn bug_report_goes_to_first_queue() {
+        let tmp = tempdir().expect("tmp");
+        let root = tmp.path();
+        let mut reg = load(root);
+        reg.lead = Some(me());
+        save(root, &reg).expect("save");
+        let id = add_task(root, "beam", "P2", "обычная плановая");
+        run(
+            root,
+            "bug",
+            &[
+                "сломалось чтение реестра",
+                "--from",
+                "beam2",
+                "--agent",
+                "beam3",
+            ],
+        )
+        .expect("bug");
+        let reg = load(root);
+        let first = reg.tasks.first().expect("задача");
+        assert!(
+            first.title.starts_with("БАГ devh:"),
+            "баг должен быть первой задачей: {:?}",
+            first.title
+        );
+        assert_eq!(first.agent, "beam3", "исполнитель по --agent");
+        assert_eq!(first.status, Status::Queued);
+        assert!(
+            first.dod.join(" ").contains("сломалось чтение реестра"),
+            "текст доклада должен попасть в DoD"
+        );
+        assert_ne!(first.id, id, "доклад — новая задача");
+    }
+
+    /// Взятая задача не предлагается в очереди (task taken), но видна как «в работе».
+    #[test]
+    fn taken_task_is_hidden_from_queue() {
+        let tmp = tempdir().expect("tmp");
+        let root = tmp.path();
+        let id = add_task(root, &me(), "P1", "взять");
+        run(root, "start", &[id.as_str()]).expect("start");
+        let reg = load(root);
+        let (active, queued) = agent_sections(&reg, &me());
+        assert_eq!(active.len(), 1, "взятая задача видна в разделе «в работе»");
+        assert!(
+            queued.iter().all(|t| t.id != id),
+            "взятая задача не должна предлагаться в «свободных»"
+        );
+    }
+
+    /// Транзакционность взятия: два потока одновременно — задачу берёт ровно один.
+    #[test]
+    fn concurrent_start_only_one_wins() {
+        let tmp = tempdir().expect("tmp");
+        let root = tmp.path().to_path_buf();
+        let id = add_task(root.as_path(), &me(), "P1", "гонка");
+        let mut handles = Vec::new();
+        for _ in 0..2 {
+            let r = root.clone();
+            let i = id.clone();
+            handles.push(std::thread::spawn(move || {
+                run(r.as_path(), "start", &[i.as_str()]).is_ok()
+            }));
+        }
+        let wins = handles
+            .into_iter()
+            .map(|h| h.join().unwrap_or(false))
+            .filter(|won| *won)
+            .count();
+        assert_eq!(wins, 1, "задачу должен взять ровно один агент");
+        let reg = load(root.as_path());
+        assert_eq!(reg.tasks.first().map(|t| t.status), Some(Status::Active));
     }
 }

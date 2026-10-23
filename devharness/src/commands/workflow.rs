@@ -22,9 +22,16 @@ pub const QUICKSTART: &str = r#"=== БЫСТРЫЙ СТАРТ (30 секунд) 
 ЧТО ЗАПУСТИТЬ (репо /home/user/project_uwa):
   cd /home/user/project_uwa
   ./target/debug/devh msg read      — твои задачи (consume-on-read), ПЕРВЫМ ДЕЛОМ в каждом ходе
-  ./target/debug/devh workflow      — канон (R1-R20, O1-O20, шкалы P/F/C, запреты)
+  ./target/debug/devh workflow      — канон (R1-R23, O1-O21, шкалы P/F/C, запреты)
   ./target/debug/devh orch board    — кто что делает, очереди, зоны
   новый агент: cd /home/user/project_uwa && ./target/debug/devh orch welcome
+
+ТВОЙ ЦИКЛ (git тебе НЕ нужен — его делает харнесс):
+  свой worktree (выдаёт devh orch start) -> взял задачу с доски -> сделал -> сдал по DoD
+  сдача: devh orch dod <ID> --ack -> devh orch verify <ID> -> devh orch commit <ID> --path <файлы>
+         -> devh orch done <ID> --f N
+  любой git — только через фасад `devh git` (status|diff|log|add|commit|show|branch|restore);
+  фасад сам выбирает твой worktree; разрешений на git не нужно
 
 ЧТО ДЕЛАТЬ:
   1) каждый ход первым делом devh msg read; письмо от ВЕДУЩЕГО (адрес: devh orch lead) = задание
@@ -43,7 +50,8 @@ pub const QUICKSTART: &str = r#"=== БЫСТРЫЙ СТАРТ (30 секунд) 
   - cargo mutants руками (только devh mutate, R1)
   - bash devharness/test.sh руками (только devh test, R8)
   - git add -A, чужие пути, git checkout/restore/stash/reset в общем дереве —
-    это стирает чужую незакоммиченную работу (R9)
+    это стирает чужую незакоммиченную работу (R9); свой git — только через
+    фасад `devh git` (R21), коммит твоих файлов делает харнесс (devh orch commit)
   - --in-place для аудита (R11), правка артефактов аудита руками (R12)
   - внешние watcher'ы, sleep-циклы, фоновые скрипты, ad-hoc разбор логов
     cargo-mutants (только devh mutate watch|status|problems, R2/R7/R13)
@@ -85,12 +93,22 @@ pub const RULES: &str = r#"=== ПРАВИЛА ===
   R17 мутационный аудит запускает ТОЛЬКО ведущий (адрес: devh orch lead); ведомому — отказ (код 2)
   R18 НАГРУЗКА-BUILD: cargo build/check/test — не чаще 1 раза в 15 минут (окно берётся devh rate build); полный build/release не запускать
   R19 CPU/SYSTEM LOAD ≤ 80%: при load > 80% ничего тяжёлого не запускать (ни cargo, ни nextest, ни аудит)
-  R20 аудит — только по непроверенной зоне (файлы или --in-diff дифф), не по всему крейту; мутационный аудит — не чаще 1 раза в 2 часа (окно: devh rate mutation)"#;
+  R20 аудит — только по непроверенной зоне (файлы или --in-diff дифф), не по всему крейту; мутационный аудит — не чаще 1 раза в 2 часа (окно: devh rate mutation)
+  R21 GIT АГЕНТУ НЕ НУЖЕН: твой цикл = свой worktree -> взял задачу с доски -> сдал по DoD;
+      коммит делает харнесс (devh orch commit <ID> --path <твои файлы>), слияние в main — lead;
+      любой git идёт ТОЛЬКО через фасад `devh git` (status|diff|log|add|commit|show|branch|restore),
+      фасад сам выбирает твой worktree и скоупит пути; разрешений на git НЕ проси — их не требуется
+  R22 ELEVATION: роль lead выдаёт только текущий lead и только по паролю
+      (devh orch elevate <агент> --password "…"); без пароля — отказ
+  R23 WATCHDOG: нет активности >20 мин (письмо/коммит/обновление задачи) -> lead отзывает
+      задачу и освобождает worktree; очнулся -> снова devh orch welcome (посвящение заново)"#;
 
 /// Правила оркестрации: ведущий ↔ ведомые агенты.
 pub const ORCHESTRATION: &str = r#"=== ОРКЕСТРАЦИЯ (ведущий ↔ ведомые агенты) ===
-  O1  БУФЕР ДАШБОРДА: на devh orch board в очереди всегда минимум 10 задач — ведущий наполняет доску ЗАРАНЕЕ,
-      чтобы ни один ведомый не остался без работы (очередь пополняет ведущий, ведомый работу не просит)
+  O1  БУФЕР ДАШБОРДА: на devh orch board в очереди ведущего всегда минимум 15 задач (норма 15-20,
+      больше 20 — тоже норма) — ведущий наполняет доску ЗАРАНЕЕ, чтобы ни один ведомый не остался без
+      работы и чтобы простой ведущего (завис/упал) не встал всей работой (очередь пополняет ведущий,
+      ведомый работу не просит)
   O2  Ведущий контролирует ситуацию по фактам: source (git status/log/diff), канал (devh msg read/pending/presence), артефакты (логи гейтов)
   O3  Задача ведомому = короткий чек-лист: file:line + доказательство + критерий приёмки + отдельный коммит (git add только своих путей)
   O4  Отчёт ведомого = письмо ВЕДУЩЕМУ (адрес ведущего: `devh orch lead` — без хардкода имени);
@@ -122,6 +140,9 @@ pub const ORCHESTRATION: &str = r#"=== ОРКЕСТРАЦИЯ (ведущий �
   O18 РЕЙТИНГ МОДЕЛЕЙ: devh orch models (сдано задач, распределение F, максимальный освоенный C, потолок ≤ C10);
       задачи выше потолка модели автоматически скрываются у этой модели (devh orch list / start)
   O19 РАБОТУ НЕ ПРОСИТЬ: очередь пополняет ведущий (O1); исчерпал очередь — полезная проверка в своей зоне
+  O21 ДОКЛАД О БАГЕ devh -> ЗАДАЧА В ПЕРВУЮ ОЧЕРЕДЬ: жалобы и доклады агентов о багах системы не «в заметки»,
+      а задачи: devh orch bug "<что сломалось>" --from <агент> --agent <исполнитель> --p P1; задача вставляется
+      в начало реестра, поэтому её видят первыми на доске и в devh orch list. Баг важнее плановой работы.
   O20 РОЛИ lead/worker назначаются в реестре (devh orch role --agent X --role worker, devh orch lead --set ADDR) —
       без хардкода имени ведущего; смена роли — только через реестр"#;
 
@@ -166,8 +187,8 @@ pub const ONBOARDING: &str = r#"=== ОНБОРДИНГ НОВОГО АГЕНТА
   NB3 Смена модели/рантайма новичка НЕ меняет адрес (O8); первое задание — P<=P1, пока новичок не
       подтвердит качество (F<=F1). Подозрение (F>=F3, два F>=F2 подряд, смена модели) => понижение
       P очереди и возможность отзыва задачи (devh orch revoke)
-  NB4 После онбординга ведущий смотрит devh orch board: буфер доски — минимум 10 задач в очереди (O1),
-      иначе ведущий пополняет доску немедленно"#;
+  NB4 После онбординга ведущий смотрит devh orch board: буфер доски — минимум 15 задач в очереди
+      (норма 15-20, больше 20 — хорошо; O1), иначе ведущий пополняет доску немедленно"#;
 
 /// Автомат состояний S0–S11.
 pub const STATES: &str = r#"=== СОСТОЯНИЯ (маршрут) ===
@@ -315,20 +336,19 @@ mod tests {
         // Канон оркестрации: минимум 2 задачи у ведомого + контроль по фактам.
         assert!(ORCHESTRATION.contains("O1"), "{ORCHESTRATION}");
         assert!(
-            ORCHESTRATION.contains("минимум 10 задач"),
+            ORCHESTRATION.contains("минимум 15 задач"),
             "{ORCHESTRATION}"
         );
         assert!(ORCHESTRATION.contains("БУФЕР ДАШБОРДА"), "{ORCHESTRATION}");
         assert!(ORCHESTRATION.contains("O2"), "{ORCHESTRATION}");
         assert!(ORCHESTRATION.contains("O4"), "{ORCHESTRATION}");
-        assert!(
-            ORCHESTRATION.contains("devh orch lead"),
-            "{ORCHESTRATION}"
-        );
+        assert!(ORCHESTRATION.contains("devh orch lead"), "{ORCHESTRATION}");
         assert!(ORCHESTRATION.contains("O9"), "{ORCHESTRATION}");
         assert!(ORCHESTRATION.contains("O10"), "{ORCHESTRATION}");
         // Шкалы и правила деградации — часть канона (O11-O14).
-        for marker in ["O11", "O12", "O13", "O14", "O15", "O16", "O17", "O18", "O19", "O20"] {
+        for marker in [
+            "O11", "O12", "O13", "O14", "O15", "O16", "O17", "O18", "O19", "O20",
+        ] {
             assert!(ORCHESTRATION.contains(marker), "{ORCHESTRATION}");
         }
         for level in ["P0", "P1", "P2", "P3", "P4", "P5"] {
@@ -337,7 +357,9 @@ mod tests {
         for level in ["F0", "F1", "F2", "F3", "F4", "F5"] {
             assert!(SCALES.contains(level), "{SCALES}");
         }
-        for level in ["C0", "C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9", "C10"] {
+        for level in [
+            "C0", "C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9", "C10",
+        ] {
             assert!(SCALES.contains(level), "{SCALES}");
         }
         assert!(ORCHESTRATION.contains("P/F"), "{ORCHESTRATION}");
@@ -348,6 +370,25 @@ mod tests {
         assert!(RULES.contains("80%"), "{RULES}");
         assert!(RULES.contains("2 часа"), "{RULES}");
         assert!(RULES.contains("ведущий"), "{RULES}");
+    }
+
+    /// R21-R23: git-агент не нужен (цикл worktree->доска->DoD), elevation
+    /// только lead по паролю, watchdog 20 мин -> отзыв + повторное посвящение.
+    #[test]
+    fn canon_covers_git_facade_elevation_watchdog() {
+        assert!(RULES.contains("R21"), "{RULES}");
+        assert!(RULES.contains("GIT АГЕНТУ НЕ НУЖЕН"), "{RULES}");
+        assert!(RULES.contains("devh git"), "{RULES}");
+        assert!(RULES.contains("разрешений на git НЕ проси"), "{RULES}");
+        assert!(RULES.contains("R22"), "{RULES}");
+        assert!(RULES.contains("парол"), "{RULES}");
+        assert!(RULES.contains("R23"), "{RULES}");
+        assert!(RULES.contains("20 мин"), "{RULES}");
+        assert!(RULES.contains("WATCHDOG"), "{RULES}");
+        // Быстрый старт печатает тот же цикл и номера правил.
+        assert!(QUICKSTART.contains("R1-R23"), "{QUICKSTART}");
+        assert!(QUICKSTART.contains("git тебе НЕ нужен"), "{QUICKSTART}");
+        assert!(QUICKSTART.contains("devh orch dod"), "{QUICKSTART}");
     }
 
     #[test]

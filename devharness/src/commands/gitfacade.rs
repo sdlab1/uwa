@@ -15,9 +15,15 @@
 //!   попадает ничего постороннего.
 //!
 //! Формат: `devh git <sub> [args]`
-//!   status | diff [-- <paths…>] | log [-n N] | add --path <p…>
-//!   commit --path <p…> -m <сообщение>
+//!   status | diff [--staged] [-- <paths…>] | log [-n N] [--ahead] | add --path <p…>
+//!   commit --path <p…> -m <сообщение> | show [<rev>] | branch | restore --path <p…>
 //!   (только ведущий) merge <агент> | push | worktree list|gc|release <агент>
+//!
+//! Что это даёт ведомому: ПОЛНЫЙ рабочий набор git-операций без риска
+//! уронить чужую работу — фасад сам выбирает его worktree, пути скоупятся
+//! `--path`, а привилегированные операции (merge/push/reset дерева main)
+//! остаются за ведущим. Никаких «разрешений на git» не нужно: фасад и есть
+//! разрешение.
 
 use std::path::{Path, PathBuf};
 
@@ -162,12 +168,15 @@ pub fn git_cmd(root: &Path, args: &[String]) -> anyhow::Result<()> {
         "log" => log(&ctx, &tail),
         "add" => add(&ctx, &tail),
         "commit" => commit(&ctx, &tail),
+        "show" => show(&ctx, &tail),
+        "branch" => branch(&ctx),
+        "restore" => restore(&ctx, &tail),
         "merge" => merge(root, &ctx, &tail),
         "push" => push(root, &ctx),
         "worktree" => worktree(root, &ctx, &tail),
         other => anyhow::bail!(
             "devh git: неизвестная подкоманда «{other}» \
-             (status|diff|log|add|commit|merge|push|worktree)"
+             (status|diff|log|add|commit|show|branch|restore|merge|push|worktree)"
         ),
     }
 }
@@ -202,7 +211,15 @@ fn status(ctx: &Ctx) -> anyhow::Result<()> {
 
 fn diff(ctx: &Ctx, tail: &[String]) -> anyhow::Result<()> {
     let scope = rest_after(tail, "--").join(" ");
-    let text = git::diff_text(&ctx.tree, &scope)?;
+    // `--staged`/`--cached` — диф индекса (что уйдёт в коммит), а не рабочего
+    // дерева. Агенту это нужно перед `devh git commit`, чтобы увидеть РОВНО то,
+    // что он коммитит.
+    let staged = tail.iter().any(|a| a == "--staged" || a == "--cached");
+    let text = if staged {
+        git::diff_cached(&ctx.tree, &scope)?
+    } else {
+        git::diff_text(&ctx.tree, &scope)?
+    };
     print!("{text}");
     Ok(())
 }
@@ -211,7 +228,62 @@ fn log(ctx: &Ctx, tail: &[String]) -> anyhow::Result<()> {
     let n = flag_value(tail, "-n")
         .and_then(|v| v.trim().parse::<usize>().ok())
         .unwrap_or(10);
+    if tail.iter().any(|a| a == "--ahead") {
+        // Только коммиты, которых нет в main — «что я наработал».
+        // Базовая ветка: MAIN из конфига, если конфиг есть (в worktree он
+        // может отсутствовать — тогда дефолт `main`).
+        let base = crate::commands::load_config(&ctx.tree)
+            .map(|c| c.main_branch)
+            .unwrap_or_else(|_| "main".to_string());
+        let text = git::log_range(&ctx.tree, &base, n)?;
+        print!("{text}");
+        return Ok(());
+    }
     print!("{}", git::log_oneline(&ctx.tree, n));
+    Ok(())
+}
+
+/// `devh git show [<rev>] [-- <paths…>]` — содержимое ревизии или файла.
+/// `rev` вида `HEAD:путь` отдаёт содержимое файла на ревизии.
+fn show(ctx: &Ctx, tail: &[String]) -> anyhow::Result<()> {
+    let scope = rest_after(tail, "--");
+    let rev = tail
+        .iter()
+        .find(|a| !a.starts_with('-') && !scope.contains(a))
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "HEAD".to_string());
+    if rev.contains(':') {
+        // «HEAD:devharness/src/lib.rs» — файл на ревизии.
+        let text = git::show_file(&ctx.tree, &rev)?;
+        print!("{text}");
+        if !text.ends_with('\n') {
+            println!();
+        }
+        return Ok(());
+    }
+    let text = git::show_rev(&ctx.tree, &rev, &scope)?;
+    print!("{text}");
+    Ok(())
+}
+
+/// `devh git branch` — ветки дерева; текущая помечена `*`.
+fn branch(ctx: &Ctx) -> anyhow::Result<()> {
+    let current = git::branch_current(&ctx.tree).unwrap_or_default();
+    for b in git::branches(&ctx.tree) {
+        println!("{}{b}", if b == current { "* " } else { "  " });
+    }
+    Ok(())
+}
+
+/// `devh git restore --path <p…>` — откатить указанные файлы к HEAD.
+/// Безопасная форма: только свои пути, только в своём worktree, индекс не
+/// трогаем. (`git checkout --`/`git restore` руками — запрещено; здесь путь
+/// скоупленный фасадом.)
+fn restore(ctx: &Ctx, tail: &[String]) -> anyhow::Result<()> {
+    let paths = guard_paths(&flag_values(tail, "--path"))?;
+    git::restore_paths(&ctx.tree, &paths)?;
+    println!("откачено к HEAD: {}", paths.join(", "));
     Ok(())
 }
 
@@ -286,16 +358,16 @@ fn worktree(root: &Path, ctx: &Ctx, tail: &[String]) -> anyhow::Result<()> {
     if !ctx.is_lead {
         anyhow::bail!("devh git worktree: только ведущий");
     }
-    let sub = tail.first().map(|s| s.trim().to_string()).unwrap_or_default();
+    let sub = tail
+        .first()
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
     let cfg = crate::commands::load_config(root).unwrap_or_default();
     match sub.as_str() {
         "list" => {
             let reg = crate::commands::orch::load(root);
             for a in reg.agents.iter() {
-                let path = a
-                    .worktree
-                    .clone()
-                    .unwrap_or_else(|| "—".to_string());
+                let path = a.worktree.clone().unwrap_or_else(|| "—".to_string());
                 let dirty = Path::new(&path).is_dir() && git::tree_dirty(Path::new(&path));
                 println!(
                     "{:<10} {}{}",
@@ -350,8 +422,14 @@ mod tests {
 
     #[test]
     fn guard_paths_rejects_escape_and_absolute() {
-        assert!(guard_paths(&["../main".to_string()]).is_err(), ".. запрещён");
-        assert!(guard_paths(&["/etc/passwd".to_string()]).is_err(), "absolute запрещён");
+        assert!(
+            guard_paths(&["../main".to_string()]).is_err(),
+            ".. запрещён"
+        );
+        assert!(
+            guard_paths(&["/etc/passwd".to_string()]).is_err(),
+            "absolute запрещён"
+        );
         assert!(guard_paths(&[]).is_err(), "пустой список запрещён");
         let ok = guard_paths(&["devharness/src".to_string(), "devharness/src".to_string()])
             .unwrap_or_else(|_| unreachable!());
@@ -366,9 +444,49 @@ mod tests {
             &paths
         ));
         assert!(!staged_subset_ok(
-            &["devharness/src/core/rate.rs".to_string(), "AGENTS.md".to_string()],
+            &[
+                "devharness/src/core/rate.rs".to_string(),
+                "AGENTS.md".to_string()
+            ],
             &paths
         ));
+    }
+
+    #[test]
+    fn restore_requires_paths_and_rejects_escape() {
+        // restore без --path — отказ (не «откатить всё»).
+        assert!(guard_paths(&[]).is_err(), "пустой список — отказ");
+        // `..` и абсолютный путь — отказ (песочница дерева).
+        assert!(guard_paths(&["../main".to_string()]).is_err());
+        assert!(guard_paths(&["/etc/passwd".to_string()]).is_err());
+    }
+
+    /// `rest_after` — разбор `-- <paths…>`: пути после маркера, до — нет.
+    #[test]
+    fn rest_after_collects_paths_after_marker() {
+        let args: Vec<String> = ["--staged", "--", "a.rs", "b.rs"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(
+            rest_after(&args, "--"),
+            vec!["a.rs".to_string(), "b.rs".to_string()]
+        );
+        assert!(rest_after(&args, "@@").is_empty());
+    }
+
+    /// `flag_values` собирает ПОВТОРЯЕМЫЕ `--path a --path b` (нужно для
+    /// add/commit/restore с несколькими файлами).
+    #[test]
+    fn flag_values_collects_repeated_paths() {
+        let args: Vec<String> = ["--path", "a.rs", "--path=b.rs", "tail"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(
+            flag_values(&args, "--path"),
+            vec!["a.rs".to_string(), "b.rs".to_string()]
+        );
     }
 
     #[test]
