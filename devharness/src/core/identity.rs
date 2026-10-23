@@ -342,8 +342,13 @@ pub fn remove_alias(alias: &str) -> Result<bool, String> {
 
 /// Имена, закреплённые кем-то явно (`devh msg claim`).
 fn claimed_names() -> Vec<String> {
+    claimed_names_in(&msg_home())
+}
+
+/// Те же имена, но в указанном хранилище (для тестов с отдельным home).
+fn claimed_names_in(home: &Path) -> Vec<String> {
     let mut out = Vec::new();
-    let dir = msg_home().join("agents");
+    let dir = home.join("agents");
     let Ok(entries) = fs::read_dir(dir) else {
         return out;
     };
@@ -372,13 +377,18 @@ fn claimed_names() -> Vec<String> {
 /// без сведения об этом в канале два адреса одного агента и задания
 /// расходятся. Чужое закреплённое имя не отбираем.
 fn auto_register_alias(name: &str) {
+    let home = msg_home();
+    auto_register_alias_in(&home, name);
+}
+
+/// То же, но в указанном хранилище алиасов (тесты с отдельным home).
+fn auto_register_alias_in(home: &Path, name: &str) {
     let Some((_pid, comm, _start)) = runtime_ancestor() else {
         return;
     };
     if comm.is_empty() || comm == name || sanitize_name(&comm).is_err() {
         return;
     }
-    let home = msg_home();
     let _guard = ALIAS_WRITE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let lock_path = home.join("aliases.lock");
     if let Some(parent) = lock_path.parent() {
@@ -392,7 +402,7 @@ fn auto_register_alias(name: &str) {
     if let Some(ref f) = lock_file {
         let _ = fs2::FileExt::lock_exclusive(f);
     }
-    let map = alias_map_in(&home);
+    let map = alias_map_in(home);
     if let Some(existing) = map.get(&comm) {
         if existing.as_str() != name {
             if let Some(ref f) = lock_file {
@@ -401,7 +411,7 @@ fn auto_register_alias(name: &str) {
             return;
         }
     }
-    if claimed_names().iter().any(|n| n == &comm) {
+    if claimed_names_in(home).iter().any(|n| n == &comm) {
         if let Some(ref f) = lock_file {
             let _ = fs2::FileExt::unlock(f);
         }
@@ -409,7 +419,7 @@ fn auto_register_alias(name: &str) {
     }
     let mut map = map;
     map.insert(comm, name.to_string());
-    let _ = write_alias_map_in(&home, &map);
+    let _ = write_alias_map_in(home, &map);
     if let Some(ref f) = lock_file {
         let _ = fs2::FileExt::unlock(f);
     }
@@ -567,6 +577,51 @@ pub fn slot_key() -> Option<String> {
 fn slot_binding() -> Option<Binding> {
     let slot = slot_key()?;
     read_binding_in(&msg_home(), &slot)
+}
+
+/// Найти claimed-привязку для заданного имени (если есть).
+/// Возвращает (key, Binding) если имя закреплено.
+fn claimed_binding_for_name(home: &Path, name: &str) -> Option<(String, Binding)> {
+    let agents_dir = home.join("agents");
+    if !agents_dir.is_dir() {
+        return None;
+    }
+    for entry in fs::read_dir(&agents_dir).ok()?.flatten() {
+        let path = entry.path();
+        let Ok(text) = fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        let claimed = value
+            .get("claimed")
+            .and_then(|x| x.as_bool())
+            .unwrap_or(false);
+        if !claimed {
+            continue;
+        }
+        let Some(binding_name) = value.get("name").and_then(|x| x.as_str()) else {
+            continue;
+        };
+        if binding_name.trim() != name {
+            continue;
+        }
+        // Ключ хранится В файле: имя файла — это хэш ключа, а не сам ключ.
+        let key = value
+            .get("key")
+            .and_then(|x| x.as_str())
+            .unwrap_or_default()
+            .to_string();
+        return Some((
+            key,
+            Binding {
+                name: binding_name.trim().to_string(),
+                claimed,
+            },
+        ));
+    }
+    None
 }
 
 /// Запомнить имя за слотом (чтобы следующий рестарт рантайма его увидел).
@@ -799,12 +854,53 @@ pub fn claim(raw: &str) -> Result<Identity, String> {
     }
     let (key, label) = context();
     let home = msg_home();
+    // Проверка: имя уже закреплено другим ключом?
+    if let Some(existing) = read_binding_in(&home, &key) {
+        if existing.claimed && existing.name == name {
+            // Тот же ключ закрепляет то же имя — идемпотентно.
+            auto_register_alias(&name);
+            remember_slot(&name, true);
+            return Ok(finish(name, Source::Stored, key, false));
+        }
+    }
+    // Проверка: имя уже закреплено ЧУЖИМ ключом?
+    if let Some((existing_key, _existing_binding)) = claimed_binding_for_name(&home, &name) {
+        if existing_key != key {
+            return Err(format!(
+                "имя «{name}» уже закреплено другим агентом (ключ {existing_key});                  используй другое имя или добавь синоним: devh msg alias {name} <другой>"
+            ));
+        }
+    }
     write_binding_in(&home, &key, &name, &label, true)
         .map_err(|e| format!("не записать привязку: {e}"))?;
     // Слот: после рестарта рантайма имя восстановится само.
     remember_slot(&name, true);
     auto_register_alias(&name);
     Ok(finish(name, Source::Stored, key, false))
+}
+
+
+/// claim для тестов с явным home и key.
+fn claim_with_home(home: &Path, name: &str, key: &str) -> Result<Identity, String> {
+    let name = sanitize_name(name)?;
+    let canon = canonical_in(home, &name);
+    if canon != name {
+        return Err(format!("«{name}» — синоним агента «{canon}»; закрепляй каноническое имя"));
+    }
+    let label = "test";
+    // Проверка: имя уже закреплено ЧУЖИМ ключом? (тот же ключ — идемпотентно)
+    if let Some((existing_key, _existing_binding)) = claimed_binding_for_name(home, &name) {
+        if existing_key != key {
+            return Err(format!(
+                "имя «{name}» уже закреплено другим агентом (ключ {existing_key}); используй другое имя или добавь синоним: devh msg alias {name} <другой>"
+            ));
+        }
+    }
+    write_binding_in(home, key, &name, label, true)
+        .map_err(|e| format!("не записать привязку: {e}"))?;
+    auto_register_alias_in(home, &name);
+    // remember_slot requires slot_key, skip for tests.
+    Ok(finish(name, Source::Stored, key.to_string(), false))
 }
 
 #[cfg(test)]
@@ -969,6 +1065,33 @@ mod tests {
         let b = read_binding_in(home, "slot:test:123:goose");
         assert!(b.as_ref().is_some_and(|x| x.claimed), "claimed binding");
         assert_eq!(b.as_ref().map(|x| x.name.as_str()), Some("first-agent"));
+    }
+
+
+    #[test]
+    fn claim_rejects_duplicate_by_different_key() {
+        let dir = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let home = dir.path();
+        // Первый ключ закрепляет имя "agent-a"
+        write_binding_in(home, "proc:1:2", "agent-a", "goose", true).unwrap_or_default();
+        // Второй ключ пытается закрепить то же имя — должен вернуть ошибку.
+        let result = claim_with_home(home, "agent-a", "proc:9:9");
+        assert!(result.is_err(), "повторный claim должен вернуть ошибку");
+        let err = result.unwrap_err();
+        assert!(err.contains("уже закреплено другим агентом"), "ошибка: {err}");
+        // Исходная привязка не должна измениться.
+        let b = read_binding_in(home, "proc:1:2");
+        assert_eq!(b.as_ref().map(|b| b.name.as_str()), Some("agent-a"));
+    }
+
+    #[test]
+    fn claim_idempotent_for_same_key() {
+        let dir = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let home = dir.path();
+        claim_with_home(home, "agent-b", "proc:1:2").unwrap_or_else(|_| unreachable!());
+        // Повторный claim тем же ключом — OK (идемпотентность).
+        let res = claim_with_home(home, "agent-b", "proc:1:2");
+        assert!(res.is_ok(), "повторный claim тем же ключом должен быть OK");
     }
 
     #[test]
