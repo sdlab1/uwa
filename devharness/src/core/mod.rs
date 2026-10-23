@@ -42,3 +42,4 @@ pub mod weaken;
 pub mod red_expect;
 pub mod review_blind;
 pub mod presence;
+pub mod slot;
