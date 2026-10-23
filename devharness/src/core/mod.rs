@@ -3,6 +3,7 @@ pub mod contract;
 pub mod coverage;
 pub mod digest;
 pub mod early;
+pub mod early_exit;
 pub mod escapes;
 pub mod gates;
 pub mod identity;
