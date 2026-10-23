@@ -39,3 +39,4 @@ pub mod tui;
 pub mod types;
 pub mod watch;
 pub mod weaken;
+pub mod red_expect;
