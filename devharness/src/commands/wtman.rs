@@ -174,19 +174,29 @@ pub struct SyncReport {
 }
 
 /// База для сравнения: `origin/main`, если есть, иначе локальный `main`.
+/// База для rebase/sync/merge.
+///
+/// `origin/<main>` берём ТОЛЬКО если он содержит локальный `<main>`
+/// (т.е. `<main>` — предок `origin/<main>`). Иначе origin отстал: rebase
+/// на него увёл бы работу агента на древнюю базу, а fast-forward merge
+/// в main стал бы невозможен (main не предок ветки агента).
 fn base_ref(root: &Path, main_branch: &str) -> String {
-    if git_ok(
-        root,
-        &[
-            "rev-parse",
-            "--verify",
-            "--quiet",
-            &format!("origin/{main_branch}"),
-        ],
-    ) {
-        format!("origin/{main_branch}")
-    } else if git_ok(root, &["rev-parse", "--verify", "--quiet", main_branch]) {
+    let origin = format!("origin/{main_branch}");
+    let local_ok = git_ok(root, &["rev-parse", "--verify", "--quiet", main_branch]);
+    let origin_ok = git_ok(root, &["rev-parse", "--verify", "--quiet", &origin]);
+    if local_ok && origin_ok {
+        let local_is_ancestor =
+            git_ok(root, &["merge-base", "--is-ancestor", main_branch, &origin]);
+        if local_is_ancestor {
+            return origin;
+        }
+        // origin отстал от локального main — база = локальный main.
+        return main_branch.to_string();
+    }
+    if local_ok {
         main_branch.to_string()
+    } else if origin_ok {
+        origin
     } else {
         "HEAD".to_string()
     }
@@ -439,11 +449,11 @@ pub fn merge(cfg: &RunConfig, root: &Path, agent: &str) -> anyhow::Result<MergeR
     }
     // Сначала подтягиваем главную ветку (remote → origin/main, иначе main),
     // затем rebase ветки агента поверх актуальной базы — как в `devh merge`.
-    let mut upstream = cfg.main_branch.clone();
     if crate::shell::git::has_remote(root) {
         let _ = crate::shell::git::fetch(root, &cfg.remote, &cfg.main_branch);
-        upstream = format!("{}/{}", cfg.remote, cfg.main_branch);
     }
+    // База = origin/main, только если он содержит локальный main; иначе main.
+    let upstream = base_ref(root, &cfg.main_branch);
     if crate::shell::git::rebase(&path, &upstream).is_err() {
         let _ = git_ok(&path, &["rebase", "--abort"]);
         anyhow::bail!(
@@ -745,6 +755,59 @@ mod tests {
             std::fs::read_to_string(p.join("a.txt")).unwrap_or_default(),
             "dirty\n",
             "работа агента не тронута"
+        );
+    }
+
+    /// `origin/main` отстал от локального `main` -> база = локальный `main`.
+    /// Иначе rebase агента уезжает на древнюю базу, а ff-merge в main
+    /// невозможен (main не предок ветки агента).
+    #[test]
+    fn base_ref_prefers_local_main_when_origin_is_behind() {
+        let (_d, root) = repo_fixture();
+        // Второй коммит в локальном main.
+        std::fs::write(root.join("b.txt"), "2\n").unwrap_or_else(|_| unreachable!());
+        let _ = git_ok(&root, &["add", "-A"]);
+        let _ = git_ok(&root, &["commit", "-qm", "local"]);
+        let head_sha = git(&root, &["rev-parse", "main"]).unwrap_or_else(|_| unreachable!());
+        let prev_sha = git(&root, &["rev-parse", "HEAD~1"]).unwrap_or_else(|_| unreachable!());
+
+        // origin/main отстал от локального main.
+        let _ = git_ok(
+            &root,
+            &["update-ref", "refs/remotes/origin/main", &prev_sha],
+        );
+        assert_eq!(
+            base_ref(&root, "main"),
+            "main",
+            "origin отстал -> берём локальный main"
+        );
+
+        // origin/main догнал и содержит локальный main -> берём origin.
+        let _ = git_ok(
+            &root,
+            &["update-ref", "refs/remotes/origin/main", &head_sha],
+        );
+        assert_eq!(
+            base_ref(&root, "main"),
+            "origin/main",
+            "origin содержит main -> берём origin/main"
+        );
+
+        // origin/main впереди локального main -> тоже берём origin (main подтянется ff).
+        let _ = git_ok(&root, &["checkout", "-q", "-b", "tmp"]);
+        std::fs::write(root.join("c.txt"), "3\n").unwrap_or_else(|_| unreachable!());
+        let _ = git_ok(&root, &["add", "-A"]);
+        let _ = git_ok(&root, &["commit", "-qm", "ahead"]);
+        let ahead_sha = git(&root, &["rev-parse", "HEAD"]).unwrap_or_else(|_| unreachable!());
+        let _ = git_ok(&root, &["checkout", "-q", "main"]);
+        let _ = git_ok(
+            &root,
+            &["update-ref", "refs/remotes/origin/main", &ahead_sha],
+        );
+        assert_eq!(
+            base_ref(&root, "main"),
+            "origin/main",
+            "origin впереди -> берём origin/main (main подтянется fast-forward)"
         );
     }
 }
