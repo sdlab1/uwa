@@ -23,6 +23,7 @@ pub mod rate;
 pub mod runstate;
 pub mod state;
 pub mod survivors;
+pub mod taxonomy;
 pub mod tripwire;
 pub mod tui;
 pub mod types;
