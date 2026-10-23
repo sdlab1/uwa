@@ -495,10 +495,21 @@ fn slot_binding() -> Option<Binding> {
 }
 
 /// Запомнить имя за слотом (чтобы следующий рестарт рантайма его увидел).
+///
+/// Слот занимает ПЕРВЫЙ: если слот уже закреплён за другим именем — не
+/// перебиваем. Иначе два агента без рантайма в дереве (у goose оболочка
+/// отделена от процесса goose) получили бы один слот и один ящик:
+/// второй перехватил бы имя первого. Тогда лучше потерять непрерывность,
+/// чем перепутать личности.
 fn remember_slot(name: &str, claimed: bool) {
     let Some(slot) = slot_key() else {
         return;
     };
+    if let Some(existing) = read_binding_in(&msg_home(), &slot) {
+        if existing.claimed && existing.name != name {
+            return;
+        }
+    }
     let _ = write_binding_in(&msg_home(), &slot, name, "slot", claimed);
 }
 
