@@ -545,6 +545,88 @@ fn print_help() {
     );
 }
 
+/// Нормализованный ключ модели (для рейтинга и сравнения).
+fn model_key(model: &str) -> String {
+    model
+        .trim()
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '-' })
+        .collect()
+}
+
+/// Модель агента из реестра оркестратора.
+fn registry_model(reg: &Registry, agent: &str) -> Option<String> {
+    reg.agents
+        .iter()
+        .find(|a| a.name == agent)
+        .and_then(|a| a.model.clone())
+}
+
+/// Модель агента + источник определения.
+fn model_of(root: &Path, reg: &Registry, agent: &str) -> (Option<String>, String) {
+    if let Some(m) = registry_model(reg, agent) {
+        return (Some(m), "реестр оркестратора (agents[].model)".to_string());
+    }
+    let me = crate::core::identity::canonical(&crate::core::identity::current().name);
+    if me == agent {
+        let about = crate::commands::about::collect(root);
+        if let Some(m) = about.model {
+            return (Some(m), about.model_source);
+        }
+    }
+    (None, "неизвестна".to_string())
+}
+
+/// Сданные задачи — записи для рейтинга моделей.
+fn model_records(reg: &Registry) -> Vec<crate::core::modelrank::TaskRecord> {
+    reg.tasks
+        .iter()
+        .filter(|t| t.status == Status::Done)
+        .filter_map(|t| {
+            let m = t.model.clone()?;
+            let f = t
+                .fail_level
+                .map(|x| format!("F{x}"))
+                .unwrap_or_else(|| "F0".to_string());
+            Some(crate::core::modelrank::TaskRecord {
+                model: model_key(&m),
+                f_level: f,
+                complexity: t.c_level.unwrap_or(t.complexity),
+            })
+        })
+        .collect()
+}
+
+/// Потолок сложности (C) для модели: растёт только на F0/F1.
+fn ceiling_for_model(model: &str, records: &[crate::core::modelrank::TaskRecord]) -> u8 {
+    crate::core::modelrank::ceiling_for(&model_key(model), records)
+        .unwrap_or(crate::core::complexity::ModelCeiling::DEFAULT)
+}
+
+/// Потолок агента (по модели из реестра).
+fn agent_ceiling(reg: &Registry, agent: &str) -> u8 {
+    match registry_model(reg, agent) {
+        Some(m) => ceiling_for_model(&m, &model_records(reg)),
+        None => crate::core::complexity::ModelCeiling::DEFAULT,
+    }
+}
+
+/// Разбор C-уровня (C0..C10).
+fn parse_c_level(v: &str) -> anyhow::Result<u8> {
+    let c = v
+        .trim()
+        .parse::<u8>()
+        .map_err(|_| anyhow!("неверный C-уровень «{v}» (нужно C0..C10)"))?;
+    if c > crate::core::complexity::Complexity::MAX {
+        return Err(anyhow!(
+            "C-уровень {c} выше максимума C{}",
+            crate::core::complexity::Complexity::MAX
+        ));
+    }
+    Ok(c)
+}
+
 /// `devh orch add`.
 fn add(root: &Path, args: &[String]) -> anyhow::Result<()> {
     let _lock = crate::shell::lock::OutputLock::try_acquire(root, &path(root), "devh orch")
@@ -584,6 +666,19 @@ fn add(root: &Path, args: &[String]) -> anyhow::Result<()> {
     let (lead, _) = lead_of(&reg);
     let is_lead = lead.as_deref() == Some(agent.as_str());
     let caller = crate::core::identity::canonical(&crate::core::identity::current().name);
+    let caller_is_lead = lead.as_deref() == Some(caller.as_str());
+    // Сложность C0-C10 назначает ТОЛЬКО ведущий; иначе — из уровня P.
+    let c_level = match flag(args, "--c").as_ref() {
+        Some(raw) => {
+            if !caller_is_lead {
+                return Err(anyhow!(
+                    "devh orch add: сложность C назначает только ведущий (--c C0..C10)"
+                ));
+            }
+            Some(parse_c_level(raw)?)
+        }
+        None => Some(crate::core::complexity::Complexity::from_p_level(complexity).0),
+    };
     // `--lead-self` — работа ведущего вне очереди (задача сразу в работе).
     let lead_self = args.iter().any(|a| a == "--lead-self");
     // `--buffer` — подготовленная задача в БУФЕР ведущего: висит на доске,
@@ -612,7 +707,7 @@ fn add(root: &Path, args: &[String]) -> anyhow::Result<()> {
         agent: agent.clone(),
         title: title.clone(),
         complexity,
-        c_level: None,
+        c_level,
         model: None,
         model_source: None,
         started_by: if lead_self {
@@ -645,7 +740,10 @@ fn add(root: &Path, args: &[String]) -> anyhow::Result<()> {
         });
     }
     save(root, &reg)?;
-    println!("devh orch: {id} добавлена в очередь {agent}: P{complexity} — {title}");
+    println!(
+        "devh orch: {id} добавлена в очередь {agent}: P{complexity} C{} — {title}",
+        c_level.unwrap_or(0)
+    );
     if zones.is_empty() {
         println!("devh orch: ⚠ зона не указана (--zone) — пересечения зон не проверятся");
     }
@@ -824,14 +922,27 @@ fn close(root: &Path, args: &[String], status: Status) -> anyhow::Result<()> {
         }
     }
     let (agent, f) = close_task(&mut reg, &id, status, Some(level), &reason)?;
+    // Модель, фактически выполнившая задачу (прикрепляется автоматически).
+    let (model, source) = match flag(args, "--model").as_ref() {
+        Some(m) => (Some(m.trim().to_string()), "флаг --model".to_string()),
+        None => model_of(root, &reg, &agent),
+    };
+    if let Some(idx) = find_task_index(&reg, &id) {
+        if let Some(t) = reg.tasks.get_mut(idx) {
+            t.model = model.clone();
+            t.model_source = Some(source.clone());
+            t.updated = now();
+        }
+    }
     save(root, &reg)?;
     println!(
-        "devh orch: {id} {} ({agent}, F{f})",
+        "devh orch: {id} {} ({agent}, F{f}, модель {})",
         if status == Status::Done {
             "выполнена"
         } else {
             "провалена"
-        }
+        },
+        model.unwrap_or_else(|| "неизвестна".to_string())
     );
     Ok(())
 }
@@ -972,24 +1083,42 @@ fn model(root: &Path, args: &[String]) -> anyhow::Result<()> {
 fn list(root: &Path, args: &[String]) -> anyhow::Result<()> {
     let reg = load(root);
     let only = flag(args, "--agent");
-    println!("ID      агент   P  статус    F  зоны                     задача");
+    let caller = crate::core::identity::canonical(&crate::core::identity::current().name);
+    let ceiling = agent_ceiling(&reg, &caller);
+    let mut hidden = 0usize;
+    println!("ID      агент   P  C   статус    F  зоны                     задача");
     for t in reg.tasks.iter() {
         if let Some(a) = only.as_ref() {
             if &t.agent != a {
                 continue;
             }
         }
+        // Задачи сложнее потолка модели агента — скрыты (нельзя взять).
+        if t.agent == caller && t.status == Status::Queued {
+            if let Some(c) = t.c_level {
+                if c > ceiling {
+                    hidden = hidden.saturating_add(1);
+                    continue;
+                }
+            }
+        }
         println!(
-            "{:<6} {:<7} P{} {:<9} {:<2} {:<24} {}",
+            "{:<6} {:<7} P{} C{:<3} {:<9} {:<2} {:<24} {}",
             t.id,
             t.agent,
             t.complexity,
+            t.c_level.unwrap_or(0),
             t.status.label(),
             t.fail_level
                 .map(|f| format!("F{f}"))
                 .unwrap_or_else(|| "-".to_string()),
             t.zones.join(","),
             t.title
+        );
+    }
+    if hidden > 0 {
+        println!(
+            "⚠ скрыто задач выше потолка модели (C{ceiling}): {hidden} — узнать: devh orch models"
         );
     }
     Ok(())
