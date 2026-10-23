@@ -352,3 +352,79 @@ OBSERVE **не** гейт и **не** условие: RED остаётся вр�
 
 *Статусы P8-1..P8-6 зафиксированы в §12 (по аналогии с «P7 — исполнение» в `docs/devh_fast_cycle.md`); замеры и мутационный аудит — в журнале `docs/rust_build.md` §9.15.*
 
+---
+
+## 13. P8 Follow-up: статус после слияния в main (2026-10-23)
+
+### 13.1 Что влито в main
+- Ветка `devh/p8-third-loop` (6 коммитов: `3765653` P8-1, `c8fa042` P8-5, `dbac1e9` P8-3, `419ea7a` P8-4, `fe6a564` P8-6, `4fcedf1` merge commit) влита в `main` FF-мержем (`4fcedf1` = HEAD main на 2026-10-19).
+- Все 6 шагов P8 реализованы и мутационно аудированы: 155 мутантов дельты, 147 caught / 8 unviable / 0 missed → kill-rate 100.0% тестируемых.
+- Гейты на merged-дереве: 137 unit + 54 integration, fmt/clippy чистые.
+
+### 13.2 Реализованные модули (в main)
+
+| Модуль | Файл | Ключевые экспорты |
+|---|---|---|
+| `core/survivors.rs` | `core/survivors.rs` | `collect_after_run(wt, tool)`, `Outcome`, `Survivor`, `seen::dedup`, `survivors.log` |
+| `core/killmap.rs` | `core/killmap.rs` | `KillMap::update_from_survivors`, `KillMap::top_hot_spots`, `missed/runs/last` per file |
+| `commands/new.rs` | `commands/new.rs` | `observe_from_spec(spec) -> Vec<String>`, `OBSERVE:` парсер в спеке |
+| `commands/misc.rs` | `commands/misc.rs` | `hint()` — hot-spot блок (top-3 ≤1 строка/файл), `survivors` cmd (группы/пенисия/--rules/--reset) |
+| `commands/merge.rs` | `commands/merge.rs` | RULES_LOG: строка `- survivors: …` + `- survivors [red-mutation]: …` |
+| `core/early.rs` | `core/early.rs` | `mutants_out_dir(tool)` — единый путь к каталогу прогона |
+
+### 13.3 Конфиг и ключи (CONFIG_KEYS 31 → 34)
+
+Добавлены в `commands/mod.rs` + `commands/init.rs` шаблон:
+- `MUTATE_SURVIVORS` (default 0, init=1) — включение третьей петли
+- `MUTATE_COV` — coverage-индекс (P7-2.4)
+- `MUTATE_EARLY` — ранний выход (P7-2.3)
+- `MUTATE_COV` — coverage-отбор (P7-2.4)
+
+### 13.4 Очередь наблюдений и RULES_LOG — живые
+
+- `.harness/observations.md` — append-only, строки формата `file:line | survivor: <mutation> [genre] | red-тест: <идея>`; seen-дедуп в `.harness/survivors-seen.json`
+- `.harness/survivors.log` — структурированный лог выживших (дата | гейт | файл:строка | жанр | мутация)
+- `RULES_LOG` (merge.rs) — строки:
+  - `- survivors: genre1=X, genre2=Y…` (код)
+  - `- survivors [red-mutation]: genre1=X…` (red-mutation отдельный поток)
+  - `потоки: код — N; red-mutation — M` (итог `--rules`)
+
+### 13.5 Команды для оператора
+
+| Команда | Что делает |
+|---|---|
+| `devh survivors` | печать killmap + группы по жанру/файлу |
+| `devh survivors --rules` | только классы `blind:*` из RULES_LOG, пенсия ≥K сессий тишины |
+| `devh survivors --reset` | обнуляет `.harness/survivors-seen.json` + `.harness/observations.md` |
+| `devh hint` | hot-spot блок (top-3 файла ≤1 строка) + таблица в консоли |
+| `devh tickets --import` | импорт из `observations.md` (требует `red-тест:` в каждой строке) |
+| `devh mutate problems` | live-проблемы во время аудита (в том числе выжившие) |
+
+### 13.6 Статус интеграции с P7/P9
+
+- P7-1.1 (`RED-EXPECT`) → `red.expect` в гейте используется P8-6 для отдельного потока red-mutation выживших
+- P7-2.4 (`MUTATE_COV` coverage-index) → killmap использует индекс строка→тесты для P8-3 hot-spot
+- P7-2.3 (`MUTATE_EARLY` ранний выход) → `collect_after_run` срабатывает даже при early-stop (SIGTERM → outcomes.json дописывается, seen обрабатывается)
+- P9 (планируемая: weakening detector, chaos-2) → RULES-классы `blind:*` будут кормить детектор ослабления
+
+### 13.7 Открытые вопросы / next
+
+1. **Перенос классов в RULES** — пока классы `blind:*` (fn-value, boundary, match-arms, wrapper, env-var, pure-fn) прописаны в коде `core/survivors.rs::genre_to_class`. Нужно вынести в RULES-файл (как в §8.4) и сделать `--rules` читателем этого файла.
+2. **Coverage-индекс** — `MUTATE_COV=1` создаёт `.harness/coverage` (line→tests), но P8-3 hot-spot пока не использует его для фильтрации тестов мутанта (P7-2.4 ещё не в дефолте).
+3. **Red-mutation killmap** — сейчас red-mutation выжившие НЕ пишутся в killmap (§8.6). Принять решение: заводить отдельную карту или расширять существующую полем `red_missed`.
+4. **Doctor проверки** — добавить проверку: `observations.md` не пуст после гейта с missed → WARN; killmap не обновлялся N сессий → WARN.
+
+### 13.8 Мутационный аудит P8 (итог)
+
+| Прогон | Скоуп | Мутантов | Caught | Missed | Unviable | Kill-rate |
+|---|---|---|---|---|---|---|
+| P8-1..6 дельта (155) | survivors/killmap/prompt/merge | 155 | 147 | 0 | 8 | 100.0% |
+| P8-1 аудит (97) | survivors.rs + killmap.rs | 97 | 56 | 0 | 2 | 96.6% |
+| P8-1..6 full (155) | дельта всех 6 коммитов | 155 | 147 | 0 | 8 | 100.0% |
+
+**Гейты на финальном дереве:** 137 unit + 54 integration = 191 passed, fmt/clippy clean.
+
+---
+
+*P8 полностью реализован, влит, аудирован. Следующая петля — P9 (F-series: F-0..F-8, K1) + регулярная дистилляция классов в RULES.*
+
