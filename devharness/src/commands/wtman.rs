@@ -13,6 +13,7 @@
 //! | `assign <агент>` | выдать worktree (создать, если нет) и напечатать путь |
 //! | `path <агент>` | только путь (для скриптов) |
 //! | `sync [<агент>\|--all]` | подтянуть изменения главного репо в worktree |
+//! | `merge <агент>` | влить ветку worktree агента в главную ветку (lead) |
 //! | `release <агент>` | освободить worktree (грязное — не трогаем) |
 //! | `gc` | prune: снять осиротевшие регистрации и мёртвые каталоги |
 //!
@@ -373,6 +374,118 @@ pub fn sync(cfg: &RunConfig, root: &Path, agent: &str) -> anyhow::Result<SyncRep
     })
 }
 
+/// Итог слияния worktree агента в главную ветку.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MergeAction {
+    /// Влито (fast-forward) в главную ветку.
+    Merged,
+    /// Вливать нечего: своих коммитов сверх главной ветки нет.
+    Nothing,
+    /// Нужен ручной merge (главное дерево грязное или не fast-forward).
+    Manual,
+}
+
+impl MergeAction {
+    pub fn label(self) -> &'static str {
+        match self {
+            MergeAction::Merged => "влито",
+            MergeAction::Nothing => "нечего вливать",
+            MergeAction::Manual => "нужен ручной merge",
+        }
+    }
+}
+
+/// Отчёт о слиянии worktree агента в главную ветку.
+#[derive(Debug, Clone)]
+pub struct MergeReport {
+    pub action: MergeAction,
+    pub message: String,
+    pub sha: Option<String>,
+}
+
+/// Влить ветку worktree агента в главную ветку репозитория.
+///
+/// Семантика — как у `devh merge` для задач, но для персональных worktree'ов
+/// агентов (`devh/agent-<адрес>`). Ничего не теряет:
+/// * грязное дерево агента → отказ (работа агента не тронута);
+/// * конфликт rebase → `rebase --abort` и отказ;
+/// * грязное главное дерево или не fast-forward → ручной merge, без правок.
+pub fn merge(cfg: &RunConfig, root: &Path, agent: &str) -> anyhow::Result<MergeReport> {
+    let path = agent_path(cfg, root, agent);
+    if !path.exists() {
+        anyhow::bail!("worktree агента {agent} не выдан: devh orch wt assign {agent}");
+    }
+    if crate::shell::git::tree_dirty(&path) {
+        let files = crate::shell::git::status_names(&path).join(", ");
+        anyhow::bail!(
+            "worktree агента {agent} грязный ({files}) — сначала закоммить: \
+             вливать нечего, работа агента не теряется"
+        );
+    }
+    let branch = crate::shell::git::branch_current(&path).unwrap_or_else(|| agent_branch(agent));
+    if !crate::shell::git::show_ref(root, &branch) {
+        anyhow::bail!("ветка {branch} не найдена — вливать нечего");
+    }
+    let ahead = crate::shell::git::rev_list_count(&path, &cfg.main_branch)?;
+    if ahead == 0 {
+        return Ok(MergeReport {
+            action: MergeAction::Nothing,
+            message: format!(
+                "на {branch} нет коммитов сверх {} — вливать нечего",
+                cfg.main_branch
+            ),
+            sha: None,
+        });
+    }
+    // Сначала подтягиваем главную ветку (remote → origin/main, иначе main),
+    // затем rebase ветки агента поверх актуальной базы — как в `devh merge`.
+    let mut upstream = cfg.main_branch.clone();
+    if crate::shell::git::has_remote(root) {
+        let _ = crate::shell::git::fetch(root, &cfg.remote, &cfg.main_branch);
+        upstream = format!("{}/{}", cfg.remote, cfg.main_branch);
+    }
+    if crate::shell::git::rebase(&path, &upstream).is_err() {
+        let _ = git_ok(&path, &["rebase", "--abort"]);
+        anyhow::bail!(
+            "конфликт rebase {branch} на {upstream} — rebase откачен, работа агента цела; \
+             разреши вручную в {}",
+            path.display()
+        );
+    }
+    let sha = crate::shell::git::short_head(&path);
+    if crate::shell::git::tree_dirty(root) {
+        return Ok(MergeReport {
+            action: MergeAction::Manual,
+            message: format!(
+                "главное дерево грязное — влить нельзя (R9: git принадлежит харнессу); \
+                 ветка {branch} готова ({sha}), повтори после коммита чужих правок"
+            ),
+            sha: Some(sha),
+        });
+    }
+    // Локальная главная ветка могла отстать от upstream — подтягиваем ff.
+    if upstream != cfg.main_branch {
+        let _ = crate::shell::git::merge_ff_only(root, &upstream);
+    }
+    if crate::shell::git::merge_ff_only(root, &branch) {
+        return Ok(MergeReport {
+            action: MergeAction::Merged,
+            message: format!("{branch} влит в {} ({sha})", cfg.main_branch),
+            sha: Some(sha),
+        });
+    }
+    Ok(MergeReport {
+        action: MergeAction::Manual,
+        message: format!(
+            "{} не fast-forward относительно {branch} — нужен ручной merge: \
+             git -C {} merge {branch}",
+            cfg.main_branch,
+            root.display()
+        ),
+        sha: Some(sha),
+    })
+}
+
 /// Освободить worktree агента. Грязное дерево НЕ трогаем — это работа агента.
 pub fn release(cfg: &RunConfig, root: &Path, agent: &str) -> anyhow::Result<String> {
     let path = agent_path(cfg, root, agent);
@@ -587,5 +700,51 @@ mod tests {
         let report = gc(&c, &root, &[]).unwrap_or_else(|_| unreachable!());
         assert!(!report.is_empty(), "сирота снесена: {report:?}");
         assert!(!orphan.exists());
+    }
+
+    #[test]
+    fn merge_reports_nothing_without_commits() {
+        let (_d, root) = repo_fixture();
+        let c = cfg();
+        let (_p, _) = ensure(&c, &root, "beam").unwrap_or_else(|_| unreachable!());
+        let rep = merge(&c, &root, "beam").unwrap_or_else(|_| unreachable!());
+        assert_eq!(rep.action, MergeAction::Nothing, "{}", rep.message);
+    }
+
+    #[test]
+    fn merge_fast_forwards_agent_branch_into_main() {
+        let (_d, root) = repo_fixture();
+        let c = cfg();
+        let (p, _) = ensure(&c, &root, "beam").unwrap_or_else(|_| unreachable!());
+        // Коммит агента в его worktree.
+        std::fs::write(p.join("c.txt"), "3\n").unwrap_or_else(|_| unreachable!());
+        let g = |args: &[&str]| {
+            let _ = Command::new("git").args(args).current_dir(&p).output();
+        };
+        g(&["add", "-A"]);
+        g(&["commit", "-qm", "agent work"]);
+        let rep = merge(&c, &root, "beam").unwrap_or_else(|_| unreachable!());
+        assert_eq!(rep.action, MergeAction::Merged, "{}", rep.message);
+        assert!(
+            root.join("c.txt").exists(),
+            "коммит агента попал в главное дерево"
+        );
+    }
+
+    #[test]
+    fn merge_refuses_dirty_agent_tree() {
+        let (_d, root) = repo_fixture();
+        let c = cfg();
+        let (p, _) = ensure(&c, &root, "beam").unwrap_or_else(|_| unreachable!());
+        std::fs::write(p.join("a.txt"), "dirty\n").unwrap_or_else(|_| unreachable!());
+        assert!(
+            merge(&c, &root, "beam").is_err(),
+            "грязное дерево агента не вливаем"
+        );
+        assert_eq!(
+            std::fs::read_to_string(p.join("a.txt")).unwrap_or_default(),
+            "dirty\n",
+            "работа агента не тронута"
+        );
     }
 }

@@ -541,6 +541,7 @@ fn print_help() {
   wt assign <агент>           выдать worktree агенту (идемпотентно)
   wt path <агент>             путь worktree агента (для скриптов)
   wt sync <агент>|--all       подтянуть изменения главного репо в worktree'и
+  wt merge <агент>            влить ветку worktree агента в главную ветку (только lead)
   wt release <агент>          освободить worktree (грязное — не трогаем)
   wt gc                       убрать осиротевшие worktree'и
   models                      рейтинг моделей: сдано, F-распределение, потолок C
@@ -1360,7 +1361,7 @@ fn retune(root: &Path, args: &[String]) -> anyhow::Result<()> {
 }
 
 /// `devh orch zones` — кто какие зоны держит.
-/// `devh orch wt <list|assign|path|sync|release|gc> [агент]` — учёт и
+/// `devh orch wt <list|assign|path|sync|merge|release|gc> [агент]` — учёт и
 /// управление личными worktree'ами агентов.
 fn wt(root: &Path, args: &[String]) -> anyhow::Result<()> {
     let sub = args.first().cloned().unwrap_or_else(|| "list".to_string());
@@ -1467,6 +1468,21 @@ fn wt(root: &Path, args: &[String]) -> anyhow::Result<()> {
             save(root, &reg)?;
             Ok(())
         }
+        "merge" => {
+            let agent = agent.ok_or_else(|| anyhow!("devh orch wt merge: нужен агент"))?;
+            let reg = load(root);
+            let (lead, _) = lead_of(&reg);
+            let caller = crate::core::identity::canonical(&crate::core::identity::current().name);
+            if lead.as_deref() != Some(caller.as_str()) {
+                return Err(anyhow!(
+                    "devh orch wt merge: вливает только ведущий (текущий ведущий: {})",
+                    lead.unwrap_or_else(|| "не назначен".to_string())
+                ));
+            }
+            let rep = crate::commands::wtman::merge(&cfg, root, &agent)?;
+            println!("{agent}: {} — {}", rep.action.label(), rep.message);
+            Ok(())
+        }
         "release" => {
             let agent = agent.ok_or_else(|| anyhow!("devh orch wt release: нужен агент"))?;
             let msg = crate::commands::wtman::release(&cfg, root, &agent)?;
@@ -1498,7 +1514,7 @@ fn wt(root: &Path, args: &[String]) -> anyhow::Result<()> {
             Ok(())
         }
         other => Err(anyhow!(
-            "devh orch wt: неизвестная подкоманда «{other}» (list|assign|path|sync|release|gc)"
+            "devh orch wt: неизвестная подкоманда «{other}» (list|assign|path|sync|merge|release|gc)"
         )),
     }
 }
