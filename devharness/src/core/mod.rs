@@ -2,6 +2,7 @@ pub mod complexity;
 pub mod contract;
 pub mod coverage;
 pub mod digest;
+pub mod diff_scope;
 pub mod early;
 pub mod early_exit;
 pub mod escapes;
