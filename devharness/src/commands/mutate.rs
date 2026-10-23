@@ -861,6 +861,15 @@ fn report_lines(audit: &Audit) -> Vec<String> {
     let mut v = Vec::new();
     if audit.alive {
         v.push("статус: прогон идёт".to_string());
+    } else if audit.testable() == 0 {
+        // kill_rate() при 0 тестируемых даёт условные 100% («не упало ни
+        // одного из нуля») — это НЕ измеренный процент: тестов не было,
+        // а судья в этой ситуации велит Fail («testable 0»). Печатаем
+        // правду, а не условность, чтобы отчёт не читался как успех.
+        v.push(format!(
+            "статус: прогон завершён (rc {:?}), kill-rate не измерен (0 тестируемых)",
+            audit.exit
+        ));
     } else {
         v.push(format!(
             "статус: прогон завершён (rc {:?}), kill-rate {:.1}% ({} тестируемых)",
@@ -1904,6 +1913,37 @@ mod tests {
         assert!(
             !out.iter().any(|l| l.contains("вердикт:")),
             "у идущего прогона финального вердикта нет: {out:?}"
+        );
+    }
+
+    /// Ревью T-004: при 0 тестируемых kill_rate() — условные 100%, но это
+    /// НЕ измеренный процент (судья велит Fail). Отчёт обязан печатать
+    /// «не измерен», а не «100.0%».
+    #[test]
+    fn report_lines_says_unmeasured_when_nothing_testable() {
+        let mut all_unviable = Audit::default();
+        all_unviable.counts.unviable = 3;
+        all_unviable.done = 3;
+        let out = report_lines(&all_unviable);
+        assert!(
+            out.iter()
+                .any(|l| l.contains("kill-rate не измерен (0 тестируемых)")),
+            "0 тестируемых ≠ 100%: {out:?}"
+        );
+        assert!(
+            !out.iter().any(|l| l.contains("kill-rate 100")),
+            "«kill-rate 100» при нуле тестируемых врёт: {out:?}"
+        );
+        // Обычный случай — прежний формат с процентом.
+        let mut normal = Audit::default();
+        normal.counts.caught = 9;
+        normal.counts.missed = 1;
+        normal.done = 10;
+        let out = report_lines(&normal);
+        assert!(
+            out.iter()
+                .any(|l| l.contains("kill-rate 90.0% (10 тестируемых)")),
+            "процент печатается как раньше: {out:?}"
         );
     }
 
