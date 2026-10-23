@@ -30,6 +30,7 @@
 
 use std::fs;
 use std::io::{BufRead, BufReader};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -143,10 +144,50 @@ fn latest_log(log_dir: &Path) -> Option<PathBuf> {
     best.map(|(_, p)| p)
 }
 
+/// Режим `devh test`: обычный (ждёт итог), `--bg` (отцепленный прогон),
+/// `--status` (спросить фон).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    Run,
+    Bg,
+    Status,
+}
+
+/// Вынимает режимные флаги, остальные аргументы отдаёт сьюту.
+fn split_mode(args: &[String]) -> (Mode, Vec<String>) {
+    let mut mode = Mode::Run;
+    let mut rest = Vec::with_capacity(args.len());
+    for a in args {
+        match a.as_str() {
+            "--bg" => mode = Mode::Bg,
+            "--status" => mode = Mode::Status,
+            _ => rest.push(a.clone()),
+        }
+    }
+    (mode, rest)
+}
+
+fn detached() -> std::io::Result<()> {
+    unsafe {
+        libc::signal(libc::SIGHUP, libc::SIG_IGN);
+        if libc::setsid() == -1 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
 /// Точка входа `devh test`.
 pub fn test(root: &Path, args: &[String]) -> anyhow::Result<()> {
     let suite = root.join("devharness/test.sh");
     let log_dir = root.join(".harness/logs");
+    let (mode, args) = split_mode(args);
+    if mode == Mode::Status {
+        return status(root, &log_dir);
+    }
+    if mode == Mode::Bg {
+        return bg(root, &log_dir, &args);
+    }
 
     // ── --list: список проверок ───────────────────────────────────────
     if args.iter().any(|a| a == "--list") {
@@ -302,6 +343,92 @@ pub fn test(root: &Path, args: &[String]) -> anyhow::Result<()> {
     crate::commands::die(rc);
 }
 
+/// `devh test --bg`: отцепленный полный прогон. Агент не ждёт сьют —
+/// сьют пишет свой лог, а `--status` читает итог.
+fn bg(root: &Path, log_dir: &Path, args: &[String]) -> anyhow::Result<()> {
+    fs::create_dir_all(log_dir)?;
+    let pid_path = log_dir.join("test-bg.pid");
+    if let Ok(text) = fs::read_to_string(&pid_path) {
+        let pid: i32 = text.trim().parse().unwrap_or(0);
+        if pid > 0 && crate::shell::proc::pid_alive(pid) {
+            println!(
+                "devh test --bg: уже идёт PID {pid}; лог: {}",
+                log_dir.join("test-bg.log").display()
+            );
+            println!("статус: devh test --status");
+            crate::commands::die(2);
+        }
+    }
+    let log = log_dir.join("test-bg.log");
+    let out = fs::File::create(&log)?;
+    let err = out.try_clone()?;
+    let exe = std::env::current_exe()?;
+    let mut cmd = Command::new(exe);
+    cmd.arg("test")
+        .args(args)
+        .current_dir(root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(out))
+        .stderr(Stdio::from(err));
+    unsafe {
+        cmd.pre_exec(detached);
+    }
+    let child = cmd.spawn()?;
+    let pid = child.id();
+    if let Err(e) = fs::write(&pid_path, format!("{pid}\n")) {
+        let _ = std::process::Command::new("kill")
+            .arg(pid.to_string())
+            .status();
+        return Err(e.into());
+    }
+    println!("OK bg: тест → PID {pid}; лог: {}", log.display());
+    println!(
+        "   следить: devh test --status | итог появится в {}",
+        log_dir.join("test-latest.log").display()
+    );
+    Ok(())
+}
+
+/// `devh test --status`: идёт/завершён + итог из канонического лога.
+fn status(_root: &Path, log_dir: &Path) -> anyhow::Result<()> {
+    let pid_path = log_dir.join("test-bg.pid");
+    if let Ok(text) = fs::read_to_string(&pid_path) {
+        let pid: i32 = text.trim().parse().unwrap_or(0);
+        if pid > 0 && crate::shell::proc::pid_alive(pid) {
+            let el = pid_path
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.elapsed().ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            println!(
+                "тест идёт: PID {pid}, {el}s; лог: {}",
+                log_dir.join("test-bg.log").display()
+            );
+            crate::commands::die(2);
+        }
+        let _ = fs::remove_file(&pid_path);
+    }
+    let Some(log) = latest_log(log_dir) else {
+        println!("devh test --status: фонового прогона и лога нет — среда не готова");
+        crate::commands::die(2);
+    };
+    let text = fs::read_to_string(&log)?;
+    let Some(t) = parse_totals(&text) else {
+        println!(
+            "devh test --status: итог не найден (лог: {})",
+            log.display()
+        );
+        crate::commands::die(2);
+    };
+    println!("PASS: {}", t.pass);
+    println!("FAIL: {}", t.fail);
+    println!("лог: {}", log.display());
+    let rc = if t.fail == 0 && t.pass > 0 { 0 } else { 1 };
+    crate::commands::die(rc);
+}
+
 /// Имя проверки по аргументу `--case`: номер в списке или подстрока.
 fn resolve_case(arg: &str, log_dir: &Path, suite: &Path) -> String {
     let mut names: Vec<String> = Vec::new();
@@ -342,6 +469,17 @@ fn resolve_case(arg: &str, log_dir: &Path, suite: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mode_flags_are_removed_from_suite_args() {
+        let args: Vec<String> = ["--bg", "--case", "7", "--status"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let (mode, rest) = split_mode(&args);
+        assert_eq!(mode, Mode::Status);
+        assert_eq!(rest, vec!["--case".to_string(), "7".to_string()]);
+    }
 
     #[test]
     fn totals_are_parsed_from_suite_summary() {
