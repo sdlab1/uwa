@@ -1179,5 +1179,15 @@ if [ "$FAIL" -gt 0 ]; then
   echo "ПАДЕНИЯ (${#FAIL_NAMES[@]}):"
   printf '  - %s\n' "${FAIL_NAMES[@]}"
 fi
+
+echo "== 48. FLOOD (R-10): приёмка канала devh msg =="
+if bash "$HERE/tests/flood_acceptance.sh" "$DEVH" >"$T/flood.log" 2>&1; then
+  pass "flood: все проверки приёмки прошли (exit 0)"
+else
+  fail "flood: есть провалы в приёмке"
+  sed -n '1,40p' "$T/flood.log"
+fi
+grep -q "FAIL:" "$T/flood.log" && fail "flood: есть FAIL в логе приёмки" || pass "flood: нет FAIL в логе"
+
 echo "ИТОГ: PASS=$PASS FAIL=$FAIL SKIP=$SKIP (лог: $SUITE_LOG)"
 [ "$FAIL" -eq 0 ]
