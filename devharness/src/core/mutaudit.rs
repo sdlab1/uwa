@@ -601,8 +601,23 @@ fn outcome_duration(item: &Value) -> f64 {
 /// Кеш — thread-local: вызывающий (таймер прогона) работает в одном
 /// потоке, глобальной синхронизации не нужно.
 pub fn first_problem(dir: &Path, live: &early::LiveCounts) -> Option<early::FirstProblem> {
+    first_problem_with(dir, live, true)
+}
+
+/// `json_current=false` — outcomes.json не переписывался ТЕКУЩИМ прогоном
+/// (остаток прошлого прогона в общей worktree): append-списки дельтятся
+/// от базлайна, а JSON — нет, поэтому ему нельзя доверять. Live-часть
+/// валидна всегда и читается до этой проверки.
+pub fn first_problem_with(
+    dir: &Path,
+    live: &early::LiveCounts,
+    json_current: bool,
+) -> Option<early::FirstProblem> {
     if let Some(p) = early::first_problem(live) {
         return Some(p);
+    }
+    if !json_current {
+        return None;
     }
     let path = dir.join("outcomes.json");
     // Файла нет — проблем из JSON не будет (append-списки уже проверены).
@@ -1021,6 +1036,42 @@ mod tests {
             first_problem(d.path(), &live),
             Some(early::FirstProblem::Unknown(1)),
             "изменившийся outcomes.json обязан перечитываться (кеш — не клеймо)"
+        );
+    }
+
+    /// Ревью T-004: json_current=false — JSON не принадлежит прогону
+    /// (остаток прошлого в общей worktree): читается только live-часть.
+    #[test]
+    fn first_problem_with_json_current_false_ignores_stale_outcomes() {
+        let d = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        std::fs::write(
+            d.path().join("outcomes.json"),
+            outcomes_json(&[S_CAUGHT, S_SUCCEEDED]),
+        )
+        .unwrap_or_else(|_| unreachable!());
+        let live = early::LiveCounts {
+            total: Some(2),
+            caught: 1,
+            missed: 0,
+            unviable: 0,
+            timeout: 0,
+        };
+        assert_eq!(
+            first_problem(d.path(), &live),
+            Some(early::FirstProblem::Succeeded(1)),
+            "контроль: свежий JSON виден"
+        );
+        assert_eq!(
+            first_problem_with(d.path(), &live, false),
+            None,
+            "непереписанный (чужой) JSON не читается"
+        );
+        let mut live_missed = live;
+        live_missed.missed = 1;
+        assert_eq!(
+            first_problem_with(d.path(), &live_missed, false),
+            Some(early::FirstProblem::Missed(1)),
+            "live-часть валидна даже при чужом JSON"
         );
     }
 

@@ -3187,9 +3187,17 @@ fn stop_decision(
     min_kill: u32,
     shuffled: bool,
     log: &str,
+    outcomes_before: Option<crate::core::mutaudit::FreshStamp>,
 ) -> Option<MutStop> {
     if first_problem {
-        if let Some(p) = crate::core::mutaudit::first_problem(dir, live) {
+        // Стейл-гард: outcomes.json, не тронутый с момента старта прогона, —
+        // остаток ПРОШЛОГО прогона в общей worktree (списки дельтятся от
+        // базлайна, а JSON — нет): без проверки первый тик читал бы чужую
+        // succeeded/unknown и ложно останавливал новый прогон.
+        let now = crate::core::mutaudit::fresh_stamp(&dir.join("outcomes.json"));
+        if let Some(p) =
+            crate::core::mutaudit::first_problem_with(dir, live, now != outcomes_before)
+        {
             return Some(MutStop::First(p));
         }
     }
@@ -3223,6 +3231,10 @@ fn run_mut_watched(wt: &Path, cmd: &str, m: &MutateCfg, envs: &[(String, String)
     let m_first = m.first_problem;
     let dir_clone = dir.clone();
     let base_clone = base;
+    // Отпечаток outcomes.json ДО прогона: файл в общей worktree может быть
+    // остатком прошлого прогона — problem-first не должен читать его как
+    // свежий (см. стейл-гард в stop_decision).
+    let outcomes_before = crate::core::mutaudit::fresh_stamp(&dir.join("outcomes.json"));
     // Фирменная строка прогресса живёт здесь: тик watcher'а = печать + (при
     // MUTATE_EARLY) решение об остановке. Печать отделена от остановки.
     // tty/step — свойства вывода процесса: читаем один раз (не в тике),
@@ -3250,7 +3262,14 @@ fn run_mut_watched(wt: &Path, cmd: &str, m: &MutateCfg, envs: &[(String, String)
         // ждать конца прогона ради неё незачем. Detached-аудит при этом
         // идёт до конца (он не останавливается — см. `devh mutate`).
         stop_decision(
-            &live, &dir_clone, m_first, m_early, min_kill, shuffled, log_text,
+            &live,
+            &dir_clone,
+            m_first,
+            m_early,
+            min_kill,
+            shuffled,
+            log_text,
+            outcomes_before,
         )
     }) {
         Ok(mn) => {
@@ -3998,7 +4017,7 @@ mod tests {
             timeout: 0,
         };
         // Проблем нет — идём до конца (даже при включённом problem-first).
-        assert!(stop_decision(&live, &dir, true, false, 90, false, "").is_none());
+        assert!(stop_decision(&live, &dir, true, false, 90, false, "", None).is_none());
         // Появился выживший — немедленный останов с actionable-причиной.
         std::fs::write(
             dir.join("missed.txt"),
@@ -4007,12 +4026,52 @@ mod tests {
         .unwrap_or_else(|_| unreachable!());
         let mut live2 = live;
         live2.missed = 1;
-        let stop = stop_decision(&live2, &dir, true, false, 90, false, "");
+        let stop = stop_decision(&live2, &dir, true, false, 90, false, "", None);
         assert_eq!(
             stop,
             Some(MutStop::First(crate::core::early::FirstProblem::Missed(1)))
         );
         // Выключенный problem-first — прогон идёт до конца.
-        assert!(stop_decision(&live2, &dir, false, false, 90, false, "").is_none());
+        assert!(stop_decision(&live2, &dir, false, false, 90, false, "", None).is_none());
+    }
+
+    /// Ревью T-004: outcomes.json, не переписанный ТЕКУЩИМ прогоном, —
+    /// остаток прошлого прогона в общей worktree (списки дельтятся от
+    /// базлайна, JSON — нет). Первый тик не должен читать чужую succeeded
+    /// как свою; после перезаписи файл обязан читаться.
+    #[test]
+    fn stop_decision_ignores_stale_outcomes_until_rewrite() {
+        let d = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let dir = d.path().join("mutants.out");
+        std::fs::create_dir_all(&dir).unwrap_or_else(|_| unreachable!());
+        let one = |dur: &str| {
+            format!(
+                r#"{{"outcomes":[{{"scenario":{{"Mutant":{{"name":"src/a.rs:1:1: replace x with y","file":"src/a.rs","span":{{"start":{{"line":1,"column":1}}}},"replacement":"None","genre":"FnValue"}}}},"summary":"Success","phase_results":[{{"phase":"Test","duration":{dur}}}]}}]}}"#
+            )
+        };
+        std::fs::write(dir.join("outcomes.json"), one("1.0")).unwrap_or_else(|_| unreachable!());
+        let before = crate::core::mutaudit::fresh_stamp(&dir.join("outcomes.json"))
+            .unwrap_or_else(|| unreachable!());
+        let live = crate::core::early::LiveCounts {
+            total: Some(10),
+            caught: 4,
+            missed: 0,
+            unviable: 0,
+            timeout: 0,
+        };
+        // Отпечаток не изменился → JSON не наш → стопа нет (живые списки чисты).
+        assert!(
+            stop_decision(&live, &dir, true, false, 90, false, "", Some(before)).is_none(),
+            "остаток прошлого outcomes.json не должен останавливать новый прогон"
+        );
+        // Прогон перезаписал файл (байты другие) → succeeded виден → стоп.
+        std::fs::write(dir.join("outcomes.json"), one("2.0")).unwrap_or_else(|_| unreachable!());
+        assert_eq!(
+            stop_decision(&live, &dir, true, false, 90, false, "", Some(before)),
+            Some(MutStop::First(crate::core::early::FirstProblem::Succeeded(
+                1
+            ))),
+            "свежий outcomes.json читается как своя проблема"
+        );
     }
 }
