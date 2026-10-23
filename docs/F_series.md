@@ -264,9 +264,11 @@ pub fn default_protected() -> &'static [&'static str];        // см. ниже
 
 После фазы `red-author` на **свежем** worktree (`fresh == true`, проверено: сейчас `tree_dirty` смотрит только `!fresh`, строка 367) дерево должно быть чистым. Грязное: откатить `git checkout -- . && git clean -fd`, записать в `tripwire.log`, продолжать. Pre-RED всё равно пройдёт после этого уже на чистом HEAD, то есть доказательство валидно.
 
-### F-1.7 N4: подпись кэша мутатора
+### F-1.7 N4: подпись кэша мутатора (сделано)
 
 `mutcache` после **каждого прогона харнесса** пишет штамп `items/W-NNN/mutcache.stamp` = `sha256(manifest ‖ outcomes.json)`. В начале `gate_iterate_cache` штамп сверяется с содержимым worktree. Не совпал: `rotate_out_dir` и пересчёт. Подделать штамп можно только записью в `items/`, а это защищённая зона. Заодно `fnv1a` → sha256 (`sha2` уже в зависимостях).
+
+Факт: `finalize_stamp` вызывается после каждого прогона мутатора (single/batch/per-file и перед env-выходом), пишет атомарно (tmp+rename). `gate_iterate_cache(wt, stamp)` без валидного штампа всегда rotate — старый FNV-кэш не переиспользуется. Тест `forged_manifest_without_valid_stamp_is_rejected`; `devh test` — PASS 477.
 
 ### F-1.8 Поток проблем во время аудита (не ждать verdict)
 

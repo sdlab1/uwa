@@ -716,6 +716,7 @@ fn red_mutate_phase(
             die(store, id, 1);
         }
         let red_cmd = std::fs::read_to_string(&red.file).unwrap_or_default();
+        let stamp = store.item_dir(id).join("mutcache.stamp");
         let rep = mutate_gate(MutateGateArgs {
             m,
             wt,
@@ -725,6 +726,7 @@ fn red_mutate_phase(
             label: "red-mutation",
             key: "RED_MUTATE",
             gate: Gate::Mutate,
+            stamp: &stamp,
         })
         .unwrap_or_else(|e| {
             eprintln!("{}{e}{}", c.r, c.z);
@@ -1506,6 +1508,7 @@ fn gate_ladder(
     }
 
     if let Some(m) = &cfg.mutate {
+        let stamp = store.item_dir(id).join("mutcache.stamp");
         let rep = mutate_gate(MutateGateArgs {
             m,
             wt,
@@ -1515,6 +1518,7 @@ fn gate_ladder(
             label: "mutation",
             key: "MUTATE",
             gate: Gate::Mutate,
+            stamp: &stamp,
         })
         .unwrap_or_else(|e| {
             eprintln!("{}{e}{}", c.r, c.z);
@@ -2179,6 +2183,8 @@ struct MutateGateArgs<'a> {
     label: &'a str,
     key: &'a str,
     gate: Gate,
+    /// F-1/N4: защищённый штамп kill-cache (`items/W-NNN/mutcache.stamp`).
+    stamp: &'a Path,
 }
 
 fn mutate_gate(args: MutateGateArgs<'_>) -> anyhow::Result<MutReport> {
@@ -2191,6 +2197,7 @@ fn mutate_gate(args: MutateGateArgs<'_>) -> anyhow::Result<MutReport> {
         label,
         key,
         gate,
+        stamp,
     } = args;
     // P7: in-place прогон = агент для этого дерева. Лок держится на весь
     // гейт (batch и per-file цикл) — §9.13 «отравленный коммит».
@@ -2238,7 +2245,7 @@ fn mutate_gate(args: MutateGateArgs<'_>) -> anyhow::Result<MutReport> {
     // skip-set уезжает в mutants.out.stale-*, A/B «слабили тест → выживший
     // обязан стать caught» выполняется механикой.
     if tool0.contains("--iterate") {
-        if crate::shell::mutcache::gate_iterate_cache(wt) {
+        if crate::shell::mutcache::gate_iterate_cache(wt, stamp) {
             println!(".. kill-cache: дерево не менялось — --iterate пропускает пойманных ранее");
         } else {
             println!(
@@ -2284,6 +2291,7 @@ fn mutate_gate(args: MutateGateArgs<'_>) -> anyhow::Result<MutReport> {
         let cmd = apply_cov_filter(&tool0, cov_filter.as_deref());
         let before = outcomes_stamp(wt, &tool0);
         let mut rep = finish(m, run_mut(wt, &cmd, m), label, key, gate.clone());
+        let _ = crate::shell::mutcache::finalize_stamp(wt, stamp);
         if let Some(line) = survivors_hook(m, wt, &tool0, obs, id, label, before) {
             rep.log += &format!("{line}\n");
         }
@@ -2319,6 +2327,7 @@ fn mutate_gate(args: MutateGateArgs<'_>) -> anyhow::Result<MutReport> {
                 .join(" ")
         );
         let mut rep = finish(m, run_mut(wt, &cmd, m), label, key, gate.clone());
+        let _ = crate::shell::mutcache::finalize_stamp(wt, stamp);
         if let Some(line) = survivors_hook(m, wt, &tool0, obs, id, label, before) {
             rep.log += &format!("{line}\n");
         }
@@ -2372,6 +2381,7 @@ fn mutate_gate(args: MutateGateArgs<'_>) -> anyhow::Result<MutReport> {
             key,
             gate.clone(),
         );
+        let _ = crate::shell::mutcache::finalize_stamp(wt, stamp);
         if let Some(line) = survivors_hook(m, wt, &tool0, obs, id, &format!("{label} {f}"), before)
         {
             rep.log += &format!("{line}\n");
@@ -2380,6 +2390,7 @@ fn mutate_gate(args: MutateGateArgs<'_>) -> anyhow::Result<MutReport> {
         match &rep.verdict {
             // Инструмент не распознан — смысла продолжать цикл нет (как и раньше).
             Verdict::EnvBlocked { .. } => {
+                let _ = crate::shell::mutcache::finalize_stamp(wt, stamp);
                 return Ok(MutReport {
                     log: acc.log,
                     verdict: rep.verdict.clone(),

@@ -21,19 +21,23 @@
 //! Скоуп — одно дерево: `.harness/` вне git (`.git/info/exclude`),
 //! `mutants.out*` в `.gitignore` (`**/mutants.out*/`) — коммиту невидимы.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+use sha2::{Digest, Sha256};
 
 /// Дерево, которое НЕ входит в отпечаток: служебное/артефакты. `.harness/`
 /// меняется каждым прогоном (логи, статусы) — иначе отпечаток никогда бы
 /// не совпал; `mutants.out*` — сам кэш мутатора.
 const SKIP_NAMES: [&str; 3] = [".git", "target", ".harness"];
 
-fn fnv1a(bytes: &[u8], mut h: u64) -> u64 {
-    for &b in bytes {
-        h ^= u64::from(b);
-        h = h.wrapping_mul(0x100_0000_01b3);
+/// sha256 с length-prefix: пары ("a","bc") и ("ab","c") не дают один хэш.
+fn sha_hex(parts: &[&[u8]]) -> String {
+    let mut h = Sha256::new();
+    for part in parts {
+        h.update((part.len() as u64).to_le_bytes());
+        h.update(part);
     }
-    h
+    h.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
 
 fn collect(root: &Path, dir: &Path, out: &mut Vec<(String, std::path::PathBuf)>) {
@@ -71,23 +75,58 @@ pub fn tree_fingerprint(root: &Path) -> String {
     let mut files = Vec::new();
     collect(root, root, &mut files);
     files.sort_by(|a, b| a.0.cmp(&b.0));
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut h = Sha256::new();
     for (rel, p) in &files {
-        h = fnv1a(rel.as_bytes(), h);
-        h = fnv1a(&[0], h);
+        h.update((rel.len() as u64).to_le_bytes());
+        h.update(rel.as_bytes());
         match std::fs::read(p) {
             Ok(bytes) => {
-                h = fnv1a(&bytes.len().to_le_bytes(), h);
-                h = fnv1a(&bytes, h);
+                h.update(b"file");
+                h.update((bytes.len() as u64).to_le_bytes());
+                h.update(&bytes);
             }
-            Err(_) => h = fnv1a(b"<unreadable>", h),
+            Err(_) => {
+                h.update(b"unreadable");
+            }
         }
     }
-    format!("{h:016x} ({} files)", files.len())
+    let hex: String = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
+    format!("{hex} ({} files)", files.len())
 }
 
-pub fn manifest_path(wt: &Path) -> std::path::PathBuf {
+pub fn manifest_path(wt: &Path) -> PathBuf {
     wt.join(".harness").join("mutate-manifest")
+}
+
+/// F-1/N4: штамп `sha256(manifest ‖ outcomes.json)` в защищённой зоне
+/// (`items/W-NNN/mutcache.stamp`). Агент может подложить manifest и
+/// outcomes, но не штамп: он вне worktree и входит в `PROTECTED`.
+fn stamp_value(wt: &Path) -> String {
+    let manifest = std::fs::read(manifest_path(wt)).unwrap_or_default();
+    let outcomes = match std::fs::read(wt.join("mutants.out/outcomes.json")) {
+        Ok(b) => [b"present".as_slice(), b"\0", b.as_slice()].concat(),
+        Err(_) => b"missing".to_vec(),
+    };
+    sha_hex(&[b"mutcache-v1", &manifest, &outcomes])
+}
+
+/// Записать штамп АТОМАРНО (tmp + rename): читатель не увидит половину.
+pub fn write_stamp(stamp: &Path, value: &str) -> std::io::Result<()> {
+    if let Some(dir) = stamp.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let tmp = stamp.with_extension("stamp.tmp");
+    std::fs::write(&tmp, format!("{value}\n"))?;
+    std::fs::rename(&tmp, stamp)
+}
+
+/// После прогона: зафиксировать `manifest + outcomes`. Без этого следующий
+/// `--iterate` увидел бы новый outcomes и счёл бы честный кэш подделкой.
+pub fn finalize_stamp(wt: &Path, stamp: &Path) -> bool {
+    if !manifest_path(wt).is_file() {
+        return false;
+    }
+    write_stamp(stamp, &stamp_value(wt)).is_ok()
 }
 
 /// Прошлый `mutants.out` невалиден (дерево изменилось): убираем его из-под
@@ -111,7 +150,7 @@ fn rotate_out_dir(wt: &Path) {
 /// Гейт допуска кэша. true — отпечаток совпал, skip-set честен (`--iterate`
 /// может пропускать пойманных ранее). false — дерево изменилось: прошлый
 /// кэш сброшен, манифест перезаписан текущим отпечатком.
-pub fn gate_iterate_cache(wt: &Path) -> bool {
+pub fn gate_iterate_cache(wt: &Path, stamp: &Path) -> bool {
     let fp = tree_fingerprint(wt);
     let stored = std::fs::read_to_string(manifest_path(wt))
         .ok()
@@ -120,11 +159,17 @@ pub fn gate_iterate_cache(wt: &Path) -> bool {
                 .find(|l| l.starts_with("tree:"))
                 .map(|l| l["tree:".len()..].trim().to_string())
         });
-    let fresh = stored.as_deref() == Some(fp.as_str());
+    // Штамп обязателен: без него manifest/outcomes можно подложить.
+    let stamp_ok = std::fs::read_to_string(stamp)
+        .map(|s| s.trim() == stamp_value(wt))
+        .unwrap_or(false);
+    let fresh = stamp_ok && stored.as_deref() == Some(fp.as_str());
     if !fresh {
         rotate_out_dir(wt);
         let _ = std::fs::create_dir_all(wt.join(".harness"));
         let _ = std::fs::write(manifest_path(wt), format!("tree: {fp}\n"));
+        // Штамп на пустой outcomes: после прогона его обновит finalize_stamp.
+        let _ = write_stamp(stamp, &stamp_value(wt));
     }
     fresh
 }
@@ -138,6 +183,10 @@ mod tests {
         std::fs::write(d.path().join("lib.rs"), "pub fn a() {}\n")
             .unwrap_or_else(|_| unreachable!());
         d
+    }
+
+    fn stamp(d: &tempfile::TempDir) -> PathBuf {
+        d.path().join(".harness/mutcache.stamp")
     }
 
     #[test]
@@ -192,7 +241,7 @@ mod tests {
             .unwrap_or_else(|_| unreachable!());
 
         assert!(
-            !gate_iterate_cache(d.path()),
+            !gate_iterate_cache(d.path(), &stamp(&d)),
             "дерево изменилось — кэш обязан быть сброшен"
         );
         assert!(
@@ -218,14 +267,55 @@ mod tests {
         std::fs::create_dir_all(d.path().join("mutants.out")).unwrap_or_else(|_| unreachable!());
         std::fs::write(d.path().join("mutants.out/outcomes.json"), "{}\n")
             .unwrap_or_else(|_| unreachable!());
-        assert!(gate_iterate_cache(d.path()));
+        assert!(finalize_stamp(d.path(), &stamp(&d)), "штамп после прогона");
+        assert!(gate_iterate_cache(d.path(), &stamp(&d)));
         assert!(d.path().join("mutants.out").exists(), "хит не трогает кэш");
     }
 
     #[test]
     fn gate_hit_without_manifest_is_a_miss() {
         let d = tree();
-        assert!(!gate_iterate_cache(d.path()), "первый прогон всегда miss");
+        assert!(
+            !gate_iterate_cache(d.path(), &stamp(&d)),
+            "первый прогон всегда miss"
+        );
         assert!(manifest_path(d.path()).is_file());
+        assert!(finalize_stamp(d.path(), &stamp(&d)));
+        assert!(
+            gate_iterate_cache(d.path(), &stamp(&d)),
+            "после finalize штамп валиден"
+        );
+    }
+
+    /// N4: агент подложил manifest + outcomes «всё caught», но не смог
+    /// подделать штамп в защищённой зоне → кэш сброшен, не «чисто».
+    #[test]
+    fn forged_manifest_without_valid_stamp_is_rejected() {
+        let d = tree();
+        let st = stamp(&d);
+        assert!(!gate_iterate_cache(d.path(), &st));
+        assert!(finalize_stamp(d.path(), &st));
+        assert!(gate_iterate_cache(d.path(), &st));
+
+        std::fs::create_dir_all(d.path().join("mutants.out")).unwrap_or_else(|_| unreachable!());
+        std::fs::write(
+            d.path().join("mutants.out/outcomes.json"),
+            r#"{"caught": 999}"#,
+        )
+        .unwrap_or_else(|_| unreachable!());
+        std::fs::write(
+            manifest_path(d.path()),
+            format!("tree: {}\n", tree_fingerprint(d.path())),
+        )
+        .unwrap_or_else(|_| unreachable!());
+
+        assert!(
+            !gate_iterate_cache(d.path(), &st),
+            "штамп не совпал с подложенными файлами — кэш обязан быть сброшен"
+        );
+        assert!(
+            !d.path().join("mutants.out").exists(),
+            "подложный outcomes убран из-под --iterate"
+        );
     }
 }

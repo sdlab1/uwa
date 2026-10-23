@@ -313,9 +313,21 @@ fn tree_stamp(root: &Path) -> String {
     // аудита не должна объявлять результат протухшим (ложный перепрогон).
     let entries: Vec<_> = entries
         .into_iter()
-        .filter(|e| !e.path.starts_with("docs/") && !e.path.ends_with(".md"))
+        .filter(|e| audit_relevant(&e.path))
         .collect();
     crate::core::digest::tree_digest(&entries).unwrap_or_default()
+}
+
+/// Входит ли файл в отпечаток аудита. Артефакты самого аудита и
+/// документация не влияют на cargo-mutants: иначе `mutants.out`/`.harness`
+/// делали бы снимок протухшим в момент старта.
+fn audit_relevant(path: &str) -> bool {
+    if path.starts_with("docs/") || path.ends_with(".md") {
+        return false;
+    }
+    !path
+        .split('/')
+        .any(|c| c == ".git" || c == "target" || c == ".harness" || c.starts_with("mutants.out"))
 }
 
 /// Дерево изменилось после старта аудита?
