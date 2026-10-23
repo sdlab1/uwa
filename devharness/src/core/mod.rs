@@ -28,6 +28,7 @@ pub mod mutate_outcomes;
 pub mod bench_gate;
 pub mod mutaudit;
 pub mod plan;
+pub mod observations;
 pub mod rate;
 pub mod runstate;
 pub mod state;
