@@ -588,15 +588,74 @@ pub fn parse_review_verdict(log: &str) -> ReviewVerdict;
 
 ## F-5. Контракт парсеров (3 ч)
 
-1. `tools/capture-fixtures.sh` на микрорепо снимает реальный вывод и `outcomes.json` инструментов в `tests/fixtures/<tool>-<ver>/` (cargo-mutants 25/26/27, nextest, cargo test, CRAP). Golden-тесты `parse_*` прогоняются по каталогу.
-2. `devh doctor --gates-selftest`: каждый сконфигурированный гейт запускается на встроенном микрорепо с известным исходом (1 caught, 1 missed), парсер обязан дать точные числа. Дрейф ловится **до** боевого прогона.
-3. Weekly-canary (см. `docs/CANARY.md`) с последней версией cargo-mutants. Красный canary не блокирует сессии, а заводит тикет.
-4. Опциональный JSON-контракт внешнего гейта (приоритет над текстовым парсером):
-   ```json
-   {"gate":"crap","total":42,"violations":[{"file":"src/a.rs","line":10,"fun":"f","score":18.5}]}
-   ```
+**Контекст (где парсеры живут).** Все парсеры stdout внешних инструментов сосредоточены в `gates.rs` (2026 строк):
 
-**Тесты:** `golden_cargo_mutants_27_parses_exact_counts`, `…_26`, `…_25`; `contract_json_overrides_text`; `selftest_reports_tool_drift`.
+| Гейт | Функции парсинга в `gates.rs` | Что разбирает | Хрупкость |
+|---|---|---|---|
+| **MUTATE** | `parse_mutation_output`→`parse_mutation_line`→`parse_mutants_summary_line`/`parse_legacy_muex_line`; `parse_no_mutants_reason`; `parse_diff_filter_error`; `parse_unknown_outcome_reason` | cargo-mutants ≥25 (LabOutcome::summary_string) + legacy muex | 1) progress строки nutmeg (`N/M tested...`) имеют `tested` но нет `:`─сегмента — фильтруются по `mid`; 2) singular/plural через plural(); 3) сегменты после `:` опциональны и в любом порядке; 4) `succeeded` — известный исход (мутант без test-phase, `--check`), **не** unknown; 5) unknown outcome делает строку неразбираемой → Fail |
+| **CRAP** | `parse_crap_output`→`parse_crap_row`; `crap_score` | `file:line fun C=N cov=N score=N` + `CRAP: functions=N` | 1) `C=` **перед** `cov=` (жёсткий порядок); 2) 3 токена до `C=`; 3) нет summary → EnvBlocked |
+| **NoIgnored** | `parse_ignored_count`; `parse_ignored_names`; `unexpected_ignores` | cargo test / nextest `ignored` | nextest не печатает имена — `parse_ignored_names` только cargo test |
+| **Review** | `parse_review_verdict` | `VERDICT: OK` / `VERDICT: ISSUES:…` | **N7**: substring-search по всему логу — эхо-diff обманывает. Фикс F-4.2: только строки с начала |
+| **RED (P7)** | `failing_tests` (cargo test + nextest); `failure_stream` (дроп зелёных); `red_expect_marker` | test-id anchors + regex причины | Зелёные (`... ok`/`... ignored`/`PASS [`/`✓`) убираются — иначе подпись матчит проходящий тест (корпус A5a) |
+
+**Проблема:** при обновлении cargo-mutants/nextest/crap-rs/cargo test формат меняется. Сегодня — **только** на боевом прогоне: парсер молчит (`None`→`EnvBlocked`) или парсит **неправильно** (зелёный вердикт при дыре). F-5 делает дрейф **видимым до** прогона.
+
+### F-5.1 Fixtures capture
+
+```bash
+# tools/capture-fixtures.sh — один раз на версию
+# tests/fixtures/cargo-mutants-27/  (*.out, *.json, meta.json)
+```
+
+Сценарии (микрорепо `tools/mutate.sh`): `clean` (10 caught 0 missed), `missed` (1 survived), `timeout` (F-3), `unviable` (F-3), `succeeded` (`--check`), `zero_mutants` (P7-2.2), `diff_filter_error` (rc=5), `mixed_order` (случайный порядок сегментов).
+
+### F-5.2 Golden-тесты (`tests/parser_contract.rs`)
+
+```rust
+#[test]
+fn golden_cargo_mutants_27_parses_exact_counts() {
+    // для *.out в tests/fixtures/cargo-mutants-27/
+    // parse_mutation_output → точные MutationStats
+}
+```
+
+Правило: новая версия инструмента = новый каталог fixtures + падающий тест.
+
+### F-5.3 `devh doctor --gates-selftest`
+
+Каждый гейт из `gate_ladder` (run.rs) на микрорепо (`tests/mk_smoke_repo.sh`):
+
+| Гейт | Ожидание | Парсер |
+|---|---|---|
+| MUTATE | 1 caught 1 missed | `killed=1, missed=1, mutants=2` |
+| NO-IGNORED | 1 ignored | `unexpected_ignores.len()=1` |
+| CRAP | 1 violation > max | `violations.len()=1` |
+
+Расхождение → `WARN: gate X parser drift`, не падать.
+
+### F-5.4 Weekly-canary (`docs/CANARY.md`)
+
+Еженедельно: cargo-mutants latest + capture. Красный canary **не блокирует** сессии, заводит тикет в `.harness/observations.md`.
+
+### F-5.5 JSON-контракт (приоритет над текстом)
+
+`parse_json_contract` — чистая функция, extend-only. Текстовый парсер — fallback. Расхождение → `EnvBlocked("parser drift vs JSON")`.
+
+### F-5.6 Тесты
+
+`golden_cargo_mutants_27_parses_exact_counts`, `golden_cargo_mutants_26`, `golden_cargo_mutants_25`, `golden_crap_parses_exact_violations`, `contract_json_overrides_text`, `selftest_reports_tool_drift`, `parse_unknown_outcome_reason_detects_weird`, `parse_no_mutants_reason_catches_empty_scope`.
+
+### Грабли (подтверждены в `gates.rs`)
+
+1. **Progress vs итог**: `8/10 tested, 1 MISSED` имеет `tested` но `between` = `, 1 MISSED` → фильтр `mid`.
+2. **Singular**: `1 mutant tested: 1 caught`.
+3. **succeeded ≠ unknown**: `mutation_succeeded_segment_is_known_and_not_a_kill` (unit).
+4. **Порядок сегментов**: `outcomes.split(',')`, матч по слову.
+5. **nextest ignored**: только cargo test (граница).
+
+### Откат
+
+`MUT_PARSER_STRICT=0`. Лучше — чинить парсер: fixtures + golden тесты.
 
 ---
 

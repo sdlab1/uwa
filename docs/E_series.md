@@ -92,6 +92,58 @@ pub fn staleness(corpus_date: &str, ref_date: &str, max: i64) -> Staleness
 
 ---
 
+### E3.1 Реализация (escapes.rs)
+
+**Корпус — снимок, а не live-данные.** `corpus.json` пишет `test.sh` по окончании полного прогона (корпус A5). Формат три поля:
+
+```json
+{"caught": 13, "total": 13, "date": "2026-10-19"}
+```
+
+- `caught`/`total` — kill-rate; `total == 0` → `kill_rate = 0.0`.
+- `date` — строго `YYYY-MM-DD`, до дня.
+
+**Путь:** `corpus_path(store) = store.dir.join("corpus.json")`. `std::fs::read_to_string`; ошибка → `None` в `aggregate` → corpus `None` → `Freshness::Unknown`.
+
+**Референс — дата последней сессии из `log.md`, НЕ wall-clock:**
+
+```rust
+pub fn sessions_in(log_md: &str) -> Vec<String> { /* ## W-NNN — title (YYYY-MM-DD) */ }
+pub fn latest_session_date(log_md: &str) -> Option<String> {
+    sessions_in(log_md).into_iter().max()
+}
+```
+
+`sessions_in`: `strip_prefix("## ")`, `id = rest.split(" — ").next()`, `id.starts_with('W')`; `date_in_parens` ищет последние `(...)`, проверяет `looks_like_date` (10 байт, `b'-'` на позициях 4/7); `parse_date_days` проверяет `m ∈ [1,12]`, `d ∈ [1,31]`.
+
+**Дни — Hinnant `days_from_civil`, без chrono:** ~20 строк, `saturating_*` везде (мутант `replace → Default::default()` компилируется, а вычитание без saturating даёт underflow).
+
+**Трёхсостоянийный вердикт (`corpus_freshness`):**
+
+| Состояние | Условие | `allows_level` | `note()` |
+|---|---|---|---|
+| `Fresh` | `0 ≤ age ≤ max_days` | `true` | `None` |
+| `Stale` | `age > max_days` | `false` | `«устарел {age}д > {max}»` |
+| `Unknown` | `parse_date_days → None` | `false` | `«дата не читается»` |
+
+**Граница:** `age == max` → Fresh (stale строго `>`). Мутант `>`↔`>=` убивается обеими ветвями тестами.
+
+**Встраивание:** `aggregate(store, max_days)` читает `escapes.md` + `log.md` + `corpus.json`; `fresh` → `level_line` печатает всегда:
+- `Fresh` → `«корпус 13/13»`
+- `Stale` → `«корпус 13/13 (2026-10-01, устарел 21д > 14)»`
+- `Unknown` → `«корпус 13/13 (дата не читается)»`
+- `corpus == None` → `«корпус: нет данных»`
+
+`autonomy_level` получает `fresh.allows_level()`: `Stale`/`Unknown` → `false` → L0. **Конфиг:** `RunConfig.corpus_fresh_days: u32` default = `CORPUS_FRESH_DAYS = 14`.
+
+**Что ломает свежесть:** (1) атаки не покрыты новыми тестами → `Stale` режет уровень при 100% kill; (2) `test.sh` не перегнан → `Stale` пока не пересчитан; (3) дата в `log.md` не читается → `Unknown` → L0.
+
+**Откат:** `CORPUS_FRESH_DAYS=0` → всегда Fresh. `-1`/пусто/мусор → 14.
+
+**Тесты в `escapes.rs`:** 7 кейсов `corpus_freshness`; `level_line` для всех состояний. Интеграция: `report_stale_corpus_blocks_level`, `report_no_corpus_is_no_data_not_hundred`.
+
+---
+
 ## E1 — петля фальсификации (1 ч, но с двумя решениями внутри)
 
 **Решение 1 — детерминизм выбора.** Сэмпл не «каждая N-я по времени», а **W-id % AUTONOMY_SAMPLE == 0**. Номера выдаёт харнесс → агент не может влиять на попадание в выборку, человек не выбирает удобные сессии:
