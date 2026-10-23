@@ -86,6 +86,13 @@ pub enum Cmd {
         /// Аргументы после `msg`: send|read|watch|list|prune + флаги.
         args: Vec<String>,
     },
+    /// Оркестратор: реестр задач ведомых, шкалы P0-P5/F0-F5, дашборд ведущего.
+    Orch {
+        /// Подкоманда: board|list|add|start|done|fail|revoke|reassign|degrade|model|zones.
+        sub: String,
+        /// Остальные аргументы (флаги подкоманды).
+        args: Vec<String>,
+    },
 }
 
 impl Default for Cmd {
@@ -209,6 +216,22 @@ impl Cmd {
                         .trailing_var_arg(true)
                         .allow_hyphen_values(true)
                         .help("аргументы: send|read|watch|list|prune + флаги"),
+                ),
+            Command::new("orch")
+                .about("оркестратор: реестр задач, шкалы P0-P5/F0-F5, дашборд")
+                .arg(
+                    Arg::new("sub")
+                        .index(1)
+                        .default_value("board")
+                        .help("board|list|add|start|done|fail|revoke|reassign|degrade|model|zones"),
+                )
+                .arg(
+                    Arg::new("rest")
+                        .index(2)
+                        .num_args(0..)
+                        .trailing_var_arg(true)
+                        .allow_hyphen_values(true)
+                        .help("аргументы подкоманды"),
                 ),
         ]
     }
@@ -360,6 +383,20 @@ impl Cmd {
                     .map(|v| v.cloned().collect::<Vec<String>>())
                     .unwrap_or_default();
                 Ok(Cmd::Msg { args })
+            }
+            Some("orch") => {
+                let m = matches
+                    .subcommand_matches("orch")
+                    .unwrap_or_else(|| unreachable!());
+                let sub = m
+                    .get_one::<String>("sub")
+                    .cloned()
+                    .unwrap_or_else(|| "board".to_string());
+                let args = m
+                    .get_many::<String>("rest")
+                    .map(|v| v.cloned().collect::<Vec<String>>())
+                    .unwrap_or_default();
+                Ok(Cmd::Orch { sub, args })
             }
             _ => Err("unknown subcommand".to_string()),
         }

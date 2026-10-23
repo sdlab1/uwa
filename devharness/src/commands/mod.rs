@@ -9,6 +9,7 @@ pub mod misc;
 pub mod mutate;
 pub mod new;
 pub mod next;
+pub mod orch;
 pub mod ps;
 pub mod run;
 pub mod survivors;
@@ -291,6 +292,12 @@ pub fn dispatch(cmd: &Cmd, root: &Path) -> anyhow::Result<()> {
             test::test(root, args)?;
             return Ok(());
         }
+        // Оркестратор: реестр задач + дашборд. Работает БЕЗ .harness/config
+        // (как msg/next/workflow): реестр — .harness/orch/registry.json.
+        Cmd::Orch { sub, args } => {
+            orch::orch(root, sub, args)?;
+            return Ok(());
+        }
         _ => {}
     }
     // Канал сообщений (devh msg) не требует .harness/config: хранилище — $DEVH_MSG_HOME.
@@ -303,6 +310,7 @@ pub fn dispatch(cmd: &Cmd, root: &Path) -> anyhow::Result<()> {
         Cmd::Next => unreachable!(),
         Cmd::Workflow => unreachable!(),
         Cmd::Test { .. } => unreachable!(),
+        Cmd::Orch { .. } => unreachable!(),
         Cmd::New {
             arg,
             no_red,
