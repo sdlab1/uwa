@@ -1338,6 +1338,68 @@ fn recheck_args(base: &[String], name: &str, out: &Path) -> Vec<String> {
     args
 }
 
+/// Исход ОДНОГО мутанта в каталоге output прогона (`<--output>/mutants.out`).
+///
+/// `dir` считает вызывающий через [`audit_dir`] — единую формулу
+/// (`early::mutants_out_dir`), тут только чтение. `replacement`/`genre`
+/// берутся из `outcomes.json` через [`mutaudit::load`]: append-списки дают
+/// только имена. Возвращает `(пойман, исход)`; `None` — имени в output нет.
+///
+/// Пойманный мутант в списки плохих НЕ попадает (`BAD_LISTS` — это
+/// missed/timeout/unviable) — его ищем в `caught.txt`.
+fn recheck_find(dir: &Path, name: &str, exit: Option<i32>) -> Option<(bool, mutaudit::Bad)> {
+    let (qfile, qline, qdesc) = mutaudit::parse_list_name(name);
+    let audit = mutaudit::load(dir, false, exit);
+    let found = audit.bad.into_iter().find(|b| {
+        // Точное имя (детали из outcomes.json) либо — пока JSON не дописан —
+        // тот же мутант по файлу/строке/описанию из append-списка.
+        b.name == name
+            || (b.file == qfile && b.line == qline && (b.name == qdesc || b.name.is_empty()))
+    });
+    if let Some(b) = found {
+        return Some((false, b));
+    }
+    let caught_txt = fs::read_to_string(dir.join("caught.txt")).unwrap_or_default();
+    if !caught_txt.lines().any(|l| l.trim() == name) {
+        return None;
+    }
+    Some((
+        true,
+        mutaudit::Bad {
+            summary: mutaudit::S_CAUGHT.to_string(),
+            file: qfile,
+            line: qline,
+            name: name.to_string(),
+            replacement: String::new(),
+            genre: String::new(),
+        },
+    ))
+}
+
+/// Три РАЗНЫХ причины «исхода нет» — одна строка «исход не найден» врали бы
+/// оператору (каша из «инструмент не записал прогон» и «другое имя»).
+///
+/// «исход не найден» — только когда output СОЗДАН и `outcomes.json` есть,
+/// а имени в нём нет.
+fn recheck_miss_reason(dir: &Path, name: &str, rc: Option<i32>, log: &str) -> String {
+    if !dir.is_dir() {
+        return format!(
+            "recheck: инструмент не создал output ({}) — cargo-mutants не записал прогон (rc {rc:?})\n{log}",
+            dir.display()
+        );
+    }
+    if !dir.join("outcomes.json").exists() {
+        return format!(
+            "recheck: в {} нет outcomes.json — прогон не дописан (rc {rc:?})\n{log}",
+            dir.display()
+        );
+    }
+    format!(
+        "recheck: исход для {name:?} не найден в {} — такого мутанта в прогоне нет (rc {rc:?})\n{log}",
+        dir.display()
+    )
+}
+
 /// `devh mutate recheck <name>`: один мутант по имени, отдельный output.
 /// Результат — overlay `rechecked.json`; вердикт по-прежнему требует
 /// перепрогона (recheck не доказывает «чисто» для всего аудита).
@@ -1372,18 +1434,16 @@ fn recheck(root: &Path, args: &[String]) -> anyhow::Result<()> {
         .output()?;
     let stdout = String::from_utf8_lossy(&res.stdout);
     let stderr = String::from_utf8_lossy(&res.stderr);
-    let bad = mutaudit::live_bad(&out);
-    let found = bad.into_iter().find(|b| b.name == name);
-    let Some(found) = found else {
-        println!(
-            "recheck: исход для {name:?} не найден (rc {:?})\n{}\n{}",
-            res.status.code(),
-            tail(&stdout, 12),
-            tail(&stderr, 12)
-        );
+    let rc = res.status.code();
+    // Каталог прогона — ЕДИНАЯ формула (`--output <out>` → `<out>/mutants.out`):
+    // раньше тут читали сам `&out` — там никогда ничего не было, и recheck
+    // всегда отвечал «исход не найден» (rc=2), фича не работала ни разу.
+    let dir = audit_dir(root, &args);
+    let log = format!("{}\n{}", tail(&stdout, 12), tail(&stderr, 12));
+    let Some((caught, found)) = recheck_find(&dir, &name, rc) else {
+        println!("{}", recheck_miss_reason(&dir, &name, rc, &log));
         crate::commands::die(2);
     };
-    let caught = found.summary == mutaudit::S_CAUGHT;
     let json = serde_json::json!({
         "updated": now_secs(),
         "tree_stamp": tree_stamp(root),
@@ -1789,6 +1849,107 @@ mod tests {
             .iter()
             .any(|a| a == r"^src/a\.rs:1:5: replace x with None$"));
         assert!(got.iter().any(|a| a == "/tmp/recheck"));
+    }
+
+    /// Имя сценария, как его пишут `problems` и append-списки.
+    const RC_NAME: &str = "devharness/src/core/plan.rs:7:5: replace x with y";
+
+    /// Фейковый output прогона: `<out>/mutants.out/{outcomes.json,список}` —
+    /// ровно то, что настоящий cargo-mutants пишет по `--output <out>`.
+    /// Путь считается ЕДИНОЙ формулой [`audit_dir`] — как в `recheck`.
+    fn fake_recheck_out(root: &Path, name: &str, summary: &str) -> PathBuf {
+        let out = root.join("out");
+        let dir = audit_dir(root, &["--output".to_string(), out.display().to_string()]);
+        fs::create_dir_all(&dir).unwrap_or_else(|_| unreachable!());
+        let list = match summary {
+            mutaudit::S_CAUGHT => "caught.txt",
+            mutaudit::S_UNVIABLE => "unviable.txt",
+            mutaudit::S_TIMEOUT => "timeout.txt",
+            _ => "missed.txt",
+        };
+        fs::write(dir.join(list), format!("{name}\n")).unwrap_or_else(|_| unreachable!());
+        let json = format!(
+            r#"{{"outcomes":[{{"scenario":{{"Mutant":{{"name":"{name}","file":"devharness/src/core/plan.rs","span":{{"start":{{"line":7,"column":5}}}},"replacement":"None","genre":"FnValue"}}}},"summary":"{summary}","phase_results":[{{"phase":"Test","duration":2.5}}]}}]}}"#
+        );
+        fs::write(dir.join("outcomes.json"), json).unwrap_or_else(|_| unreachable!());
+        dir
+    }
+
+    /// Главный баг-фикс: recheck читает `<--output>/mutants.out`, а не сам
+    /// `--output` (в нём никогда ничего не было → «исход не найден» всегда).
+    #[test]
+    fn recheck_finds_name_in_out_muts_out() {
+        let d = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let dir = fake_recheck_out(d.path(), RC_NAME, mutaudit::S_MISSED);
+        assert_eq!(
+            dir,
+            d.path().join("out").join("mutants.out"),
+            "каталог считается формулой audit_dir, а не второй формулой"
+        );
+        let (caught, found) = recheck_find(&dir, RC_NAME, Some(2)).expect("имя найдено");
+        assert!(!caught, "выживший — не пойман");
+        assert_eq!(found.summary, mutaudit::S_MISSED);
+        assert_eq!(found.name, RC_NAME);
+        assert_eq!(found.file, "devharness/src/core/plan.rs");
+        assert_eq!(found.line, 7);
+        // replacement/genre — ИЗ outcomes.json, а не пустые из списка.
+        assert_eq!(found.replacement, "None");
+        assert_eq!(found.genre, "FnValue");
+    }
+
+    /// Пойманный мутант не попадает ни в один список плохих — только в
+    /// caught.txt: раньше `caught` в recheck был недостижим.
+    #[test]
+    fn recheck_finds_caught_from_caught_txt() {
+        let d = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let dir = fake_recheck_out(d.path(), RC_NAME, mutaudit::S_CAUGHT);
+        let (caught, found) = recheck_find(&dir, RC_NAME, Some(0)).expect("имя найдено");
+        assert!(caught, "caught.txt → пойман");
+        assert_eq!(found.summary, mutaudit::S_CAUGHT);
+        assert_eq!(found.name, RC_NAME);
+        assert_eq!(found.file, "devharness/src/core/plan.rs");
+    }
+
+    /// JSON ещё не дописан: мутант узнаётся по файлу/строке/описанию из
+    /// append-списка (замены не будет, но «исход не найден» — ложь).
+    #[test]
+    fn recheck_finds_by_place_when_outcomes_json_missing() {
+        let d = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let dir = fake_recheck_out(d.path(), RC_NAME, mutaudit::S_MISSED);
+        fs::remove_file(dir.join("outcomes.json")).unwrap_or_else(|_| unreachable!());
+        let (caught, found) = recheck_find(&dir, RC_NAME, Some(2)).expect("имя найдено");
+        assert!(!caught);
+        assert_eq!(found.summary, mutaudit::S_MISSED);
+        assert_eq!(found.line, 7);
+        assert!(found.replacement.is_empty(), "без JSON деталей нет");
+    }
+
+    /// Три причины «исхода нет» — одна строка «исход не найден» врали бы
+    /// оператору. «исход не найден» — только когда output создан и дописан.
+    #[test]
+    fn recheck_miss_reason_separates_three_causes() {
+        let d = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let dir = d.path().join("out").join("mutants.out");
+
+        // 1) Каталога нет — инструмент его не создал.
+        let m = recheck_miss_reason(&dir, RC_NAME, Some(66), "log");
+        assert!(m.contains("инструмент не создал output"), "{m}");
+        assert!(m.contains("rc Some(66)"), "код возврата сохранён: {m}");
+
+        // 2) Каталог есть, outcomes.json нет — прогон не дописан.
+        fs::create_dir_all(&dir).unwrap_or_else(|_| unreachable!());
+        let m = recheck_miss_reason(&dir, RC_NAME, Some(2), "log");
+        assert!(m.contains("нет outcomes.json"), "{m}");
+
+        // 3) Output дописан, но имени нет — только тут «исход не найден».
+        fs::write(dir.join("outcomes.json"), r#"{"outcomes":[]}"#)
+            .unwrap_or_else(|_| unreachable!());
+        let m = recheck_miss_reason(&dir, RC_NAME, Some(2), "log");
+        assert!(m.contains("исход для"), "{m}");
+        assert!(
+            !m.contains("не создал") && !m.contains("outcomes.json"),
+            "{m}"
+        );
     }
 
     #[test]

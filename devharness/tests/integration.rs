@@ -2046,7 +2046,17 @@ struct MutateSandbox {
 /// STUB_SLEEP.
 const CARGO_MUTANTS_STUB: &str = r#"#!/usr/bin/env bash
 # Стаб cargo-mutants: пишет в mutants.out то же, что пишет настоящий.
-out="mutants.out"
+# Настоящий: без --output → ./mutants.out, с --output X → X/mutants.out.
+base="."
+prev=""
+for a in "$@"; do
+  if [ "$prev" = "--output" ]; then base="$a"; fi
+  case "$a" in --output=*) base="${a#--output=}";; esac
+  prev="$a"
+done
+# Диагностика «инструмент не создал output»: выйти ДО создания каталога.
+[ -n "$STUB_NO_OUTPUT" ] && exit 66
+out="$base/mutants.out"
 mkdir -p "$out"
 rm -f "$out"/*.txt "$out/outcomes.json" "$out/mutants.json"
 caught="${STUB_CAUGHT:-0}"
@@ -2393,6 +2403,67 @@ fn section52_crashed_audit_with_partial_data_is_not_clean() {
     let (rc, out) = sb.run(&["mutate", "problems"]);
     assert_eq!(rc, 1, "problems видит оборванный аудит: {out}");
     assert!(contains(&out, "оборвался"), "{out}");
+}
+
+/// `devh mutate recheck <name>` читает `<--output>/mutants.out` (единая
+/// формула `audit_dir`), а НЕ сам `--output`: раньше там никогда ничего не
+/// было — recheck всегда отвечал «исход не найден» (rc=2), фича не работала
+/// ни разу. Стаб cargo-mutants пишет ровно то, что пишет настоящий.
+#[test]
+fn section53_recheck_reads_out_muts_out() {
+    let sb = MutateSandbox::new("recheck");
+    // Прогон-основание: флаги уходят в state.args → их берёт recheck.
+    let (rc, out) = sb.run_env(
+        &["mutate", "start", "--", "--test-tool", "nextest"],
+        &[("STUB_MISSED", "1"), ("STUB_EXIT", "2")],
+    );
+    assert_eq!(rc, 0, "start: {out}");
+    let st = sb.wait_state(std::time::Duration::from_secs(30));
+    assert_ne!(st, "timeout", "супервизор дописал состояние");
+    let name = "devharness/src/core/plan.rs:1:5: replace x with None";
+
+    // 1) Выживший: имя ЕСТЬ в <out>/mutants.out → НЕ «исход не найден».
+    let (rc, out) = sb.run_env(
+        &["mutate", "recheck", name],
+        &[("STUB_MISSED", "1"), ("STUB_EXIT", "2")],
+    );
+    assert_eq!(rc, 1, "выживший — recheck rc=1 (дыра): {out}");
+    assert!(contains(&out, "✗ выжил"), "диагностика выжившего: {out}");
+    assert!(contains(&out, name), "имя мутанта в отчёте: {out}");
+    assert!(!contains(&out, "исход для"), "НЕ «исход не найден»: {out}");
+    assert!(
+        !contains(&out, "не создал output"),
+        "каталог был создан: {out}"
+    );
+    let v = sb.read_json(".harness/mutate/rechecked.json");
+    assert_eq!(v.get("caught").and_then(|x| x.as_bool()), Some(false));
+    // replacement/genre — из outcomes.json, а не пустые.
+    assert_eq!(v.get("replacement").and_then(|x| x.as_str()), Some("None"));
+    assert_eq!(v.get("genre").and_then(|x| x.as_str()), Some("FnValue"));
+
+    // 2) Пойманный: caught.txt → rc=0, overlay caught=true.
+    let (rc, out) = sb.run_env(
+        &["mutate", "recheck", name],
+        &[("STUB_CAUGHT", "1"), ("STUB_EXIT", "0")],
+    );
+    assert_eq!(rc, 0, "пойман — recheck rc=0: {out}");
+    assert!(contains(&out, "пойман"), "{out}");
+    let v = sb.read_json(".harness/mutate/rechecked.json");
+    assert_eq!(v.get("caught").and_then(|x| x.as_bool()), Some(true));
+
+    // 3) Инструмент не создал output → СВОЯ диагностика (не «исход не
+    //    найден»), rc=2 и код возврата стаба в сообщении.
+    let (rc, out) = sb.run_env(&["mutate", "recheck", name], &[("STUB_NO_OUTPUT", "1")]);
+    assert_eq!(rc, 2, "нет каталога — rc=2: {out}");
+    assert!(contains(&out, "инструмент не создал output"), "{out}");
+    assert!(
+        contains(&out, "rc Some(66)"),
+        "код инструмента виден: {out}"
+    );
+    assert!(
+        !contains(&out, "исход для"),
+        "«исход не найден» — не тут: {out}"
+    );
 }
 
 #[test]

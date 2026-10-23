@@ -354,11 +354,27 @@ stamp глобальный, поэтому правка любого исход�
 --in-place`. Результат пишется в `rechecked.json` (overlay, R12 не нарушен):
 `{tree_stamp, name, summary, caught}`.
 
+Чтение результата — по ЕДИНОЙ формуле каталога прогона
+`audit_dir`/`early::mutants_out_dir` → `<--output>/mutants.out` (сам `--output`
+пуст, в нём ничего не лежит). `replacement`/`genre` берутся из
+`outcomes.json` через `mutaudit::load`; пойманный мутант ищется в
+`caught.txt` (в списки плохих он не попадает). Три разные диагностики вместо
+одной «исход не найден»: «инструмент не создал output» (каталога нет) /
+«нет outcomes.json» (прогон не дописан) / «исход для … не найден» (только
+когда output создан и дописан).
+
 `problems`/`status`/`live_problem_count` снимают проблему только если overlay
 помечен `caught` и `tree_stamp` совпадает с ТЕКУЩИМ деревом. `verdict` overlay
 не использует: recheck не доказывает «чисто» для всего аудита — нужен
 перепрогон дельты. Тесты: `recheck_args_strip_cache_and_set_exact_filter`,
-`rechecked_overlay_closes_only_caught_on_same_tree`.
+`rechecked_overlay_closes_only_caught_on_same_tree`,
+`recheck_finds_name_in_out_muts_out`,
+`recheck_finds_caught_from_caught_txt`,
+`recheck_finds_by_place_when_outcomes_json_missing`,
+`recheck_miss_reason_separates_three_causes`,
+`section53_recheck_reads_out_muts_out` (интеграционный: стаб cargo-mutants
+пишет в `<out>/mutants.out` — выживший → rc=1, пойманный → rc=0, нет
+каталога → rc=2 «инструмент не создал output»).
 
 ### Тесты
 
