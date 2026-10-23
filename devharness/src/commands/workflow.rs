@@ -50,6 +50,17 @@ pub const RULES: &str = r#"=== ПРАВИЛА ===
   R14 не гадать: непонятно, что делать дальше → `devh next` печатает ровно одну следующую команду
   R15 problem-first: первая проблема останавливает СИНХРОННЫЙ гейт и уходит в fix-промпт (файл, строка, замена, жанр); выключается MUTATE_FIRST_PROBLEM=0"#;
 
+/// Правила оркестрации: ведущий ↔ ведомые агенты.
+pub const ORCHESTRATION: &str = r#"=== ОРКЕСТРАЦИЯ (ведущий ↔ ведомые агенты) ===
+  O1  У каждого ведомого в очереди минимум 2 задачи: ведущий НЕ оставляет агента без работы после его отчёта
+  O2  Ведущий контролирует ситуацию по фактам: source (git status/log/diff), канал (devh msg read/pending/presence), артефакты (логи гейтов)
+  O3  Задача ведомому = короткий чек-лист: file:line + доказательство + критерий приёмки + отдельный коммит (git add только своих путей)
+  O4  Отчёт ведомого = письмо ведущему (`devh msg send --to minimax`); отчёт без следующей задачи ⇒ ведущий немедленно закрывает очередь
+  O5  Зоны не пересекаются: файлы ведомого ведущий не правит; общий файл ⇒ очередь (а не «оба сразу»)
+  O6  Тяжёлые прогоны (devh test / devh mutate) — по отмашке ведущего и на спокойной машине
+  O7  Ведомый читает почту в каждом ходе (devh msg read) и сообщает о подозрительном/нестыковках СРАЗУ, а не в конце
+  O8  Смена модели/рантайма не меняет адрес: адрес = канон (алиас), рантайм — синоним"#;
+
 /// Автомат состояний S0–S11.
 pub const STATES: &str = r#"=== СОСТОЯНИЯ (маршрут) ===
   S0  нет .harness/config                     → devh init
@@ -129,6 +140,8 @@ pub fn workflow() {
     println!();
     println!("{RULES}");
     println!();
+    println!("{ORCHESTRATION}");
+    println!();
     println!("{STATES}");
     println!();
     println!("{COMMANDS}");
@@ -171,6 +184,16 @@ mod tests {
         assert!(COMMANDS.contains("devh mutate"), "{COMMANDS}");
         assert!(COMMANDS.contains("devh test"), "{COMMANDS}");
         assert!(COMMANDS.contains("devh next"), "{COMMANDS}");
+    }
+
+    #[test]
+    fn canon_covers_orchestration_rules() {
+        // Канон оркестрации: минимум 2 задачи у ведомого + контроль по фактам.
+        assert!(ORCHESTRATION.contains("O1"), "{ORCHESTRATION}");
+        assert!(ORCHESTRATION.contains("минимум 2 задачи"), "{ORCHESTRATION}");
+        assert!(ORCHESTRATION.contains("O2"), "{ORCHESTRATION}");
+        assert!(ORCHESTRATION.contains("O4"), "{ORCHESTRATION}");
+        assert!(ORCHESTRATION.contains("devh msg send --to minimax"), "{ORCHESTRATION}");
     }
 
     #[test]
