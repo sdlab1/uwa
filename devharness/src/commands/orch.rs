@@ -71,6 +71,22 @@ pub struct Task {
     pub title: String,
     /// Сложность: 0 = P0 … 5 = P5.
     pub complexity: u8,
+    /// Сложность по шкале C0-C10 (C0 — проще всего, C10 — EPIC).
+    /// Назначает только ведущий; None = не задана.
+    #[serde(default)]
+    pub c_level: Option<u8>,
+    /// Модель, фактически выполнившая задачу (прикрепляется при сдаче).
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Как определена модель (about | реестр | --model | identify).
+    #[serde(default)]
+    pub model_source: Option<String>,
+    /// Кто взял задачу в работу (задача закреплена за агентом `agent`).
+    #[serde(default)]
+    pub started_by: Option<String>,
+    /// Unix-время взятия задачи в работу.
+    #[serde(default)]
+    pub started_at: Option<u64>,
     /// Статус.
     pub status: Status,
     /// Зоны ответственности (пути) — для контроля пересечений.
@@ -287,9 +303,10 @@ fn flags_all(args: &[String], name: &str) -> Vec<String> {
 }
 
 /// Флаги, за которыми идёт значение (остальные — булевы).
-const VALUE_FLAGS: [&str; 18] = [
+const VALUE_FLAGS: [&str; 19] = [
     "--agent",
     "--p",
+    "--c",
     "--title",
     "--zone",
     "--note",
@@ -526,6 +543,16 @@ fn add(root: &Path, args: &[String]) -> anyhow::Result<()> {
     let mut reg = load(root);
     let (lead, _) = lead_of(&reg);
     let is_lead = lead.as_deref() == Some(agent.as_str());
+    let caller = crate::core::identity::canonical(&crate::core::identity::current().name);
+    // `--lead-self` — работа ведущего вне очереди (задача сразу в работе).
+    let lead_self = args.iter().any(|a| a == "--lead-self");
+    if is_lead && agent == caller && !lead_self {
+        return Err(anyhow!(
+            "devh orch add: ведущий не ставит задачи в собственную очередь — очередь для \
+             ведомых. Выдай задачу ведомому (--agent <ведомый>) или оформи свою работу \
+             как --lead-self (задача сразу в работе, вне очереди)"
+        ));
+    }
     if checks.is_empty() && !(is_lead && args.iter().any(|a| a == "--no-test")) {
         return Err(anyhow!(
             "devh orch add: для ведомого нужна минимум одна машинная проверка --check \"команда\"{}",
@@ -541,7 +568,20 @@ fn add(root: &Path, args: &[String]) -> anyhow::Result<()> {
         agent: agent.clone(),
         title: title.clone(),
         complexity,
-        status: Status::Queued,
+        c_level: None,
+        model: None,
+        model_source: None,
+        started_by: if lead_self {
+            Some(caller.clone())
+        } else {
+            None
+        },
+        started_at: if lead_self { Some(ts) } else { None },
+        status: if lead_self {
+            Status::Active
+        } else {
+            Status::Queued
+        },
         zones: zones.clone(),
         fail_level: None,
         note,
@@ -610,22 +650,53 @@ fn start(root: &Path, args: &[String]) -> anyhow::Result<()> {
         .first()
         .cloned()
         .ok_or_else(|| anyhow!("devh orch start: нужен ID задачи"))?;
+    // «task taken»: лок на реестр — две команды не возьмут одну задачу.
+    let _lock = crate::shell::lock::OutputLock::try_acquire(root, &path(root), "devh orch start")
+        .map_err(|e| anyhow!("devh orch start: {e}"))?;
     let mut reg = load(root);
     let idx =
         find_task_index(&reg, &id).ok_or_else(|| anyhow!("devh orch: задача {id} не найдена"))?;
-    let t = reg.tasks.get_mut(idx).unwrap_or_else(|| unreachable!());
-    if t.status != Status::Queued {
+    let caller = crate::core::identity::canonical(&crate::core::identity::current().name);
+    let (lead, _) = lead_of(&reg);
+    if lead.as_deref() == Some(caller.as_str()) {
         return Err(anyhow!(
-            "devh orch: {id} не в очереди (статус {})",
-            t.status.label()
+            "devh orch start: ведущий не берёт задачи из очереди — очередь для ведомых. \
+             Выдай задачу ведомому: devh orch add --agent <ведомый> ..."
         ));
     }
-    t.status = Status::Active;
-    t.updated = now();
-    let agent = t.agent.clone();
-    let p = t.complexity;
+    let (owner, status, taken_by) = {
+        let t = &reg.tasks[idx];
+        (
+            t.agent.clone(),
+            t.status,
+            t.started_by.clone().unwrap_or_else(|| "-".to_string()),
+        )
+    };
+    if owner != caller {
+        return Err(anyhow!(
+            "devh orch start: задача {id} закреплена за {owner} — бери свою задачу \
+             (devh orch list --agent {caller})"
+        ));
+    }
+    if status != Status::Queued {
+        return Err(anyhow!(
+            "devh orch start: {id} уже взята (статус {}, взял {taken_by}) — «task taken», \
+             двойная работа запрещена",
+            status.label()
+        ));
+    }
+    let ts = now();
+    {
+        let t = reg.tasks.get_mut(idx).unwrap_or_else(|| unreachable!());
+        t.status = Status::Active;
+        t.started_by = Some(caller.clone());
+        t.started_at = Some(ts);
+        t.updated = ts;
+    }
+    let agent = owner;
+    let p = reg.tasks[idx].complexity;
     save(root, &reg)?;
-    println!("devh orch: {id} в работе ({agent}, P{p})");
+    println!("devh orch: {id} взята в работу ({agent}, P{p})");
     Ok(())
 }
 
@@ -914,19 +985,39 @@ fn board(root: &Path) -> anyhow::Result<()> {
         if let Some(s) = susp.as_ref() {
             println!("  ⚠ подозрение: {s}");
         }
-        for t in active.iter().chain(queued.iter()) {
-            println!(
-                "  {} {:<7} P{} {:<24} {}",
-                t.id,
-                t.status.label(),
-                t.complexity,
-                if t.zones.is_empty() {
-                    "зона не задана".to_string()
-                } else {
-                    t.zones.join(",")
-                },
-                t.title
-            );
+        if !active.is_empty() {
+            println!("  в работе (взято — не выдаётся):");
+            for t in active.iter() {
+                println!(
+                    "    {} {:<7} P{} {:<24} {}",
+                    t.id,
+                    t.status.label(),
+                    t.complexity,
+                    if t.zones.is_empty() {
+                        "зона не задана".to_string()
+                    } else {
+                        t.zones.join(",")
+                    },
+                    t.title
+                );
+            }
+        }
+        if !queued.is_empty() {
+            println!("  очередь (свободны):");
+            for t in queued.iter() {
+                println!(
+                    "    {} {:<7} P{} {:<24} {}",
+                    t.id,
+                    t.status.label(),
+                    t.complexity,
+                    if t.zones.is_empty() {
+                        "зона не задана".to_string()
+                    } else {
+                        t.zones.join(",")
+                    },
+                    t.title
+                );
+            }
         }
         if queued.len() < 2 {
             warns.push(format!(
@@ -1730,6 +1821,11 @@ fn onboard_register(root: &Path, args: &[String]) -> anyhow::Result<Onboarded> {
         agent: canon_agent.clone(),
         title: title.clone(),
         complexity,
+        c_level: None,
+        model: None,
+        model_source: None,
+        started_by: None,
+        started_at: None,
         status: Status::Queued,
         zones,
         fail_level: None,
@@ -1826,22 +1922,51 @@ mod tests {
         orch(root, sub, &owned)
     }
 
+    /// Канонический адрес текущего процесса (в тестах — тот, кто выполняет).
+    fn me() -> String {
+        crate::core::identity::canonical(&crate::core::identity::current().name)
+    }
+
+    /// Задача с DoD: критерий приёмки + быстрая машинная проверка.
+    fn add_task(root: &Path, agent: &str, p: &str, title: &str) -> String {
+        run(
+            root,
+            "add",
+            &[
+                "--agent",
+                agent,
+                "--p",
+                p,
+                "--title",
+                title,
+                "--dod",
+                "критерий приёмки",
+                "--check",
+                "true",
+            ],
+        )
+        .expect("add");
+        let reg = load(root);
+        reg.tasks.last().map(|t| t.id.clone()).unwrap_or_default()
+    }
+
+    /// Зелёный DoD: критерий подтверждён + машинная проверка пройдена.
+    fn complete_dod(root: &Path, id: &str) {
+        run(root, "dod", &[id, "--ack", "1"]).expect("dod ack");
+        run(root, "verify", &[id]).expect("verify");
+    }
+
     #[test]
     fn add_start_done_flow_records_levels() {
         let tmp = tempdir().expect("tmp");
         let root = tmp.path();
-        run(
-            root,
-            "add",
-            &["--agent", "beam", "--p", "P2", "--title", "починить"],
-        )
-        .expect("add");
+        let id = add_task(root, &me(), "P2", "починить");
         let reg = load(root);
         assert_eq!(reg.tasks.len(), 1);
-        let id = reg.tasks.first().map(|t| t.id.clone()).unwrap_or_default();
         assert_eq!(id, "T-001");
         assert_eq!(reg.tasks.first().map(|t| t.complexity), Some(2));
         run(root, "start", &[id.as_str()]).expect("start");
+        complete_dod(root, &id);
         run(root, "done", &[id.as_str(), "--f", "F1"]).expect("done");
         let reg = load(root);
         assert_eq!(reg.tasks.first().map(|t| t.status), Some(Status::Done));
@@ -1852,18 +1977,9 @@ mod tests {
     fn fail_level_f3_triggers_degradation_and_suspicion() {
         let tmp = tempdir().expect("tmp");
         let root = tmp.path();
-        run(
-            root,
-            "add",
-            &["--agent", "beam", "--p", "P4", "--title", "эпик"],
-        )
-        .expect("add");
-        run(
-            root,
-            "add",
-            &["--agent", "beam", "--p", "P3", "--title", "подсистема"],
-        )
-        .expect("add");
+        add_task(root, "beam", "P4", "эпик");
+        add_task(root, "beam", "P3", "подсистема");
+        complete_dod(root, "T-001");
         run(root, "done", &["T-001", "--f", "F3"]).expect("done");
         let reg = load(root);
         // вторая задача осталась в очереди — её P должен упасть на 1
@@ -1885,12 +2001,7 @@ mod tests {
     fn model_change_degrades_queue() {
         let tmp = tempdir().expect("tmp");
         let root = tmp.path();
-        run(
-            root,
-            "add",
-            &["--agent", "beam2", "--p", "P3", "--title", "штука"],
-        )
-        .expect("add");
+        add_task(root, "beam2", "P3", "штука");
         run(root, "model", &["--agent", "beam2", "--model", "mimo"]).expect("model");
         run(root, "model", &["--agent", "beam2", "--model", "beam"]).expect("model2");
         let reg = load(root);
@@ -1899,15 +2010,44 @@ mod tests {
     }
 
     #[test]
+    fn task_taken_blocks_second_take() {
+        let tmp = tempdir().expect("tmp");
+        let root = tmp.path();
+        let id = add_task(root, &me(), "P1", "взять");
+        run(root, "start", &[id.as_str()]).expect("first start");
+        let err = run(root, "start", &[id.as_str()]).expect_err("second take must fail");
+        assert!(err.to_string().contains("уже взята"), "{err}");
+        let reg = load(root);
+        assert_eq!(reg.tasks.first().and_then(|t| t.started_by.clone()), Some(me()));
+    }
+
+    #[test]
+    fn lead_does_not_take_tasks() {
+        let tmp = tempdir().expect("tmp");
+        let root = tmp.path();
+        let id = add_task(root, &me(), "P1", "своя");
+        let mut reg = load(root);
+        reg.lead = Some(me());
+        save(root, &reg).expect("save");
+        let err = run(root, "start", &[id.as_str()]).expect_err("lead must not take");
+        assert!(err.to_string().contains("ведущий не берёт"), "{err}");
+    }
+
+    #[test]
+    fn cannot_take_task_of_another_agent() {
+        let tmp = tempdir().expect("tmp");
+        let root = tmp.path();
+        let id = add_task(root, "other-agent", "P1", "чужая");
+        let err = run(root, "start", &[id.as_str()]).expect_err("foreign task must fail");
+        assert!(err.to_string().contains("закреплена за"), "{err}");
+    }
+
+    #[test]
     fn revoke_blocks_done_task() {
         let tmp = tempdir().expect("tmp");
         let root = tmp.path();
-        run(
-            root,
-            "add",
-            &["--agent", "beam", "--p", "P1", "--title", "т"],
-        )
-        .expect("add");
+        add_task(root, "beam", "P1", "т");
+        complete_dod(root, "T-001");
         run(root, "done", &["T-001", "--f", "F0"]).expect("done");
         let err = run(root, "revoke", &["T-001", "--reason", "поздно"]);
         assert!(err.is_err(), "выполненную задачу отозвать нельзя");
