@@ -63,6 +63,7 @@ use crate::core::mutaudit::{self, Audit};
 use crate::core::tui;
 use crate::core::watch::{Event, Watcher};
 use crate::shell::color::colors;
+use crate::shell::lock::OutputLock;
 use crate::shell::proc::{group_alive, pid_alive};
 
 /// Каталог артефактов аудита внутри `.harness/`.
@@ -403,9 +404,24 @@ fn start(root: &Path, args: &[String]) -> anyhow::Result<()> {
     }
     let dir = work_dir(root);
     fs::create_dir_all(&dir)?;
-    // Старые артефакты — вон: списки append-only, иначе счётчики начнутся
-    // не с нуля (а verdict будет считать мутанты прошлого прогона).
-    let _ = fs::remove_dir_all(audit_dir(root, &args));
+    // P5 R10: два прогона с ОДНИМ output не должны убивать артефакты друг
+    // друга. Лок = проверка «каталог не переписывается прямо сейчас»;
+    // на время прогона его держит супервизор (см. supervise). Держатель
+    // этого короткого лока — сам start: уборка файлов + spawn + state.
+    let _output_lock =
+        match OutputLock::try_acquire(root, &audit_dir(root, &args), "devh mutate start") {
+            Ok(g) => g,
+            Err(holder) => {
+                println!("devh mutate start: output занят — {holder}");
+                println!(
+                    "  тот же каталог аудита уже переписывается — дождись конца чужого прогона"
+                );
+                crate::commands::die(2);
+            }
+        };
+    // Старые артефакты харнесса — вон (каталог самого прогона убирает
+    // супервизор ПОД локом: см. supervise). Списки append-only, иначе
+    // счётчики начнутся не с нуля (а verdict считал бы мутанты прошлого).
     let _ = fs::remove_file(dir.join(LIVE_FILE));
     let _ = fs::remove_file(dir.join(VERDICT_FILE));
     let _ = fs::remove_file(dir.join(PROBLEMS_FILE));
@@ -469,6 +485,26 @@ fn start(root: &Path, args: &[String]) -> anyhow::Result<()> {
 // ────────────────────────── супервизор (внутренний) ──────────────────────────
 
 /// Супервизор: держит cargo-mutants ребёнком, рисует кадры, пишет вердикт.
+/// Взять лок output для прогона. `start` держит тот же лок первые мс
+/// (проверка + уборка файлов + запись state + spawn) — это окно ждём
+/// коротким ретраем; если лок занят дольше — там чужой прогон.
+fn acquire_output_for_run(root: &Path, output: &Path) -> anyhow::Result<OutputLock> {
+    const RETRIES: usize = 50;
+    let mut last = String::new();
+    for i in 0..RETRIES {
+        match OutputLock::try_acquire(root, output, "cargo-mutants") {
+            Ok(g) => return Ok(g),
+            Err(holder) => {
+                last = holder;
+                if i + 1 < RETRIES {
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+            }
+        }
+    }
+    anyhow::bail!("output занят — {last}")
+}
+
 fn supervise(root: &Path, args: &[String]) -> anyhow::Result<()> {
     let args: Vec<String> = args.iter().filter(|a| *a != "--").cloned().collect();
     if args.is_empty() {
@@ -477,6 +513,36 @@ fn supervise(root: &Path, args: &[String]) -> anyhow::Result<()> {
     let dir = work_dir(root);
     fs::create_dir_all(&dir)?;
     let adir = audit_dir(root, &args);
+    // P5 R10: лок на каталог output держится ВЕСЬ прогон (flock снимается
+    // сам при смерти супервизора). Start держал тот же лок первые мс —
+    // короткое окно ждём, дальше занятость = чужой прогон.
+    let _output_lock = match acquire_output_for_run(root, &adir) {
+        Ok(g) => g,
+        Err(e) => {
+            // Start уже объявил «running» — этот прогон НЕ идёт: гасим
+            // метку, иначе status/verdict ждали бы вечно.
+            write_state(
+                root,
+                &State {
+                    state: "failed".to_string(),
+                    pid: 0,
+                    exit: Some(3),
+                    started: now_secs(),
+                    finished: Some(now_secs()),
+                    args: args.clone(),
+                    cwd: root.display().to_string(),
+                    mode: "copy".to_string(),
+                    pgid: 0,
+                    tree_stamp: String::new(),
+                },
+            )?;
+            return Err(e);
+        }
+    };
+    // Старый прогон — вон ПОД локом: параллельный `devh mutate start` того
+    // же output уже получил rc=2, а читатели (status/problems) не должны
+    // видеть полуразобранный каталог.
+    let _ = fs::remove_dir_all(&adir);
     let started = now_secs();
     // F-1.8.1: аудит копирует дерево СЕЙЧАС. Отпечаток фиксируем до запуска
     // cargo-mutants: если дерево потом изменится, результат — снимок ДО правок.

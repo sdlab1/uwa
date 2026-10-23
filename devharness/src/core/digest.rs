@@ -60,6 +60,14 @@ fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
+/// sha256 произвольных байтов (hex). Ключ локов (`shell::lock::OutputLock`).
+pub fn sha256_hex(data: &[u8]) -> String {
+    let mut h = sha2::Sha256::new();
+    h.update(b"devh-sha256-v1\0");
+    h.update(data);
+    hex(&h.finalize())
+}
+
 /// Парс вывода `git ls-files -z` (пути, разделённые NUL).
 ///
 /// Дедуп «первый выигрывает»: `ls-files` с несколькими тегами (`-c -o`)
