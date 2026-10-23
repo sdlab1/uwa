@@ -56,8 +56,7 @@
   `shell/tripwire.rs` (3 теста: tamper → check → rollback → чисто,
   warn/refs, resume/corrupt). Подключены `Gate::Tripwire`, `TRIPWIRE`/
   `PROTECTED`, arm после RED и проверки после агента/гейтов/red-post/
-  RED-MUT/перед коммитом. `cargo check` зелёный; нужен полный прогон
-  и коммит.
+  RED-MUT/перед коммитом. `cargo check` зелёный; закоммичено `a1679ea`.
 * **Живые проблемы аудита закрыты тестами:** `Outcome::is_succeeded`
   (+`is_survivor/timeout/action`), `parse_outcomes` с пустым `file`,
   `genre_tag` (все ветки) и `civil_from_days` (эпоха/високосные/вековые
@@ -72,15 +71,17 @@
   ведёт к `stop` (Running) или перепрогону (Finished), `verdict` — rc=2.
   Тесты `audit_stale_detects_tree_change_and_tolerates_old_state`,
   `stale_audit_stops_or_restarts_instead_of_chasing_problems`; lib 413/413.
-  Свежий аудит на новом дереве: 68/228, 0 проблем, kr 100% (на момент
-  записи).
+  Закоммичено `baf8b11`. Свежий аудит на новом дереве: 68/228, 0 проблем,
+  kr 100% (на момент записи).
 
 **Осталось до закрытия части D:**
 
-* доработать F-1 Tripwire (код и тесты в дереве, нужен коммит);
-* `devh test` (полный сьют) — PASS/FAIL;
-* `devh mutate verdict` по зоне — 0 missed / 0 timeout / 0 unviable;
-* закрыть живые проблемы аудита (`survivors.rs:85`, `:179`) и перепрогнать.
+* F-1 + F-1.8.1 закоммичены (`a1679ea`, `baf8b11`); осталась run-level
+  приёмка tamper-сценариев и N4 (подпись кэша) — это уже полировка F-1;
+* `devh test` (полный сьют) — после аудита: load guard иначе даёт rc=2;
+* `devh mutate verdict` по зоне — дождаться финала (0 missed на 68/228);
+* 12 старых «проблем» `survivors.rs` закрыты тестами; свежий аудит их не
+  подтверждает, отдельно чинить нечего.
 
 ---
 
