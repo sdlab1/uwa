@@ -1600,9 +1600,18 @@ mod tests {
     fn parser_27_and_legacy_agree_unviable_timeout_succeeded_fail() {
         let p = MutPolicy::default();
         let cases: &[(&str, &str)] = &[
-            ("10 mutants tested: 9 caught, 1 unviable", "Mutants: 10, Killed: 9"),
-            ("10 mutants tested: 9 caught, 1 timeout", "Mutants: 10, Killed: 9"),
-            ("10 mutants tested: 9 caught, 1 succeeded", "Mutants: 10, Killed: 9"),
+            (
+                "10 mutants tested: 9 caught, 1 unviable",
+                "Mutants: 10, Killed: 9",
+            ),
+            (
+                "10 mutants tested: 9 caught, 1 timeout",
+                "Mutants: 10, Killed: 9",
+            ),
+            (
+                "10 mutants tested: 9 caught, 1 succeeded",
+                "Mutants: 10, Killed: 9",
+            ),
         ];
         for (s27, leg) in cases {
             let a = parse_mutation_output(s27)
@@ -1612,7 +1621,10 @@ mod tests {
             let va = judge_mutation_stats(&a, &p);
             let vb = judge_mutation_stats(&b, &p);
             assert!(matches!(va, Verdict::Fail { .. }), "27.x «{s27}» → {va:?}");
-            assert!(matches!(vb, Verdict::Fail { .. }), "легаси «{leg}» → {vb:?}");
+            assert!(
+                matches!(vb, Verdict::Fail { .. }),
+                "легаси «{leg}» → {vb:?}"
+            );
             // вердикты (Pass/Fail) обязаны совпадать
             assert_eq!(
                 matches!(va, Verdict::Pass),
@@ -1629,18 +1641,18 @@ mod tests {
         let garbage = [
             "",
             "мусор",
-            "mutants",                       // нет счётчика
-            "10 mutants tested",             // нет ':' с исходами
-            "10 mutants tested:",            // пустые исходы → parse пустого токена
-            "10 mutants tested: ,",          // пустые токены
-            "10 mutants tested: caught",     // нет числа
-            "10 mutants tested: x caught",   // не-число
-            "10 mutants tested: 5 weird",    // неизвестный исход
+            "mutants",                                   // нет счётчика
+            "10 mutants tested",                         // нет ':' с исходами
+            "10 mutants tested:",                        // пустые исходы → parse пустого токена
+            "10 mutants tested: ,",                      // пустые токены
+            "10 mutants tested: caught",                 // нет числа
+            "10 mutants tested: x caught",               // не-число
+            "10 mutants tested: 5 weird",                // неизвестный исход
             "8/10 mutants tested, 1 MISSED, 5s elapsed", // прогресс nutmeg
-            "Mutants:",                      // легаси без числа
-            "Mutants: x, Killed: y",         // легаси не-числа
-            "Mutants: 10, Killed:",          // легаси без killed
-            "N mutants tested: 1 caught",   // не-числовой счётчик
+            "Mutants:",                                  // легаси без числа
+            "Mutants: x, Killed: y",                     // легаси не-числа
+            "Mutants: 10, Killed:",                      // легаси без killed
+            "N mutants tested: 1 caught",                // не-числовой счётчик
         ];
         for g in garbage {
             // не паникует; либо None, либо валидная структура

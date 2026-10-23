@@ -128,10 +128,7 @@ impl ModelCeiling {
 /// Фильтр задач по сложности для модели.
 ///
 /// Возвращает `Ok(())` если задача ≤ потолка модели, иначе `Err` с причиной.
-pub fn filter_by_complexity(
-    task_c: Complexity,
-    model_ceiling: ModelCeiling,
-) -> Result<(), String> {
+pub fn filter_by_complexity(task_c: Complexity, model_ceiling: ModelCeiling) -> Result<(), String> {
     if model_ceiling.accepts(task_c) {
         Ok(())
     } else {

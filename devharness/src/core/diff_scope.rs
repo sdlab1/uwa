@@ -47,8 +47,18 @@ pub fn changed_lines(text: &str) -> Vec<(String, u32)> {
             if parts.len() >= 2 {
                 let old_part = parts[0].trim_start_matches('-');
                 let new_part = parts[1].trim_start_matches('+');
-                let old_start: u32 = old_part.split(',').next().unwrap_or("0").parse().unwrap_or(0);
-                let new_start: u32 = new_part.split(',').next().unwrap_or("0").parse().unwrap_or(0);
+                let old_start: u32 = old_part
+                    .split(',')
+                    .next()
+                    .unwrap_or("0")
+                    .parse()
+                    .unwrap_or(0);
+                let new_start: u32 = new_part
+                    .split(',')
+                    .next()
+                    .unwrap_or("0")
+                    .parse()
+                    .unwrap_or(0);
                 old_line = old_start;
                 new_line = new_start;
             }
@@ -96,7 +106,9 @@ mod tests {
         let diff = "--- a/foo.rs\n+++ b/foo.rs\n@@ -1,3 +1,3 @@\n-old\n+new\n";
         let files = parse_diff(diff);
         assert_eq!(files.len(), 1);
-        assert!(files.contains(&ChangedFile { path: "foo.rs".to_string() }));
+        assert!(files.contains(&ChangedFile {
+            path: "foo.rs".to_string()
+        }));
     }
 
     #[test]
@@ -124,7 +136,8 @@ mod tests {
 
     #[test]
     fn changed_lines_multiple() {
-        let diff = "--- a/foo.rs\n+++ b/foo.rs\n@@ -1,3 +1,4 @@\n line1\n+added1\n+added2\n line2\n";
+        let diff =
+            "--- a/foo.rs\n+++ b/foo.rs\n@@ -1,3 +1,4 @@\n line1\n+added1\n+added2\n line2\n";
         let lines = changed_lines(diff);
         assert_eq!(lines.len(), 2);
     }

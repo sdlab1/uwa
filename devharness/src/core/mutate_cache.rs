@@ -91,9 +91,15 @@ pub fn parse_iterator(text: &str) -> MutantCache {
             continue;
         }
         let Some(scenario) = o.scenario else { continue };
-        let Some(mutant) = scenario.mutant else { continue };
+        let Some(mutant) = scenario.mutant else {
+            continue;
+        };
         let file = mutant.file.unwrap_or_default();
-        let line = mutant.span.and_then(|s| s.start).and_then(|s| s.line).unwrap_or(0);
+        let line = mutant
+            .span
+            .and_then(|s| s.start)
+            .and_then(|s| s.line)
+            .unwrap_or(0);
         let replacement = o.replacement.unwrap_or_default();
         if !file.is_empty() {
             cache.insert(MutantKey {

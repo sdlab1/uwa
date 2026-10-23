@@ -104,10 +104,7 @@ mod tests {
 
     #[test]
     fn f2_failure_does_not_raise_ceiling() {
-        let tasks = vec![
-            task("mimo", "F0", 3),
-            task("mimo", "F2", 5),
-        ];
+        let tasks = vec![task("mimo", "F0", 3), task("mimo", "F2", 5)];
         let res = aggregate(&tasks);
         assert_eq!(res.len(), 1);
         assert_eq!(res[0].ceiling, 3, "F2 не повышает потолок");
@@ -115,10 +112,7 @@ mod tests {
 
     #[test]
     fn two_models_separated() {
-        let tasks = vec![
-            task("mimo", "F0", 3),
-            task("beam", "F0", 5),
-        ];
+        let tasks = vec![task("mimo", "F0", 3), task("beam", "F0", 5)];
         let res = aggregate(&tasks);
         assert_eq!(res.len(), 2);
         let mimo = res.iter().find(|s| s.model == "mimo").unwrap();

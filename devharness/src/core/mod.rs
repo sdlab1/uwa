@@ -1,6 +1,5 @@
 pub mod complexity;
 pub mod contract;
-pub mod corpus_freshness;
 pub mod coverage;
 pub mod diff_scope;
 pub mod digest;
