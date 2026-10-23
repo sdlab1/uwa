@@ -126,6 +126,23 @@ else
 fi
 "#,
         );
+        // F-2.2: агент ослабляет inline-тест в файле из scope (удаляет assert).
+        write_exec(
+            &self.stubs.join("stub-weaken.sh"),
+            r#"#!/usr/bin/env bash
+mkdir -p "$HARNESS_WORKTREE/src"
+cat > "$HARNESS_WORKTREE/src/a.rs" <<'EOF'
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn t() {
+        let _ = 1;
+    }
+}
+EOF
+printf 'feat: weaken inline test\n\nдетали: стаб F-2\n' > "$HARNESS_SUMMARY"
+"#,
+        );
         write_exec(
             &self.stubs.join("mut-ok.sh"),
             "#!/usr/bin/env bash\necho \"Mutants: 10, Killed: 10 (100%)\"\n",
@@ -190,6 +207,9 @@ echo "CRAP: functions=2"
             .env("T_MUT_GOOD", &mut_good)
             .env("HARNESS_REVIEW", "0")
             .env("HARNESS_LINT", "1")
+            // F-2: старые сценарии не объявляют FILES:. Новый обязательный
+            // scope проверяется отдельными section50* тестами с override=1.
+            .env("HARNESS_FREEZE_REQUIRED", "0")
             .env_remove("HARNESS_RED_MUTATE")
             .env_remove("HARNESS_RED_MIN_KILL");
     }
@@ -4501,4 +4521,189 @@ fn section49_run_logged_reaps_daemon_group_after_exit() {
         .arg("-9")
         .arg(daemon.to_string())
         .output();
+}
+
+// F-2.1: при FREEZE_REQUIRED=1 пустой scope — SpecBlock (rc=1), а не Pass.
+#[test]
+fn section50_f2_freeze_required_empty_scope_is_spec_block() {
+    let sb = Sandbox::new("s50a");
+    sb.run_ok(&["init"]);
+    sb.new_item("no scope", "спека без FILES\n", Some("red bypass"));
+    let (code, out) = sb.run_exit_env(
+        &["run", "W-001"],
+        &[
+            ("HARNESS_FREEZE", "1"),
+            ("HARNESS_FREEZE_REQUIRED", "1"),
+            ("HARNESS_WEAKEN", "off"),
+            ("HARNESS_TRIPWIRE", "off"),
+        ],
+    );
+    assert_eq!(code, 1, "required scope без FILES = SpecBlock rc=1: {out}");
+    assert!(contains(&out, "FILES: не заявлен"), "{out}");
+    let flog = fs::read_to_string(sb.log_file("W-001-freeze.log")).unwrap_or_default();
+    assert!(contains(&flog, "FILES: не заявлен"), "{flog}");
+}
+
+// F-2.1: --no-files требует причину, пишет items/W-NNN/no-files и снимает
+// обязательность scope на гейте (причина видна в freeze.log).
+#[test]
+fn section50b_f2_no_files_reason_is_recorded_and_bypasses_required_scope() {
+    let sb = Sandbox::new("s50b");
+    sb.run_ok(&["init"]);
+    sb.new_item_flags(
+        "no files",
+        "спека без FILES\n",
+        &[
+            "--no-red",
+            "red bypass",
+            "--no-files",
+            "только документация",
+        ],
+    );
+    let nf = fs::read_to_string(sb.item_dir("W-001").join("no-files")).unwrap_or_default();
+    assert_eq!(nf.trim(), "только документация");
+    let (ok, out) = sb.run_capture_env(
+        &["run", "W-001"],
+        &[
+            ("HARNESS_FREEZE", "1"),
+            ("HARNESS_FREEZE_REQUIRED", "1"),
+            ("HARNESS_WEAKEN", "off"),
+            ("HARNESS_TRIPWIRE", "off"),
+        ],
+    );
+    assert!(ok, "no-files — записанный обход, run зелёный: {out}");
+    let flog = fs::read_to_string(sb.log_file("W-001-freeze.log")).unwrap_or_default();
+    assert!(
+        contains(&flog, "обход no-files: только документация"),
+        "{flog}"
+    );
+}
+
+// F-2.1: пустая причина не является обходом — new отклоняется.
+#[test]
+fn section50c_f2_no_files_empty_reason_is_rejected() {
+    let sb = Sandbox::new("s50c");
+    sb.run_ok(&["init"]);
+    let mut c = sb.devh(&["new", "empty reason", "--no-files", ""]);
+    c.stdin(Stdio::piped());
+    c.stdout(Stdio::piped());
+    c.stderr(Stdio::piped());
+    let mut child = c.spawn().unwrap_or_else(|_| unreachable!());
+    child
+        .stdin
+        .take()
+        .unwrap_or_else(|| unreachable!())
+        .write_all(b"spec\n")
+        .unwrap_or_else(|_| unreachable!());
+    let out = child.wait_with_output().unwrap_or_else(|_| unreachable!());
+    assert!(!out.status.success(), "пустой --no-files обязан падать");
+    let all = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(contains(&all, "непустую причину"), "{all}");
+}
+
+// F-2.1: FREEZE_REQUIRED=1 при FREEZE=0 — отказ до агента (rc=1).
+#[test]
+fn section50d_f2_freeze_required_without_freeze_is_rejected() {
+    let sb = Sandbox::new("s50d");
+    sb.run_ok(&["init"]);
+    sb.new_item("scope", "FILES: done.txt\n", Some("red bypass"));
+    let (code, out) = sb.run_exit_env(
+        &["run", "W-001"],
+        &[
+            ("HARNESS_FREEZE", "0"),
+            ("HARNESS_FREEZE_REQUIRED", "1"),
+            ("HARNESS_TRIPWIRE", "off"),
+        ],
+    );
+    assert_eq!(code, 1, "конфликт конфига = rc=1: {out}");
+    assert!(contains(&out, "FREEZE_REQUIRED=1, но FREEZE=0"), "{out}");
+}
+
+fn commit_weaken_base(sb: &Sandbox) {
+    fs::create_dir_all(sb.repo.join("src")).unwrap_or_else(|_| unreachable!());
+    fs::write(
+        sb.repo.join("src/a.rs"),
+        "#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() {\n        assert!(true);\n    }\n}\n",
+    )
+    .unwrap_or_else(|_| unreachable!());
+    sb.git_out(&["add", "src/a.rs"]);
+    sb.git_out(&["commit", "-qm", "weaken base"]);
+}
+
+fn weaken_run_env(sb: &Sandbox, mode: &str) -> Vec<(&'static str, String)> {
+    vec![
+        (
+            "HARNESS_AGENT",
+            sb.stubs.join("stub-weaken.sh").display().to_string(),
+        ),
+        ("HARNESS_FREEZE", "1".into()),
+        ("HARNESS_FREEZE_REQUIRED", "1".into()),
+        ("HARNESS_WEAKEN", mode.into()),
+        ("HARNESS_VERIFY", "true".into()),
+        ("HARNESS_MAX_FIX", "0".into()),
+        ("HARNESS_TRIPWIRE", "off".into()),
+        ("HARNESS_LINT", "0".into()),
+        ("HARNESS_REVIEW", "0".into()),
+    ]
+}
+
+// F-2.2: enforce ловит удалённый inline assert по diff (файл в scope),
+// даёт Fail(Freeze) и НЕ мутирует индекс (`git add -N` запрещён).
+#[test]
+fn section50e_f2_weaken_enforce_fails_and_does_not_touch_index() {
+    let sb = Sandbox::new("s50e");
+    sb.run_ok(&["init"]);
+    commit_weaken_base(&sb);
+    sb.new_item("weaken enforce", "FILES: src/a.rs\n", Some("red bypass"));
+    let env = weaken_run_env(&sb, "enforce");
+    let refs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let (code, out) = sb.run_exit_env(&["run", "W-001"], &refs);
+    assert_eq!(code, 1, "weaken enforce = Fail(Freeze) rc=1: {out}");
+    let flog = fs::read_to_string(sb.log_file("W-001-freeze.log")).unwrap_or_default();
+    assert!(contains(&flog, "weaken=enforce"), "{flog}");
+    assert!(contains(&flog, "удалено ассертов"), "{flog}");
+    assert!(
+        sb.git_out(&["diff", "--cached", "--name-only"])
+            .trim()
+            .is_empty(),
+        "clean diff не должен делать git add -N"
+    );
+}
+
+// F-2.2: warn логирует находку, но пропускает (агент может откатить сам).
+#[test]
+fn section50f_f2_weaken_warn_passes_and_logs() {
+    let sb = Sandbox::new("s50f");
+    sb.run_ok(&["init"]);
+    commit_weaken_base(&sb);
+    sb.new_item("weaken warn", "FILES: src/a.rs\n", Some("red bypass"));
+    let env = weaken_run_env(&sb, "warn");
+    let refs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let (ok, out) = sb.run_capture_env(&["run", "W-001"], &refs);
+    assert!(ok, "weaken warn = Pass: {out}");
+    let flog = fs::read_to_string(sb.log_file("W-001-freeze.log")).unwrap_or_default();
+    assert!(contains(&flog, "weaken=warn"), "{flog}");
+    assert!(contains(&flog, "удалено ассертов"), "{flog}");
+}
+
+// F-2.2: allow-weaken (файл | причина) снимает конкретную находку.
+#[test]
+fn section50g_f2_allow_weaken_removes_finding() {
+    let sb = Sandbox::new("s50g");
+    sb.run_ok(&["init"]);
+    commit_weaken_base(&sb);
+    sb.new_item("weaken allow", "FILES: src/a.rs\n", Some("red bypass"));
+    fs::write(
+        sb.item_dir("W-001").join("allow-weaken"),
+        "src/a.rs | рефакторинг теста\n",
+    )
+    .unwrap_or_else(|_| unreachable!());
+    let env = weaken_run_env(&sb, "enforce");
+    let refs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let (ok, out) = sb.run_capture_env(&["run", "W-001"], &refs);
+    assert!(ok, "allow-weaken снимает finding: {out}");
 }

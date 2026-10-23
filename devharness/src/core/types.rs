@@ -97,9 +97,15 @@ pub struct RunConfig {
     /// Код-дефолт false (шаблон init ставит 1): гейт первым в лестнице,
     /// считается по диффу, allowlist = spec FILES: + FREEZE_ALLOW.
     pub freeze: bool,
+    /// F-2.1: scope обязателен. Код-дефолт false; шаблон init ставит 1.
+    /// При `true` пустой scope без `no-files` — SpecBlock, а не Pass.
+    pub freeze_required: bool,
     /// Глобальный allowlist FREEZE (пробел-разделённые глобы), поверх
     /// per-item items/W-NNN/files из спеки.
     pub freeze_allow: Vec<String>,
+    /// F-2.2: детектор ослабления тестов off|warn|enforce.
+    /// Код-дефолт off; шаблон init ставит enforce.
+    pub weaken: crate::core::weaken::Mode,
     pub lint: bool,
     pub lint_cmd: String,
     pub review: bool,
@@ -148,7 +154,9 @@ impl Default for RunConfig {
             no_ignored: true,
             ignored_allowlist: Vec::new(),
             freeze: false,
+            freeze_required: false,
             freeze_allow: Vec::new(),
+            weaken: crate::core::weaken::Mode::Off,
             lint: true,
             lint_cmd: String::new(),
             review: true,

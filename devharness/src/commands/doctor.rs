@@ -144,21 +144,39 @@ pub fn doctor(store: &Store, cfg: &RunConfig, root: &Path) -> anyhow::Result<()>
         say("ok   mutation-гейт выключен");
     }
 
-    // A6: FREEZE без заявленного scope — не tripwire, а пропуск (см.
-    // run::freeze_gate). Пустой allowlist у ВСЕХ открытых item'ов = сигнал,
-    // что гейт включён вхолостую: спека должна объявить FILES:.
+    // A6/F-2: FREEZE без заявленного scope. При FREEZE_REQUIRED=1 это
+    // SpecBlock на run, а не «пропуск с логом»; no-files — записанный обход.
+    if cfg.freeze_required && !cfg.freeze {
+        say("FAIL FREEZE_REQUIRED=1, но FREEZE=0 — devh run откажет: включи FREEZE=1 или выключи FREEZE_REQUIRED");
+        fail = fail.saturating_add(1);
+        failed.push("FREEZE_REQUIRED=1 при FREEZE=0".into());
+    }
+    match cfg.weaken {
+        crate::core::weaken::Mode::Off => {
+            say("..   WEAKEN=off — детектор ослабления тестов выключен")
+        }
+        m => say(&format!(
+            "ok   WEAKEN={} (детектор ослабления тестов)",
+            m.name()
+        )),
+    }
     if cfg.freeze {
         let unscoped: Vec<ItemId> = store
             .items()
             .into_iter()
             .filter(|i| i.status != Status::Done)
             .filter(|i| {
-                store
-                    .read(item_rel(&i.id, "spec.md"))
-                    .as_deref()
-                    .map(crate::commands::new::file_globs)
-                    .filter(|g| !g.is_empty())
-                    .is_none()
+                let no_files = store
+                    .read(item_rel(&i.id, "no-files"))
+                    .map(|s| !s.trim().is_empty())
+                    .unwrap_or(false);
+                !no_files
+                    && store
+                        .read(item_rel(&i.id, "spec.md"))
+                        .as_deref()
+                        .map(crate::commands::new::file_globs)
+                        .filter(|g| !g.is_empty())
+                        .is_none()
             })
             .map(|i| i.id)
             .collect();
@@ -168,12 +186,22 @@ pub fn doctor(store: &Store, cfg: &RunConfig, root: &Path) -> anyhow::Result<()>
             say("ok   FREEZE: у всех открытых спек есть FILES: (scope заявлен)");
         } else {
             let names: Vec<String> = unscoped.iter().map(|i| i.dir_name()).collect();
-            say(&format!(
-                "WARN FREEZE=1, но scope не заявлен: {} ({}) — гейт будет пропущен с логом; добавь секцию FILES: в спеку (глобы по строке) или FREEZE_ALLOW",
-                unscoped.len(),
-                names.join(", ")
-            ));
-            warn = warn.saturating_add(1);
+            if cfg.freeze_required {
+                say(&format!(
+                    "FAIL FREEZE_REQUIRED=1, но scope не заявлен: {} ({}) — devh run откажет; добавь FILES: в спеку или --no-files \"причина\"",
+                    unscoped.len(),
+                    names.join(", ")
+                ));
+                fail = fail.saturating_add(1);
+                failed.push(format!("scope не заявлен: {}", names.join(", ")));
+            } else {
+                say(&format!(
+                    "WARN FREEZE=1, но scope не заявлен: {} ({}) — гейт будет пропущен с логом; добавь секцию FILES: в спеку (глобы по строке) или FREEZE_ALLOW",
+                    unscoped.len(),
+                    names.join(", ")
+                ));
+                warn = warn.saturating_add(1);
+            }
         }
     }
 

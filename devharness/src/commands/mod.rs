@@ -22,7 +22,7 @@ use crate::core::types::{CrapCfg, ItemId, MutateCfg, RunConfig};
 use crate::shell::store::{Item, Store};
 use crate::Cmd;
 
-pub const CONFIG_KEYS: [&str; 41] = [
+pub const CONFIG_KEYS: [&str; 43] = [
     "VERIFY",
     "BOOTSTRAP",
     "AGENT",
@@ -54,7 +54,9 @@ pub const CONFIG_KEYS: [&str; 41] = [
     "NO_IGNORED",
     "IGNORED_ALLOWLIST",
     "FREEZE",
+    "FREEZE_REQUIRED",
     "FREEZE_ALLOW",
+    "WEAKEN",
     "TRIPWIRE",
     "PROTECTED",
     "VERIFY_RETRIES",
@@ -98,6 +100,12 @@ pub fn load_config(root: &Path) -> anyhow::Result<RunConfig> {
             }
         })
         .unwrap_or(d)
+    };
+    let weaken = match g("WEAKEN") {
+        Some(v) if !v.trim().is_empty() => {
+            crate::core::weaken::Mode::parse(&v).map_err(|e| anyhow::anyhow!("devh: {e}"))?
+        }
+        _ => crate::core::weaken::Mode::Off,
     };
     let tripwire = match g("TRIPWIRE") {
         Some(v) if !v.trim().is_empty() => {
@@ -168,6 +176,8 @@ pub fn load_config(root: &Path) -> anyhow::Result<RunConfig> {
         no_ignored: boolv("NO_IGNORED", true),
         ignored_allowlist,
         freeze: boolv("FREEZE", false),
+        freeze_required: boolv("FREEZE_REQUIRED", false),
+        weaken,
         tripwire,
         protected: g("PROTECTED")
             .map(|v| {
@@ -297,7 +307,14 @@ pub fn dispatch(cmd: &Cmd, root: &Path) -> anyhow::Result<()> {
             arg,
             no_red,
             no_crap,
-        } => new::new_cmd(&store, Some(arg), no_red.as_deref(), no_crap.as_deref())?,
+            no_files,
+        } => new::new_cmd(
+            &store,
+            Some(arg),
+            no_red.as_deref(),
+            no_crap.as_deref(),
+            no_files.as_deref(),
+        )?,
         Cmd::Auto { from, max } => auto::auto(&store, &cfg, from.as_deref(), max.unwrap_or(0))?,
         Cmd::List => misc::list(&store, &cfg),
         Cmd::Hint { id } => {

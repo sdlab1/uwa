@@ -79,6 +79,9 @@ base_env() {
   export HARNESS_BENCH='' HARNESS_MAX_ACTIVE=3 HARNESS_MAX_FIX=3 HARNESS_AGENT_TIMEOUT=60
   export HARNESS_LOG_DAYS=30 HARNESS_NO_IGNORED=1 T_MUT_GOOD="$T/mut-good"
   export HARNESS_REVIEW=0 HARNESS_LINT=1
+  # F-2: старые сценарии не объявляют FILES:; новый обязательный scope
+  # проверяется отдельными F-2 тестами (там HARNESS_FREEZE_REQUIRED=1).
+  export HARNESS_FREEZE_REQUIRED=0
   # сброс гейтов, которые экспортят отдельные секции (иначе утекают в следующие)
   unset HARNESS_CRAP HARNESS_CRAP_SCOPE HARNESS_CRAP_MAX
   unset HARNESS_RED_MUTATE HARNESS_RED_MIN_KILL

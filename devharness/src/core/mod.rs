@@ -16,3 +16,4 @@ pub mod tripwire;
 pub mod tui;
 pub mod types;
 pub mod watch;
+pub mod weaken;

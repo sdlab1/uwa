@@ -13,6 +13,7 @@ pub enum Cmd {
         arg: String,
         no_red: Option<String>,
         no_crap: Option<String>,
+        no_files: Option<String>,
     },
     Auto {
         from: Option<String>,
@@ -105,7 +106,8 @@ impl Cmd {
             Command::new("new")
                 .arg(Arg::new("arg").index(1).required(true))
                 .arg(Arg::new("no_red").long("no-red").action(ArgAction::Set))
-                .arg(Arg::new("no_crap").long("no-crap").action(ArgAction::Set)),
+                .arg(Arg::new("no_crap").long("no-crap").action(ArgAction::Set))
+                .arg(Arg::new("no_files").long("no-files").action(ArgAction::Set)),
             Command::new("auto")
                 .arg(Arg::new("from").long("from").action(ArgAction::Set))
                 .arg(
@@ -224,10 +226,12 @@ impl Cmd {
                     .clone();
                 let no_red = m.get_one::<String>("no_red").cloned();
                 let no_crap = m.get_one::<String>("no_crap").cloned();
+                let no_files = m.get_one::<String>("no_files").cloned();
                 Ok(Cmd::New {
                     arg,
                     no_red,
                     no_crap,
+                    no_files,
                 })
             }
             Some("auto") => {

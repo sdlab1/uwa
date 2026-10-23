@@ -140,14 +140,36 @@ fn write_files_list(dir: &std::path::Path, spec: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// F-2.1: записанный обход обязательного scope. Причина обязательна:
+/// пустой файл не считается обходом (freeze_gate увидит «scope не заявлен»).
+fn write_no_files(dir: &std::path::Path, reason: Option<&str>) -> anyhow::Result<()> {
+    let Some(reason) = reason else {
+        return Ok(());
+    };
+    let reason = reason.trim();
+    anyhow::ensure!(
+        !reason.is_empty(),
+        "devh: --no-files требует непустую причину"
+    );
+    std::fs::write(dir.join("no-files"), reason)?;
+    Ok(())
+}
+
 pub fn new_cmd(
     store: &Store,
     arg: Option<&str>,
     no_red: Option<&str>,
     no_crap: Option<&str>,
+    no_files: Option<&str>,
 ) -> anyhow::Result<()> {
     let c = colors();
     let arg = arg.ok_or_else(|| anyhow::anyhow!("devh new \"title\""))?;
+    if let Some(reason) = no_files {
+        anyhow::ensure!(
+            !reason.trim().is_empty(),
+            "devh: --no-files требует непустую причину"
+        );
+    }
 
     if let Ok(n) = arg.parse::<u32>() {
         let todo = store.root().join(format!("todo/{n}.md"));
@@ -185,6 +207,7 @@ pub fn new_cmd(
             }
             write_contract(&d, &spec)?;
             write_files_list(&d, &spec)?;
+            write_no_files(&d, no_files)?;
             drop(_g);
             println!(
                 "{}OK {}: {} (спека из todo/{n}.md){}{}{}",
@@ -229,10 +252,13 @@ pub fn new_cmd(
         }
         write_contract(&d, &spec)?;
         write_files_list(&d, &spec)?;
+        write_no_files(&d, no_files)?;
         (id, d)
     } else {
         let spec = read_spec_stdin()?;
-        create_item(store, title, &spec, no_red, no_crap)?
+        let (id, d) = create_item(store, title, &spec, no_red, no_crap)?;
+        write_no_files(&d, no_files)?;
+        (id, d)
     };
     println!(
         "{}OK {}: {} (спека: {}){}{}{}",

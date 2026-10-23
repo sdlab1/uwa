@@ -117,7 +117,9 @@ pub fn init(root: &Path) -> anyhow::Result<()> {
     let lint_cmd = env_or("LINT_CMD", "");
     let review = env_num_or("REVIEW", 1);
     let freeze = env_num_or("FREEZE", 1);
+    let freeze_required = env_num_or("FREEZE_REQUIRED", 1);
     let freeze_allow = env_or("FREEZE_ALLOW", "");
+    let weaken = env_or("WEAKEN", "enforce");
     let tripwire = env_or("TRIPWIRE", "enforce");
     let protected = env_or("PROTECTED", "");
     let mut c = String::new();
@@ -180,8 +182,11 @@ pub fn init(root: &Path) -> anyhow::Result<()> {
         "REVIEW_DIFF_MAX=2000        # F-0.3: порог строк диффа для ревью; превышение = SpecBlock (дроби задачу, это спека, не агент). 0 = без лимита"
     );
     c += &format!("FREEZE={freeze}                    # 1 = A6: дифф сессии не выходит за заявленные файлы (первый гейт, дешевле VERIFY)\n");
+    c += &format!("FREEZE_REQUIRED={freeze_required}             # F-2.1: 1 = scope обязателен; пусто без --no-files = SpecBlock (rc=1), не Pass\n");
     c += &format!("FREEZE_ALLOW='{freeze_allow}'          # глобальный allowlist FREEZE: глобы через пробел ('src/* *.md'; per-item — секция FILES: в спеке)\n");
-    c += "#   FREEZE: allowlist = FILES: спеки (items/W-NNN/files, глобы по строке) + FREEZE_ALLOW; пусто у обоих = гейт пропущен с логом\n";
+    c += &format!("WEAKEN='{weaken}'                 # F-2.2: off|warn|enforce — детектор ослабления тестов по diff (inline #[cfg(test)] тоже)\n");
+    c += "#   FREEZE: allowlist = FILES: спеки (items/W-NNN/files, глобы по строке) + FREEZE_ALLOW; пусто у обоих = гейт пропущен с логом (при FREEZE_REQUIRED=0)\n";
+    c += "#   WEAKEN: enforce = находки -> Fail(Freeze) (агент откатывает); warn = лог+Pass; обход: items/W-NNN/allow-weaken (файл | причина)\n";
     c += "#   правка tests/** — только через записанный обход items/W-NNN/allow-test-edit (симметрия no-crap): devh run остановится и попросит причину\n";
     c += &format!("TRIPWIRE='{tripwire}'          # F-1: off|warn|enforce — защита входов гейтов от правок агента (снимок HEAD/refs/файлов + откат)\n");
     c += &format!("PROTECTED='{protected}'         # доп. защищённые глобы через пробел (относительно worktree); allow — items/W-NNN/allow-protected: путь | причина\n");

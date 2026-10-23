@@ -151,11 +151,7 @@ pub fn build_coverage_index(wt: &Path, store_root: &Path) -> Result<CoverageInde
         .envs(env.iter().copied())
         .output()
         .context("cargo test --no-run failed")?;
-    ensure_success(
-        "cargo test --no-run",
-        build.status.success(),
-        &build.stderr,
-    )?;
+    ensure_success("cargo test --no-run", build.status.success(), &build.stderr)?;
 
     // Прогон тестов для генерации профиля (только lib+tests бинари)
     let test_run = Command::new("cargo")
@@ -182,11 +178,7 @@ pub fn build_coverage_index(wt: &Path, store_root: &Path) -> Result<CoverageInde
         .args(["merge", "-sparse", profraw_str, "-o", profdata_str])
         .output()
         .context("llvm-profdata merge failed")?;
-    ensure_success(
-        "llvm-profdata merge",
-        merge.status.success(),
-        &merge.stderr,
-    )?;
+    ensure_success("llvm-profdata merge", merge.status.success(), &merge.stderr)?;
 
     // 4. llvm-cov show --format=json
     let object = find_test_binary(wt, "devh")?;
@@ -534,7 +526,9 @@ mod tests {
         );
         let mut wrong_version = index_with(7, "bin::t");
         wrong_version.version = CoverageIndex::VERSION.saturating_add(1);
-        wrong_version.save(dir.path()).unwrap_or_else(|_| unreachable!());
+        wrong_version
+            .save(dir.path())
+            .unwrap_or_else(|_| unreachable!());
         assert!(
             CoverageIndex::load_if_valid(dir.path(), "hash-1").is_none(),
             "чужая версия -> None"
@@ -587,7 +581,8 @@ mod tests {
         let h1 = compute_test_files_hash(wt).unwrap_or_else(|_| unreachable!());
         let h2 = compute_test_files_hash(wt).unwrap_or_else(|_| unreachable!());
         assert_eq!(h1, h2, "одинаковое дерево -> одинаковый хэш");
-        std::fs::write(wt.join("tests/a.rs"), "fn a() { } // изменено").unwrap_or_else(|_| unreachable!());
+        std::fs::write(wt.join("tests/a.rs"), "fn a() { } // изменено")
+            .unwrap_or_else(|_| unreachable!());
         let h3 = compute_test_files_hash(wt).unwrap_or_else(|_| unreachable!());
         assert_ne!(h1, h3, "изменение тест-файла меняет хэш");
     }
@@ -630,8 +625,12 @@ mod tests {
     #[test]
     fn find_test_binary_without_candidates_errors() {
         let dir = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
-        std::fs::create_dir_all(dir.path().join("target/debug/deps")).unwrap_or_else(|_| unreachable!());
-        assert!(find_test_binary(dir.path(), "devh").is_err(), "нет бинаря -> Err");
+        std::fs::create_dir_all(dir.path().join("target/debug/deps"))
+            .unwrap_or_else(|_| unreachable!());
+        assert!(
+            find_test_binary(dir.path(), "devh").is_err(),
+            "нет бинаря -> Err"
+        );
     }
 
     /// РЕАЛЬНЫЙ формат `nextest list --message-format=json` (nextest 0.9+):
@@ -656,12 +655,17 @@ mod tests {
         }"#;
         let map = parse_nextest_list(json);
         assert_eq!(map.len(), 3, "все тесты трёх сьютов: {map:?}");
-        assert!(map.contains_key("devh::a::one"), "id = binary-id::test: {map:?}");
+        assert!(
+            map.contains_key("devh::a::one"),
+            "id = binary-id::test: {map:?}"
+        );
         assert!(map.contains_key("devh::integration::observability"));
         let one = map.get("devh::a::one").unwrap_or_else(|| unreachable!());
         assert_eq!(one.binary, "devh");
         assert_eq!(one.test_name, "a::one");
-        let int = map.get("devh::integration::observability").unwrap_or_else(|| unreachable!());
+        let int = map
+            .get("devh::integration::observability")
+            .unwrap_or_else(|| unreachable!());
         assert_eq!(int.binary, "devh::integration");
     }
 
@@ -746,7 +750,11 @@ mod tests {
 
     #[test]
     fn normalize_path_keeps_relative_and_strips_cwd_prefix() {
-        assert_eq!(normalize_path("src/lib.rs"), "src/lib.rs", "относительный как есть");
+        assert_eq!(
+            normalize_path("src/lib.rs"),
+            "src/lib.rs",
+            "относительный как есть"
+        );
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"));
         let under = cwd.join("src").join("x.rs");
         let got = normalize_path(&under.to_string_lossy());

@@ -28,7 +28,7 @@
 | ID | Слабость | Где в коде | Шаг |
 |---|---|---|---|
 | W1 | «Агент не трогает git» держится только на промпте; нет проверки HEAD/refs, нет защиты `red.cmd` и конфигов гейтов | `prompt.rs`, `run.rs` | F-1, F-7 |
-| W2 | FREEZE пропускается без `FILES:` (только лог); inline-тесты Rust в файлах из scope можно ослабить | `run.rs::freeze_gate`, `core/gates.rs::freeze_violations` | F-2 |
+| W2 | FREEZE пропускает пустой scope при `FREEZE_REQUIRED=0` (только лог); inline-тесты Rust в файлах из scope можно ослабить | `run.rs::freeze_gate`, `core/gates.rs::freeze_violations`, `core/weaken.rs` | F-2 |
 | W3 | Мутгейт: 0 мутантов = Pass; `exclude_re`/`mutants::skip` не охраняются; `commands/**` не мутируется. Timeout/unviable уже не «пойман»: `timeout > 0` и `unviable > 0` → Fail | `gates.rs::judge_mutation`, `cargo-mutants.toml` | F-3 |
 | W4 | REVIEW — та же модель, самое мягкое звено | `run.rs::review_gate` | F-4 (+E5/C2) |
 | W5 | Хрупкий парсинг stdout инструментов (cargo-mutants, muex, CRAP) | `gates.rs::parse_*` | F-5 |
@@ -392,15 +392,18 @@ RED: cargo test -p devh --lib weaken_
 
 ### F-2.1 `FILES:` обязателен
 
-Парсинг `FILES:` повторён в четырёх местах `new.rs` **(проверено: строки ~155, 203, 269, 299)**. Свести к одной функции:
+Парсинг `FILES:` один — `new::file_globs` (инлайн и буллеты); отдельного
+`scope_for` нет, чтобы не плодить второй парсер. `devh new` принимает
+`--no-files "причина"` (пустая причина — ошибка) и пишет
+`items/W-NNN/no-files`.
 
-```rust
-pub fn scope_for(spec: &str, no_files: Option<&str>) -> Result<Scope, ScopeError>;
-```
-
-- спека без `FILES:` отклоняется; обход `devh new … --no-files "причина"` пишет `items/W-NNN/no-files`;
-- `freeze_gate` при пустом allow и `FREEZE_REQUIRED=1` даёт `SpecBlock` (блокер спеки, чинит человек), а не тихий Pass с логом;
-- `RunConfig.freeze` в коде по умолчанию `false`, шаблон init ставит `1`: `require_gates` должен требовать `freeze` и `freeze_required` одновременно, иначе репо без `devh init` остаётся без гейта.
+- `FREEZE_REQUIRED=1 && FREEZE=0` — `require_gates` отказывает rc=1;
+- `freeze_gate` при пустом allow, `FREEZE_REQUIRED=1` и без `no-files` даёт
+  `SpecBlock Freeze "FILES: не заявлен"` (блокер спеки, чинит человек), а не
+  тихий Pass; записанный `no-files` — Pass с причиной в логе;
+- `RunConfig.freeze` в коде по умолчанию `false`, `freeze_required` — тоже
+  `false`; шаблон init ставит `FREEZE=1` и `FREEZE_REQUIRED=1`. Репо без
+  `devh init` остаётся без scope-гейта (явный код-дефолт).
 
 ### F-2.2 Детектор
 
@@ -421,9 +424,19 @@ pub fn weakening(diff: &str, allowed: &[(String, String)]) -> Vec<Finding>;
 - удалённая `fn name` под `#[test]`, чьё имя не встретилось среди добавленных, даёт `TestFnRemoved`;
 - добавленные `#[ignore]`, `#[should_panic]`, `mutants::skip`: отдельные находки (первая пересекается с NO-IGNORED, но находится раньше и с точным файлом).
 
-**Обход:** `items/W-NNN/allow-weaken` со строками `файл | причина`. Старый `allow-test-edit` остаётся для `tests/**` (совместимость).
+**Обход:** `items/W-NNN/allow-weaken` со строками `файл | причина`
+(пустая причина не действует). Старый `allow-test-edit` остаётся для
+`tests/**` (совместимость).
 
-Результат вливается в `freeze_gate`: один гейт, одно `fix_prompt`, новый вариант `Gate` не нужен.
+**Diff:** отдельный `clean_diff` в `run.rs` — `git diff HEAD --no-renames`
+для tracked + `git diff --no-index /dev/null <path>` для untracked. Не
+используется `shell/git.rs::diff_text`, потому что он делает `git add -N`
+(мутация индекса агента).
+
+**Режимы:** `WEAKEN=off` (код-дефолт) — детектор выключен; `warn` — находки
+в `freeze.log`, вердикт Pass; `enforce` (init) — находки дают
+`Fail(Gate::Freeze)`, агент может откатить. Результат вливается в
+`freeze_gate`: один гейт, одно `fix_prompt`, новый вариант `Gate` не нужен.
 
 ### Тесты (диффы строками)
 

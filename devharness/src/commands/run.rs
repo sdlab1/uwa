@@ -8,6 +8,7 @@ use crate::core::runstate;
 use crate::core::state::{self, ClaimAction, Event};
 use crate::core::tripwire::{CheckOutcome, Mode};
 use crate::core::types::{CrapCfg, ItemId, MutateCfg, RunConfig};
+use crate::core::weaken;
 use crate::prompt;
 use crate::shell::color::colors;
 use crate::shell::git;
@@ -351,6 +352,11 @@ fn require_gates(cfg: &RunConfig) -> anyhow::Result<()> {
     if cfg.mutate.is_none() {
         anyhow::bail!(
             "devh: MUTATE-гейт ОБЯЗАТЕЛЕН, «пропуск» запрещён — пропиши MUTATE в .harness/config (gobot: cd gobot + mix mutants/muex; rust: cargo-mutants)"
+        );
+    }
+    if cfg.freeze_required && !cfg.freeze {
+        anyhow::bail!(
+            "devh: FREEZE_REQUIRED=1, но FREEZE=0 — scope-гейт обязателен: включи FREEZE=1 или выключи FREEZE_REQUIRED"
         );
     }
     Ok(())
@@ -990,7 +996,7 @@ fn give_up(
             eprintln!("{missing}");
         }
         gates::FailureKind::Spec => {
-            let Verdict::SpecBlock { gate, .. } = &stop.verdict else {
+            let Verdict::SpecBlock { gate, tail } = &stop.verdict else {
                 unreachable!("класс Spec несёт SpecBlock-вердикт")
             };
             eprintln!(
@@ -999,6 +1005,9 @@ fn give_up(
                 gate.name(),
                 c.z
             );
+            // F-2.1: причина SpecBlock (например «FILES: не заявлен») должна
+            // быть видна в консоли, а не только в logs/W-NNN-freeze.log.
+            eprintln!("{tail}");
         }
     }
     die(store, id, code)
@@ -1127,21 +1136,50 @@ fn agent_env(id: &ItemId, wt: &Path, store: &Store, cfg: &RunConfig) -> Vec<(Str
 /// Store/worktree: пустой allowlist, записанный обход и правка вне scope —
 /// три разных судьбы, и мутант в любой из них обязан быть CAUGHT.
 /// `git`-ошибка сюда НЕ входит: она решается раньше и даёт `EnvBlocked`.
-fn freeze_verdict(changed: &[String], allow: &[String], test_edit: bool) -> (String, Verdict) {
+fn freeze_verdict(
+    changed: &[String],
+    allow: &[String],
+    test_edit: bool,
+    freeze_required: bool,
+    no_files: Option<&str>,
+    findings: &[weaken::Finding],
+    weaken_mode: weaken::Mode,
+) -> (String, Verdict) {
     if allow.is_empty() {
+        if let Some(reason) = no_files {
+            return (
+                format!(
+                    "freeze: scope не задан (обход no-files: {}) — гейт пропущен\n",
+                    reason.trim()
+                ),
+                Verdict::Pass,
+            );
+        }
+        if freeze_required {
+            let tail = "FREEZE: FILES: не заявлен — scope обязателен (FREEZE_REQUIRED=1); добавь FILES: в спеку или --no-files \"причина\"".to_string();
+            return (
+                format!("freeze: {tail}\n"),
+                Verdict::SpecBlock {
+                    gate: Gate::Freeze,
+                    tail,
+                },
+            );
+        }
         return (
             "freeze: scope не задан (нет FILES: в спеке и FREEZE_ALLOW) — гейт пропущен\n".into(),
             Verdict::Pass,
         );
     }
     let mut log = format!(
-        "freeze: allowlist [{}]; обход allow-test-edit: {}; дифф: {}\n",
+        "freeze: allowlist [{}]; обход allow-test-edit: {}; no-files: {}; weaken: {}; дифф: {}\n",
         allow.join(", "),
         if test_edit {
             "записан"
         } else {
             "нет"
         },
+        no_files.map(str::trim).unwrap_or("нет"),
+        weaken_mode.name(),
         if changed.is_empty() {
             "пусто".to_string()
         } else {
@@ -1149,19 +1187,104 @@ fn freeze_verdict(changed: &[String], allow: &[String], test_edit: bool) -> (Str
         }
     );
     let violations = gates::freeze_violations(changed, allow, test_edit);
-    let verdict = if violations.is_empty() {
-        Verdict::Pass
+    let active_findings: Vec<&weaken::Finding> = if weaken_mode == weaken::Mode::Off {
+        Vec::new()
     } else {
-        // причины — и в лог, и в tail: give_up печатает только имя гейта,
-        // поэтому доказательство нарушения живёт в logs/W-NNN-freeze.log
-        log.push_str(&violations.join("\n"));
-        log.push('\n');
-        Verdict::Fail {
-            gate: Gate::Freeze,
-            tail: violations.join("\n"),
-        }
+        findings.iter().collect()
     };
+    let mut reasons = violations.clone();
+    if !active_findings.is_empty() {
+        log.push_str(&format!(
+            "freeze: weaken={} находок {}:\n",
+            weaken_mode.name(),
+            active_findings.len()
+        ));
+        for f in &active_findings {
+            log.push_str(&format!("  {}\n", f.label()));
+            reasons.push(f.label());
+        }
+    }
+    let verdict =
+        if reasons.is_empty() || (weaken_mode == weaken::Mode::Warn && violations.is_empty()) {
+            Verdict::Pass
+        } else {
+            // причины — и в лог, и в tail: give_up печатает только имя гейта,
+            // поэтому доказательство нарушения живёт в logs/W-NNN-freeze.log
+            if !violations.is_empty() {
+                log.push_str(&violations.join("\n"));
+                log.push('\n');
+            }
+            Verdict::Fail {
+                gate: Gate::Freeze,
+                tail: reasons.join("\n"),
+            }
+        };
     (log, verdict)
+}
+
+/// F-2: чистый diff без `git add -N` (он мутирует индекс агента).
+/// Tracked — `git diff HEAD --no-renames`; untracked добавляем через
+/// `git diff --no-index /dev/null <path>` (exit 1 = есть отличия).
+fn clean_diff(wt: &Path) -> anyhow::Result<String> {
+    let tracked = std::process::Command::new("git")
+        .args([
+            "-c",
+            "core.quotepath=off",
+            "diff",
+            "HEAD",
+            "--no-renames",
+            "--no-color",
+            "--no-ext-diff",
+            "--unified=3",
+        ])
+        .current_dir(wt)
+        .output()
+        .map_err(|e| anyhow::anyhow!("devh: git diff не запустился ({e})"))?;
+    if !tracked.status.success() {
+        anyhow::bail!(
+            "git diff HEAD: {}",
+            String::from_utf8_lossy(&tracked.stderr).trim()
+        );
+    }
+    let mut diff = String::from_utf8_lossy(&tracked.stdout).to_string();
+    let untracked = std::process::Command::new("git")
+        .args(["ls-files", "-z", "--others", "--exclude-standard"])
+        .current_dir(wt)
+        .output()
+        .map_err(|e| anyhow::anyhow!("devh: git ls-files не запустился ({e})"))?;
+    if !untracked.status.success() {
+        anyhow::bail!(
+            "git ls-files: {}",
+            String::from_utf8_lossy(&untracked.stderr).trim()
+        );
+    }
+    for path in String::from_utf8_lossy(&untracked.stdout)
+        .split('\0')
+        .filter(|p| !p.is_empty())
+    {
+        let out = std::process::Command::new("git")
+            .args([
+                "diff",
+                "--no-index",
+                "--no-color",
+                "--unified=3",
+                "--",
+                "/dev/null",
+                path,
+            ])
+            .current_dir(wt)
+            .output()
+            .map_err(|e| anyhow::anyhow!("devh: git diff --no-index не запустился ({e})"))?;
+        if out.status.success() || out.status.code() == Some(1) {
+            diff.push_str(&String::from_utf8_lossy(&out.stdout));
+        } else {
+            anyhow::bail!(
+                "git diff --no-index {path}: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+    }
+    Ok(diff)
 }
 
 fn freeze_gate(store: &Store, cfg: &RunConfig, wt: &Path, id: &ItemId) -> (String, Verdict) {
@@ -1191,7 +1314,39 @@ fn freeze_gate(store: &Store, cfg: &RunConfig, wt: &Path, id: &ItemId) -> (Strin
         .read(item_rel(id, "allow-test-edit"))
         .map(|s| !s.trim().is_empty())
         .unwrap_or(false);
-    freeze_verdict(&changed, &allow, test_edit)
+    let no_files = store
+        .read(item_rel(id, "no-files"))
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let allowed_weaken = store
+        .read(item_rel(id, "allow-weaken"))
+        .map(|s| weaken::parse_allow(&s))
+        .unwrap_or_default();
+    let findings = if cfg.weaken != weaken::Mode::Off && !allow.is_empty() {
+        match clean_diff(wt) {
+            Ok(diff) => weaken::weakening(&diff, &allowed_weaken),
+            Err(e) => {
+                let missing = format!(
+                    "FREEZE: diff для WEAKEN нечитаем ({e}) — детектор ослабления не может работать"
+                );
+                return (
+                    format!("freeze: {missing}\n"),
+                    Verdict::EnvBlocked { missing },
+                );
+            }
+        }
+    } else {
+        Vec::new()
+    };
+    freeze_verdict(
+        &changed,
+        &allow,
+        test_edit,
+        cfg.freeze_required,
+        no_files.as_deref(),
+        &findings,
+        cfg.weaken,
+    )
 }
 
 /// C1: контракт задачи — МЯГКАЯ проверка по диффу (НЕ гейт): goal/observe
@@ -3205,6 +3360,7 @@ mod tests {
     };
     use crate::core::gates::{Gate, Verdict};
     use crate::core::types::MutateCfg;
+    use crate::core::weaken;
     use crate::shell::git;
     use std::path::Path;
 
@@ -3407,14 +3563,69 @@ mod tests {
 
     #[test]
     fn failclosed_freeze_empty_scope_is_a_logged_pass_not_a_silent_one() {
-        let (log, v) = freeze_verdict(&["src/calc.sh".into()], &[], false);
+        let (log, v) = freeze_verdict(
+            &["src/calc.sh".into()],
+            &[],
+            false,
+            false,
+            None,
+            &[],
+            weaken::Mode::Off,
+        );
         assert_eq!(v, Verdict::Pass);
         assert!(log.contains("scope не задан"), "{log}");
     }
 
     #[test]
+    fn f2_freeze_required_empty_scope_is_spec_block() {
+        let (log, v) = freeze_verdict(
+            &["src/calc.sh".into()],
+            &[],
+            false,
+            true,
+            None,
+            &[],
+            weaken::Mode::Off,
+        );
+        match v {
+            Verdict::SpecBlock { gate, tail } => {
+                assert_eq!(gate, Gate::Freeze);
+                assert!(tail.contains("FILES: не заявлен"), "{tail}");
+            }
+            other => unreachable!("ожидался SpecBlock, получено {other:?}"),
+        }
+        assert!(log.contains("FILES: не заявлен"), "{log}");
+    }
+
+    #[test]
+    fn f2_no_files_reason_turns_required_scope_into_logged_pass() {
+        let (log, v) = freeze_verdict(
+            &["src/calc.sh".into()],
+            &[],
+            false,
+            true,
+            Some("задача только про доки"),
+            &[],
+            weaken::Mode::Off,
+        );
+        assert_eq!(v, Verdict::Pass);
+        assert!(
+            log.contains("обход no-files: задача только про доки"),
+            "{log}"
+        );
+    }
+
+    #[test]
     fn failclosed_freeze_out_of_scope_is_fail_with_reason_in_tail() {
-        let (log, v) = freeze_verdict(&["tests/all.sh".into()], &["src/calc.sh".into()], false);
+        let (log, v) = freeze_verdict(
+            &["tests/all.sh".into()],
+            &["src/calc.sh".into()],
+            false,
+            false,
+            None,
+            &[],
+            weaken::Mode::Off,
+        );
         match v {
             Verdict::Fail { gate, tail } => {
                 assert_eq!(gate, Gate::Freeze);
@@ -3430,12 +3641,82 @@ mod tests {
 
     #[test]
     fn failclosed_freeze_recorded_bypass_legitimizes_tests() {
-        let (_, v) = freeze_verdict(&["tests/all.sh".into()], &["src/calc.sh".into()], true);
+        let (_, v) = freeze_verdict(
+            &["tests/all.sh".into()],
+            &["src/calc.sh".into()],
+            true,
+            false,
+            None,
+            &[],
+            weaken::Mode::Off,
+        );
         assert_eq!(
             v,
             Verdict::Pass,
             "записанный обход законен (симметрия no-crap)"
         );
+    }
+
+    #[test]
+    fn f2_weaken_enforce_fails_freeze_and_names_finding() {
+        let finding = weaken::Finding::AssertsRemoved {
+            file: "src/a.rs".into(),
+            removed: 2,
+            added: 0,
+        };
+        let (log, v) = freeze_verdict(
+            &["src/a.rs".into()],
+            &["src/a.rs".into()],
+            false,
+            false,
+            None,
+            std::slice::from_ref(&finding),
+            weaken::Mode::Enforce,
+        );
+        match v {
+            Verdict::Fail { gate, tail } => {
+                assert_eq!(gate, Gate::Freeze);
+                assert!(tail.contains("удалено ассертов"), "{tail}");
+            }
+            other => unreachable!("ожидался Fail, получено {other:?}"),
+        }
+        assert!(log.contains("weaken=enforce"), "{log}");
+    }
+
+    #[test]
+    fn f2_weaken_warn_logs_but_passes() {
+        let finding = weaken::Finding::IgnoreAdded {
+            file: "src/a.rs".into(),
+        };
+        let (log, v) = freeze_verdict(
+            &["src/a.rs".into()],
+            &["src/a.rs".into()],
+            false,
+            false,
+            None,
+            std::slice::from_ref(&finding),
+            weaken::Mode::Warn,
+        );
+        assert_eq!(v, Verdict::Pass);
+        assert!(log.contains("weaken=warn"), "{log}");
+        assert!(log.contains("#[ignore]"), "{log}");
+    }
+
+    #[test]
+    fn f2_weaken_off_ignores_findings() {
+        let finding = weaken::Finding::IgnoreAdded {
+            file: "src/a.rs".into(),
+        };
+        let (_, v) = freeze_verdict(
+            &["src/a.rs".into()],
+            &["src/a.rs".into()],
+            false,
+            false,
+            None,
+            std::slice::from_ref(&finding),
+            weaken::Mode::Off,
+        );
+        assert_eq!(v, Verdict::Pass);
     }
 
     /// ГЛАВНЫЙ тест F-0.2: `gate_ladder` обязан иметь легальную env-ветку.

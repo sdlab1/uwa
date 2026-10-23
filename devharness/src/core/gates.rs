@@ -1960,10 +1960,7 @@ test result: FAILED. 1 passed; 1 failed";
     fn freeze_glob_double_star_prefix_matches_root_and_nested_paths() {
         // `**/` — рекурсивный префикс: файл может лежать в корне или в любом
         // вложенном каталоге, но имя после `**/` обязано совпасть целиком.
-        assert!(freeze_glob(
-            "**/cargo-mutants.toml",
-            "cargo-mutants.toml"
-        ));
+        assert!(freeze_glob("**/cargo-mutants.toml", "cargo-mutants.toml"));
         assert!(freeze_glob(
             "**/cargo-mutants.toml",
             "devharness/cargo-mutants.toml"
