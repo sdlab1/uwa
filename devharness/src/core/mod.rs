@@ -4,6 +4,7 @@ pub mod coverage;
 pub mod diff_scope;
 pub mod digest;
 pub mod early;
+pub mod report_fmt;
 pub mod autonomy_sample;
 pub mod early_exit;
 pub mod escapes;
