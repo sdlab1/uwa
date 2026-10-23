@@ -372,9 +372,9 @@ stamp глобальный, поэтому правка любого исход�
 `recheck_finds_caught_from_caught_txt`,
 `recheck_finds_by_place_when_outcomes_json_missing`,
 `recheck_miss_reason_separates_three_causes`,
-`section53_recheck_reads_out_muts_out` (интеграционный: стаб cargo-mutants
-пишет в `<out>/mutants.out` — выживший → rc=1, пойманный → rc=0, нет
-каталога → rc=2 «инструмент не создал output»).
+и интеграционные в `tests/recheck.rs` (стаб cargo-mutants пишет в
+`<out>/mutants.out` — выживший → rc=1, пойманный → rc=0, нет каталога →
+rc=2 «инструмент не создал output»).
 
 ### Тесты
 
