@@ -28,6 +28,11 @@
   R13 никаких «ручных» команд в bash: всё, что нужно от харнесса, делается его подкомандами
   R14 не гадать: непонятно, что делать дальше → `devh next` печатает ровно одну следующую команду
   R15 problem-first: первая проблема останавливает СИНХРОННЫЙ гейт и уходит в fix-промпт (файл, строка, замена, жанр); выключается MUTATE_FIRST_PROBLEM=0
+  R16 коммит-гейт: задача закрывается только с зелёным DoD — devh orch dod <ID> --ack -> devh orch verify <ID> -> devh orch commit <ID> --path <свои пути>
+  R17 мутационный аудит запускает ТОЛЬКО ведущий (адрес: devh orch lead); ведомому — отказ (код 2)
+  R18 НАГРУЗКА-BUILD: cargo build/check/test — не чаще 1 раза в 15 минут (окно берётся devh rate build); полный build/release не запускать
+  R19 CPU/SYSTEM LOAD ≤ 80%: при load > 80% ничего тяжёлого не запускать (ни cargo, ни nextest, ни аудит)
+  R20 аудит — только по непроверенной зоне (файлы или --in-diff дифф), не по всему крейту; мутационный аудит — не чаще 1 раза в 2 часа (окно: devh rate mutation)
 
 === СОСТОЯНИЯ (маршрут) ===
   S0  нет .harness/config                     → devh init
@@ -70,15 +75,16 @@
   devh next                    оракул: ровно одна следующая команда (всегда rc=0)
   devh workflow                печать этого канона из кода
 
-=== ЗАПРЕЩЕНО (R1/R2/R9/R13) ===
-  ✗ cargo mutants / cargo-mutants руками        → только devh mutate
-  ✗ bash devharness/test.sh руками              → только devh test
-  ✗ внешний watcher/sleep-цикл/фоновый скрипт   → только devh mutate watch
-  ✗ ad-hoc разбор логов (grep/awk по outcomes)  → devh mutate problems / status --json
-  ✗ git add/commit/push/rebase/reset/checkout   → devh commit / devh merge
-  ✗ правка артефактов аудита руками             → результат обнуляется
-  ✗ тяжёлые прогоны параллельно и при перегруженном CPU → сначала свежая проверка нагрузки
+=== ЗАПРЕЩЕНО (R1/R2/R9/R13/R17/R18/R19/R20) ===
+  ✗ cargo mutants / cargo-mutants руками        → только devh mutate (R1)
+  ✗ bash devharness/test.sh руками              → только devh test (R8)
+  ✗ внешний watcher/sleep-цикл/фоновый скрипт   → только devh mutate watch (R2/R7)
+  ✗ ad-hoc разбор логов (grep/awk по outcomes)  → devh mutate problems / status --json (R13)
+  ✗ git add/commit/push/rebase/reset/checkout   → devh commit / devh merge (R9/R16)
+  ✗ правка артефактов аудита руками             → результат обнуляется (R12)
+  ✗ тяжёлые прогоны параллельно и при перегруженном CPU → сначала свежая проверка нагрузки (R18/R19)
   ✗ убивать процессы соседнего агента            → ждать или останавливать ТОЛЬКО свой прогон
+  ✗ запускать аудит ведомому (R17), build чаще 15 мин (R18), load > 80% (R19), аудит всего крейту (R20)
 
 === БЕЗОПАСНОСТЬ (соседние агенты) ===
   Тяжёлые проверки (мутации, полный сьют) — последовательно, не параллельно.
