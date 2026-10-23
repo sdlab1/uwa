@@ -127,6 +127,8 @@ pub const CANON: &str = r#"devh mutate — единственный вход в 
                               (--timeout N — ограничить секунды).
   devh mutate problems        руководство к действию: что чинить (файл:строка,
                               замена, жанр, исход). rc=1, если есть проблемы.
+                              Если дерево изменилось после старта, снимок
+                              помечается протухшим: не чини уже исправленное.
   devh mutate verdict         финальный вердикт: 0 = чисто, 1 = дыра
                               (выжил/таймаут/не компилится/неопознанный исход/
                               повреждённые детали/упавший инструмент),
@@ -140,6 +142,8 @@ pub const CANON: &str = r#"devh mutate — единственный вход в 
   • «что сейчас?»         → status
   • «что чинить?»         → problems
   • смотришь в терминал    → watch
+  • дерево изменилось      → stop + перезапуск (next подскажет); verdict
+    после старта               по старому снимку не выносится (rc=2)
 
 Семантика исходов (cargo-mutants 27.1.0):
   ✓ CaughtMutant  — пойман: единственный результат, закрывает вопрос.
@@ -191,6 +195,10 @@ struct State {
     pub mode: String,
     /// Группа процессов cargo-mutants (её гасит `devh mutate stop`).
     pub pgid: i32,
+    /// F-1.8.1: отпечаток дерева на момент старта. Пусто — старый state.json;
+    /// тогда stale-проверка выключена (нельзя доказать протухание).
+    #[serde(default)]
+    pub tree_stamp: String,
 }
 
 fn read_state(root: &Path) -> Option<State> {
@@ -292,6 +300,41 @@ pub fn state_args(root: &Path) -> Vec<String> {
     read_state(root).map(|s| s.args).unwrap_or_default()
 }
 
+/// F-1.8.1: отпечаток содержимого дерева (tracked + untracked, без ignored).
+///
+/// Ошибка git не ломает аудит: пустой отпечаток означает «протухание
+/// доказать нельзя», а не «всё свежее». Молчаливое «свежее» здесь было бы
+/// ложью ровно в тот момент, когда git сломан.
+fn tree_stamp(root: &Path) -> String {
+    let Ok(entries) = crate::shell::git::tree_entries(root) else {
+        return String::new();
+    };
+    // Документация не влияет на cargo-mutants: правка docs/*.md во время
+    // аудита не должна объявлять результат протухшим (ложный перепрогон).
+    let entries: Vec<_> = entries
+        .into_iter()
+        .filter(|e| !e.path.starts_with("docs/") && !e.path.ends_with(".md"))
+        .collect();
+    crate::core::digest::tree_digest(&entries).unwrap_or_default()
+}
+
+/// Дерево изменилось после старта аудита?
+///
+/// `true` — `problems.json`/`verdict` относятся к снимку ДО правок. Оракул
+/// `devh next` не должен вести агента чинить уже исправленное. Пустой
+/// отпечаток (старый state.json / git недоступен) — `false`: поведение
+/// прежнее, без ложных «протухло».
+pub fn audit_stale(root: &Path) -> bool {
+    let Some(st) = read_state(root) else {
+        return false;
+    };
+    if st.tree_stamp.is_empty() {
+        return false;
+    }
+    let now = tree_stamp(root);
+    !now.is_empty() && now != st.tree_stamp
+}
+
 /// Флаги cargo-mutants из состояния (или из аргументов — если состояния нет).
 fn effective_args(root: &Path, args: &[String]) -> Vec<String> {
     match read_state(root) {
@@ -387,6 +430,7 @@ fn start(root: &Path, args: &[String]) -> anyhow::Result<()> {
             cwd: root.display().to_string(),
             mode: "copy".to_string(),
             pgid: 0,
+            tree_stamp: tree_stamp(root),
         },
     )?;
     println!("аудит запущен (супервизор pid {})", child.id());
@@ -415,6 +459,9 @@ fn supervise(root: &Path, args: &[String]) -> anyhow::Result<()> {
     fs::create_dir_all(&dir)?;
     let adir = audit_dir(root, &args);
     let started = now_secs();
+    // F-1.8.1: аудит копирует дерево СЕЙЧАС. Отпечаток фиксируем до запуска
+    // cargo-mutants: если дерево потом изменится, результат — снимок ДО правок.
+    let tree_stamp = tree_stamp(root);
     // Старый вердикт прошлого прогона — в нём «чисто/дыра» для ДРУГОГО
     // аудита. Убираем на старте: пока новый вердикт не записан, его нет
     // (fail-closed), а не «протухший зелёный».
@@ -431,6 +478,7 @@ fn supervise(root: &Path, args: &[String]) -> anyhow::Result<()> {
             cwd: root.display().to_string(),
             mode: "copy".to_string(),
             pgid: 0,
+            tree_stamp: tree_stamp.clone(),
         },
     )?;
 
@@ -469,6 +517,7 @@ fn supervise(root: &Path, args: &[String]) -> anyhow::Result<()> {
                     cwd: root.display().to_string(),
                     mode: "copy".to_string(),
                     pgid: 0,
+                    tree_stamp: tree_stamp.clone(),
                 },
             )?;
             anyhow::bail!("devh mutate: cargo mutants не запустился ({e})");
@@ -594,6 +643,7 @@ fn supervise(root: &Path, args: &[String]) -> anyhow::Result<()> {
             cwd: root.display().to_string(),
             mode: "copy".to_string(),
             pgid,
+            tree_stamp,
         },
     )?;
     Ok(())
@@ -884,6 +934,7 @@ fn status(root: &Path, args: &[String]) -> anyhow::Result<()> {
     let eff = effective_args(root, args);
     let audit = snapshot(root, &eff);
     let aborted_state = aborted(root);
+    let stale = audit_stale(root);
     // Диагноз ПЕРЕД «аудит не запущен»: аудит стартовал, а супервизор умер.
     // Сказать «не запущен» здесь = солгать оператору (он потом скажет
     // «а я его запускал!»).
@@ -901,6 +952,12 @@ fn status(root: &Path, args: &[String]) -> anyhow::Result<()> {
     if stopped(root).is_some() {
         println!("⚠ аудит остановлен по требованию оператора — результата нет (вердикт = rc 2)");
     }
+    if stale {
+        println!(
+            "⚠ дерево изменилось после старта аудита — это снимок ДО правок; \
+             уже исправленные проблемы могут выглядеть живыми (нужен перепрогон)"
+        );
+    }
     if args.iter().any(|a| a == "--json") {
         let json = serde_json::json!({
             "done": audit.done,
@@ -914,12 +971,13 @@ fn status(root: &Path, args: &[String]) -> anyhow::Result<()> {
             "kill_rate": audit.kill_rate(),
             "alive": audit.alive,
             "aborted": aborted_state.is_some(),
+            "stale": stale,
             "exit": audit.exit,
             "malformed": audit.malformed,
             "details_missing": audit.details_missing,
             "details_mismatch": audit.details_mismatch,
             "tool_problem": audit.tool_problem,
-            "blocks_clean": audit.blocks_clean_verdict() || aborted_state.is_some(),
+            "blocks_clean": audit.blocks_clean_verdict() || aborted_state.is_some() || stale,
             "problems": problem_json(&audit),
         });
         println!(
@@ -1058,9 +1116,17 @@ fn problems(root: &Path, args: &[String]) -> anyhow::Result<()> {
     // Проблемы уровня инструмента/деталей — тоже проблемы: чинить нечего,
     // но и «проблем нет» сказать нельзя.
     let mut extra: Vec<String> = Vec::new();
+    let stale = audit_stale(root);
     if stopped(root).is_some() {
         extra.push(
             "⚠ аудит остановлен по требованию оператора — результата нет (вердикт = rc 2)"
+                .to_string(),
+        );
+    }
+    if stale {
+        extra.push(
+            "⚠ дерево изменилось после старта аудита — часть проблем может быть уже \
+             исправлена (снимок ДО правок); сверься с текущим кодом, не чини вслепую"
                 .to_string(),
         );
     }
@@ -1099,6 +1165,7 @@ fn problems(root: &Path, args: &[String]) -> anyhow::Result<()> {
     if args.iter().any(|a| a == "--json") {
         let json = serde_json::json!({
             "count": audit.bad.len(),
+            "stale": stale,
             "problems": problem_json(&audit),
             "tool_problem": audit.tool_problem,
             "malformed": audit.malformed,
@@ -1164,6 +1231,13 @@ fn verdict(root: &Path) -> anyhow::Result<()> {
     }
     if audit.total.is_none() && audit.done == 0 {
         println!("аудит не запущен — нечего вердиктовать (devh mutate start <args>)");
+        crate::commands::die(2);
+    }
+    if audit_stale(root) {
+        println!(
+            "вердикт: не выносим — дерево изменилось после старта аудита, \
+             результат относится к старому снимку; перепрогони тем же прогоном"
+        );
         crate::commands::die(2);
     }
     for l in report_lines(&audit) {
@@ -1265,6 +1339,9 @@ pub fn live_problem_count(root: &Path) -> u32 {
 /// `Some(false)` как «дыра, надо чинить» — инверсия здесь делала бы
 /// чистый аудит «дырой», а дырявый — «чистым».
 pub fn verdict_state(root: &Path) -> Option<bool> {
+    if audit_stale(root) {
+        return None;
+    }
     let eff = effective_args(root, &[]);
     let audit = snapshot(root, &eff);
     verdict_flag(&audit, stopped(root).is_some(), aborted(root).is_some())
@@ -1474,6 +1551,7 @@ mod tests {
             cwd: "/tmp".to_string(),
             mode: "copy".to_string(),
             pgid: 42,
+            tree_stamp: "abc".to_string(),
         };
         let text = serde_json::to_string(&st).unwrap_or_default();
         let back: State = serde_json::from_str(&text).unwrap_or_else(|_| unreachable!());
@@ -1489,6 +1567,61 @@ mod tests {
         assert!(st.cwd.is_empty());
         assert_eq!(st.pgid, 0);
         assert!(st.finished.is_none());
+        assert!(st.tree_stamp.is_empty());
+    }
+
+    /// F-1.8.1: правка файла после старта делает снимок протухшим, а старый
+    /// state.json без отпечатка не объявляет ложное «протухло».
+    #[test]
+    fn audit_stale_detects_tree_change_and_tolerates_old_state() {
+        let d = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let run = |args: &[&str]| {
+            assert!(
+                Command::new("git")
+                    .args(args)
+                    .current_dir(d.path())
+                    .status()
+                    .map(|s| s.success())
+                    .unwrap_or(false),
+                "git {args:?}"
+            );
+        };
+        run(&["init", "-q"]);
+        fs::create_dir_all(d.path().join(".git/info")).unwrap_or_else(|_| unreachable!());
+        fs::write(d.path().join(".git/info/exclude"), ".harness/\n")
+            .unwrap_or_else(|_| unreachable!());
+        fs::write(d.path().join("a.rs"), "fn a() {}\n").unwrap_or_else(|_| unreachable!());
+        run(&["add", "a.rs"]);
+
+        let stamp = tree_stamp(d.path());
+        assert!(!stamp.is_empty(), "git есть — отпечаток обязан быть");
+        write_state(
+            d.path(),
+            &State {
+                state: "running".to_string(),
+                pid: 1,
+                exit: None,
+                started: 1,
+                finished: None,
+                args: vec![],
+                cwd: d.path().display().to_string(),
+                mode: "copy".to_string(),
+                pgid: 0,
+                tree_stamp: stamp,
+            },
+        )
+        .unwrap_or_else(|_| unreachable!());
+        assert!(!audit_stale(d.path()), "дерево не менялось");
+
+        fs::write(d.path().join("a.rs"), "fn a() { }\n").unwrap_or_else(|_| unreachable!());
+        assert!(audit_stale(d.path()), "правка файла = протухший снимок");
+
+        // Старый state.json без tree_stamp — stale-проверка не выдумывает
+        // протухание (совместимость), даже если дерево уже другое.
+        let old = r#"{"state":"done","pid":1,"exit":0,"started":5,"args":["--x"]}"#;
+        fs::write(d.path().join(".harness/mutate/state.json"), old)
+            .unwrap_or_else(|_| unreachable!());
+        assert!(!audit_stale(d.path()), "пустой отпечаток ≠ протухло");
     }
 
     #[test]

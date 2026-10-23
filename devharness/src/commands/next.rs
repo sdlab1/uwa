@@ -279,6 +279,15 @@ fn audit_next(root: &Path) -> Option<Next> {
     match crate::commands::mutate::audit_state(root) {
         AuditState::None => None,
         AuditState::Running => {
+            // F-1.8.1: дерево изменилось после старта — список проблем
+            // относится к снимку ДО правок. Веди не к «призракам», а к
+            // остановке (перезапуск предложит следующий `devh next`).
+            if crate::commands::mutate::audit_stale(root) {
+                return Some(Next::new(
+                    "devh mutate stop",
+                    "дерево изменилось после старта аудита — результат протух; останови прогон и перезапусти (следующий devh next)",
+                ));
+            }
             // Идёт: если уже есть проблемы — сразу к ним (problem-first),
             // иначе — наблюдать.
             let problems = crate::commands::mutate::live_problem_count(root);
@@ -301,6 +310,14 @@ fn audit_next(root: &Path) -> Option<Next> {
             "аудит не дал результата (остановлен/оборвался) — перезапустить тем же прогоном",
         )),
         AuditState::Finished => {
+            // F-1.8.1: завершённый аудит тоже мог стать снимком ДО правок —
+            // вердикт по нему не выносим, только перепрогон.
+            if crate::commands::mutate::audit_stale(root) {
+                return Some(Next::new(
+                    &restart_command(root),
+                    "дерево изменилось после старта аудита — вердикт протух; перепрогон тем же прогоном",
+                ));
+            }
             // Аудит завершён: вердикт решает, чисто или нет.
             if let Some(false) = crate::commands::mutate::verdict_state(root) {
                 return Some(Next::new(
@@ -462,6 +479,54 @@ mod tests {
         assert_eq!(n.command, "devh mutate problems");
         assert!(n.why.contains("не ждать verdict"), "{}", n.why);
         assert!(n.why.contains("copy"), "{}", n.why);
+    }
+
+    /// F-1.8.1: снимок протух — next не ведёт к problems (там уже
+    /// исправленное), а останавливает прогон; завершённый — к перепрогону.
+    #[test]
+    fn stale_audit_stops_or_restarts_instead_of_chasing_problems() {
+        let d = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let run = |args: &[&str]| {
+            assert!(
+                std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(d.path())
+                    .status()
+                    .map(|s| s.success())
+                    .unwrap_or(false),
+                "git {args:?}"
+            );
+        };
+        run(&["init", "-q"]);
+        std::fs::create_dir_all(d.path().join(".git/info")).unwrap_or_else(|_| unreachable!());
+        std::fs::write(d.path().join(".git/info/exclude"), ".harness/\n")
+            .unwrap_or_else(|_| unreachable!());
+        std::fs::write(d.path().join("a.rs"), "fn a() {}\n").unwrap_or_else(|_| unreachable!());
+        run(&["add", "a.rs"]);
+        let stamp = crate::shell::git::tree_digest(d.path()).unwrap_or_else(|_| unreachable!());
+        std::fs::create_dir_all(d.path().join(".harness/mutate"))
+            .unwrap_or_else(|_| unreachable!());
+        std::fs::write(
+            d.path().join(".harness/mutate/state.json"),
+            format!(
+                r#"{{"state":"running","pid":{},"args":["--x"],"tree_stamp":"{stamp}"}}"#,
+                std::process::id()
+            ),
+        )
+        .unwrap_or_else(|_| unreachable!());
+        std::fs::write(d.path().join("a.rs"), "fn a() { }\n").unwrap_or_else(|_| unreachable!());
+        let n = audit_next(d.path()).unwrap_or_else(|| unreachable!());
+        assert_eq!(n.command, "devh mutate stop", "{}", n.why);
+        assert!(n.why.contains("протух"), "{}", n.why);
+
+        std::fs::write(
+            d.path().join(".harness/mutate/state.json"),
+            format!(r#"{{"state":"done","pid":0,"exit":0,"args":["--x"],"tree_stamp":"{stamp}"}}"#),
+        )
+        .unwrap_or_else(|_| unreachable!());
+        let n = audit_next(d.path()).unwrap_or_else(|| unreachable!());
+        assert_eq!(n.command, "devh mutate start --x", "{}", n.why);
+        assert!(n.why.contains("протух"), "{}", n.why);
     }
 
     #[test]
