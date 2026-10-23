@@ -31,6 +31,15 @@ pub enum Finding {
     MutantsSkipAdded {
         file: String,
     },
+    /// Удалён атрибут `#[test]` больше, чем добавлено: тест перестал
+    /// запускаться, но его `fn` остался в дереве — `TestFnRemoved` такую
+    /// «тихую» отключку не ловит (fn не удалён). Классическое ослабление:
+    /// снять `#[test]`, оставить тело, и дифф выглядит как правка атрибута.
+    TestAttrRemoved {
+        file: String,
+        removed: u32,
+        added: u32,
+    },
 }
 
 impl Finding {
@@ -40,7 +49,8 @@ impl Finding {
             | Self::TestFnRemoved { file, .. }
             | Self::IgnoreAdded { file }
             | Self::ShouldPanicAdded { file }
-            | Self::MutantsSkipAdded { file } => file,
+            | Self::MutantsSkipAdded { file }
+            | Self::TestAttrRemoved { file, .. } => file,
         }
     }
 
@@ -66,6 +76,13 @@ impl Finding {
             Self::MutantsSkipAdded { file } => {
                 format!("FREEZE: weaken: в {file} добавлен mutants::skip")
             }
+            Self::TestAttrRemoved {
+                file,
+                removed,
+                added,
+            } => format!(
+                "FREEZE: weaken: в {file} удалено #[test] больше, чем добавлено ({removed} > {added}) — тест перестал запускаться"
+            ),
         }
     }
 }
@@ -125,6 +142,8 @@ struct Stats {
     ignore_added: bool,
     should_panic_added: bool,
     mutants_skip_added: bool,
+    test_attr_removed: u32,
+    test_attr_added: u32,
 }
 
 /// Находки по диффу. `allowed` — уже разобранный allow-weaken; находка
@@ -176,7 +195,8 @@ pub fn weakening(diff: &str, allowed: &[(String, String)]) -> Vec<Finding> {
         let trimmed = code.trim();
 
         if kind == b'+' {
-            if trimmed.starts_with("#[ignore]") {
+            // `#[ignore]` и `#[ignore = "reason"]` — оба ослабление.
+            if trimmed.starts_with("#[ignore]") || trimmed.starts_with("#[ignore ") {
                 st.ignore_added = true;
             }
             if trimmed.starts_with("#[should_panic") {
@@ -196,6 +216,13 @@ pub fn weakening(diff: &str, allowed: &[(String, String)]) -> Vec<Finding> {
         }
 
         if trimmed.starts_with("#[test]") {
+            // F-T026: удалённый/добавленный атрибут `#[test]`. Тихая отключка
+            // теста: снять `#[test]`, оставить `fn` — TestFnRemoved не ловит.
+            if kind == b'-' {
+                st.test_attr_removed = st.test_attr_removed.saturating_add(1);
+            } else if kind == b'+' {
+                st.test_attr_added = st.test_attr_added.saturating_add(1);
+            }
             pending_test = true;
             continue;
         }
@@ -241,7 +268,14 @@ pub fn weakening(diff: &str, allowed: &[(String, String)]) -> Vec<Finding> {
             out.push(Finding::ShouldPanicAdded { file: file.clone() });
         }
         if st.mutants_skip_added {
-            out.push(Finding::MutantsSkipAdded { file });
+            out.push(Finding::MutantsSkipAdded { file: file.clone() });
+        }
+        if st.test_attr_removed > st.test_attr_added {
+            out.push(Finding::TestAttrRemoved {
+                file: file.clone(),
+                removed: st.test_attr_removed,
+                added: st.test_attr_added,
+            });
         }
     }
     out.retain(|f| {
@@ -382,6 +416,73 @@ mod tests {
         assert!(f.contains(&Finding::MutantsSkipAdded {
             file: "src/a.rs".into()
         }));
+    }
+
+    /// T-026: удалённый `#[test]` при живой `fn` — тихая отключка теста.
+    #[test]
+    fn weaken_removed_test_attr_is_finding() {
+        // `#[test]` удалён, `fn` остаётся контекстом — TestFnRemoved не ловит.
+        let d = diff(
+            "src/a.rs",
+            &["#[test]"],
+            &["fn still_here() {", "    assert!(x);", "}"],
+        );
+        let f = weakening(&d, &[]);
+        assert!(
+            f.contains(&Finding::TestAttrRemoved {
+                file: "src/a.rs".into(),
+                removed: 1,
+                added: 0
+            }),
+            "ожидался TestAttrRemoved, получено: {f:?}"
+        );
+    }
+
+    /// T-026: переименование теста (`#[test]` -/+ поровну) — не TestAttrRemoved.
+    #[test]
+    fn weaken_test_attr_swap_is_not_finding() {
+        let d = diff(
+            "src/a.rs",
+            &["#[test]", "fn old_name() {", "    assert!(x);", "}"],
+            &["#[test]", "fn new_name() {", "    assert!(x);", "}"],
+        );
+        let f = weakening(&d, &[]);
+        // TestFnRemoved ловит переименование, TestAttrRemoved — нет (-/+ по 1).
+        assert!(
+            !f.iter()
+                .any(|x| matches!(x, Finding::TestAttrRemoved { .. })),
+            "не должно быть TestAttrRemoved при -/+ #[test]: {f:?}"
+        );
+        assert!(f.contains(&Finding::TestFnRemoved {
+            file: "src/a.rs".into(),
+            name: "old_name".into()
+        }));
+    }
+
+    /// T-026: `#[ignore = "..."]` (с параметром) тоже IgnoreAdded — раньше обходился.
+    #[test]
+    fn weaken_ignore_with_reason_is_finding() {
+        let d = diff("src/a.rs", &[], &["#[ignore = \"flaky\"]"]);
+        let f = weakening(&d, &[]);
+        assert!(
+            f.contains(&Finding::IgnoreAdded {
+                file: "src/a.rs".into()
+            }),
+            " #[ignore = \"...\"] должен быть IgnoreAdded, получено: {f:?}"
+        );
+    }
+
+    /// T-026: label() нового правила называет файл и суть.
+    #[test]
+    fn weaken_test_attr_removed_label() {
+        let finding = Finding::TestAttrRemoved {
+            file: "src/a.rs".into(),
+            removed: 1,
+            added: 0,
+        };
+        assert!(finding.label().contains("src/a.rs"));
+        assert!(finding.label().contains("#[test]"));
+        assert_eq!(finding.file(), "src/a.rs");
     }
 
     #[test]
