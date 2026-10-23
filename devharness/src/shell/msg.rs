@@ -99,7 +99,10 @@ fn presence_rows() -> Vec<(String, String, u64, Option<i32>)> {
             let Some(base) = name.strip_suffix(".txt") else {
                 continue;
             };
-            let agent = base.rsplit_once('.').map(|(a, _)| a.to_string()).unwrap_or_else(|| base.to_string());
+            let agent = base
+                .rsplit_once('.')
+                .map(|(a, _)| a.to_string())
+                .unwrap_or_else(|| base.to_string());
             let Ok(raw) = fs::read_to_string(e.path()) else {
                 continue;
             };
@@ -115,7 +118,18 @@ fn presence_rows() -> Vec<(String, String, u64, Option<i32>)> {
                     pid = v.parse::<i32>().ok();
                 }
             }
-            out.push((agent, action, ts, pid));
+            // Синонимы — один агент: сливаем строки по каноническому имени.
+            let canon = crate::core::identity::canonical(&agent);
+            match out.iter_mut().find(|(n, _, _, _)| *n == canon) {
+                Some(existing) => {
+                    if ts >= existing.2 {
+                        existing.1 = action;
+                        existing.2 = ts;
+                        existing.3 = pid;
+                    }
+                }
+                None => out.push((canon, action, ts, pid)),
+            }
         }
     }
     out.sort();
@@ -319,8 +333,17 @@ fn legacy_inbox_path() -> PathBuf {
 /// явного имени), лежат в `default.log` — агент с авто-именем обязан их
 /// видеть, иначе они потерялись бы навсегда.
 fn inbox_files(agent: &str) -> Vec<PathBuf> {
-    let own = own_inbox_path(agent);
+    let canon = crate::core::identity::canonical(agent);
+    let own = own_inbox_path(&canon);
     let mut files = vec![own.clone()];
+    // Ящики синонимов — это ТОТ ЖЕ агент: под старым именем могли скопиться
+    // письма; их надо видеть, и их можно съедать (это не legacy-ящик).
+    for alias in crate::core::identity::aliases_of(&canon) {
+        let path = inbox_path(&safe_name(&alias));
+        if path != own && path.exists() {
+            files.push(path);
+        }
+    }
     let legacy = legacy_inbox_path();
     if own != legacy && legacy.exists() {
         files.push(legacy);
@@ -611,7 +634,11 @@ pub fn render_block(block: &str) -> String {
     let thin = "─".repeat(MSG_WIDTH);
     out.push_str(&format!("{col_c}{rule}{col_z}\n"));
 
-    let sender = if v.sender.is_empty() { "?" } else { v.sender.as_str() };
+    let sender = if v.sender.is_empty() {
+        "?"
+    } else {
+        v.sender.as_str()
+    };
     let to = if v.to.is_empty() { "?" } else { v.to.as_str() };
     let title = format!("✉  {sender} → {to}");
     let mut right_parts: Vec<String> = Vec::new();
@@ -664,8 +691,10 @@ fn roster() -> Vec<String> {
             for e in entries.flatten() {
                 let name = e.file_name().to_string_lossy().to_string();
                 if let Some(base) = name.strip_suffix(".log") {
-                    if !names.iter().any(|n| n == base) {
-                        names.push(base.to_string());
+                    // канон: синонимы не плодят «двойных» соседей в ростере
+                    let canon = crate::core::identity::canonical(base);
+                    if !names.iter().any(|n| *n == canon) {
+                        names.push(canon);
                     }
                 }
             }
@@ -695,7 +724,9 @@ fn append_message(path: &Path, block: &str) -> bool {
 
 /// Файл «уже показанных» уведомлений (на агента).
 fn notified_path(agent: &str) -> PathBuf {
-    home().join("notified").join(format!("{}.log", safe_name(agent)))
+    home()
+        .join("notified")
+        .join(format!("{}.log", safe_name(agent)))
 }
 
 /// ID уже показанных уведомлений агента.
@@ -1082,9 +1113,11 @@ fn deliver(from: &str, to: &[String], block: &str, thread: &str) -> Vec<String> 
     let msg_id = block_field(block, "ID: ").unwrap_or_default();
     let mut done: Vec<String> = Vec::new();
     for t in unique.iter() {
-        let path = inbox_path(&safe_name(t));
+        // Синоним → канон: письмо к «opencode» приходит в ящик «deepseek».
+        let target = crate::core::identity::canonical(t);
+        let path = inbox_path(&safe_name(&target));
         if append_message(&path, block) {
-            done.push(t.clone());
+            done.push(target.clone());
             ack(&safe_name(from), &msg_id, "доставлено");
         }
     }
@@ -1184,6 +1217,12 @@ fn send(args: &[String]) -> i32 {
             let peek = m.flag("peek");
             let filter = m.value("tag");
             let mut shown = 0usize;
+            // Сначала СЪЕДАЕМ (переписываем ящик), потом печатаем.
+            // Наоборот — письмо терялось, если вывод обрывался пайпом
+            // (например `devh msg read | head`): процесс умирал по SIGPIPE
+            // ДО записи, и агент видел одно и то же письмо снова и снова.
+            let mut to_print: Vec<String> = Vec::new();
+            let mut rewrites: Vec<(PathBuf, String)> = Vec::new();
             for path in inbox_files(&agent) {
                 // legacy-ящик общий для всех старых сессий: его только читаем,
                 // но НЕ съедаем — иначе одно письмо забирал себе кто-то один.
@@ -1191,19 +1230,20 @@ fn send(args: &[String]) -> i32 {
                 let text = fs::read_to_string(&path).unwrap_or_default();
                 let (header, blocks) = split_log(&text);
                 let mut kept: Vec<String> = Vec::new();
+                let mut matched_here = 0usize;
                 for b in blocks.iter() {
                     let matches = match filter.as_ref() {
                         None => true,
                         Some(t) => block_tags(b).iter().any(|x| x == t),
                     };
                     if matches {
+                        to_print.push(render_block(b));
                         if legacy {
-                            println!("{}", render_block(b));
-                            println!("(legacy-ящик — письмо остаётся в общем ящике)");
-                        } else {
-                            println!("{}", render_block(b));
+                            to_print
+                                .push("(legacy-ящик — письмо остаётся в общем ящике)".to_string());
                         }
                         shown = shown.saturating_add(1);
+                        matched_here = matched_here.saturating_add(1);
                         if !peek && !legacy {
                             let id = block_field(b, "ID: ").unwrap_or_default();
                             let sender = block_sender(b);
@@ -1213,9 +1253,17 @@ fn send(args: &[String]) -> i32 {
                         kept.push(b.clone());
                     }
                 }
-                if !peek && shown > 0 && !legacy {
-                    let _ = fs::write(&path, join_log(&header, &kept));
+                if !peek && matched_here > 0 && !legacy {
+                    rewrites.push((path.clone(), join_log(&header, &kept)));
                 }
+            }
+            for (path, body) in rewrites.iter() {
+                if let Err(e) = fs::write(path, body) {
+                    eprintln!("не записать ящик {}: {e}", path.display());
+                }
+            }
+            for line in to_print.iter() {
+                println!("{line}");
             }
             touch_presence(&agent, "read");
             if shown == 0 {
@@ -1252,14 +1300,9 @@ fn send(args: &[String]) -> i32 {
                         .cloned()
                         .collect();
                     if !fresh.is_empty() {
-                        for b in fresh.iter() {
-                            let id = block_field(b, "ID: ").unwrap_or_default();
-                            if !id.is_empty() {
-                                seen.push(id.clone());
-                            }
-                            println!("{}", render_block(b));
-                            notify(&id, b);
-                        }
+                        // Сначала съедаем (если --consume), потом печатаем:
+                        // обрыв вывода (пайп/SIGPIPE) не должен оставлять
+                        // письмо в ящике — иначе оно всплывёт снова.
                         if consume && !legacy {
                             let keep: Vec<String> = blocks
                                 .iter()
@@ -1269,7 +1312,17 @@ fn send(args: &[String]) -> i32 {
                                 })
                                 .cloned()
                                 .collect();
-                            let _ = fs::write(&path, join_log(&header, &keep));
+                            if let Err(e) = fs::write(&path, join_log(&header, &keep)) {
+                                eprintln!("не записать ящик {}: {e}", path.display());
+                            }
+                        }
+                        for b in fresh.iter() {
+                            let id = block_field(b, "ID: ").unwrap_or_default();
+                            if !id.is_empty() {
+                                seen.push(id.clone());
+                            }
+                            println!("{}", render_block(b));
+                            notify(&id, b);
                         }
                     }
                 }
@@ -1279,6 +1332,54 @@ fn send(args: &[String]) -> i32 {
                 std::thread::sleep(Duration::from_secs(interval));
             }
             0
+        }
+        "alias" => {
+            // Синонимы имён: один агент — один адрес в канале.
+            if m.flag("list") {
+                let map = crate::core::identity::alias_map();
+                if map.is_empty() {
+                    println!("алиасов нет");
+                } else {
+                    for (a, c) in map {
+                        println!("{a} → {c}");
+                    }
+                }
+                0
+            } else if let Some(a) = m.value("remove") {
+                match crate::core::identity::remove_alias(&a) {
+                    Ok(true) => {
+                        println!("синоним {a} убран");
+                        0
+                    }
+                    Ok(false) => {
+                        eprintln!("синоним {a} не был задан");
+                        1
+                    }
+                    Err(e) => {
+                        eprintln!("devh msg alias: {e}");
+                        1
+                    }
+                }
+            } else {
+                let alias = m.first();
+                if alias.is_empty() {
+                    eprintln!(
+                        "нужно: devh msg alias <синоним> [--for <канон>] | --list | --remove <синоним>"
+                    );
+                    return 2;
+                }
+                let canon = m.value("for").unwrap_or_else(|| me(None));
+                match crate::core::identity::set_alias(&alias, &canon) {
+                    Ok(()) => {
+                        println!("синоним {alias} → {canon}");
+                        0
+                    }
+                    Err(e) => {
+                        eprintln!("devh msg alias: {e}");
+                        1
+                    }
+                }
+            }
         }
         "claim" => {
             // Закрепить имя за текущей сессией: дальше devh сам знает, кто я.
@@ -1305,6 +1406,9 @@ fn send(args: &[String]) -> i32 {
             println!("источник: {}", id.source.as_str());
             println!("ключ: {}", id.key);
             println!("непрочитанных (своих): {}", own_blocks(&id.name).len());
+            if !id.aliases.is_empty() {
+                println!("синонимы (тот же агент): {}", id.aliases.join(", "));
+            }
             println!("legacy (общий старый ящик): {}", legacy_blocks().len());
             if id.source == crate::core::identity::Source::Cwd {
                 println!(
@@ -1441,7 +1545,8 @@ fn send(args: &[String]) -> i32 {
                 println!(
                     "{agent}	{state}	{}	{action}	pid={}",
                     ago(*ts),
-                    pid.map(|p| p.to_string()).unwrap_or_else(|| "?".to_string())
+                    pid.map(|p| p.to_string())
+                        .unwrap_or_else(|| "?".to_string())
                 );
             }
             0
@@ -1622,7 +1727,7 @@ fn send(args: &[String]) -> i32 {
         }
         _ => {
             println!(
-                "канал агентов: send | reply | read | watch | thread | threads | close | list | sent | find | acks | pending | presence\n\
+                "канал агентов: send | reply | read | watch | thread | threads | close | list | sent | find | acks | pending | presence | alias | claim | whoami\n\
                  письмо с одним или несколькими адресатами; прочитанное удаляется (consume-on-read);\n\
                  обсуждение (тред) сохраняется целиком, треды закрываются консенсусом;\n\
                  указание на код: --at путь[:строка] (регион с контекстом) или --diff файл (unified diff);\n\
@@ -1755,7 +1860,9 @@ ID: abcd1234\n\
             "[10:24] ОТ: deepseek — КОМУ: test-agent\nID: aa11bb22\n\
 ТРЕД: t1\nТЕМА: Письмо\nТЕЛО:\nтело\n",
         );
-        let (first, second) = with_msg_home(home, || (auto_notify("test-agent"), auto_notify("test-agent")));
+        let (first, second) = with_msg_home(home, || {
+            (auto_notify("test-agent"), auto_notify("test-agent"))
+        });
         assert_eq!(first, 1, "первый вызов показал письмо");
         assert_eq!(second, 0, "повтор не дублирует (дедуп по ID)");
     }
@@ -1846,7 +1953,9 @@ ID: abcd1234\n\
     }
 
     fn block_of(to: &str, subject: &str, tags: &[&str], body: &str) -> String {
-        let mut b = format!("[10:00] ОТ: sender — КОМУ: {to}\nID: abcd1234\nТРЕД: 11112222\nТЕМА: {subject}\n");
+        let mut b = format!(
+            "[10:00] ОТ: sender — КОМУ: {to}\nID: abcd1234\nТРЕД: 11112222\nТЕМА: {subject}\n"
+        );
         if !tags.is_empty() {
             b.push_str(&format!("ТЭГИ: {}\n", tags.join(", ")));
         }
@@ -1856,7 +1965,10 @@ ID: abcd1234\n\
 
     #[test]
     fn split_log_keeps_blocks_and_header() {
-        let text = format!("# шапка\n{SEP}\n{}{SEP}\n", block_of("a", "тема", &[], "тело"));
+        let text = format!(
+            "# шапка\n{SEP}\n{}{SEP}\n",
+            block_of("a", "тема", &[], "тело")
+        );
         let (header, blocks) = split_log(&text);
         assert!(header.contains("шапка"), "шапка сохраняется: {header}");
         assert_eq!(blocks.len(), 1, "один блок: {blocks:?}");
@@ -1876,7 +1988,10 @@ ID: abcd1234\n\
 
     #[test]
     fn join_log_roundtrip() {
-        let blocks = vec![block_of("a", "t1", &["x"], "b1"), block_of("b", "t2", &[], "b2")];
+        let blocks = vec![
+            block_of("a", "t1", &["x"], "b1"),
+            block_of("b", "t2", &[], "b2"),
+        ];
         let text = join_log("# h\n", &blocks);
         let (_h, back) = split_log(&text);
         assert_eq!(back.len(), 2, "оба блока на месте: {back:?}");
@@ -1931,7 +2046,10 @@ ID: abcd1234\n\
         std::fs::write(&path, body).unwrap_or_default();
         let (p, plain, marked) = code_region(&path.to_string_lossy(), Some(6)).unwrap_or_default();
         assert!(p.ends_with("f.rs"), "путь: {p}");
-        assert!(plain.contains("line5") && plain.contains("line6"), "контекст: {plain}");
+        assert!(
+            plain.contains("line5") && plain.contains("line6"),
+            "контекст: {plain}"
+        );
         assert!(marked.contains('»'), "маркер указанной строки: {marked}");
         assert!(marked.contains("line5"), "контекст в вырезке: {marked}");
     }
@@ -1964,7 +2082,10 @@ ID: abcd1234\n\
         assert!(msg.contains("ОТ: me"), "отправитель: {msg}");
         assert!(msg.contains("КОМУ: peer"), "адресат: {msg}");
         assert!(msg.contains("ТРЕД: thr"), "тред: {msg}");
-        assert!(msg.contains("МЕСТО: devharness/src/core/load.rs"), "место: {msg}");
+        assert!(
+            msg.contains("МЕСТО: devharness/src/core/load.rs"),
+            "место: {msg}"
+        );
         assert!(msg.contains("ВЫРЕЗКА:"), "вырезка: {msg}");
         assert!(msg.contains("ТЭГИ: ошибка"), "тэги: {msg}");
     }

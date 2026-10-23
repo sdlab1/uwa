@@ -21,6 +21,7 @@
 //! Ключ сессии из п.3/4 уникален для КАЖДОГО агента: два соседа в одном
 //! репозитории получают разные имена и разные входящие.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -30,7 +31,7 @@ use sha2::{Digest, Sha256};
 
 /// Рантаймы агентов: `comm` процесса, который запускает сессию.
 /// Имя из этого списка становится префиксом авто-имени (`goose-1a2b`).
-const KNOWN_RUNTIMES: [&str; 10] = [
+const KNOWN_RUNTIMES: [&str; 11] = [
     "goose",
     "opencode",
     "claude",
@@ -41,6 +42,7 @@ const KNOWN_RUNTIMES: [&str; 10] = [
     "cline",
     "continue",
     "cursor-agent",
+    "kilo",
 ];
 
 /// Где взялось имя — для отчёта `devh msg whoami`.
@@ -60,6 +62,8 @@ pub enum Source {
     Tty,
     /// Рабочий каталог (fallback).
     Cwd,
+    /// Слот рантайма (переживает рестарт сессии).
+    Slot,
 }
 
 impl Source {
@@ -72,6 +76,7 @@ impl Source {
             Source::Runtime => "рантайм-процесс",
             Source::Tty => "tty",
             Source::Cwd => "рабочий каталог",
+            Source::Slot => "слот (переживает рестарт рантайма)",
         }
     }
 }
@@ -81,7 +86,9 @@ impl Source {
 pub struct Identity {
     /// Имя агента (имя файла входящих/исходящих).
     pub name: String,
-    /// Откуда взято имя.
+    /// Синонимы того же агента (например `opencode` → `deepseek`).
+    pub aliases: Vec<String>,
+    /// Откуда взялось имя.
     pub source: Source,
     /// Ключ сессии (к чему привязано имя в `$DEVH_MSG_HOME/agents`).
     pub key: String,
@@ -114,8 +121,7 @@ fn unix_now() -> u64 {
 
 /// Имя файла привязки для ключа.
 fn binding_path_in(home: &Path, key: &str) -> PathBuf {
-    home.join("agents")
-        .join(format!("{}.json", key_hash(key)))
+    home.join("agents").join(format!("{}.json", key_hash(key)))
 }
 
 /// Привязка имени к ключу сессии.
@@ -162,9 +168,210 @@ fn write_binding_in(
         "updated": unix_now(),
     });
     let tmp = path.with_extension("json.tmp");
-    fs::write(&tmp, serde_json::to_string_pretty(&body).unwrap_or_default())?;
+    fs::write(
+        &tmp,
+        serde_json::to_string_pretty(&body).unwrap_or_default(),
+    )?;
     fs::rename(&tmp, &path)?;
     Ok(())
+}
+
+/// Файл алиасов: синоним → каноническое имя.
+///
+/// Один и тот же агент бывает известен под двумя именами: модель `deepseek`
+/// работает внутри приложения `opencode` — и в канале появляются ДВА адреса
+/// одного агента. Задания уходят в один ящик, отчёт в другой, соседи не
+/// понимают, кто перед ними. Алиас сводит имена к одному канону.
+fn aliases_path_in(home: &Path) -> PathBuf {
+    home.join("aliases.json")
+}
+
+/// Прочитать карту алиасов (синоним → канон) из указанного хранилища.
+pub fn alias_map_in(home: &Path) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    let Ok(text) = fs::read_to_string(aliases_path_in(home)) else {
+        return out;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return out;
+    };
+    let Some(map) = value.get("aliases").and_then(|v| v.as_object()) else {
+        return out;
+    };
+    for (k, v) in map {
+        let k = k.trim().to_string();
+        let Some(text) = v.as_str() else {
+            continue;
+        };
+        let v = text.trim().to_string();
+        if !k.is_empty() && !v.is_empty() {
+            out.insert(k, v);
+        }
+    }
+    out
+}
+
+/// Прочитать карту алиасов из основного хранилища.
+pub fn alias_map() -> BTreeMap<String, String> {
+    alias_map_in(&msg_home())
+}
+
+/// Записать карту алиасов (атомарно: tmp + rename).
+fn write_alias_map_in(home: &Path, map: &BTreeMap<String, String>) -> io::Result<()> {
+    let path = aliases_path_in(home);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let body = serde_json::json!({ "aliases": map });
+    let tmp = path.with_extension("json.tmp");
+    fs::write(
+        &tmp,
+        serde_json::to_string_pretty(&body).unwrap_or_default(),
+    )?;
+    fs::rename(&tmp, &path)?;
+    Ok(())
+}
+
+/// Записать карту алиасов в основное хранилище.
+fn write_alias_map(map: &BTreeMap<String, String>) -> io::Result<()> {
+    write_alias_map_in(&msg_home(), map)
+}
+
+/// Каноническое имя: разыменовать цепочку алиасов (с защитой от петли).
+pub fn canonical_in(home: &Path, name: &str) -> String {
+    let map = alias_map_in(home);
+    let mut current = name.trim().to_string();
+    for _ in 0..8 {
+        let Some(next) = map.get(&current) else {
+            break;
+        };
+        let next = next.trim().to_string();
+        if next.is_empty() || next == current {
+            break;
+        }
+        current = next;
+    }
+    current
+}
+
+/// Каноническое имя в основном хранилище.
+pub fn canonical(name: &str) -> String {
+    canonical_in(&msg_home(), name)
+}
+
+/// Синонимы, указывающие на каноническое имя.
+pub fn aliases_of_in(home: &Path, canon: &str) -> Vec<String> {
+    let mut out: Vec<String> = alias_map_in(home)
+        .iter()
+        .filter(|(_, c)| c.as_str() == canon)
+        .map(|(a, _)| a.clone())
+        .collect();
+    out.sort();
+    out
+}
+
+/// Синонимы в основном хранилище.
+pub fn aliases_of(canon: &str) -> Vec<String> {
+    aliases_of_in(&msg_home(), canon)
+}
+
+/// Связать синоним с каноном.
+pub fn set_alias_in(
+    home: &Path,
+    alias: &str,
+    canon: &str,
+) -> Result<(), String> {
+    let alias = sanitize_name(alias)?;
+    let canon = sanitize_name(canon)?;
+    if alias == canon {
+        return Err("синоним совпадает с каноном".to_string());
+    }
+    let mut map = alias_map_in(home);
+    let mut probe = canon.clone();
+    for _ in 0..8 {
+        if probe == alias {
+            return Err("алиас образовал бы петлю".to_string());
+        }
+        match map.get(&probe) {
+            Some(next) => probe = next.clone(),
+            None => break,
+        }
+    }
+    map.insert(alias, canon.clone());
+    write_alias_map_in(home, &map).map_err(|e| format!("не записать алиасы: {e}"))?;
+    Ok(())
+}
+
+/// Связать синоним с каноном в основном хранилище.
+pub fn set_alias(alias: &str, canon: &str) -> Result<(), String> {
+    set_alias_in(&msg_home(), alias, canon)
+}
+
+/// Убрать синоним (true — был).
+pub fn remove_alias_in(home: &Path, alias: &str) -> Result<bool, String> {
+    let mut map = alias_map_in(home);
+    let existed = map.remove(alias.trim()).is_some();
+    if existed {
+        write_alias_map_in(home, &map).map_err(|e| format!("не записать алиасы: {e}"))?;
+    }
+    Ok(existed)
+}
+
+/// Убрать синоним в основном хранилище.
+pub fn remove_alias(alias: &str) -> Result<bool, String> {
+    remove_alias_in(&msg_home(), alias)
+}
+
+/// Имена, закреплённые кем-то явно (`devh msg claim`).
+fn claimed_names() -> Vec<String> {
+    let mut out = Vec::new();
+    let dir = msg_home().join("agents");
+    let Ok(entries) = fs::read_dir(dir) else {
+        return out;
+    };
+    for e in entries.flatten() {
+        let Ok(text) = fs::read_to_string(e.path()) else {
+            continue;
+        };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        let claimed = v.get("claimed").and_then(|x| x.as_bool()).unwrap_or(false);
+        let Some(name) = v.get("name").and_then(|x| x.as_str()) else {
+            continue;
+        };
+        if claimed {
+            out.push(name.trim().to_string());
+        }
+    }
+    out
+}
+
+/// Зарегистрировать синоним хоста-рантайма → наше имя.
+///
+/// Агент живёт внутри приложения-рантайма (`deepseek` — внутри `opencode`).
+/// Если имя агента закреплено явно, а хост назван иначе — это тот же агент:
+/// без сведения об этом в канале два адреса одного агента и задания
+/// расходятся. Чужое закреплённое имя не отбираем.
+fn auto_register_alias(name: &str) {
+    let Some((_pid, comm, _start)) = runtime_ancestor() else {
+        return;
+    };
+    if comm.is_empty() || comm == name || sanitize_name(&comm).is_err() {
+        return;
+    }
+    let map = alias_map();
+    if let Some(existing) = map.get(&comm) {
+        if existing.as_str() != name {
+            return;
+        }
+    }
+    if claimed_names().iter().any(|n| n == &comm) {
+        return;
+    }
+    let mut map = map;
+    map.insert(comm, name.to_string());
+    let _ = write_alias_map(&map);
 }
 
 /// Имя из сессии: `session-<8hex>` / `goose-<8hex>` / `tty-<8hex>` / `cwd-<8hex>`.
@@ -207,6 +414,94 @@ pub fn sanitize_name(raw: &str) -> Result<String, String> {
     Ok(trimmed.to_string())
 }
 
+/// Похоже ли имя на авто-имя (`goose-1a2b3c4d`, `ag-…`, `cwd-…`)?
+///
+/// Авто-имя привязано к конкретной сессии рантайма и меняется при его
+/// рестарте. Человеческое/модельное имя (`deepseek`, `minimax`) — нет.
+/// Различие нужно, чтобы алиас нельзя было навести на одноразовый адрес.
+fn looks_auto(name: &str) -> bool {
+    let Some((prefix, suffix)) = name.rsplit_once('-') else {
+        return false;
+    };
+    if prefix.is_empty() || suffix.len() != 8 {
+        return false;
+    }
+    suffix.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// Канон для хоста-рантайма, если он задан синонимом.
+///
+/// `opencode` — это приложение, в котором работает модель `deepseek`.
+/// Если в карте алиасов `opencode → deepseek`, то агент, запущенный внутри
+/// opencode, ДОЛЖЕН называться `deepseek`: иначе в канале два адреса одного
+/// агента, задания расходятся, отчёт приходит не туда.
+fn host_alias_in(home: &Path, comm: &str) -> Option<String> {
+    if comm.is_empty() {
+        return None;
+    }
+    let map = alias_map_in(home);
+    let target = map.get(comm)?.trim().to_string();
+    if target.is_empty() || target == comm {
+        return None;
+    }
+    // Цель должна быть «настоящим» именем, а не одноразовым авто-именем.
+    if looks_auto(&target) {
+        return None;
+    }
+    Some(canonical_in(home, &target))
+}
+
+/// Канон для хоста-рантайма в основном хранилище.
+fn host_alias(comm: &str) -> Option<String> {
+    host_alias_in(&msg_home(), comm)
+}
+
+/// Ключ «слота» — устойчив между рестартами рантайма.
+///
+/// `AGENT_SESSION_ID` меняется при каждом рестарте goose ⇒ агент теряет
+/// свой ящик и уходит в новое имя. Слот — это долгоживущий предок
+/// (редактор, ppid=1) + имя рантайма: рестарт рантайма слот не меняет,
+/// а разные рантаймы (goose / opencode) в одном редакторе разные.
+fn slot_key() -> Option<String> {
+    let runtime = runtime_ancestor().map(|(_, comm, _)| comm);
+    let mut pid = std::process::id();
+    let mut hops: u32 = 0;
+    let mut leader: Option<(u32, String)> = None;
+    while hops < 24 {
+        let Some(ppid) = read_ppid(pid) else {
+            break;
+        };
+        if ppid == 1 {
+            leader = Some((pid, read_starttime(pid)));
+            break;
+        }
+        if ppid == pid || ppid == 0 {
+            break;
+        }
+        pid = ppid;
+        hops = hops.saturating_add(1);
+    }
+    let (pid, start) = leader?;
+    Some(format!(
+        "slot:{pid}:{start}:{}",
+        runtime.unwrap_or_else(|| "none".to_string())
+    ))
+}
+
+/// Закреплённое имя для слота (переживает рестарт рантайма).
+fn slot_binding() -> Option<Binding> {
+    let slot = slot_key()?;
+    read_binding_in(&msg_home(), &slot)
+}
+
+/// Запомнить имя за слотом (чтобы следующий рестарт рантайма его увидел).
+fn remember_slot(name: &str, claimed: bool) {
+    let Some(slot) = slot_key() else {
+        return;
+    };
+    let _ = write_binding_in(&msg_home(), &slot, name, "slot", claimed);
+}
+
 /// Ключ и метка контекста сессии.
 fn context() -> (String, String) {
     for var in ["AGENT_SESSION_ID", "DEVH_SESSION"] {
@@ -224,10 +519,7 @@ fn context() -> (String, String) {
         let cwd = std::env::current_dir()
             .map(|p| p.display().to_string())
             .unwrap_or_default();
-        return (
-            format!("tty:{tty}:{}", key_hash(&cwd)),
-            "tty".to_string(),
-        );
+        return (format!("tty:{tty}:{}", key_hash(&cwd)), "tty".to_string());
     }
     let cwd = std::env::current_dir()
         .map(|p| p.display().to_string())
@@ -290,10 +582,7 @@ fn read_starttime(pid: u32) -> String {
     let Some(rest) = text.get(close.saturating_add(1)..) else {
         return "0".to_string();
     };
-    rest.split_whitespace()
-        .nth(19)
-        .unwrap_or("0")
-        .to_string()
+    rest.split_whitespace().nth(19).unwrap_or("0").to_string()
 }
 
 /// Терминал процесса (`/dev/pts/N`), если есть.
@@ -339,44 +628,50 @@ fn tty_of(pid: u32) -> Option<String> {
 /// сессий). Иначе `devh msg claim` молча ничего не делал.
 pub fn resolve(explicit: Option<&str>) -> Identity {
     if let Some(name) = explicit.map(str::trim).filter(|s| !s.is_empty()) {
-        return Identity {
-            name: name.to_string(),
-            source: Source::Explicit,
-            key: "explicit".to_string(),
-            fresh: false,
-        };
+        return finish(
+            name.to_string(),
+            Source::Explicit,
+            "explicit".to_string(),
+            false,
+        );
     }
     let (key, label) = context();
     let home = msg_home();
     let binding = read_binding_in(&home, &key);
     if let Some(b) = binding.as_ref() {
         if b.claimed {
-            return Identity {
-                name: b.name.clone(),
-                source: Source::Stored,
-                key,
-                fresh: false,
-            };
+            // Явно закреплённое имя + хост-рантайм с другим именем → синоним.
+            auto_register_alias(&b.name);
+            remember_slot(&b.name, true);
+            return finish(b.name.clone(), Source::Stored, key, false);
         }
     }
     if let Ok(env) = std::env::var("DEVH_AGENT") {
         let env = env.trim().to_string();
         if !env.is_empty() {
-            return Identity {
-                name: env,
-                source: Source::Env,
-                key: "env".to_string(),
-                fresh: false,
-            };
+            return finish(env, Source::Env, "env".to_string(), false);
+        }
+    }
+    // Хост-рантайм с синонимом (opencode → deepseek): я — этот агент,
+    // даже если текущая сессия рантайма ещё не знает моего имени.
+    // Это важнее авто-имени: иначе у одного агента два адреса.
+    if let Some((_pid, comm, _start)) = runtime_ancestor() {
+        if let Some(canon) = host_alias(&comm) {
+            let _ = write_binding_in(&home, &key, &canon, &label, false);
+            remember_slot(&canon, false);
+            return finish(canon, Source::Runtime, key, false);
         }
     }
     if let Some(b) = binding {
-        return Identity {
-            name: b.name,
-            source: Source::Stored,
-            key,
-            fresh: false,
-        };
+        return finish(b.name, Source::Stored, key, false);
+    }
+    // Слот: рантайм перезапустился, но редактор/слот тот же — имя прежнее.
+    if let Some(b) = slot_binding() {
+        if b.claimed {
+            auto_register_alias(&b.name);
+            let _ = write_binding_in(&home, &key, &b.name, &label, false);
+            return finish(b.name.clone(), Source::Slot, key, false);
+        }
     }
     let name = auto_name(&label, &key);
     let _ = write_binding_in(&home, &key, &name, &label, false);
@@ -386,11 +681,19 @@ pub fn resolve(explicit: Option<&str>) -> Identity {
         "cwd" => Source::Cwd,
         _ => Source::Runtime,
     };
+    finish(name, source, key, true)
+}
+
+/// Финализация имени: канонизация + список синонимов.
+fn finish(name: String, source: Source, key: String, fresh: bool) -> Identity {
+    let name = canonical(&name);
+    let aliases = aliases_of(&name);
     Identity {
         name,
+        aliases,
         source,
         key,
-        fresh: true,
+        fresh,
     }
 }
 
@@ -402,16 +705,20 @@ pub fn current() -> Identity {
 /// Закрепить своё имя за текущей сессией (перекрывает `DEVH_AGENT`).
 pub fn claim(raw: &str) -> Result<Identity, String> {
     let name = sanitize_name(raw)?;
+    let canon = canonical(&name);
+    if canon != name {
+        return Err(format!(
+            "«{name}» — синоним агента «{canon}»; закрепляй каноническое имя"
+        ));
+    }
     let (key, label) = context();
     let home = msg_home();
     write_binding_in(&home, &key, &name, &label, true)
         .map_err(|e| format!("не записать привязку: {e}"))?;
-    Ok(Identity {
-        name,
-        source: Source::Stored,
-        key,
-        fresh: false,
-    })
+    // Слот: после рестарта рантайма имя восстановится само.
+    remember_slot(&name, true);
+    auto_register_alias(&name);
+    Ok(finish(name, Source::Stored, key, false))
 }
 
 #[cfg(test)]
@@ -500,5 +807,75 @@ mod tests {
         assert!(read_comm(pid).is_some());
         assert!(read_ppid(pid).is_some());
         assert!(!read_starttime(pid).is_empty());
+    }
+
+    #[test]
+    fn looks_auto_detects_generated_names_only() {
+        assert!(looks_auto("goose-1a2b3c4d"));
+        assert!(looks_auto("ag-deadbeef"));
+        assert!(looks_auto("cwd-0123abcd"));
+        assert!(!looks_auto("deepseek"));
+        assert!(!looks_auto("beam-2"));
+        assert!(!looks_auto("minimax"));
+    }
+
+    #[test]
+    fn alias_map_roundtrip_in_temp_home() {
+        let dir = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let home = dir.path();
+        assert!(alias_map_in(home).is_empty());
+        set_alias_in(home, "opencode", "beam").unwrap_or_else(|_| unreachable!());
+        let map = alias_map_in(home);
+        assert_eq!(map.get("opencode").map(String::as_str), Some("beam"));
+        assert_eq!(canonical_in(home, "opencode"), "beam");
+        assert_eq!(aliases_of_in(home, "beam"), vec!["opencode".to_string()]);
+    }
+
+    #[test]
+    fn canonical_follows_chain_and_survives_loop() {
+        let dir = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let home = dir.path();
+        set_alias_in(home, "a", "b").unwrap_or_else(|_| unreachable!());
+        set_alias_in(home, "b", "c").unwrap_or_else(|_| unreachable!());
+        assert_eq!(canonical_in(home, "a"), "c");
+        // Петля в файле (её могли внести руками) не должна зациклить.
+        let mut map = alias_map_in(home);
+        map.insert("c".to_string(), "a".to_string());
+        write_alias_map_in(home, &map).unwrap_or_default();
+        let out = canonical_in(home, "a");
+        assert!(!out.is_empty());
+        assert_ne!(out, "");
+    }
+
+    #[test]
+    fn set_alias_rejects_loop_and_self() {
+        let dir = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let home = dir.path();
+        set_alias_in(home, "a", "b").unwrap_or_else(|_| unreachable!());
+        assert!(set_alias_in(home, "b", "a").is_err(), "петля должна быть отвергнута");
+        assert!(set_alias_in(home, "x", "x").is_err(), "синоним == канон");
+        assert!(set_alias_in(home, "../evil", "beam").is_err(), "путь в имени");
+    }
+
+    #[test]
+    fn remove_alias_reports_presence() {
+        let dir = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let home = dir.path();
+        set_alias_in(home, "opencode", "beam").unwrap_or_else(|_| unreachable!());
+        assert!(remove_alias_in(home, "opencode").unwrap_or(false));
+        assert!(!remove_alias_in(home, "opencode").unwrap_or(true));
+        assert!(alias_map_in(home).is_empty());
+    }
+
+    #[test]
+    fn host_alias_uses_map_and_skips_auto_names() {
+        let dir = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let home = dir.path();
+        set_alias_in(home, "opencode", "beam").unwrap_or_else(|_| unreachable!());
+        assert_eq!(host_alias_in(home, "opencode"), Some("beam".to_string()));
+        assert_eq!(host_alias_in(home, "goose"), None);
+        // Одноразовое авто-имя каноном быть не может.
+        set_alias_in(home, "claude", "goose-1a2b3c4d").unwrap_or_else(|_| unreachable!());
+        assert_eq!(host_alias_in(home, "claude"), None);
     }
 }
