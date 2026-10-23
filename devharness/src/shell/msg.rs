@@ -340,18 +340,51 @@ fn legacy_inbox_path() -> PathBuf {
 /// Legacy нужен для перехода: письма, отправленные старой схемой (без
 /// явного имени), лежат в `default.log` — агент с авто-именем обязан их
 /// видеть, иначе они потерялись бы навсегда.
+/// Миграция синонимных ящиков в канонический (один раз, дедуп по ID).
+fn migrate_synonym_inboxes(canon: &str) {
+    let own = own_inbox_path(canon);
+    let aliases = crate::core::identity::aliases_of(canon);
+    for alias in &aliases {
+        let path = inbox_path(&safe_name(alias));
+        if path == own || !path.exists() {
+            continue;
+        }
+        // Читаем синонимный ящик.
+        let text = fs::read_to_string(&path).unwrap_or_default();
+        let (_header, blocks) = split_log(&text);
+        if blocks.is_empty() {
+            let _ = fs::remove_file(&path);
+            continue;
+        }
+        // Собираем ID уже в каноническом ящике.
+        let own_text = fs::read_to_string(&own).unwrap_or_default();
+        let (_, own_blocks) = split_log(&own_text);
+        let mut own_ids: Vec<String> = own_blocks
+            .iter()
+            .map(|b| block_field(b, "ID: ").unwrap_or_default())
+            .collect();
+        // Дописываем только новые (дедуп по ID).
+        for b in blocks.iter() {
+            let id = block_field(b, "ID: ").unwrap_or_default();
+            if !id.is_empty() && own_ids.iter().any(|x| x == &id) {
+                continue;
+            }
+            let _ = append_message(&own, b);
+            if !id.is_empty() {
+                own_ids.push(id);
+            }
+        }
+        // Удаляем синонимный ящик после миграции.
+        let _ = fs::remove_file(&path);
+    }
+}
+
 fn inbox_files(agent: &str) -> Vec<PathBuf> {
     let canon = crate::core::identity::canonical(agent);
+    // Миграция синонимных ящиков в канонический (один раз).
+    migrate_synonym_inboxes(&canon);
     let own = own_inbox_path(&canon);
     let mut files = vec![own.clone()];
-    // Ящики синонимов — это ТОТ ЖЕ агент: под старым именем могли скопиться
-    // письма; их надо видеть, и их можно съедать (это не legacy-ящик).
-    for alias in crate::core::identity::aliases_of(&canon) {
-        let path = inbox_path(&safe_name(&alias));
-        if path != own && path.exists() {
-            files.push(path);
-        }
-    }
     let legacy = legacy_inbox_path();
     if own != legacy && legacy.exists() {
         files.push(legacy);
@@ -1490,7 +1523,11 @@ fn send(args: &[String]) -> i32 {
                         // Сначала съедаем (если --consume), потом печатаем:
                         // обрыв вывода (пайп/SIGPIPE) не должен оставлять
                         // письмо в ящике — иначе оно всплывёт снова.
-                        if consume && !legacy {
+                        // Потребляем только если агент — текущий (свой ящик).
+                        // Сторож чужого агента не должен красть письма.
+                        let is_self = crate::core::identity::canonical(&agent)
+                            == crate::core::identity::canonical(&crate::core::identity::current().name);
+                        if consume && !legacy && is_self {
                             // Съедаем свежие (fresh) письма: удаляем их из ящика.
                             // Раньше фильтр был инвертирован — свежие оставались.
                             let fresh_ids: Vec<String> = fresh
@@ -2346,6 +2383,61 @@ ID: abcd1234\n\
         let map = crate::core::identity::alias_map_in(&home);
         assert!(map.contains_key("alias-a"), "alias-a должен быть: {map:?}");
         assert!(map.contains_key("alias-b"), "alias-b должен быть: {map:?}");
+    }
+
+
+    #[test]
+    fn migrate_synonym_inboxes_no_duplicates() {
+        let dir = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let home = dir.path();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        std::env::set_var("DEVH_MSG_HOME", home);
+        std::env::set_var("MSG_NOTIFY_DEDUPE", home.join("notified.dedupe"));
+        std::env::set_var("DEVH_MSG_POPUP", "0");
+        std::env::set_var("DEVH_MSG_SOUND", "0");
+        // Создаём алиас kilo → beam
+        crate::core::identity::set_alias_in(home, "kilo", "beam").unwrap_or_else(|_| unreachable!());
+        // Пишем письмо в оба ящика с одинаковым ID
+        let block = "[10:00] ОТ: sender — КОМУ: beam\nID: dup1\nТРЕД: t1\nТЕМА: test\nТЕЛО:\nbody\n";
+        let inbox = home.join("inbox");
+        std::fs::create_dir_all(&inbox).unwrap_or_default();
+        std::fs::write(inbox.join("beam.log"), format!("{block}{}\n", SEP)).unwrap_or_default();
+        std::fs::write(inbox.join("kilo.log"), format!("{block}{}\n", SEP)).unwrap_or_default();
+        // Миграция
+        migrate_synonym_inboxes("beam");
+        // kilo.log должен быть удалён
+        assert!(!inbox.join("kilo.log").exists(), "kilo.log удалён после миграции");
+        // beam.log должен содержать ровно один блок (дедуп)
+        let text = std::fs::read_to_string(inbox.join("beam.log")).unwrap_or_default();
+        let (_, blocks) = split_log(&text);
+        assert_eq!(blocks.len(), 1, "один блок после дедупа: {blocks:?}");
+        std::env::remove_var("DEVH_MSG_HOME");
+        std::env::remove_var("MSG_NOTIFY_DEDUPE");
+        std::env::remove_var("DEVH_MSG_POPUP");
+        std::env::remove_var("DEVH_MSG_SOUND");
+        drop(_guard);
+    }
+
+    #[test]
+    fn inbox_files_no_synonym_boxes_after_migration() {
+        let dir = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let home = dir.path();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        std::env::set_var("DEVH_MSG_HOME", home);
+        std::env::set_var("MSG_NOTIFY_DEDUPE", home.join("notified.dedupe"));
+        std::env::set_var("DEVH_MSG_POPUP", "0");
+        std::env::set_var("DEVH_MSG_SOUND", "0");
+        crate::core::identity::set_alias_in(home, "kilo", "beam").unwrap_or_else(|_| unreachable!());
+        let files = inbox_files("beam");
+        // После миграции только own + legacy (если есть)
+        for f in &files {
+            assert!(!f.to_string_lossy().contains("kilo.log"), "нет kilo.log в списке: {f:?}");
+        }
+        std::env::remove_var("DEVH_MSG_HOME");
+        std::env::remove_var("MSG_NOTIFY_DEDUPE");
+        std::env::remove_var("DEVH_MSG_POPUP");
+        std::env::remove_var("DEVH_MSG_SOUND");
+        drop(_guard);
     }
 
     #[test]
