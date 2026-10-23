@@ -26,6 +26,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// Роль ведущего (lead): назначается и переназначается в реестре.
+pub const ROLE_LEAD: &str = "lead";
+/// Роль ведомого (worker).
+pub const ROLE_WORKER: &str = "worker";
+
 /// Статус задачи в реестре.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -78,6 +83,40 @@ pub struct Task {
     pub created: u64,
     /// Unix-время последнего изменения.
     pub updated: u64,
+    /// Критерии Definition of Done (человеческий чек-лист).
+    #[serde(default)]
+    pub dod: Vec<String>,
+    /// Машинные проверки DoD (команды).
+    #[serde(default)]
+    pub checks: Vec<String>,
+    /// Подтверждённые исполнителем критерии DoD.
+    #[serde(default)]
+    pub acked: Vec<String>,
+    /// Доказательства прогонов машинных проверок.
+    #[serde(default)]
+    pub evidence: Vec<Evidence>,
+    /// SHA коммита, сделанного по задаче.
+    #[serde(default)]
+    pub commit_sha: Option<String>,
+    /// Причина обхода DoD ведущим.
+    #[serde(default)]
+    pub override_reason: Option<String>,
+}
+
+/// Доказательство прогона машинной проверки.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Evidence {
+    /// Команда проверки.
+    pub cmd: String,
+    /// Проверка завершилась успешно.
+    pub ok: bool,
+    /// Краткий хвост вывода проверки.
+    #[serde(default)]
+    pub detail: String,
+    /// Unix-время прогона.
+    pub at: u64,
+    /// Отпечаток дерева зон на момент прогона.
+    pub digest: String,
 }
 
 /// Состояние исполнителя: модель, рантайм, уровень отказа, подозрение.
@@ -95,6 +134,12 @@ pub struct AgentState {
     pub fail_streak: u32,
     /// Причина подозрения (смена модели, F3+, …).
     pub suspicion: Option<String>,
+    /// Роль агента: `lead` (ведущий) или `worker` (ведомый).
+    #[serde(default)]
+    pub role: Option<String>,
+    /// Ждёт первого `orch welcome` (онбординг).
+    #[serde(default)]
+    pub pending_welcome: bool,
 }
 
 /// Реестр задач и исполнителей.
@@ -106,6 +151,9 @@ pub struct Registry {
     pub tasks: Vec<Task>,
     /// Исполнители.
     pub agents: Vec<AgentState>,
+    /// Назначенный ведущий (канонический адрес).
+    #[serde(default)]
+    pub lead: Option<String>,
 }
 
 fn now() -> u64 {
@@ -152,6 +200,60 @@ fn agent_index(reg: &Registry, name: &str) -> Option<usize> {
     reg.agents.iter().position(|a| a.name == name)
 }
 
+/// Кто ведущий (lead) и откуда это известно.
+///
+/// Приоритет: явное назначение в реестре → агент с ролью `lead` → None.
+pub fn lead_of(reg: &Registry) -> (Option<String>, &'static str) {
+    if let Some(l) = reg.lead.as_ref() {
+        let canon = crate::core::identity::canonical(l);
+        if !canon.is_empty() {
+            return (Some(canon), "назначен в реестре");
+        }
+    }
+    if let Some(a) = reg.agents.iter().find(|a| a.role.as_deref() == Some(ROLE_LEAD)) {
+        return (
+            Some(crate::core::identity::canonical(&a.name)),
+            "роль lead в реестре",
+        );
+    }
+    (None, "не назначен")
+}
+
+/// Назначить ведущего; прежний lead становится worker.
+fn assign_lead(reg: &mut Registry, addr: &str) -> anyhow::Result<String> {
+    let raw = addr.trim();
+    if raw.is_empty() {
+        return Err(anyhow!("devh orch lead: пустой адрес"));
+    }
+    let canon = crate::core::identity::canonical(raw);
+    for a in reg.agents.iter_mut() {
+        if a.role.as_deref() == Some(ROLE_LEAD) && a.name != canon {
+            a.role = Some(ROLE_WORKER.to_string());
+        }
+    }
+    match reg.agents.iter_mut().find(|a| a.name == canon) {
+        Some(a) => a.role = Some(ROLE_LEAD.to_string()),
+        None => reg.agents.push(AgentState {
+            name: canon.clone(),
+            role: Some(ROLE_LEAD.to_string()),
+            ..Default::default()
+        }),
+    }
+    reg.lead = Some(canon.clone());
+    Ok(canon)
+}
+
+/// Задачи агента (по каноническому адресу): в очереди и в работе.
+fn tasks_for<'a>(reg: &'a Registry, canon: &str) -> Vec<&'a Task> {
+    reg.tasks
+        .iter()
+        .filter(|t| {
+            crate::core::identity::canonical(&t.agent) == canon
+                && (t.status == Status::Queued || t.status == Status::Active)
+        })
+        .collect()
+}
+
 /// Вспомогательное: значение флага `--name value` или `--name=value`.
 fn flag(args: &[String], name: &str) -> Option<String> {
     let prefix = format!("{name}=");
@@ -185,7 +287,7 @@ fn flags_all(args: &[String], name: &str) -> Vec<String> {
 }
 
 /// Флаги, за которыми идёт значение (остальные — булевы).
-const VALUE_FLAGS: [&str; 10] = [
+const VALUE_FLAGS: [&str; 18] = [
     "--agent",
     "--p",
     "--title",
@@ -196,6 +298,14 @@ const VALUE_FLAGS: [&str; 10] = [
     "--to",
     "--model",
     "--runtime",
+    "--dod",
+    "--check",
+    "--ack",
+    "--add",
+    "--path",
+    "--message",
+    "--override",
+    "--set",
 ];
 
 /// Позиционные аргументы (не флаги и не их значения).
@@ -316,6 +426,9 @@ fn close_task(
 
 /// Точка входа: `devh orch <sub> [args]`.
 pub fn orch(root: &Path, sub: &str, args: &[String]) -> anyhow::Result<()> {
+    // Хук ставится при любом обращении к оркестратору, но никогда не ломает
+    // репозиторий: отсутствие/старость бинаря только предупреждает.
+    let _ = install_hook_internal(root, false);
     match sub {
         "board" => board(root),
         "list" => list(root, args),
@@ -328,6 +441,15 @@ pub fn orch(root: &Path, sub: &str, args: &[String]) -> anyhow::Result<()> {
         "degrade" => degrade(root, args),
         "model" => model(root, args),
         "zones" => zones(root),
+        "dod" => dod_cmd(root, args),
+        "verify" => verify_cmd(root, args),
+        "commit" => commit_cmd(root, args),
+        "guard-commit" => guard_commit_cmd(root),
+        "install-hook" => install_hook_cmd(root),
+        "lead" => lead_cmd(root, args),
+        "role" => role_cmd(root, args),
+        "welcome" => welcome(root),
+        "onboard" => onboard(root, args),
         "help" | "--help" | "-h" => {
             print_help();
             Ok(())
@@ -345,9 +467,19 @@ fn print_help() {
 
   board                      дашборд: кто/какие задачи/P/F/зоны/очередь/предупреждения
   list [--agent X]           таблица задач
-  add --agent X --p N --title T [--zone path]... [--note N] [--notify]
+  add --agent X --p N --title T --dod <критерий> [--check <команда>]...
+       [--zone path]... [--note N] [--notify]
   start <ID>                 задача взята в работу
-  done <ID> --f N            выполнена (N = фактический уровень отказа)
+  dod <ID> [--add <критерий>] [--ack <критерий>|N] [--check <команда>] [--zone path]
+  verify <ID>                прогнать машинные проверки DoD
+  done <ID> --f N            выполнена (только с зелёным DoD; --override только lead)
+  commit <ID> [--message M] [--path path]...  коммит по задаче (только зелёный DoD)
+  guard-commit               гейт для pre-commit хука
+  install-hook               установить pre-commit хук
+  lead [--set ADDR] [--notify]  актуальный ведущий / назначение
+  role --agent X --role lead|worker
+  welcome                    пакет новичка
+  onboard --agent NAME [--task T] [--p P1] [--zone Z] [--dod ...] [--check ...]
   fail <ID> --f N --reason R провалена
   revoke <ID> --reason R     отзыв задачи
   reassign <ID> --agent X    переназначить
@@ -361,7 +493,8 @@ fn print_help() {
 
 /// `devh orch add`.
 fn add(root: &Path, args: &[String]) -> anyhow::Result<()> {
-    let agent = flag(args, "--agent").ok_or_else(|| anyhow!("devh orch add: нужен --agent"))?;
+    let raw_agent = flag(args, "--agent").ok_or_else(|| anyhow!("devh orch add: нужен --agent"))?;
+    let agent = crate::core::identity::canonical(&raw_agent);
     let p_raw = flag(args, "--p").ok_or_else(|| anyhow!("devh orch add: нужен --p 0..5"))?;
     let complexity = parse_level(&p_raw, "уровень сложности")?;
     let title = flag(args, "--title").ok_or_else(|| anyhow!("devh orch add: нужен --title"))?;
@@ -375,8 +508,31 @@ fn add(root: &Path, args: &[String]) -> anyhow::Result<()> {
         }
     }
     let note = flag(args, "--note").unwrap_or_default();
-
+    let dod: Vec<String> = flags_all(args, "--dod")
+        .into_iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if dod.is_empty() {
+        return Err(anyhow!(
+            "devh orch add: задача без DoD не создаётся — добавь --dod \"критерий\""
+        ));
+    }
+    let checks: Vec<String> = flags_all(args, "--check")
+        .into_iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
     let mut reg = load(root);
+    let (lead, _) = lead_of(&reg);
+    let is_lead = lead.as_deref() == Some(agent.as_str());
+    if checks.is_empty() && !(is_lead && args.iter().any(|a| a == "--no-test")) {
+        return Err(anyhow!(
+            "devh orch add: для ведомого нужна минимум одна машинная проверка --check \"команда\"{}",
+            if is_lead { " (для lead укажи --no-test)" } else { "" }
+        ));
+    }
+
     reg.seq = reg.seq.saturating_add(1);
     let id = format!("T-{:03}", reg.seq);
     let ts = now();
@@ -391,6 +547,12 @@ fn add(root: &Path, args: &[String]) -> anyhow::Result<()> {
         note,
         created: ts,
         updated: ts,
+        dod,
+        checks,
+        acked: Vec::new(),
+        evidence: Vec::new(),
+        commit_sha: None,
+        override_reason: None,
     });
     if agent_index(&reg, &agent).is_none() {
         reg.agents.push(AgentState {
@@ -404,15 +566,27 @@ fn add(root: &Path, args: &[String]) -> anyhow::Result<()> {
         println!("devh orch: ⚠ зона не указана (--zone) — пересечения зон не проверятся");
     }
     if args.iter().any(|a| a == "--notify") {
-        let body = format!(
-            "Задача {id} (сложность P{complexity}): {title}. Зоны: {}. \
-             В отчёте укажи P/F: P{complexity}/<фактический уровень отказа>. \
-             Шкалы: devh workflow §ШКАЛЫ. Тяжёлые прогоны — только по отмашке ведущего.",
-            if zones.is_empty() {
-                "не заданы".to_string()
-            } else {
-                zones.join(", ")
+        let task = reg.tasks.last().expect("только что добавлена");
+        let mut body = format!(
+            "Задача {id} (сложность P{complexity}): {title}. Зоны: {}.\n\
+             Definition of Done — критерии:\n",
+            if zones.is_empty() { "не заданы".to_string() } else { zones.join(", ") }
+        );
+        for (i, criterion) in task.dod.iter().enumerate() {
+            body.push_str(&format!("  {}. {criterion}\n", i + 1));
+        }
+        body.push_str("Машинные проверки:\n");
+        if task.checks.is_empty() {
+            body.push_str("  (нет — lead явно разрешил --no-test)\n");
+        } else {
+            for check in &task.checks {
+                body.push_str(&format!("  - {check}\n"));
             }
+        }
+        body.push_str(
+            "Прохождение: devh orch dod <ID> --ack \"критерий\" (или N) → \
+             devh orch verify <ID> → devh orch commit <ID>. \
+             В отчёте укажи P/F: P{complexity}/<фактический уровень отказа>.",
         );
         let rc = crate::shell::msg::run(&[
             "send".to_string(),
@@ -460,20 +634,47 @@ fn close(root: &Path, args: &[String], status: Status) -> anyhow::Result<()> {
     let id = positional(args)
         .first()
         .cloned()
-        .ok_or_else(|| anyhow!("devh orch: нужен ID задачи"))?;
+        .ok_or_else(|| anyhow!("devh orch: задача не найдена"))?;
     let f_raw = flag(args, "--f").ok_or_else(|| anyhow!("devh orch: нужен --f 0..5"))?;
     let level = parse_level(&f_raw, "уровень отказа")?;
     let reason = flag(args, "--reason").unwrap_or_default();
+    let override_reason = flag(args, "--override");
     let mut reg = load(root);
+    if status == Status::Done {
+        let idx = find_task_index(&reg, &id)
+            .ok_or_else(|| anyhow!("devh orch: задача {id} не найдена"))?;
+        let task = reg.tasks.get(idx).expect("индекс найден");
+        let state = dod_state(root, task);
+        if !state.complete {
+            let (lead, _) = lead_of(&reg);
+            let me = crate::core::identity::current();
+            let me = crate::core::identity::canonical(&me.name);
+            match override_reason.as_ref().filter(|r| !r.trim().is_empty()) {
+                Some(why) if lead.as_deref() == Some(me.as_str()) => {
+                    let task = reg.tasks.get_mut(idx).expect("индекс найден");
+                    task.override_reason = Some(why.trim().to_string());
+                    println!("devh orch: ⚠ DoD {id} обойдён ведущим: {}", why.trim());
+                }
+                Some(_) => {
+                    return Err(anyhow!(
+                        "devh orch done: обход DoD разрешён только ведущему"
+                    ));
+                }
+                None => {
+                    return Err(anyhow!(
+                        "devh orch done: DoD {id} не выполнен: {}. Подтверди критерии: \
+                         devh orch dod {id} --ack; проверь: devh orch verify {id}",
+                        state.missing
+                    ));
+                }
+            }
+        }
+    }
     let (agent, f) = close_task(&mut reg, &id, status, Some(level), &reason)?;
     save(root, &reg)?;
     println!(
         "devh orch: {id} {} ({agent}, F{f})",
-        if status == Status::Done {
-            "выполнена"
-        } else {
-            "провалена"
-        }
+        if status == Status::Done { "выполнена" } else { "провалена" }
     );
     Ok(())
 }
@@ -813,6 +1014,790 @@ fn board(root: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+// ─────────────────────────────── DoD-гейт ───────────────────────────────
+
+fn zone_digest(root: &Path, zones: &[String]) -> String {
+    let Ok(entries) = crate::shell::git::tree_entries(root) else {
+        // Стабильный fallback для репозитория без git: проверка остаётся
+        // воспроизводимой, хоть и не ловит изменение содержимого.
+        return format!("fallback:{}", zones.join(","));
+    };
+    let filtered: Vec<_> = entries
+        .into_iter()
+        .filter(|e| zones.iter().any(|z| zones_overlap(&e.path, z)))
+        .collect();
+    crate::core::digest::tree_digest(&filtered).unwrap_or_else(|e| format!("digest-error:{e}"))
+}
+
+#[derive(Debug, Clone)]
+struct DodState {
+    criteria_ok: usize,
+    criteria_total: usize,
+    checks_ok: usize,
+    checks_total: usize,
+    complete: bool,
+    missing: String,
+}
+
+fn dod_state(root: &Path, task: &Task) -> DodState {
+    let criteria_total = task.dod.len();
+    let criteria_ok = task
+        .dod
+        .iter()
+        .filter(|criterion| task.acked.iter().any(|a| a == *criterion))
+        .count();
+    let digest = zone_digest(root, &task.zones);
+    let checks_total = task.checks.len();
+    let checks_ok = task
+        .checks
+        .iter()
+        .filter(|check| {
+            task.evidence.iter().rev().any(|e| {
+                e.cmd == **check && e.ok && e.digest == digest
+            })
+        })
+        .count();
+    let mut missing = Vec::new();
+    if criteria_ok < criteria_total {
+        missing.push(format!("критерии {criteria_ok}/{criteria_total}"));
+    }
+    if checks_ok < checks_total {
+        missing.push(format!("проверки {checks_ok}/{checks_total}"));
+    }
+    DodState {
+        criteria_ok,
+        criteria_total,
+        checks_ok,
+        checks_total,
+        complete: criteria_total > 0 && criteria_ok == criteria_total && checks_ok == checks_total,
+        missing: if missing.is_empty() {
+            "готово".to_string()
+        } else {
+            missing.join(", ")
+        },
+    }
+}
+
+/// `devh orch dod <ID> [--add ...] [--ack ...] [--check ...] [--zone ...]`.
+pub fn dod_cmd(root: &Path, args: &[String]) -> anyhow::Result<()> {
+    let id = positional(args)
+        .first()
+        .cloned()
+        .ok_or_else(|| anyhow!("devh orch dod: нужен ID задачи"))?;
+    let mut reg = load(root);
+    let idx = find_task_index(&reg, &id)
+        .ok_or_else(|| anyhow!("devh orch dod: задача {id} не найдена"))?;
+    let additions = flags_all(args, "--add");
+    let acks = flags_all(args, "--ack");
+    let checks = flags_all(args, "--check");
+    let zones = flags_all(args, "--zone");
+    {
+        let task = reg.tasks.get_mut(idx).expect("индекс найден");
+        for criterion in additions {
+            let criterion = criterion.trim().to_string();
+            if !criterion.is_empty() && !task.dod.contains(&criterion) {
+                task.dod.push(criterion);
+            }
+        }
+        for check in checks {
+            let check = check.trim().to_string();
+            if !check.is_empty() && !task.checks.contains(&check) {
+                task.checks.push(check);
+            }
+        }
+        for zone in zones {
+            let zone = zone.trim().to_string();
+            if !zone.is_empty() && !task.zones.contains(&zone) {
+                task.zones.push(zone);
+            }
+        }
+        for ack in acks {
+            let ack = ack.trim();
+            if ack.is_empty() {
+                continue;
+            }
+            let criterion = if let Ok(n) = ack.parse::<usize>() {
+                task.dod.get(n.saturating_sub(1)).cloned().ok_or_else(|| {
+                    anyhow!("devh orch dod: нет критерия с номером {n}")
+                })?
+            } else {
+                ack.to_string()
+            };
+            if !task.dod.iter().any(|c| c == &criterion) {
+                return Err(anyhow!(
+                    "devh orch dod: критерий «{criterion}» не входит в DoD задачи"
+                ));
+            }
+            if !task.acked.contains(&criterion) {
+                task.acked.push(criterion);
+            }
+        }
+        task.updated = now();
+    }
+    save(root, &reg)?;
+    let task = reg.tasks.get(idx).expect("индекс найден");
+    let state = dod_state(root, task);
+    println!(
+        "devh orch: DoD {id}: критерии {}/{} ✓, проверки {}/{} ✓",
+        state.criteria_ok, state.criteria_total, state.checks_ok, state.checks_total
+    );
+    Ok(())
+}
+
+fn output_tail(text: &str) -> String {
+    let mut lines: Vec<&str> = text.lines().collect();
+    if lines.len() > 30 {
+        lines = lines.split_off(lines.len() - 30);
+    }
+    lines.join("\n")
+}
+
+/// `devh orch verify <ID>` — машинные проверки DoD.
+pub fn verify_cmd(root: &Path, args: &[String]) -> anyhow::Result<()> {
+    let id = positional(args)
+        .first()
+        .cloned()
+        .ok_or_else(|| anyhow!("devh orch verify: нужен ID задачи"))?;
+    let mut reg = load(root);
+    let idx = find_task_index(&reg, &id)
+        .ok_or_else(|| anyhow!("devh orch verify: задача {id} не найдена"))?;
+    let checks = reg.tasks.get(idx).expect("индекс найден").checks.clone();
+    if checks.is_empty() {
+        println!("devh orch: {id}: машинных проверок нет (--no-test)");
+        return Ok(());
+    }
+    let log_dir = dir(root).join("logs");
+    fs::create_dir_all(&log_dir)?;
+    let ts = now();
+    let log_path = log_dir.join(format!("{id}-{ts}.log"));
+    let mut all_ok = true;
+    let mut log = String::new();
+    for check in checks {
+        let before = zone_digest(root, &reg.tasks.get(idx).expect("индекс найден").zones);
+        let output = std::process::Command::new("timeout")
+            .args(["1800", "bash", "-lc", &check])
+            .current_dir(root)
+            .output();
+        let (ok, detail, code) = match output {
+            Ok(out) => {
+                let mut combined = String::from_utf8_lossy(&out.stdout).to_string();
+                combined.push_str(&String::from_utf8_lossy(&out.stderr));
+                (
+                    out.status.success(),
+                    output_tail(&combined),
+                    out.status.code().unwrap_or(-1),
+                )
+            }
+            Err(e) => (false, format!("не запустилась: {e}"), -1),
+        };
+        let after = zone_digest(root, &reg.tasks.get(idx).expect("индекс найден").zones);
+        let fresh = before == after;
+        let evidence_ok = ok && fresh;
+        if !evidence_ok {
+            all_ok = false;
+        }
+        log.push_str(&format!("$ {check}\n{detail}\nкод={code} digest_before={before} digest_after={after}\n\n"));
+        {
+            let task = reg.tasks.get_mut(idx).expect("индекс найден");
+            task.evidence.push(Evidence {
+                cmd: check.clone(),
+                ok: evidence_ok,
+                detail: if fresh {
+                    detail
+                } else {
+                    format!("{detail}\n⚠ дерево зон изменилось во время проверки")
+                },
+                at: now(),
+                digest: before,
+            });
+            task.updated = now();
+        }
+        if evidence_ok {
+            println!("✓ {check}");
+        } else if !fresh {
+            println!("✗ {check}: дерево зон изменилось во время проверки");
+        } else {
+            println!("✗ {check} (код {code})");
+        }
+    }
+    fs::write(&log_path, &log)?;
+    save(root, &reg)?;
+    println!("devh orch: лог проверок: {}", log_path.display());
+    if !all_ok {
+        return Err(anyhow!("devh orch verify: есть красные проверки"));
+    }
+    Ok(())
+}
+
+fn git_output(root: &Path, args: &[&str]) -> anyhow::Result<String> {
+    let out = std::process::Command::new("git")
+        .args(args)
+        .current_dir(root)
+        .output()?;
+    if !out.status.success() {
+        return Err(anyhow!(
+            "git {}: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// `devh orch commit <ID>` — коммит только после зелёного DoD.
+pub fn commit_cmd(root: &Path, args: &[String]) -> anyhow::Result<()> {
+    let id = positional(args)
+        .first()
+        .cloned()
+        .ok_or_else(|| anyhow!("devh orch commit: нужен ID задачи"))?;
+    let reg = load(root);
+    let idx = find_task_index(&reg, &id)
+        .ok_or_else(|| anyhow!("devh orch commit: задача {id} не найдена"))?;
+    let task = reg.tasks.get(idx).expect("индекс найден");
+    let state = dod_state(root, task);
+    if !state.complete {
+        return Err(anyhow!(
+            "devh orch commit: DoD {id} не выполнен: {}. Сначала: \
+             devh orch dod {id} --ack ... && devh orch verify {id}",
+            state.missing
+        ));
+    }
+    let mut paths: Vec<String> = flags_all(args, "--path")
+        .into_iter()
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
+        .collect();
+    if paths.is_empty() {
+        paths = task.zones.clone();
+    }
+    if paths.is_empty() {
+        return Err(anyhow!(
+            "devh orch commit: не указан путь и у задачи нет зон (--path)"
+        ));
+    }
+    let mut git_args = vec!["add", "--"];
+    git_args.extend(paths.iter().map(String::as_str));
+    git_output(root, &git_args)?;
+    let message = flag(args, "--message").unwrap_or_else(|| {
+        format!("chore(task {id}): {}", task.title)
+    });
+    let mut commit_args = vec!["commit", "-m", message.as_str(), "--"];
+    commit_args.extend(paths.iter().map(String::as_str));
+    git_output(root, &commit_args)?;
+    let sha = git_output(root, &["rev-parse", "HEAD"])?;
+    let mut reg = load(root);
+    if let Some(idx) = find_task_index(&reg, &id) {
+        let task = reg.tasks.get_mut(idx).expect("индекс найден");
+        task.commit_sha = Some(sha.clone());
+        task.updated = now();
+    }
+    save(root, &reg)?;
+    println!("devh orch: коммит {sha} по задаче {id}: {message}");
+    Ok(())
+}
+
+/// Проверка DoD для активных задач, чьи зоны пересекаются со staged.
+pub fn guard_commit_cmd(root: &Path) -> anyhow::Result<()> {
+    let staged = git_output(root, &["diff", "--cached", "--name-only"])?;
+    let staged: Vec<String> = staged
+        .lines()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
+    if staged.is_empty() {
+        return Ok(());
+    }
+    let reg = load(root);
+    let mut errors = Vec::new();
+    for task in reg.tasks.iter().filter(|t| t.status == Status::Active) {
+        if !task.zones.iter().any(|zone| {
+            staged.iter().any(|path| zones_overlap(path, zone))
+        }) {
+            continue;
+        }
+        let state = dod_state(root, task);
+        if !state.complete {
+            errors.push(format!("{}: {}", task.id, state.missing));
+        }
+    }
+    if !errors.is_empty() {
+        return Err(anyhow!(
+            "devh orch guard-commit: DoD не выполнен для активных задач ({}):\n  {}\n\
+             Подтверди критерии (devh orch dod <ID> --ack) и прогони проверки \
+             (devh orch verify <ID>).",
+            errors.len(),
+            errors.join("\n  ")
+        ));
+    }
+    Ok(())
+}
+
+const HOOK_MARKER: &str = "# devh-orch-guard-commit";
+
+fn hook_path(root: &Path) -> PathBuf {
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "--git-path", "hooks/pre-commit"])
+        .current_dir(root)
+        .output();
+    let raw = match output {
+        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).trim().to_string(),
+        _ => ".git/hooks/pre-commit".to_string(),
+    };
+    let p = PathBuf::from(raw);
+    if p.is_absolute() { p } else { root.join(p) }
+}
+
+fn install_hook_internal(root: &Path, verbose: bool) -> anyhow::Result<()> {
+    let path = hook_path(root);
+    if !path.starts_with(root) && !path.is_absolute() {
+        return Ok(());
+    }
+    if let Ok(text) = fs::read_to_string(&path) {
+        if text.contains(HOOK_MARKER) {
+            if verbose {
+                println!("devh orch: pre-commit хук уже установлен: {}", path.display());
+            }
+            return Ok(());
+        }
+    }
+    let Some(parent) = path.parent() else { return Ok(()) };
+    fs::create_dir_all(parent)?;
+    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("devh"));
+    let script = format!(r#"#!/bin/sh
+{HOOK_MARKER}
+DEVH_BIN="${{DEVH_BIN:-{exe}}}"
+if [ ! -x "$DEVH_BIN" ] || ! "$DEVH_BIN" orch help 2>/dev/null | grep -q 'guard-commit'; then
+  echo "devh orch: pre-commit пропущен — бинарь не собран или старый" >&2
+  exit 0
+fi
+exec "$DEVH_BIN" orch guard-commit
+"#, exe = exe.display());
+    fs::write(&path, script)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&path)?.permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&path, perms)?;
+    }
+    if verbose {
+        println!("devh orch: pre-commit хук установлен: {}", path.display());
+    }
+    Ok(())
+}
+
+/// `devh orch install-hook`.
+pub fn install_hook_cmd(root: &Path) -> anyhow::Result<()> {
+    install_hook_internal(root, true)
+}
+
+/// `devh orch lead [--set ADDR] [--notify]` — показать или назначить ведущего.
+pub fn lead_cmd(root: &Path, args: &[String]) -> anyhow::Result<()> {
+    let mut reg = load(root);
+    if let Some(target) = flag(args, "--set") {
+        let raw = target.trim().to_string();
+        let canon = crate::core::identity::canonical(&raw);
+        if canon != raw {
+            println!("devh orch: ⚠ «{raw}» — синоним агента «{canon}»; назначаю «{canon}»");
+        }
+        let canon = assign_lead(&mut reg, &raw)?;
+        save(root, &reg)?;
+        println!("devh orch: ведущий (lead) теперь {canon}");
+        println!("  инструкции и письма теперь указывают на него; узнать актуального: devh orch lead");
+        if args.iter().any(|a| a == "--notify") {
+            let body = "Ты назначен ведущим (lead) оркестрации devh. Очередь и зоны — devh orch board, \
+                        роли — devh orch lead. Отчёты ведомых приходят письмами на этот адрес."
+                .to_string();
+            let rc = crate::shell::msg::run(&[
+                "send".to_string(),
+                "--to".to_string(),
+                canon.clone(),
+                "--subject".to_string(),
+                "devh orch: ты теперь ведущий (lead)".to_string(),
+                "--body".to_string(),
+                body,
+            ]);
+            if rc != 0 {
+                println!("devh orch: ⚠ письмо о назначении не отправлено (rc={rc})");
+            }
+        }
+        return Ok(());
+    }
+    let (lead, src) = lead_of(&reg);
+    println!("=== РОЛИ ===");
+    match lead.as_ref() {
+        Some(l) => println!("ведущий (lead): {l} — {src}"),
+        None => println!(
+            "ведущий (lead): НЕ НАЗНАЧЕН — назначь: devh orch lead --set <адрес>"
+        ),
+    }
+    for a in reg.agents.iter() {
+        println!(
+            "  {:<12} роль={}",
+            a.name,
+            a.role.clone().unwrap_or_else(|| "—".to_string())
+        );
+    }
+    println!("назначить/переназначить: devh orch lead --set <адрес> [--notify]");
+    println!("роль исполнителя:        devh orch role --agent <адрес> --role worker");
+    Ok(())
+}
+
+/// `devh orch role --agent X --role lead|worker`.
+pub fn role_cmd(root: &Path, args: &[String]) -> anyhow::Result<()> {
+    let agent = flag(args, "--agent")
+        .ok_or_else(|| anyhow!("devh orch role: нужен --agent"))?
+        .trim()
+        .to_string();
+    let role = flag(args, "--role")
+        .ok_or_else(|| anyhow!("devh orch role: нужен --role lead|worker"))?
+        .trim()
+        .to_lowercase();
+    if role != ROLE_LEAD && role != ROLE_WORKER {
+        return Err(anyhow!(
+            "devh orch role: роль «{role}» неизвестна (допустимо: lead|worker)"
+        ));
+    }
+    let mut reg = load(root);
+    let canon = crate::core::identity::canonical(&agent);
+    if agent_index(&reg, &canon).is_none() {
+        reg.agents.push(AgentState {
+            name: canon.clone(),
+            ..Default::default()
+        });
+    }
+    if role == ROLE_LEAD {
+        for a in reg.agents.iter_mut() {
+            if a.role.as_deref() == Some(ROLE_LEAD) && a.name != canon {
+                a.role = Some(ROLE_WORKER.to_string());
+            }
+        }
+    }
+    let idx = agent_index(&reg, &canon).unwrap_or_else(|| unreachable!());
+    if let Some(a) = reg.agents.get_mut(idx) {
+        a.role = Some(role.clone());
+    }
+    if role == ROLE_LEAD {
+        reg.lead = Some(canon.clone());
+    } else if reg
+        .lead
+        .as_ref()
+        .map(|l| crate::core::identity::canonical(l))
+        .as_deref()
+        == Some(canon.as_str())
+    {
+        reg.lead = None;
+    }
+    save(root, &reg)?;
+    println!("devh orch: {canon} — роль {role}");
+    Ok(())
+}
+
+/// Пакет новичка: адрес, ведущий (динамически), задачи, протокол, запреты.
+fn print_welcome_packet(
+    reg: &Registry,
+    addr: &str,
+    source: &str,
+    key: &str,
+    lead: Option<&str>,
+    lead_src: &str,
+) {
+    println!("=== ПАКЕТ НОВОГО АГЕНТА ===");
+    println!("твой адрес: {addr} (источник: {source}, ключ: {key})");
+    match lead {
+        Some(l) => println!(
+            "ведущий (lead): {l} ({lead_src}) · актуальный адрес: devh orch lead"
+        ),
+        None => println!(
+            "ведущий (lead): НЕ НАЗНАЧЕН · спроси в чате или назначь: devh orch lead --set <адрес>"
+        ),
+    }
+    let tasks = tasks_for(reg, addr);
+    println!("\nТВОИ ЗАДАЧИ (реестр .harness/orch/registry.json):");
+    if tasks.is_empty() {
+        println!("  (пока нет — очередь пополняет ведущий; работу не проси)");
+    } else {
+        for t in tasks.iter() {
+            println!(
+                "  {} {:<7} P{} {} — {}",
+                t.id,
+                t.status.label(),
+                t.complexity,
+                if t.zones.is_empty() {
+                    "зона не задана".to_string()
+                } else {
+                    t.zones.join(",")
+                },
+                t.title
+            );
+        }
+    }
+    let to = lead.unwrap_or("<lead>");
+    println!("\nКАК РАБОТАТЬ:");
+    println!("  1) каждый ход первым делом: devh msg read (consume-on-read)");
+    println!("  2) бери первую задачу из своей очереди и не жди пинга");
+    println!("  3) отчёт = ОДНО письмо ведущему:");
+    println!(
+        "       devh msg send --to {to} --subject \"<канон>: <задача> — готово\" \\"
+    );
+    println!(
+        "         --body \"1) сделано: <file:line> 2) как проверено: <тест/команда> 3) доказательства: <вывод/цифры> 4) осталось/риски: <...>\""
+    );
+    println!("     + отдельная строка: P/F: P2/F1");
+    println!("  4) DoD: devh orch dod <ID> --ack <критерий> → devh orch verify <ID> →");
+    println!("     devh orch commit <ID> — без зелёного DoD коммит невозможен");
+    println!("  5) очередь пополняет ведущий — работу не проси; жди следующую задачу");
+    println!("  6) тяжёлые прогоны (devh test, devh mutate) — только по отмашке ведущего");
+    println!("  7) полный канон: devh workflow · задачи: devh orch board");
+    println!("\nЗАПРЕЩЕНО: cargo mutants руками (R1) · bash devharness/test.sh руками (R8) ·");
+    println!("  git add -A / checkout / restore / stash / reset в общем дереве (R9) · --in-place (R11) ·");
+    println!("  запуск мутационного аудита — только ведущий (R17) · коммит без зелёного DoD (R16) ·");
+    println!("  правка артефактов аудита (R12) · внешние watcher'ы (R2/R7/R13) · чужая зона (O5)");
+}
+
+/// `devh orch welcome` — пакет новичка (NB2) + авто-привязка адреса.
+fn welcome(root: &Path) -> anyhow::Result<()> {
+    let me = crate::core::identity::current();
+    let mut reg = load(root);
+    let (lead, lead_src) = lead_of(&reg);
+    let mut addr = me.name.clone();
+    let registered = reg
+        .agents
+        .iter()
+        .any(|a| crate::core::identity::canonical(&a.name) == addr);
+    if !registered {
+        let waiting: Vec<String> = reg
+            .agents
+            .iter()
+            .filter(|a| a.pending_welcome)
+            .map(|a| a.name.clone())
+            .collect();
+        if waiting.len() == 1 {
+            let target = waiting[0].clone();
+            let target_canon = crate::core::identity::canonical(&target);
+            // Адрес новичка уже принадлежит другому агенту (в т.ч. ведущему) —
+            // привязывать синоним нельзя: это увёл бы чужой ящик.
+            let foreign = reg.agents.iter().any(|a| {
+                a.name != target && crate::core::identity::canonical(&a.name) == addr
+            }) || lead.as_deref() == Some(addr.as_str());
+            if foreign {
+                println!("⚠ ТВОЙ ТЕКУЩИЙ АДРЕС «{addr}» УЖЕ ЗАНЯТ ДРУГИМ АГЕНТОМ.");
+                println!("  Закрепи свой адрес, потом повтори эту команду:");
+                println!("      devh msg claim {target}");
+                println!("  (после claim ты будешь {target}, и пакет покажет твои задачи)");
+            } else {
+                let rc = crate::shell::msg::run(&[
+                    "alias".to_string(),
+                    addr.clone(),
+                    "--for".to_string(),
+                    target.clone(),
+                ]);
+                if rc == 0 {
+                    addr = target_canon.clone();
+                    if let Some(a) = reg.agents.iter_mut().find(|a| a.name == target) {
+                        a.pending_welcome = false;
+                    }
+                    save(root, &reg)?;
+                    println!(
+                        "=== ты зарегистрирован как {addr} (адрес «{}» привязан автоматически) ===",
+                        me.name
+                    );
+                }
+            }
+        }
+    }
+    print_welcome_packet(
+        &reg,
+        &addr,
+        me.source.as_str(),
+        &me.key,
+        lead.as_deref(),
+        lead_src,
+    );
+    Ok(())
+}
+
+/// Итог онбординга (чистая часть — без письма; для тестов).
+struct Onboarded {
+    agent: String,
+    task_id: String,
+    complexity: u8,
+    lead: Option<String>,
+}
+
+/// `devh orch onboard --agent NAME ...` — регистрация + первое задание (NB1/NB3).
+fn onboard_register(root: &Path, args: &[String]) -> anyhow::Result<Onboarded> {
+    let agent = flag(args, "--agent")
+        .ok_or_else(|| anyhow!("devh orch onboard: нужен --agent NAME"))?
+        .trim()
+        .to_string();
+    if agent.is_empty() {
+        return Err(anyhow!("devh orch onboard: пустой --agent"));
+    }
+    let canon_agent = crate::core::identity::canonical(&agent);
+    let title = flag(args, "--task")
+        .unwrap_or_else(|| "первое задание (уточни у ведущего)".to_string());
+    let p_raw = flag(args, "--p").unwrap_or_else(|| "P1".to_string());
+    let requested = parse_level(&p_raw, "уровень сложности")?;
+    let complexity = requested.min(1); // NB3: новичку первое задание не сложнее P1
+    let zone = flag(args, "--zone");
+    let runtime = flag(args, "--runtime");
+    let model = flag(args, "--model");
+    let dod: Vec<String> = flags_all(args, "--dod")
+        .into_iter().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+    let checks: Vec<String> = flags_all(args, "--check")
+        .into_iter().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+    if dod.is_empty() {
+        return Err(anyhow!("devh orch onboard: первое задание требует DoD (--dod <критерий>)"));
+    }
+    let mut reg = load(root);
+    // Адрес не должен совпадать с чужим (в т.ч. с адресом ведущего).
+    let (lead_now, _) = lead_of(&reg);
+    if let Some(l) = lead_now.as_ref() {
+        if *l == canon_agent {
+            return Err(anyhow!(
+                "devh orch onboard: адрес «{canon_agent}» уже занят ведущим"
+            ));
+        }
+    }
+    if reg
+        .agents
+        .iter()
+        .any(|a| a.name != canon_agent && crate::core::identity::canonical(&a.name) == canon_agent)
+    {
+        return Err(anyhow!(
+            "devh orch onboard: адрес «{canon_agent}» уже занят другим агентом"
+        ));
+    }
+    // Регистрация агента.
+    match agent_index(&reg, &canon_agent) {
+        Some(i) => {
+            let a = reg.agents.get_mut(i).unwrap_or_else(|| unreachable!());
+            a.pending_welcome = true;
+            if a.role.is_none() {
+                a.role = Some(ROLE_WORKER.to_string());
+            }
+            if let Some(m) = model.as_ref() {
+                a.model = Some(m.clone());
+            }
+            if let Some(r) = runtime.as_ref() {
+                a.runtime = Some(r.clone());
+            }
+        }
+        None => reg.agents.push(AgentState {
+            name: canon_agent.clone(),
+            model: model.clone(),
+            runtime: runtime.clone(),
+            role: Some(ROLE_WORKER.to_string()),
+            pending_welcome: true,
+            ..Default::default()
+        }),
+    }
+    // Первое задание.
+    reg.seq = reg.seq.saturating_add(1);
+    let task_id = format!("T-{:03}", reg.seq);
+    let ts = now();
+    let mut zones: Vec<String> = Vec::new();
+    if let Some(z) = zone.as_ref() {
+        for part in z.split(',') {
+            let p = part.trim().to_string();
+            if !p.is_empty() && !zones.contains(&p) {
+                zones.push(p);
+            }
+        }
+    }
+    reg.tasks.push(Task {
+        id: task_id.clone(),
+        agent: canon_agent.clone(),
+        title: title.clone(),
+        complexity,
+        status: Status::Queued,
+        zones,
+        fail_level: None,
+        note: String::new(),
+        created: ts,
+        updated: ts,
+        dod,
+        checks,
+        acked: Vec::new(),
+        evidence: Vec::new(),
+        commit_sha: None,
+        override_reason: None,
+    });
+    // Если ведущий ещё не назначен — назначаем того, кто проводит онбординг.
+    let me = crate::core::identity::current();
+    let (lead, _) = lead_of(&reg);
+    if lead.is_none() && crate::core::identity::canonical(&me.name) != canon_agent {
+        let _ = assign_lead(&mut reg, &me.name);
+    }
+    let (lead, _) = lead_of(&reg);
+    save(root, &reg)?;
+    Ok(Onboarded {
+        agent: canon_agent,
+        task_id,
+        complexity,
+        lead,
+    })
+}
+
+/// `devh orch onboard` — онбординг + письмо-протокол + ОДНА команда для новичка.
+fn onboard(root: &Path, args: &[String]) -> anyhow::Result<()> {
+    let onb = onboard_register(root, args)?;
+    let lead = onb
+        .lead
+        .clone()
+        .unwrap_or_else(|| "<ведущий не назначен>".to_string());
+    let body = format!(
+        "Ты зарегистрирован как {agent} в оркестрации devh.\n\
+         Первое задание: {task} (P{complexity}) — детали: devh orch board.\n\
+         Ведущий (lead) сейчас: {lead} (актуальный адрес — devh orch lead).\n\
+         Отчёт ведущему — одно письмо, 4 пункта + строка P/F:\n\
+         devh msg send --to {lead} --subject \"<канон>: <задача> — готово\" --body \"1) сделано: <file:line> 2) как проверено: <тест> 3) доказательства: <цифры> 4) осталось/риски: <...>\"\n\
+         Тяжёлые прогоны (devh test, devh mutate) — только по отмашке ведущего.\n\
+         Полный канон: devh workflow.",
+        agent = onb.agent,
+        task = onb.task_id,
+        complexity = onb.complexity,
+        lead = lead
+    );
+    let rc = crate::shell::msg::run(&[
+        "send".to_string(),
+        "--to".to_string(),
+        onb.agent.clone(),
+        "--subject".to_string(),
+        format!("Добро пожаловать в оркестрацию: {}", onb.agent),
+        "--body".to_string(),
+        body,
+    ]);
+    if rc != 0 {
+        println!("devh orch: ⚠ письмо-протокол не отправлено (rc={rc})");
+    }
+    // Авто-привязка рантайма (O8): только если этот рантайм ещё свободен.
+    if let Some(rt) = flag(args, "--runtime") {
+        let rt = rt.trim().to_string();
+        if !rt.is_empty() && rt != onb.agent {
+            let canon_rt = crate::core::identity::canonical(&rt);
+            if canon_rt == rt {
+                let rc = crate::shell::msg::run(&[
+                    "alias".to_string(),
+                    rt.clone(),
+                    "--for".to_string(),
+                    onb.agent.clone(),
+                ]);
+                if rc != 0 {
+                    println!("devh orch: ⚠ не привязан рантайм «{rt}»");
+                }
+            } else {
+                println!(
+                    "devh orch: ⚠ рантайм «{rt}» уже привязан к «{canon_rt}» — не перебиваю (O8)"
+                );
+            }
+        }
+    }
+    println!("cd {} && ./target/debug/devh orch welcome", root.display());
+    Ok(())
+}
 #[cfg(test)]
 mod tests {
     use super::*;
