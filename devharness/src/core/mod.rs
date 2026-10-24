@@ -9,6 +9,7 @@ pub mod coverage_index;
 pub mod diff_scope;
 pub mod digest;
 pub mod early;
+pub mod elevation_guard;
 pub mod sandbox_policy;
 pub mod board_view;
 pub mod zone_index;
