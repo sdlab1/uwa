@@ -1,3 +1,4 @@
+pub mod agent_identity;
 pub mod agent_router;
 pub mod agent_state;
 pub mod check_runner;
