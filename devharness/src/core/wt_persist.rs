@@ -210,6 +210,104 @@ fn copy_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Результат сканирования: найденный worktree и его ветка.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScannedWorktree {
+    pub path: PathBuf,
+    pub branch: String,
+}
+
+/// Результат миграции одного worktree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MigrationResult {
+    pub old_path: PathBuf,
+    pub new_path: PathBuf,
+    pub migrated: bool,
+}
+
+/// Отсканировать `/tmp` на наличие worktree'ов (каталоги `devh-*`,
+/// содержащие git-репо с веткой `devh/agent-*`).
+pub fn scan_tmp_worktrees() -> Vec<ScannedWorktree> {
+    let mut out = Vec::new();
+    let entries = match fs::read_dir("/tmp") {
+        Ok(e) => e,
+        Err(_) => return out,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !name.starts_with("devh-") {
+            continue;
+        }
+        let branch = match git_branch(&path) {
+            Some(b) => b,
+            None => continue,
+        };
+        if !branch.starts_with("devh/agent-") {
+            continue;
+        }
+        out.push(ScannedWorktree { path, branch });
+    }
+    out
+}
+
+/// Перенести все worktree'и из `/tmp` в персистентный `wt_root`.
+///
+/// Возвращает список выполненных миграций (успешных и неудачных).
+pub fn migrate_all_in_tmp() -> Vec<MigrationResult> {
+    let scanned = scan_tmp_worktrees();
+    let mut results = Vec::new();
+    for sw in scanned {
+        let name = sw.path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("");
+        // Формат: devh-{slug}-{agent} → достаем slug и agent.
+        let stripped = name.strip_prefix("devh-").unwrap_or(name);
+        let mut parts = stripped.split('-');
+        let slug = parts.next().unwrap_or("").to_string();
+        let agent = parts.collect::<Vec<_>>().join("-");
+        if slug.is_empty() || agent.is_empty() {
+            continue;
+        }
+        let plan = plan_migration(&sw.path, &slug, &agent);
+        if !validate_migration_plan(&plan) {
+            continue;
+        }
+        let migrated = migrate_worktree(&plan);
+        results.push(MigrationResult {
+            old_path: plan.old_path,
+            new_path: plan.new_path,
+            migrated,
+        });
+    }
+    results
+}
+
+/// Получить текущую ветку git-репо по пути (None если не репо).
+fn git_branch(path: &Path) -> Option<String> {
+    let out = Command::new("git")
+        .arg("rev-parse")
+        .arg("--abbrev-ref")
+        .arg("HEAD")
+        .current_dir(path)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&out.stdout);
+    let s = s.trim();
+    if s.is_empty() {
+        None
+    } else {
+        Some(s.to_string())
+    }
+}
+
 /// Создать симлинк со старого пути на новый (для плавного перехода).
 ///
 /// Агенты и тесты, которые жёстко захардкодили `/tmp/devh-...`, получат
@@ -369,5 +467,77 @@ mod tests {
         copy_worktree_contents(&src, &dst).unwrap();
         assert!(dst.join("devharness").join("file.rs").exists());
         assert!(!dst.join("target").exists(), "target/ must be skipped");
+    }
+
+    #[test]
+    fn git_branch_returns_branch_name() {
+        let dir = tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        let _ = Command::new("git").args(["init", "-q"]).current_dir(&repo).output();
+        let _ = Command::new("git").args(["config", "user.email", "t@t.com"]).current_dir(&repo).output();
+        let _ = Command::new("git").args(["config", "user.name", "T"]).current_dir(&repo).output();
+        std::fs::write(repo.join("file.txt"), "hello\n").unwrap();
+        let _ = Command::new("git").args(["add", "."]).current_dir(&repo).output();
+        let _ = Command::new("git").args(["commit", "-m", "init"]).current_dir(&repo).output();
+        let branch = git_branch(&repo);
+        assert!(branch.is_some(), "git repo must have a branch");
+        let b = branch.unwrap();
+        assert!(b == "master" || b == "main", "unexpected branch: {b}");
+    }
+
+    #[test]
+    fn git_branch_returns_none_for_non_repo() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("not_a_repo");
+        fs::create_dir_all(&path).unwrap();
+        assert!(git_branch(&path).is_none(), "non-git dir should return None");
+    }
+
+    #[test]
+    fn scan_filters_non_devh_dirs() {
+        // scan_tmp_worktrees reads the real /tmp — we verify it returns
+        // a Vec (doesn't panic) and that non-worktree entries aren't included.
+        let result = scan_tmp_worktrees();
+        for sw in &result {
+            assert!(
+                sw.path.file_name().unwrap().to_string_lossy().starts_with("devh-"),
+                "scan should only return devh-* dirs: {:?}",
+                sw.path
+            );
+            assert!(
+                sw.branch.starts_with("devh/agent-"),
+                "scanned worktree must be on an agent branch: {}",
+                sw.branch
+            );
+        }
+    }
+
+    #[test]
+    fn migrate_worktree_preserves_branch_after_migration() {
+        let dir = tempdir().unwrap();
+        let old = dir.path().join("devh-999-agent1");
+        fs::create_dir_all(&old).unwrap();
+        let _ = Command::new("git").args(["init", "-q"]).current_dir(&old).output();
+        let _ = Command::new("git").args(["config", "user.email", "t@t.com"]).current_dir(&old).output();
+        let _ = Command::new("git").args(["config", "user.name", "T"]).current_dir(&old).output();
+        std::fs::write(old.join("file.txt"), "hello\n").unwrap();
+        let _ = Command::new("git").args(["add", "."]).current_dir(&old).output();
+        let _ = Command::new("git").args(["commit", "-m", "init"]).current_dir(&old).output();
+        let branch = git_branch(&old).unwrap_or_default();
+
+        let new_root = dir.path().join("persistent/worktrees");
+        let new_path = persistent_path_for(&new_root, "999", "agent1");
+        let plan = MigrationPlan {
+            old_path: old.clone(),
+            new_path: new_path.clone(),
+            branch: branch.clone(),
+        };
+        let result = migrate_worktree(&plan);
+        assert!(result, "migration should succeed");
+        assert!(new_path.exists());
+        // После миграции в новом пути та же ветка.
+        let new_branch = git_branch(&new_path);
+        assert_eq!(new_branch, Some(branch));
     }
 }
