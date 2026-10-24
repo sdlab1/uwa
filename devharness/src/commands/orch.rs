@@ -165,6 +165,15 @@ pub struct AgentState {
     /// Unix-время последней синхронизации worktree с главным репо.
     #[serde(default)]
     pub wt_synced_at: Option<u64>,
+    /// Состояние автослияния ветки агента в главную (`влито`/`ошибка`/…).
+    #[serde(default)]
+    pub merge_state: Option<String>,
+    /// SHA последнего слитого коммита.
+    #[serde(default)]
+    pub merged_sha: Option<String>,
+    /// Unix-время последнего автослияния.
+    #[serde(default)]
+    pub merged_at: Option<u64>,
 }
 
 /// Реестр задач и исполнителей.
@@ -1333,9 +1342,20 @@ fn list(root: &Path, args: &[String]) -> anyhow::Result<()> {
     let ceiling = agent_ceiling(&reg, &caller);
     let mut hidden = 0usize;
     println!("ID      агент   P  C   статус    F  зоны                     задача");
+    let (lead, _) = lead_of(&reg);
+    let is_lead = lead.as_deref() == Some(caller.as_str());
     for t in reg.tasks.iter() {
         if let Some(a) = only.as_ref() {
             if &t.agent != a {
+                continue;
+            }
+        } else if !is_lead {
+            // Ведомому — только свои задачи и свободные задачи буфера ведущего:
+            // чужие зоны и служебные секции панели ему не нужны.
+            let mine = crate::core::identity::canonical(&t.agent) == caller;
+            let from_buffer = lead.as_deref() == Some(t.agent.as_str())
+                && t.status == Status::Queued;
+            if !mine && !from_buffer {
                 continue;
             }
         }
@@ -1791,6 +1811,13 @@ fn zones_overlap(a: &str, b: &str) -> bool {
 /// `devh orch board` — дашборд ведущего.
 fn board(root: &Path) -> anyhow::Result<()> {
     let reg = load(root);
+    let (board_lead, _) = lead_of(&reg);
+    let caller = crate::core::identity::canonical(&crate::core::identity::current().name);
+    // Панель ведущего — служебная: чужим агентам она не достаётся. Новичок
+    // должен видеть СВОИ задачи и свободные задачи буфера, а не чужие зоны.
+    if board_lead.as_deref() != Some(caller.as_str()) {
+        return board_worker(&reg, board_lead.as_deref(), &caller);
+    }
     let ts = now();
     println!("=== ДАШБОРД ОРКЕСТРАТОРА ===");
     println!("шкалы P0-P5/F0-F5: devh workflow §ШКАЛЫ · реестр: .harness/orch/registry.json");
@@ -1805,7 +1832,6 @@ fn board(root: &Path) -> anyhow::Result<()> {
     names.sort();
 
     let mut warns: Vec<String> = Vec::new();
-    let (board_lead, _) = lead_of(&reg);
     for name in names.iter() {
         let state = reg.agents.iter().find(|a| &a.name == name);
         let (active, queued) = agent_sections(&reg, name);
@@ -1985,6 +2011,101 @@ fn board(root: &Path) -> anyhow::Result<()> {
         reg.tasks.len(),
         reg.agents.len()
     );
+    Ok(())
+}
+
+/// Срез доски для ВЕДОМОГО агента.
+///
+/// Ведущий видит всю панель (все агенты, буфер, пересечения зон, предупреждения).
+/// Ведомому достаются: его модель/состояние, его worktree, его задачи (в работе
+/// и в очереди) и свободные задачи буфера ведущего — их можно взять самому.
+fn board_worker(reg: &Registry, lead: Option<&str>, caller: &str) -> anyhow::Result<()> {
+    let state = reg.agents.iter().find(|a| {
+        crate::core::identity::canonical(&a.name) == caller
+    });
+    let (active, queued) = agent_sections(reg, caller);
+    let model = state
+        .and_then(|s| s.model.clone())
+        .unwrap_or_else(|| "—".to_string());
+    let last_f = state
+        .and_then(|s| s.last_fail)
+        .map(|f| format!("F{f}"))
+        .unwrap_or_else(|| "—".to_string());
+    println!("=== МОЯ ДОСКА ({caller}) ===");
+    println!(
+        "модель={model}  последний={last_f}  в работе={}  очередь={}",
+        active.len(),
+        queued.len()
+    );
+    if let Some(s) = state.and_then(|s| s.suspicion.clone()) {
+        println!("  ⚠ подозрение: {s}");
+    }
+    if let Some(w) = state.and_then(|s| s.worktree.clone()) {
+        let synced = state
+            .and_then(|s| s.wt_synced_at)
+            .map(|t| format!("sync {}с назад", now().saturating_sub(t)))
+            .unwrap_or_else(|| "sync не делался".to_string());
+        println!("  worktree: {w} ({synced})");
+    }
+    if let Some(m) = state.and_then(|s| s.merge_state.clone()) {
+        let sha = state
+            .and_then(|s| s.merged_sha.clone())
+            .unwrap_or_else(|| "—".to_string());
+        println!("  merge: {m} ({sha})");
+    }
+    if !active.is_empty() {
+        println!("  в работе (взято — не выдаётся):");
+        for t in active.iter() {
+            println!(
+                "    {} {:<7} P{} {:<24} {}",
+                t.id,
+                t.status.label(),
+                t.complexity,
+                if t.zones.is_empty() {
+                    "зона не задана".to_string()
+                } else {
+                    t.zones.join(",")
+                },
+                t.title
+            );
+        }
+    }
+    if !queued.is_empty() {
+        println!("  очередь (свободны):");
+        for t in queued.iter() {
+            println!(
+                "    {} {:<7} P{} {:<24} {}",
+                t.id,
+                t.status.label(),
+                t.complexity,
+                if t.zones.is_empty() {
+                    "зона не задана".to_string()
+                } else {
+                    t.zones.join(",")
+                },
+                t.title
+            );
+        }
+    }
+    let buffer = buffer_tasks(reg, lead);
+    if !buffer.is_empty() {
+        println!("  свободные задачи (буфер ведущего — можно взять самому):");
+        for t in buffer.iter() {
+            println!(
+                "    {} {:<7} P{} {:<24} {}",
+                t.id,
+                t.status.label(),
+                t.complexity,
+                if t.zones.is_empty() {
+                    "зона не задана".to_string()
+                } else {
+                    t.zones.join(",")
+                },
+                t.title
+            );
+        }
+    }
+    println!("\nследующий шаг: devh msg read → взять задачу → dod/verify/commit/done");
     Ok(())
 }
 
