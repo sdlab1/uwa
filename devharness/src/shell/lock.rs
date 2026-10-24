@@ -1,7 +1,12 @@
 use fs2::FileExt;
+use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::MetadataExt;
+use std::os::unix::io::AsRawFd;
 use std::path::{Component, Path, PathBuf};
+use std::sync::{Condvar, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 #[allow(dead_code)]
 pub struct ItemRunLock(File);
@@ -94,11 +99,68 @@ impl MutateLock {
 // (вложенный вызов). Поэтому ключи уже взятых локов хранятся в
 // thread-local HELD: повторный захват ТОГО ЖЕ ключа в ТОМ ЖЕ потоке —
 // no-op guard (file: None), конфликта не создаёт и ключ не снимает.
-// Другой поток того же процесса конфликтует честно (через flock) —
-// взятие задачи остаётся транзакционным.
+//
+// ДРУГОЙ ПОТОК ТОГО ЖЕ ПРОЦЕССА: ждёт освобождения (внутрипроцессный
+// координатор `inproc_table`), а не падает — это был источник флейка
+// «реестр занят (pid свой)» в параллельных cargo-тестах. ЧУЖОЙ ПРОЦЕСС:
+// по-прежнему мгновенный отказ с pid держателя — взятие задачи остаётся
+// транзакционным между агентами.
 thread_local! {
     static HELD: std::cell::RefCell<std::collections::HashSet<String>> =
         std::cell::RefCell::new(std::collections::HashSet::new());
+}
+
+/// Сколько ждать внутрипроцессный конфликт, прежде чем отказать.
+const INPROC_WAIT: Duration = Duration::from_secs(15);
+
+/// Внутрипроцессная координация локов: ключ → «занят».
+///
+/// `flock` защищает ОТ ДРУГИХ ПРОЦЕССОВ. Внутри одного процесса (параллельные
+/// cargo-тесты одного бинаря) два разных fd одного файла конфликтуют, хотя
+/// «настоящего» конфликта нет: это тот же самый процесс. Раньше это давало
+/// флейк «реестр занят (pid <свой pid>)» — тесты падали по расписанию.
+///
+/// Поэтому держим ещё и слот на ключ: второй поток ТОГО ЖЕ процесса ЖДЁТ
+/// освобождения (с потолком ожидания), а чужой процесс по-прежнему получает
+/// мгновенный отказ с pid держателя — транзакционность взятия задачи цела.
+fn inproc_table() -> &'static (Mutex<HashMap<String, bool>>, Condvar) {
+    static TABLE: OnceLock<(Mutex<HashMap<String, bool>>, Condvar)> = OnceLock::new();
+    TABLE.get_or_init(|| (Mutex::new(HashMap::new()), Condvar::new()))
+}
+
+/// Занять внутрипроцессный слот ключа (ждёт, если слот занят другим потоком).
+///
+/// Err — слот не освободился за `INPROC_WAIT` (зависший держатель).
+fn inproc_acquire(key: &str) -> Result<(), String> {
+    let (mtx, cv) = inproc_table();
+    let mut owners = mtx.lock().unwrap_or_else(|e| e.into_inner());
+    let deadline = Instant::now() + INPROC_WAIT;
+    while owners.contains_key(key) {
+        let now = Instant::now();
+        if now >= deadline {
+            return Err(format!(
+                "внутрипроцессный конфликт: лок держится другим потоком этого процесса \
+                 дольше {}с",
+                INPROC_WAIT.as_secs()
+            ));
+        }
+        let (guard, _) = cv
+            .wait_timeout(owners, deadline - now)
+            .unwrap_or_else(|e| e.into_inner());
+        owners = guard;
+    }
+    owners.insert(key.to_string(), true);
+    Ok(())
+}
+
+/// Освободить внутрипроцессный слот ключа и разбудить ожидающих.
+fn inproc_release(key: &str) {
+    let (mtx, cv) = inproc_table();
+    {
+        let mut owners = mtx.lock().unwrap_or_else(|e| e.into_inner());
+        owners.remove(key);
+    }
+    cv.notify_all();
 }
 
 /// Лок с реентрантностью: `file: None` = no-op guard (вложенный захват),
@@ -124,19 +186,34 @@ impl OutputLock {
         let dir = root.join(".harness").join("mutate").join("locks");
         std::fs::create_dir_all(&dir).map_err(|e| format!("{e}"))?;
         let path = dir.join(format!("{key}.lock"));
+        // Внутрипроцессный слот: поток того же процесса ЖДЁТ вместо отказа
+        // (flock внутри процесса даёт ложный конфликт — флейк тестов).
+        inproc_acquire(&key).map_err(|e| format!("{e} [лок: {}]", path.display()))?;
         let f = OpenOptions::new()
             .create(true)
             .write(true)
             .truncate(false)
             .open(&path)
-            .map_err(|e| format!("{e}"))?;
+            .map_err(|e| {
+                inproc_release(&key);
+                format!("{e}")
+            })?;
         if f.try_lock_exclusive().is_err() {
+            inproc_release(&key);
             let holder = std::fs::read_to_string(&path)
                 .ok()
                 .and_then(|t| t.lines().next().map(str::to_string))
                 .filter(|s| !s.trim().is_empty())
                 .unwrap_or_else(|| "неизвестный прогон".into());
-            return Err(holder);
+            // Путь лока в сообщении: оператор сразу видит, КАКОЙ файл занят
+            // (реестр репозитория, временный реестр теста, аудит мутаций).
+            // + диагностика держателя: свой fd (утечка в процессе) или pid
+            // из /proc/locks (чужой процесс) — иначе флейк не расследуем.
+            return Err(format!(
+                "{holder} [ключ: {key}][лок: {}]{}",
+                path.display(),
+                lock_diag(&path, Some(f.as_raw_fd()))
+            ));
         }
         use std::io::Write;
         f.set_len(0).map_err(|e| format!("{e}"))?;
@@ -155,13 +232,83 @@ impl Drop for OutputLock {
         // (file: None) ключ не трогает — иначе внешний лок освободился бы
         // слишком рано.
         if let Some(key) = self.key.take() {
+            // 1) Снять flock: ядро освобождает лок при закрытии fd.
+            //    Это ДОЛЖНО идти раньше пробуждения ожидающих, иначе
+            //    ожидающий проснётся и упрётся в ещё занятый flock.
+            self.file = None;
+            // 2) Снять thread-local reentrancy-метку.
             HELD.with(|h| {
                 h.borrow_mut().remove(&key);
             });
+            // 3) Освободить внутрипроцессный слот и разбудить ожидающих.
+            inproc_release(&key);
+        } else {
+            self.file = None;
         }
-        // file сбрасывается здесь -> flock освобождается ядром.
-        self.file = None;
     }
+}
+
+/// Диагностика конфликта лока: кто держит файл.
+///
+/// Возвращает короткую строку для сообщения об ошибке:
+///   - «свои fd: 7,9» — в ЭТОМ процессе остались открытые дескрипторы
+///     (утечка лока: guard не вы dropped / fd унаследован потомком);
+///   - «держит pid N» — лок держит чужой процесс (видно из /proc/locks);
+///   - пусто — держатель не найден (гонка между проверкой и чтением).
+fn lock_diag(path: &Path, own_fd: Option<std::os::unix::io::RawFd>) -> String {
+    let mut out = String::new();
+    // 1) Дескрипторы этого процесса, указывающие на файл лока.
+    //    `own_fd` — тот дескриптор, который мы только что открыли и который
+    //    лок НЕ держит (попытка flock провалилась) — его исключаем, иначе
+    //    «свои fd» всегда показывал бы сами себя и диагностика была бы
+    //    бесполезной. Остальные fd этого процесса — кандидаты на утечку.
+    let mut own: Vec<String> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir("/proc/self/fd") {
+        for entry in entries.flatten() {
+            let fd = entry.file_name().to_string_lossy().to_string();
+            if let Some(skip) = own_fd {
+                if fd.parse::<std::os::unix::io::RawFd>().ok() == Some(skip) {
+                    continue;
+                }
+            }
+            if let Ok(target) = std::fs::read_link(entry.path()) {
+                if target == path {
+                    own.push(fd);
+                }
+            }
+        }
+    }
+    if !own.is_empty() {
+        out.push_str(&format!(" [свои fd: {}]", own.join(",")));
+    }
+    // 2) Кто держит flock снаружи: /proc/locks (inode устройство:inode).
+    if let Ok(meta) = std::fs::metadata(path) {
+        let ino = meta.ino();
+        let dev = meta.dev();
+        if let Ok(text) = std::fs::read_to_string("/proc/locks") {
+            for line in text.lines() {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() < 6 {
+                    continue;
+                }
+                let Some(pid) = parts.get(4) else { continue };
+                let Some(file_id) = parts.get(5) else { continue };
+                let Some((dev_hex, ino_str)) = file_id.split_once(':') else {
+                    continue;
+                };
+                let Ok(ino_num) = ino_str.parse::<u64>() else {
+                    continue;
+                };
+                let Ok(dev_num) = u64::from_str_radix(dev_hex, 16) else {
+                    continue;
+                };
+                if ino_num == ino && dev_num == dev {
+                    out.push_str(&format!(" [держит pid {pid}]"));
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Ключ лока: абсолютный путь без `.`/`..` — без IO (путь существует не
@@ -210,12 +357,11 @@ mod tests {
         assert!(MutateLock::try_acquire(dir.path(), "third").is_ok());
     }
 
-    /// P5 R10: относительный и абсолютный путь output = ОДИН лок, holder —
-    /// «pid N (label)», после смерти держателя лок свободен.
+    /// P5 R10: относительный и абсолютный путь output = ОДИН лок.
     ///
-    /// ВАЖНО: конфликт проверяем из ДРУГОГО потока — в том же потоке
-    /// захват того же ключа реентрантен (no-op), это лечит флейк
-    /// «реестр занят (pid <свой>)».
+    /// Второй поток ТОГО ЖЕ процесса не получает ложный отказ, а ЖДЁТ
+    /// освобождения (внутрипроцессный координатор) — это лечит флейк
+    /// «реестр занят (pid <свой>)» в параллельных cargo-тестах.
     #[test]
     fn output_lock_relative_and_absolute_share_one_key() {
         let d = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
@@ -224,19 +370,52 @@ mod tests {
             .unwrap_or_else(|_| unreachable!("первый лок должен браться"));
         // Тот же каталог, но абсолютным путём и с лишним `.`: тот же лок.
         let root2 = root.clone();
-        let busy = std::thread::spawn(move || {
-            OutputLock::try_acquire(&root2, &root2.join(".").join("audit"), "second")
-        })
-        .join()
-        .unwrap_or_else(|_| unreachable!());
-        let err = busy.err().unwrap_or_else(|| unreachable!("занят"));
-        assert!(err.starts_with("pid "), "holder = {err}");
-        assert!(err.contains("devh mutate start"), "holder = {err}");
-        drop(g);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let waiter = std::thread::spawn(move || {
+            let res = OutputLock::try_acquire(&root2, &root2.join(".").join("audit"), "second");
+            let _ = tx.send(res.is_ok());
+            res
+        });
+        // Пока держим первый лок — второй поток ЖДЁТ (а не падает).
         assert!(
-            OutputLock::try_acquire(&root, &root.join("audit"), "third").is_ok(),
-            "мёртвый держатель не оставляет stale"
+            rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "второй поток того же процесса должен ждать, а не получить отказ"
         );
+        drop(g);
+        let got = waiter.join().unwrap_or_else(|_| unreachable!());
+        let held = got.unwrap_or_else(|e| unreachable!("после освобождения лок берётся: {e}"));
+        drop(held);
+        let third = OutputLock::try_acquire(&root, &root.join("audit"), "third");
+        assert!(
+            third.is_ok(),
+            "мёртвый держатель не оставляет stale: {:?}",
+            third.err()
+        );
+    }
+
+    /// Внутрипроцессный конфликт: второй поток ЖДЁТ и затем берёт лок —
+    /// ложных «занято (pid свой)» больше нет.
+    #[test]
+    fn output_lock_same_process_waits_instead_of_failing() {
+        let d = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let root = d.path().to_path_buf();
+        let g = OutputLock::try_acquire(&root, Path::new("audit"), "first")
+            .unwrap_or_else(|_| unreachable!("первый лок должен браться"));
+        let root2 = root.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let waiter = std::thread::spawn(move || {
+            let res = OutputLock::try_acquire(&root2, Path::new("audit"), "second");
+            let _ = tx.send(res.is_ok());
+            res
+        });
+        assert!(
+            rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "второй поток ждёт освобождения"
+        );
+        drop(g);
+        let got = waiter.join().unwrap_or_else(|_| unreachable!());
+        let held = got.unwrap_or_else(|e| unreachable!("после drop лок берётся: {e}"));
+        drop(held);
     }
 
     /// Разные каталоги output блокируют друг друга.
@@ -272,7 +451,7 @@ mod tests {
     }
 
     /// Ключ вложенного no-op-guard не снимает ключ внешнего: пока держится
-    /// внешний guard, чужой поток всё ещё видит лок занятым.
+    /// внешний guard, другой поток всё ещё ЖДЁТ лок (и не получает его сразу).
     #[test]
     fn nested_noop_does_not_release_outer_lock() {
         let d = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
@@ -282,14 +461,21 @@ mod tests {
         let inner = OutputLock::try_acquire(root, Path::new("audit"), "inner")
             .unwrap_or_else(|e| unreachable!("вложенный захват — no-op: {e}"));
         drop(inner);
-        // Другой поток ( spawned ) честно конфликтует: лок занят.
+        // Другой поток ждёт, пока внешний guard освободит лок.
         let root2 = root.to_path_buf();
-        let busy = std::thread::spawn(move || {
-            OutputLock::try_acquire(&root2, Path::new("audit"), "other")
-        })
-        .join()
-        .unwrap_or_else(|_| unreachable!());
-        assert!(busy.is_err(), "внешний guard держит лок: {:?}", busy.err());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let waiter = std::thread::spawn(move || {
+            let res = OutputLock::try_acquire(&root2, Path::new("audit"), "other");
+            let _ = tx.send(res.is_ok());
+            res
+        });
+        assert!(
+            rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "no-op-guard не должен отпускать внешний лок"
+        );
         drop(outer);
+        let got = waiter.join().unwrap_or_else(|_| unreachable!());
+        let held = got.unwrap_or_else(|e| unreachable!("после drop внешнего guard лок свободен: {e}"));
+        drop(held);
     }
 }
