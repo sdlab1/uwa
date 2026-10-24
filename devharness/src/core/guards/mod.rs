@@ -4,6 +4,7 @@
 //! модулей, зависимости задач). Оркестратор прогоняет набор guards перед
 //! выдачей/сдачей задачи и получает единый отчёт: ok / warn / problem.
 
+pub mod deps_guard;
 pub mod module_list_guard;
 pub mod worktree_guard;
 pub mod zone_overlap_guard;
