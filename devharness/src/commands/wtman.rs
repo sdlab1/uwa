@@ -126,6 +126,14 @@ fn git_env(cwd: &Path, env: &[(&str, String)], args: &[&str]) -> anyhow::Result<
 /// Рабочее дерево не трогаем: это чекпоинт, а не коммит в ветку агента.
 pub fn checkpoint(cfg: &RunConfig, root: &Path, agent: &str) -> anyhow::Result<String> {
     let path = agent_path(cfg, root, agent);
+    checkpoint_at(&path, agent)
+}
+
+/// Чекпоинт незакоммиченной работы в ветку `devh/wip-<адрес>` по явному пути.
+///
+/// Путь берётся из реестра (у агента он может отличаться от вычисленного
+/// по конфигу): чекпоинтим именно тот worktree, который видит харнесс.
+pub fn checkpoint_at(path: &Path, agent: &str) -> anyhow::Result<String> {
     if !path.exists() {
         anyhow::bail!("worktree агента {agent} не выдан — нечего сохранять");
     }
@@ -280,6 +288,98 @@ fn resolve_union_mod_list(path: &Path, file: &str) -> anyhow::Result<()> {
     std::fs::write(path.join(file), resolved)?;
     git(path, &["add", file])?;
     Ok(())
+}
+
+/// Влить ветку агента в главную, не трогая его worktree.
+///
+/// Почему не rebase: у агента почти всегда грязное дерево (он работает),
+/// а `git rebase` требует чистоты. Поэтому слияние идёт через временный
+/// worktree: коммиты агента (`main..branch`) переносятся cherry-pick'ом на
+/// главную, конфликт списка модулей (`core/mod.rs`) объединяется
+/// автоматически. Worktree агента остаётся нетронутым — агент ничего не
+/// должен делать для слияния.
+pub fn merge_via_cherry_pick(
+    main_root: &Path,
+    main_branch: &str,
+    branch: &str,
+    agent: &str,
+) -> anyhow::Result<String> {
+    let range = format!("{main_branch}..{branch}");
+    let commits: Vec<String> = git(main_root, &["rev-list", "--reverse", &range])?
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect();
+    if commits.is_empty() {
+        anyhow::bail!("нечего вливать: на {branch} нет коммитов сверх {main_branch}");
+    }
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp = std::env::temp_dir().join(format!(
+        "devh-merge-{}-{}",
+        sanitize(agent),
+        stamp
+    ));
+    let tmp_branch = format!("devh/merge-tmp-{}", sanitize(agent));
+    let cleanup = || {
+        let _ = git_ok(main_root, &["worktree", "remove", "--force", &tmp.to_string_lossy()]);
+        let _ = git_ok(main_root, &["branch", "-D", &tmp_branch]);
+        let _ = std::fs::remove_dir_all(&tmp);
+    };
+    let tmp_s = tmp.to_string_lossy().to_string();
+    if !git_ok(main_root, &["worktree", "add", "--detach", &tmp_s, main_branch]) {
+        cleanup();
+        anyhow::bail!("не удалось создать временный worktree для слияния {branch}");
+    }
+    for commit in &commits {
+        if git_ok(&tmp, &["cherry-pick", commit]) {
+            continue;
+        }
+        let conflicted = conflict_files(&tmp);
+        let only_mod_list = !conflicted.is_empty()
+            && conflicted.iter().all(|f| is_mod_list_file(f));
+        if only_mod_list {
+            let mut resolved = true;
+            for file in &conflicted {
+                if resolve_union_mod_list(&tmp, file).is_err() {
+                    resolved = false;
+                    break;
+                }
+            }
+            if resolved {
+                let env = [("GIT_EDITOR", "true".to_string())];
+                if git_env(&tmp, &env, &["cherry-pick", "--continue"]).is_ok() {
+                    continue;
+                }
+            }
+        } else if conflicted.is_empty() && git_ok(&tmp, &["cherry-pick", "--skip"]) {
+            continue;
+        }
+        let _ = git_ok(&tmp, &["cherry-pick", "--abort"]);
+        cleanup();
+        anyhow::bail!(
+            "конфликт при переносе коммитов {branch} в {main_branch} ({}): {}",
+            commits.len(),
+            if conflicted.is_empty() {
+                "неизвестный конфликт".to_string()
+            } else {
+                conflicted.join(", ")
+            }
+        );
+    }
+    if !git_ok(&tmp, &["switch", "-c", &tmp_branch]) {
+        cleanup();
+        anyhow::bail!("не удалось создать временную ветку {tmp_branch}");
+    }
+    if !git_ok(main_root, &["merge", "-q", "--ff-only", &tmp_branch]) {
+        cleanup();
+        anyhow::bail!("fast-forward {main_branch} на перенос {branch} не удался");
+    }
+    let sha = git(main_root, &["rev-parse", "--short", "HEAD"])?;
+    cleanup();
+    Ok(sha)
 }
 
 /// Rebase с авторазрешением единственного известного конфликта.
@@ -1163,5 +1263,73 @@ mod tests {
         assert!(validate_mod_list("pub mod al pha;\n").is_err());
         // Дубль модуля.
         assert!(validate_mod_list("pub mod alpha;\npub mod alpha;\n").is_err());
+    }
+
+    /// Конфиг с уникальным каталогом worktree'ов (тесты не делят /tmp).
+    fn cfg_in(d: &tempfile::TempDir) -> RunConfig {
+        RunConfig {
+            wt_root: d.path().join("wts"),
+            main_branch: "main".to_string(),
+            ..Default::default()
+        }
+    }
+
+    /// Влитие не трогает worktree агента: коммиты переносятся в главную,
+    /// незакоммиченная работа остаётся у агента (её забирает WIP-чекпоинт).
+    #[test]
+    fn merge_via_cherry_pick_transfers_commits_and_keeps_agent_tree() {
+        let (d, root) = repo_fixture();
+        let c = cfg_in(&d);
+        let (p, _) = ensure(&c, &root, "beam").unwrap_or_else(|_| unreachable!());
+        std::fs::write(p.join("b.txt"), "2\n").unwrap_or_else(|_| unreachable!());
+        let g = |args: &[&str], cwd: &Path| {
+            let _ = Command::new("git").args(args).current_dir(cwd).output();
+        };
+        g(&["add", "-A"], &p);
+        g(&["commit", "-qm", "agent work"], &p);
+        // Незакоммиченная работа агента не должна мешать слиянию.
+        std::fs::write(p.join("c.txt"), "3\n").unwrap_or_else(|_| unreachable!());
+        let sha = merge_via_cherry_pick(&root, "main", &agent_branch("beam"), "beam")
+            .unwrap_or_else(|e| unreachable!("{e}"));
+        let head = git(&root, &["rev-parse", "--short", "HEAD"]).unwrap_or_default();
+        assert_eq!(sha, head, "вернули sha главной");
+        assert!(root.join("b.txt").exists(), "коммит агента попал в главную");
+        assert!(
+            !root.join("c.txt").exists(),
+            "незакоммиченное агента не попало в главную"
+        );
+        assert!(p.join("c.txt").exists(), "работа агента на месте");
+    }
+
+    /// Конфликт списка модулей (`core/mod.rs`) объединяется автоматически:
+    /// ни одна строка не теряется, дублей нет.
+    #[test]
+    fn merge_via_cherry_pick_unions_core_mod_list_on_conflict() {
+        let (d, root) = repo_fixture();
+        let c = cfg_in(&d);
+        let g = |args: &[&str], cwd: &Path| {
+            let _ = Command::new("git").args(args).current_dir(cwd).output();
+        };
+        std::fs::create_dir_all(root.join("core")).unwrap_or_else(|_| unreachable!());
+        std::fs::write(root.join("core/mod.rs"), "pub mod a;\n").unwrap_or_else(|_| unreachable!());
+        g(&["add", "-A"], &root);
+        g(&["commit", "-qm", "mod list"], &root);
+        let (p, _) = ensure(&c, &root, "beam").unwrap_or_else(|_| unreachable!());
+        std::fs::write(p.join("core/mod.rs"), "pub mod a;\npub mod b;\n")
+            .unwrap_or_else(|_| unreachable!());
+        g(&["add", "-A"], &p);
+        g(&["commit", "-qm", "agent adds module"], &p);
+        // Главная меняет тот же список — теперь конфликт.
+        std::fs::write(root.join("core/mod.rs"), "pub mod a;\npub mod c;\n")
+            .unwrap_or_else(|_| unreachable!());
+        g(&["add", "-A"], &root);
+        g(&["commit", "-qm", "main adds module"], &root);
+        merge_via_cherry_pick(&root, "main", &agent_branch("beam"), "beam")
+            .unwrap_or_else(|e| unreachable!("{e}"));
+        let text = std::fs::read_to_string(root.join("core/mod.rs")).unwrap_or_default();
+        assert!(text.contains("pub mod a;"), "{text}");
+        assert!(text.contains("pub mod b;"), "{text}");
+        assert!(text.contains("pub mod c;"), "{text}");
+        assert_eq!(text.matches("pub mod a;").count(), 1, "дублей нет: {text}");
     }
 }

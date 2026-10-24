@@ -1159,15 +1159,17 @@ fn auto_merge_agent(root: &Path, reg: &Registry, agent: &str, task_id: &str) -> 
             detail: format!("worktree {wt} не найден (задача {task_id})"),
         });
     }
+    // Грязный worktree — не блокер: незакоммиченное уходит в WIP-ветку агента,
+    // committed-часть вливается сразу. Агенту ничего делать не нужно.
+    let mut wip_note = String::new();
     if crate::shell::git::tree_dirty(&path) {
-        let files = crate::shell::git::status_names(&path).join(", ");
-        return Some(MergeOutcome {
-            state: "ошибка: worktree грязный".to_string(),
-            sha: None,
-            detail: format!(
-                "незакоммиченные изменения ({files}) — закоммить и сказать lead'у ({task_id}); автослияние повторится"
+        match crate::commands::wtman::checkpoint_at(&path, &canon) {
+            Ok(sha) => wip_note = format!(
+                "; WIP сохранён в {} ({sha})",
+                crate::commands::wtman::wip_branch(&canon)
             ),
-        });
+            Err(e) => wip_note = format!("; WIP-чекпоинт не удался: {e}"),
+        }
     }
     let branch = crate::shell::git::branch_current(&path).unwrap_or_default();
     if branch.is_empty() {
@@ -1188,14 +1190,6 @@ fn auto_merge_agent(root: &Path, reg: &Registry, agent: &str, task_id: &str) -> 
             detail: format!("на {branch} нет коммитов сверх {main_branch} (задача {task_id})"),
         });
     }
-    // Rebase на главную: конфликт списка модулей объединяется автоматически.
-    if let Err(e) = crate::commands::wtman::rebase_auto(&path, &main_branch) {
-        return Some(MergeOutcome {
-            state: "ошибка: rebase".to_string(),
-            sha: None,
-            detail: format!("{e} (задача {task_id})"),
-        });
-    }
     let main_root =
         crate::shell::git::main_root_from_cwd(&path).unwrap_or_else(|_| root.to_path_buf());
     if crate::shell::git::tree_dirty(&main_root) {
@@ -1208,19 +1202,21 @@ fn auto_merge_agent(root: &Path, reg: &Registry, agent: &str, task_id: &str) -> 
             ),
         });
     }
-    if !crate::shell::git::merge_ff_only(&main_root, &branch) {
-        return Some(MergeOutcome {
+    // Перенос коммитов агента на главную — во временном worktree: его
+    // (грязный) worktree остаётся нетронутым, rebase не нужен.
+    match crate::commands::wtman::merge_via_cherry_pick(&main_root, &main_branch, &branch, &canon)
+    {
+        Ok(sha) => Some(MergeOutcome {
+            state: "влито".to_string(),
+            sha: Some(sha.clone()),
+            detail: format!("{branch} влит в {main_branch} ({sha}){wip_note}"),
+        }),
+        Err(e) => Some(MergeOutcome {
             state: "ошибка: merge".to_string(),
             sha: None,
-            detail: format!("fast-forward {branch} в {main_branch} не удался ({task_id})"),
-        });
+            detail: format!("{e} (задача {task_id})"),
+        }),
     }
-    let sha = crate::shell::git::short_head(&main_root);
-    Some(MergeOutcome {
-        state: "влито".to_string(),
-        sha: Some(sha.clone()),
-        detail: format!("{branch} влит в {main_branch} ({sha})"),
-    })
 }
 
 /// Уведомить агента о результате автослияния (действовать не нужно).
@@ -4306,18 +4302,37 @@ mod tests {
         assert_eq!(out.state, "влито", "{out:?}");
         let head = crate::shell::git::short_head(&root);
         assert!(out.sha.is_some(), "sha записан: {out:?}");
-        assert_eq!(Some(head), out.sha, "main на коммите агента");
+        assert_eq!(
+            out.sha.as_deref().map(str::trim),
+            Some(head.trim()),
+            "main на коммите агента"
+        );
     }
 
-    /// Грязный worktree — слияние не делаем, причина в detail.
+    /// Грязный worktree — НЕ блокер: незакоммиченное уходит в WIP-ветку
+    /// агента, committed-часть вливается сразу. Агенту ничего делать не нужно.
     #[test]
-    fn auto_merge_reports_dirty_worktree() {
+    fn auto_merge_dirty_worktree_checkpoints_wip_and_merges_committed() {
         let (_d, root, wt) = agent_wt_fixture();
         std::fs::write(wt.join("c.txt"), "3\n").expect("write");
         let reg = reg_with_agent("beam", &wt);
         let out = auto_merge_agent(&root, &reg, "beam", "T-002").expect("результат");
-        assert_eq!(out.state, "ошибка: worktree грязный", "{out:?}");
-        assert!(out.sha.is_none(), "sha не записан при ошибке");
+        assert_eq!(out.state, "влито", "{out:?}");
+        assert!(out.sha.is_some(), "sha записан: {out:?}");
+        assert!(out.detail.contains("WIP"), "WIP упомянут: {out:?}");
+        assert!(root.join("b.txt").exists(), "коммит агента в главной");
+        assert!(
+            !root.join("c.txt").exists(),
+            "незакоммиченное агента не попало в главную"
+        );
+        assert!(
+            crate::shell::git::show_ref(&root, "devh/wip-beam"),
+            "WIP-ветка агента создана"
+        );
+        assert!(
+            wt.join("c.txt").exists(),
+            "рабочее дерево агента не тронуто"
+        );
     }
 
     /// Нет коммитов сверх главной — сливать нечего.
