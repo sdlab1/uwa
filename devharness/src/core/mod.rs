@@ -9,6 +9,7 @@ pub mod digest;
 pub mod early;
 pub mod zone_index;
 pub mod fail_reason;
+pub mod facade_policy;
 pub mod report_fmt;
 pub mod autonomy_sample;
 pub mod early_exit;
