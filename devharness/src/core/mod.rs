@@ -17,6 +17,7 @@ pub mod fail_reason;
 pub mod facade_policy;
 pub mod presence_alert;
 pub mod queue_policy;
+pub mod registry_invariants;
 pub mod report_fmt;
 pub mod autonomy_sample;
 pub mod early_exit;
