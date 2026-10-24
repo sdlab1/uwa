@@ -399,3 +399,28 @@ devh msg send --to <ведущий> --subject "<канон>: <задача> — 
 `.harness/config` (или `HARNESS_MUTATE_FIRST_PROBLEM=0` в окружении).
 
 Подробности: `docs/mutation_workflow.md` (генерируется из кода).
+
+## Edge case → баг-репорт → автоматический guard
+
+Когда агент сталкивается с неучтённым edge case, который:
+
+1. **Существует в коде харнесса** (не в бизнес-логике): оформить как баг-репорт
+   через `devh orch bug "<что сломалось>" --from <агент> --agent <исполнитель> --p P1`.
+   Баг вставляется в начало очереди — его видят первыми.
+
+2. **Можно закрыть guard'ом**: создать `devharness/src/core/guards/<name>.rs` —
+   тест, который проходит, если edge case пойман, и падает, если он случился.
+   Guard регистрируется в `core/mod.rs` и запускается через `devh orch guard`.
+
+3. **Selfcheck**: `devh orch guard --all` проходит, если все guards green.
+
+| кто что делает | команда |
+| --- | --- |
+| сообщить о баге | `devh orch bug "<описание>" --from <агент> --p P1 [--zone path]` |
+| запустить все guards | `devh orch guard` |
+| проверить конкретный guard | `devh test --case guard::name` |
+| добавить новый guard | создать `core/guards/<name>.rs`, `pub mod` в `mod.rs`, тест с `#[test]` |
+| увидеть все guards в очереди | `devh orch list --all | grep GUARD` |
+
+Цикл: **edge case** → `orch bug` → задача в начало очереди → **guard** →
+`orch guard` проходит → edge case больше не слепой уголок.
