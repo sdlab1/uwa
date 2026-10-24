@@ -34,8 +34,9 @@ use std::path::Path;
 /// - `flock` на чужом inode.
 ///
 /// `create_if_missing` = true: если файл не существует, создать его с
-/// `O_CREAT|O_EXCL` (атомарно — исключает гонку создания). Если уже существует
-/// симлинк — `O_NOFOLLOW` даст ELOOP и мы не окажемся захватом чужого файла.
+/// `O_CREAT|O_EXCL` (атомарно — исключает гонку создания). Если файл уже существует
+/// — открыть его (не падать с EEXIST). Если по пути симлинк — `O_NOFOLLOW` даст ELOOP
+/// и мы не окажемся захватом чужого файла.
 pub fn open_lock_file(path: &Path, create_if_missing: bool) -> std::io::Result<File> {
     let cpath = std::ffi::CString::new(path.to_string_lossy().as_bytes())
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "path has NUL"))?;
@@ -53,7 +54,16 @@ pub fn open_lock_file(path: &Path, create_if_missing: bool) -> std::io::Result<F
             libc::open(cpath.as_ptr(), flags, mode)
         };
         if fd < 0 {
-            return Err(std::io::Error::last_os_error());
+            let err = std::io::Error::last_os_error();
+            if create_if_missing && err.raw_os_error() == Some(libc::EEXIST) {
+                let retry_flags: i32 = libc::O_RDWR | libc::O_NOFOLLOW;
+                let fd = unsafe { libc::open(cpath.as_ptr(), retry_flags) };
+                if fd < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                return Ok(unsafe { File::from_raw_fd(fd) });
+            }
+            return Err(err);
         }
         return Ok(unsafe { File::from_raw_fd(fd) });
     }
@@ -148,13 +158,32 @@ mod tests {
     }
 
     #[test]
-    fn o_excl_prevents_overwrite_of_existing_file() {
+    fn open_lock_file_opens_existing_with_create_if_missing() {
         let dir = tempdir().unwrap();
         let p = dir.path().join("existing.lock");
         std::fs::write(&p, "stale").unwrap();
-        // create_if_missing=true → O_CREAT|O_EXCL → падает, если файл есть.
+        // create_if_missing=true + существующий файл → EEXIST fallback
+        // на открытие без O_CREAT|O_EXCL (bug T-158).
         let result = open_lock_file(&p, true);
-        assert!(result.is_err(), "O_EXCL must refuse existing file");
+        assert!(result.is_ok(), "existing file must be opened, not error");
+        let f = result.unwrap();
+        // Проверим, что файл не затёрся.
+        drop(f);
+        let content = std::fs::read_to_string(&p).unwrap();
+        assert_eq!(content, "stale");
+    }
+
+    #[test]
+    fn open_lock_file_double_acquire_does_not_fail() {
+        // Сценарий из бага: дважды открываем тот же lock-файл с create_if_missing=true.
+        let dir = tempdir().unwrap();
+        let p = dir.path().join("retry.lock");
+        // Первый acquire — создаёт файл.
+        let f1 = open_lock_file(&p, true).unwrap();
+        drop(f1);
+        // Второй acquire — файл существует, должен открыть, а не падать EEXIST.
+        let f2 = open_lock_file(&p, true);
+        assert!(f2.is_ok(), "retry acquisition must succeed on existing file");
     }
 
     #[test]
