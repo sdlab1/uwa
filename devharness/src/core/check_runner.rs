@@ -45,8 +45,8 @@ impl CheckResult {
 ///
 /// Возвращает `None`, если строка пустая или кавычки не сбалансированы.
 pub fn parse_command(s: &str) -> Option<Vec<String>> {
-    let bytes = s.as_bytes();
-    if bytes.is_empty() {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.is_empty() {
         return None;
     }
     let mut args: Vec<String> = Vec::new();
@@ -56,8 +56,8 @@ pub fn parse_command(s: &str) -> Option<Vec<String>> {
     let mut has_arg = false;
 
     let mut i = 0;
-    while i < bytes.len() {
-        let c = bytes[i] as char;
+    while i < chars.len() {
+        let c = chars[i];
         if in_single {
             if c == '\'' {
                 in_single = false;
@@ -67,8 +67,8 @@ pub fn parse_command(s: &str) -> Option<Vec<String>> {
         } else if in_double {
             if c == '"' {
                 in_double = false;
-            } else if c == '\\' && i + 1 < bytes.len() {
-                let next = bytes[i + 1] as char;
+            } else if c == '\\' && i + 1 < chars.len() {
+                let next = chars[i + 1];
                 if next == '"' || next == '\\' {
                     current.push(next);
                     i += 1;
@@ -121,11 +121,14 @@ pub fn parse_command(s: &str) -> Option<Vec<String>> {
 /// Хвост вывода: последние ~2000 символов.
 fn output_tail(stdout: &str, stderr: &str) -> String {
     let combined = format!("{stdout}{stderr}");
-    if combined.len() > 2000 {
-        combined[combined.len() - 2000..].to_string()
-    } else {
-        combined
+    if combined.len() <= 2000 {
+        return combined;
     }
+    let start = combined.len() - 2000;
+    let safe_start = (start..combined.len())
+        .find(|&i| combined.is_char_boundary(i))
+        .unwrap_or(start);
+    combined[safe_start..].to_string()
 }
 
 /// Запустить проверку без shell, с таймаутом.
@@ -495,5 +498,37 @@ mod tests {
         let r = run_check("sleep 30", tmp.path(), 1);
         assert!(r.timed_out, "должен быть таймаут");
         assert_eq!(r.code, 124);
+    }
+
+    #[test]
+    fn parse_command_preserves_cyrillic() {
+        let v = parse_command("echo 'Привет мир'").unwrap();
+        assert_eq!(v, vec!["echo", "Привет мир"]);
+    }
+
+    #[test]
+    fn parse_command_cyrillic_unquoted() {
+        let v = parse_command("echo Привет").unwrap();
+        assert_eq!(v, vec!["echo", "Привет"]);
+    }
+
+    #[test]
+    fn output_tail_non_ascii_no_panic() {
+        // 667 символов € = 2001 байт; старый код паниковал на byte index 1.
+        let s = "€".repeat(667);
+        let out = output_tail(&s, "");
+        // Не должно паниковать; результат ≤ 2000 байт.
+        assert!(out.len() <= 2000);
+        assert!(out.is_char_boundary(0));
+    }
+
+    #[test]
+    fn output_tail_mixed_ascii_nonascii() {
+        let s = format!("{}x", "€".repeat(500)); // 1500 + 1 = 1501 байт
+        let long = format!("{s}{s}{s}{s}"); // >2000 байт
+        let out = output_tail(&long, "");
+        assert!(out.len() <= 2000 + 2); // ±1 символ из-за char boundary
+        assert!(out.is_char_boundary(0));
+        assert!(out.chars().all(|c| c == '€' || c == 'x'));
     }
 }
