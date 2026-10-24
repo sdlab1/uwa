@@ -423,22 +423,9 @@ fn outbox_path(agent: &str) -> PathBuf {
 }
 
 /// Имя агента → безопасное имя файла (без разделителей пути).
+/// Единая точка правды: `shell::msg_path_guard` (T-111).
 fn safe_name(agent: &str) -> String {
-    let cleaned: String = agent
-        .chars()
-        .map(|c| {
-            if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    if cleaned.is_empty() {
-        "agent".to_string()
-    } else {
-        cleaned
-    }
+    crate::shell::msg_path_guard::safe_agent(agent)
 }
 
 /// Кто я в канале. Имя — авто: контекст сессии (core::identity), а не
