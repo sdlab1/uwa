@@ -26,6 +26,8 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
+use crate::core::ledger::{LedgerEntry, LedgerEvent, log_event};
+use crate::core::agent_state::{AgentState as CoreAgentState, degrade_p};
 
 /// Роль ведущего (lead): назначается и переназначается в реестре.
 pub const ROLE_LEAD: &str = "lead";
@@ -480,10 +482,7 @@ fn degrade_queue(reg: &mut Registry, agent: &str, reason: &str, floor: Option<u8
         .iter_mut()
         .filter(|t| t.agent == agent && t.status == Status::Queued)
     {
-        let target = match floor {
-            Some(f) => t.complexity.min(f),
-            None => t.complexity.saturating_sub(1),
-        };
+        let target = degrade_p(t.complexity, floor);
         if target < t.complexity {
             t.complexity = target;
             t.updated = now();
@@ -1023,8 +1022,11 @@ fn start(root: &Path, args: &[String]) -> anyhow::Result<()> {
         }
     };
     save(root, &reg)?;
+    // Ledger: событие Started
+    let ledger_path = dir(root).join("ledger.jsonl");
+    let _ = log_event(&ledger_path, &LedgerEntry::new(&agent, LedgerEvent::Started, ts).with_task(&id));
     println!(
-        "devh orch: {id} взята в работу ({agent}, P{p} C{}){}",
+        "devh orch: {id} взята в работаю ({agent}, P{p} C{}){}",
         reg.tasks[idx].c_level.unwrap_or(0),
         if from_buffer {
             " [из буфера ведущего]"
@@ -1106,6 +1108,10 @@ fn close(root: &Path, args: &[String], status: Status) -> anyhow::Result<()> {
         }
     }
     save(root, &reg)?;
+    // Ledger: событие Done или Failed
+    let event = if status == Status::Done { LedgerEvent::Done } else { LedgerEvent::Failed };
+    let ledger_path = dir(root).join("ledger.jsonl");
+    let _ = log_event(&ledger_path, &LedgerEntry::new(&agent, event, now()).with_task(&id));
     println!(
         "devh orch: {id} {} ({agent}, F{f}, модель {})",
         if status == Status::Done {
@@ -1264,6 +1270,8 @@ fn record_merge(reg: &mut Registry, agent: &str, out: &MergeOutcome) {
         a.merged_sha = out.sha.clone();
         a.merged_at = Some(now());
     }
+    // Ledger: событие Merged
+    // Примечание: root не доступен здесь, ledger записывается в auto_merge_agent
 }
 
 /// Повтор автослияния для агентов, у которых слияние не удалось.
@@ -1343,7 +1351,14 @@ fn revoke(root: &Path, args: &[String]) -> anyhow::Result<()> {
             t.note = format!("отзыв: {}", reason.trim());
         }
     }
+    let agent = {
+        let t = reg.tasks.get(idx).unwrap_or_else(|| unreachable!());
+        t.agent.clone()
+    };
     save(root, &reg)?;
+    // Ledger: событие Revoked
+    let ledger_path = dir(root).join("ledger.jsonl");
+    let _ = log_event(&ledger_path, &LedgerEntry::new(&agent, LedgerEvent::Revoked, now()).with_task(&id).with_detail(&reason));
     println!("devh orch: {id} отозвана ({reason})");
     Ok(())
 }
@@ -2965,6 +2980,67 @@ fn git_output(root: &Path, args: &[&str]) -> anyhow::Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
+/// Проверить, что commit SHA существует в git и принадлежит ветке агента.
+/// Возвращает Ok(()) если проверка прошла, Err с описанием проблемы — иначе.
+fn validate_commit_sha(tree: &Path, sha: &str, agent: &str, reg: &Registry) -> anyhow::Result<()> {
+    use std::process::Command;
+    // 1. Проверить, что объект существует в git
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(tree)
+        .args(["cat-file", "-e", sha])
+        .output();
+    match output {
+        Ok(out) if out.status.success() => {}
+        Ok(out) => {
+            let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            return Err(anyhow::anyhow!(
+                "commit SHA {} не существует в git ({}): {}",
+                sha,
+                tree.display(),
+                err
+            ));
+        }
+        Err(e) => {
+            return Err(anyhow::anyhow!("не удалось запустить git cat-file: {}", e));
+        }
+    }
+
+    // 2. Проверить, что коммит принадлежит ветке агента (wt_branch)
+    let canon = crate::core::identity::canonical;
+    if let Some(agent_state) = crate::commands::orch::load(&crate::commands::orch::orch_root(tree))
+        .agents
+        .iter()
+        .find(|a| crate::core::identity::canonical(&a.name) == crate::core::identity::canonical(agent))
+    {
+        if let Some(wt_branch) = &agent_state.wt_branch {
+            // Проверить, что коммит является предком вершины ветки агента (merge-base)
+            let output = std::process::Command::new("git")
+                .arg("-C")
+                .arg(tree)
+                .args(["merge-base", "--is-ancestor", sha, wt_branch])
+                .output();
+            match output {
+                Ok(out) if out.status.success() => {}
+                Ok(out) => {
+                    let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+                    return Err(anyhow::anyhow!(
+                        "commit SHA {} не принадлежит ветке агента {} ({}): {}",
+                        sha,
+                        agent,
+                        wt_branch,
+                        err
+                    ));
+                }
+                Err(e) => {
+                    return Err(anyhow::anyhow!("не удалось запустить git merge-base: {}", e));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// `devh orch commit <ID>` — коммит только после зелёного DoD.
 pub fn commit_cmd(root: &Path, args: &[String]) -> anyhow::Result<()> {
     let _lock = crate::shell::lock::OutputLock::try_acquire(root, &path(root), "devh orch")
@@ -3019,6 +3095,7 @@ pub fn commit_cmd(root: &Path, args: &[String]) -> anyhow::Result<()> {
             return Err(e);
         }
         let sha = git_output(&tree, &["rev-parse", "HEAD"])?;
+        validate_commit_sha(&tree, &sha, &task.agent, &reg)?;
         let mut reg = load(root);
         if let Some(idx) = find_task_index(&reg, &id) {
             let task = reg.tasks.get_mut(idx).expect("индекс найден");
@@ -3032,6 +3109,7 @@ pub fn commit_cmd(root: &Path, args: &[String]) -> anyhow::Result<()> {
         return Ok(());
     }
     let sha = git_output(&tree, &["rev-parse", "HEAD"])?;
+    validate_commit_sha(&tree, &sha, &task.agent, &reg)?;
     let mut reg = load(root);
     if let Some(idx) = find_task_index(&reg, &id) {
         let task = reg.tasks.get_mut(idx).expect("индекс найден");
