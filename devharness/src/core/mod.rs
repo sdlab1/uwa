@@ -51,3 +51,4 @@ pub mod slot;
 pub mod model_ceiling;
 pub mod degrade;
 pub mod timeout_policy;
+pub mod lock_guard;
