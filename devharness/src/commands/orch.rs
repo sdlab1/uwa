@@ -188,8 +188,18 @@ fn now() -> u64 {
         .unwrap_or(0)
 }
 
+/// Корень, где живёт ОБЩИЙ реестр оркестратора: главный checkout репозитория.
+///
+/// Реестр лежит в `.harness/orch/registry.json`, а `.harness/` вне git и
+/// существует только в главном дереве. В worktree агента `root` — это корень
+/// worktree: без маппинга агент видел пустую доску (нет задач, буфера, своего
+/// статуса merge) и спрашивал у ведущего, как сливать.
+fn orch_root(root: &Path) -> PathBuf {
+    crate::shell::git::main_root_from_cwd(root).unwrap_or_else(|_| root.to_path_buf())
+}
+
 fn dir(root: &Path) -> PathBuf {
-    root.join(".harness").join("orch")
+    orch_root(root).join(".harness").join("orch")
 }
 
 fn path(root: &Path) -> PathBuf {
@@ -397,6 +407,27 @@ fn parse_level(v: &str, what: &str) -> anyhow::Result<u8> {
 /// Разделы доски по агенту: (в работе, свободны в очереди).
 /// Взятая задача (Active) НИКОГДА не попадает в «свободны»: её нельзя взять
 /// второй раз (task taken) и она не должна предлагаться на доске.
+/// Дерево, в котором живёт работа по задаче: worktree исполнителя.
+///
+/// Раньше DoD/verify/commit работали в дереве, ОТКУДА вызвали. Агент, чей
+/// процесс запущен из общего main, коммитил прямо в main — минуя свой
+/// worktree, ветку и автослияние (и засорял main чужими файлами).
+fn task_tree(root: &Path, reg: &Registry, task: &Task) -> PathBuf {
+    let canon = crate::core::identity::canonical(&task.agent);
+    if let Some(wt) = reg
+        .agents
+        .iter()
+        .find(|a| crate::core::identity::canonical(&a.name) == canon)
+        .and_then(|a| a.worktree.clone())
+    {
+        let p = PathBuf::from(wt);
+        if p.is_dir() {
+            return p;
+        }
+    }
+    root.to_path_buf()
+}
+
 fn agent_sections<'a>(reg: &'a Registry, agent: &str) -> (Vec<&'a Task>, Vec<&'a Task>) {
     let mut active: Vec<&Task> = Vec::new();
     let mut queued: Vec<&Task> = Vec::new();
@@ -961,7 +992,8 @@ fn close(root: &Path, args: &[String], status: Status) -> anyhow::Result<()> {
         let idx = find_task_index(&reg, &id)
             .ok_or_else(|| anyhow!("devh orch: задача {id} не найдена"))?;
         let task = reg.tasks.get(idx).expect("индекс найден");
-        let state = dod_state(root, task);
+        let tree = task_tree(root, &reg, task);
+        let state = dod_state(&tree, task);
         if !state.complete {
             let (lead, _) = lead_of(&reg);
             let me = crate::core::identity::current();
@@ -2083,7 +2115,8 @@ pub fn dod_cmd(root: &Path, args: &[String]) -> anyhow::Result<()> {
     }
     save(root, &reg)?;
     let task = reg.tasks.get(idx).expect("индекс найден");
-    let state = dod_state(root, task);
+    let tree = task_tree(root, &reg, task);
+    let state = dod_state(&tree, task);
     println!(
         "devh orch: DoD {id}: критерии {}/{} ✓, проверки {}/{} ✓",
         state.criteria_ok, state.criteria_total, state.checks_ok, state.checks_total
@@ -2112,6 +2145,9 @@ pub fn verify_cmd(root: &Path, args: &[String]) -> anyhow::Result<()> {
     let idx = find_task_index(&reg, &id)
         .ok_or_else(|| anyhow!("devh orch verify: задача {id} не найдена"))?;
     let checks = reg.tasks.get(idx).expect("индекс найден").checks.clone();
+    // Проверки идут в worktree ИСПОЛНИТЕЛЯ, а не в дерево вызова: агент,
+    // запущенный из общего main, иначе проверял бы чужой код.
+    let tree = task_tree(root, &reg, &reg.tasks.get(idx).expect("индекс найден"));
     if checks.is_empty() {
         println!("devh orch: {id}: машинных проверок нет (--no-test)");
         return Ok(());
@@ -2123,10 +2159,10 @@ pub fn verify_cmd(root: &Path, args: &[String]) -> anyhow::Result<()> {
     let mut all_ok = true;
     let mut log = String::new();
     for check in checks {
-        let before = zone_digest(root, &reg.tasks.get(idx).expect("индекс найден").zones);
+        let before = zone_digest(&tree, &reg.tasks.get(idx).expect("индекс найден").zones);
         let output = std::process::Command::new("timeout")
             .args(["1800", "bash", "-lc", &check])
-            .current_dir(root)
+            .current_dir(&tree)
             .output();
         let (ok, detail, code) = match output {
             Ok(out) => {
@@ -2140,7 +2176,7 @@ pub fn verify_cmd(root: &Path, args: &[String]) -> anyhow::Result<()> {
             }
             Err(e) => (false, format!("не запустилась: {e}"), -1),
         };
-        let after = zone_digest(root, &reg.tasks.get(idx).expect("индекс найден").zones);
+        let after = zone_digest(&tree, &reg.tasks.get(idx).expect("индекс найден").zones);
         let fresh = before == after;
         let evidence_ok = ok && fresh;
         if !evidence_ok {
@@ -2210,7 +2246,9 @@ pub fn commit_cmd(root: &Path, args: &[String]) -> anyhow::Result<()> {
     let idx = find_task_index(&reg, &id)
         .ok_or_else(|| anyhow!("devh orch commit: задача {id} не найдена"))?;
     let task = reg.tasks.get(idx).expect("индекс найден");
-    let state = dod_state(root, task);
+    // Коммит — в worktree исполнителя задачи (его ветка), а не в дереве вызова.
+    let tree = task_tree(root, &reg, task);
+    let state = dod_state(&tree, task);
     if !state.complete {
         return Err(anyhow!(
             "devh orch commit: DoD {id} не выполнен: {}. Сначала: \
@@ -2233,12 +2271,12 @@ pub fn commit_cmd(root: &Path, args: &[String]) -> anyhow::Result<()> {
     }
     let mut git_args = vec!["add", "--"];
     git_args.extend(paths.iter().map(String::as_str));
-    git_output(root, &git_args)?;
+    git_output(&tree, &git_args)?;
     let message =
         flag(args, "--message").unwrap_or_else(|| format!("chore(task {id}): {}", task.title));
     let mut commit_args = vec!["commit", "-m", message.as_str(), "--"];
     commit_args.extend(paths.iter().map(String::as_str));
-    if let Err(e) = git_output(root, &commit_args) {
+    if let Err(e) = git_output(&tree, &commit_args) {
         // Ничего не поменялось: работа уже в истории — привязываем задачу к HEAD,
         // чтобы DoD-гейт можно было закрыть (иначе задача навсегда «в работе»).
         let msg = e.to_string();
@@ -2248,7 +2286,7 @@ pub fn commit_cmd(root: &Path, args: &[String]) -> anyhow::Result<()> {
         {
             return Err(e);
         }
-        let sha = git_output(root, &["rev-parse", "HEAD"])?;
+        let sha = git_output(&tree, &["rev-parse", "HEAD"])?;
         let mut reg = load(root);
         if let Some(idx) = find_task_index(&reg, &id) {
             let task = reg.tasks.get_mut(idx).expect("индекс найден");
@@ -2261,7 +2299,7 @@ pub fn commit_cmd(root: &Path, args: &[String]) -> anyhow::Result<()> {
         );
         return Ok(());
     }
-    let sha = git_output(root, &["rev-parse", "HEAD"])?;
+    let sha = git_output(&tree, &["rev-parse", "HEAD"])?;
     let mut reg = load(root);
     if let Some(idx) = find_task_index(&reg, &id) {
         let task = reg.tasks.get_mut(idx).expect("индекс найден");

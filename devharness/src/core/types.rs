@@ -88,6 +88,31 @@ pub struct CrapCfg {
     pub max: u32,
 }
 
+/// Каталог worktree'ов по умолчанию: НЕ `/tmp`.
+///
+/// `/tmp` живёт только до ребута: незакоммиченная работа агента исчезала
+/// вместе с каталогом. Каноническое место — `$XDG_DATA_HOME/devh/worktrees`,
+/// иначе `~/.local/share/devh/worktrees`; `/tmp` — только запасной вариант.
+pub fn default_wt_root() -> PathBuf {
+    if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
+        let xdg = xdg.trim();
+        if !xdg.is_empty() {
+            return PathBuf::from(xdg).join("devh").join("worktrees");
+        }
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        let home = home.trim();
+        if !home.is_empty() {
+            return PathBuf::from(home)
+                .join(".local")
+                .join("share")
+                .join("devh")
+                .join("worktrees");
+        }
+    }
+    PathBuf::from("/tmp")
+}
+
 #[derive(Debug, Clone)]
 pub struct RunConfig {
     pub verify: String,
@@ -169,7 +194,7 @@ impl Default for RunConfig {
             max_active: 3,
             remote: "origin".into(),
             main_branch: "main".into(),
-            wt_root: PathBuf::from("/tmp"),
+            wt_root: default_wt_root(),
             wt_reuse: false,
             log_days: 30,
             mutate: None,

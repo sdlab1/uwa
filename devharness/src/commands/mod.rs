@@ -155,7 +155,7 @@ pub fn load_config(root: &Path) -> anyhow::Result<RunConfig> {
         main_branch: g("MAIN").unwrap_or_else(|| "main".into()),
         wt_root: g("WT_ROOT")
             .map(Into::into)
-            .unwrap_or_else(|| "/tmp".into()),
+            .unwrap_or_else(crate::core::types::default_wt_root),
         wt_reuse: boolv("WT_REUSE", false),
         log_days: u32v("LOG_DAYS", 30),
         mutate: g("MUTATE")
