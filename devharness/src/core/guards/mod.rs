@@ -5,6 +5,7 @@
 //! выдачей/сдачей задачи и получает единый отчёт: ok / warn / problem.
 
 pub mod module_list_guard;
+pub mod worktree_guard;
 pub mod zone_overlap_guard;
 
 use std::path::PathBuf;
