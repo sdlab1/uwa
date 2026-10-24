@@ -22,6 +22,12 @@ export DEVH_MSG_HOME="${DEVH_MSG_HOME:-$T/devh-msg}"
 export DEVH_MSG_NO_AUTO=1
 export DEVH_MSG_POPUP=0
 export DEVH_MSG_SOUND=0
+# ЛОАД-ГЕЙТ внутри сьюта: сьют САМ создаёт нагрузку (cargo build/test в
+# песочницах), и гейт HARNESS_MUTATE_MAX_LOAD блокировал собственные
+# мутационные проверки: в одном прогоне 43 "mutation env-блокер" (load 16.7 >
+# порога 8.0) и каскадом 97 FAIL. Здесь гейт не нужен: лимит прогонов
+# контролирует `devh rate`, а нагрузку сьюта мы видим сами.
+export HARNESS_MUTATE_MAX_LOAD="${HARNESS_MUTATE_MAX_LOAD:-off}"
 PASS=0; FAIL=0; SKIP=0
 FAIL_NAMES=()
 # ТОЧЕЧНАЯ ПРОВЕРКА (`devh test --case <N|имя>`): фильтр меняет ТОЛЬКО отчёт
