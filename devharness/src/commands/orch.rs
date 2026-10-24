@@ -1681,7 +1681,7 @@ fn deps_satisfied(reg: &Registry, t: &Task) -> (bool, Vec<String>) {
 }
 
 /// Кандидаты на выдачу: своя очередь + буфер ведущего, зависимости закрыты.
-fn ready_tasks<'a>(reg: &'a Registry, caller: &str) -> Vec<&'a Task> {
+pub fn ready_tasks<'a>(reg: &'a Registry, caller: &str) -> Vec<&'a Task> {
     let (lead, _) = lead_of(reg);
     let mut out: Vec<&Task> = Vec::new();
     for t in reg.tasks.iter() {
