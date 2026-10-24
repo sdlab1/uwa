@@ -1,8 +1,6 @@
 //! P2: presence — разбор presence-файлов (статус агента: online/idle/stale + mtime).
 //! Без чтения сети.
 
-use std::path::Path;
-
 /// Статус агента по presence-файлу.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentStatus {
@@ -38,6 +36,20 @@ pub fn parse_presence_filename(name: &str) -> Option<(String, Option<u64>)> {
     Some((agent, timestamp))
 }
 
+/// Классификация статуса по возрасту (секунды). Чистая функция — без SystemTime.
+/// - Online: возраст <= stale_threshold_secs
+/// - Idle:   возраст <= stale_threshold_secs * 3
+/// - Stale:  иначе
+pub fn classify_age(age_secs: u64, stale_threshold_secs: u64) -> AgentStatus {
+    if age_secs <= stale_threshold_secs {
+        AgentStatus::Online
+    } else if age_secs <= stale_threshold_secs.saturating_mul(3) {
+        AgentStatus::Idle
+    } else {
+        AgentStatus::Stale
+    }
+}
+
 /// Определение статуса по mtime (секунды с эпохи) и порогу stale (по умолчанию 300 сек = 5 мин).
 pub fn status_from_mtime(mtime: u64, stale_threshold_secs: u64) -> AgentStatus {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -45,13 +57,8 @@ pub fn status_from_mtime(mtime: u64, stale_threshold_secs: u64) -> AgentStatus {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    if now >= mtime && now.saturating_sub(mtime) <= stale_threshold_secs {
-        AgentStatus::Online
-    } else if now > mtime && now.saturating_sub(mtime) <= stale_threshold_secs.saturating_mul(3) {
-        AgentStatus::Idle
-    } else {
-        AgentStatus::Stale
-    }
+    let age = now.saturating_sub(mtime);
+    classify_age(age, stale_threshold_secs)
 }
 
 /// Формат строки статуса для лога.
@@ -87,13 +94,26 @@ mod tests {
     }
 
     #[test]
-    fn status_online_when_recent() {
-        assert_eq!(status_from_mtime(1000, 300), AgentStatus::Online);
+    fn classify_age_online_when_recent() {
+        assert_eq!(classify_age(100, 300), AgentStatus::Online);
     }
 
     #[test]
-    fn status_stale_when_old() {
-        assert_eq!(status_from_mtime(0, 300), AgentStatus::Stale);
+    fn classify_age_idle_when_medium() {
+        assert_eq!(classify_age(500, 300), AgentStatus::Idle);
+    }
+
+    #[test]
+    fn classify_age_stale_when_old() {
+        assert_eq!(classify_age(1000, 300), AgentStatus::Stale);
+    }
+
+    #[test]
+    fn classify_age_boundary_at_threshold() {
+        assert_eq!(classify_age(300, 300), AgentStatus::Online);
+        assert_eq!(classify_age(301, 300), AgentStatus::Idle);
+        assert_eq!(classify_age(900, 300), AgentStatus::Idle);
+        assert_eq!(classify_age(901, 300), AgentStatus::Stale);
     }
 
     #[test]
