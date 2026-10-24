@@ -1212,11 +1212,22 @@ fn auto_merge_agent(root: &Path, reg: &Registry, agent: &str, task_id: &str) -> 
     // (грязный) worktree остаётся нетронутым, rebase не нужен.
     match crate::commands::wtman::merge_via_cherry_pick(&main_root, &main_branch, &branch, &canon)
     {
-        Ok(sha) => Some(MergeOutcome {
-            state: "влито".to_string(),
-            sha: Some(sha.clone()),
-            detail: format!("{branch} влит в {main_branch} ({sha}){wip_note}"),
-        }),
+        Ok(sha) => {
+            // Ledger: событие Merged (здесь есть root — в record_merge его нет,
+            // поэтому событие пишется на месте успешного слияния).
+            let ledger_path = dir(root).join("ledger.jsonl");
+            let _ = log_event(
+                &ledger_path,
+                &LedgerEntry::new(&canon, LedgerEvent::Merged, now())
+                    .with_task(task_id)
+                    .with_detail(format!("{branch} -> {main_branch} ({sha})")),
+            );
+            Some(MergeOutcome {
+                state: "влито".to_string(),
+                sha: Some(sha.clone()),
+                detail: format!("{branch} влит в {main_branch} ({sha}){wip_note}"),
+            })
+        }
         Err(e) => Some(MergeOutcome {
             state: "ошибка: merge".to_string(),
             sha: None,
@@ -3006,36 +3017,72 @@ fn validate_commit_sha(tree: &Path, sha: &str, agent: &str, reg: &Registry) -> a
         }
     }
 
-    // 2. Проверить, что коммит принадлежит ветке агента (wt_branch)
-    let canon = crate::core::identity::canonical;
-    if let Some(agent_state) = crate::commands::orch::load(&crate::commands::orch::orch_root(tree))
+    // 2. Проверить, что коммит принадлежит ветке агента (wt_branch).
+    // Ветка берётся ИЗ РЕЕСТРА (переданного reg), а не из worktree агента:
+    // в worktree реестра нет, и старая проверка молча пропускала ЛЮБОЙ SHA
+    // (fail-open — ровно тот баг, который чинит T-210).
+    let canon_agent = crate::core::identity::canonical(agent);
+    let agent_state = reg
         .agents
         .iter()
-        .find(|a| crate::core::identity::canonical(&a.name) == crate::core::identity::canonical(agent))
-    {
-        if let Some(wt_branch) = &agent_state.wt_branch {
-            // Проверить, что коммит является предком вершины ветки агента (merge-base)
-            let output = std::process::Command::new("git")
-                .arg("-C")
-                .arg(tree)
-                .args(["merge-base", "--is-ancestor", sha, wt_branch])
-                .output();
-            match output {
-                Ok(out) if out.status.success() => {}
-                Ok(out) => {
-                    let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
-                    return Err(anyhow::anyhow!(
-                        "commit SHA {} не принадлежит ветке агента {} ({}): {}",
-                        sha,
-                        agent,
-                        wt_branch,
-                        err
-                    ));
-                }
-                Err(e) => {
-                    return Err(anyhow::anyhow!("не удалось запустить git merge-base: {}", e));
-                }
+        .find(|a| crate::core::identity::canonical(&a.name) == canon_agent);
+    let wt_branch = agent_state
+        .and_then(|a| a.wt_branch.as_deref())
+        .map(str::trim)
+        .filter(|b| !b.is_empty());
+    let Some(wt_branch) = wt_branch else {
+        // Ветка агента неизвестна — принадлежность доказать нечем, но SHA
+        // существует в этом же репозитории (шаг 1). Не ломаем поток для
+        // агентов без worktree; при известной ветке проверка строгая.
+        return Ok(());
+    };
+    // 2a. Текущая ветка worktree агента должна быть ЕГО веткой: коммит,
+    // сделанный в чужой ветке, не принадлежит агенту.
+    let current_branch = std::process::Command::new("git")
+        .arg("-C")
+        .arg(tree)
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .output();
+    match current_branch {
+        Ok(out) if out.status.success() => {
+            let branch = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if branch != wt_branch {
+                return Err(anyhow::anyhow!(
+                    "worktree агента {agent} на ветке «{branch}», а заявлена «{wt_branch}» — \
+                     SHA {sha} не принадлежит ветке агента"
+                ));
             }
+        }
+        Ok(out) => {
+            let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            return Err(anyhow::anyhow!(
+                "не удалось определить ветку worktree агента {agent}: {err}"
+            ));
+        }
+        Err(e) => {
+            return Err(anyhow::anyhow!("не удалось запустить git rev-parse: {}", e));
+        }
+    }
+    // Проверить, что коммит является предком вершины ветки агента (merge-base)
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(tree)
+        .args(["merge-base", "--is-ancestor", sha, wt_branch])
+        .output();
+    match output {
+        Ok(out) if out.status.success() => {}
+        Ok(out) => {
+            let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            return Err(anyhow::anyhow!(
+                "commit SHA {} не принадлежит ветке агента {} ({}): {}",
+                sha,
+                agent,
+                wt_branch,
+                err
+            ));
+        }
+        Err(e) => {
+            return Err(anyhow::anyhow!("не удалось запустить git merge-base: {}", e));
         }
     }
     Ok(())
@@ -4007,7 +4054,10 @@ mod tests {
         // а не к канонизированному через host_alias имени.
         let tmp = tempdir().expect("tmp");
         let root = tmp.path();
-        let lead = "minimax";
+        // Ведущий в реестре — заведомо НЕ caller: тест не должен зависеть от того,
+        // кто его запускает (был захардкожен "minimax" — падал у lead-сессии:
+        // lead по правилам не берёт задачи из очереди).
+        let lead = "buffer-owner";
         let id = add_task(root, lead, "P1", "из буфера");
         let mut reg = load(root);
         reg.lead = Some(lead.to_string());
@@ -4369,6 +4419,108 @@ mod tests {
             ..Default::default()
         });
         reg
+    }
+
+    // ---- T-210: commit_sha fail-closed -----------------------------------
+    // Агент с заявленной веткой: коммит обязан быть сделан ИМЕННО в ней.
+    fn reg_with_branch(agent: &str, wt: &Path, branch: &str) -> Registry {
+        let mut reg = reg_with_agent(agent, wt);
+        reg.agents[0].wt_branch = Some(branch.to_string());
+        reg
+    }
+
+    /// SHA, которого нет в git, — отказ (такой SHA в реестр не попадает).
+    #[test]
+    fn commit_sha_must_exist_in_git() {
+        let (_d, root, wt) = agent_wt_fixture();
+        let reg = reg_with_branch("beam", &wt, "devh/agent-beam");
+        let err = validate_commit_sha(&wt, "0000000000000000000000000000000000000000", "beam", &reg)
+            .expect_err("несуществующий SHA должен быть отвергнут");
+        assert!(
+            err.to_string().contains("не существует в git"),
+            "внятная причина отказа: {err}"
+        );
+    }
+
+    /// Коммит в ЧУЖОЙ ветке не принадлежит агенту — отказ.
+    #[test]
+    fn commit_sha_from_other_branch_rejected() {
+        let (_d, root, wt) = agent_wt_fixture();
+        // Ветка агента в реестре — одна, а worktree переключён на другую.
+        std::process::Command::new("git")
+            .args(["switch", "-q", "-c", "devh/agent-other"])
+            .current_dir(&wt)
+            .output()
+            .expect("switch");
+        let reg = reg_with_branch("beam", &wt, "devh/agent-beam");
+        let sha = crate::shell::git::short_head(&wt);
+        let err = validate_commit_sha(&wt, sha.trim(), "beam", &reg)
+            .expect_err("коммит в чужой ветке должен быть отвергнут");
+        assert!(
+            err.to_string().contains("не принадлежит ветке агента"),
+            "внятная причина отказа: {err}"
+        );
+    }
+
+    /// Коммит в своей ветке — принимается (базовый случай).
+    #[test]
+    fn commit_sha_on_own_branch_accepted() {
+        let (_d, root, wt) = agent_wt_fixture();
+        let reg = reg_with_branch("beam", &wt, "devh/agent-beam");
+        let sha = crate::shell::git::short_head(&wt);
+        validate_commit_sha(&wt, sha.trim(), "beam", &reg).expect("своя ветка — ок");
+    }
+
+    // ---- T-133: журнал событий оркестратора ------------------------------
+    /// Старт задачи пишет событие started в журнал.
+    #[test]
+    fn start_writes_ledger_event() {
+        let (_d, root) = git_repo_fixture();
+        let id = add_task(&root, &me(), "P2", "событие started");
+        run(&root, "start", &[id.as_str()]).expect("start");
+        let text = std::fs::read_to_string(dir(&root).join("ledger.jsonl")).expect("ledger.jsonl");
+        let entries = crate::core::ledger::tail(&text, 10);
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.task_id.as_deref() == Some(id.as_str()) && e.event == crate::core::ledger::LedgerEvent::Started),
+            "событие started записано: {text}"
+        );
+    }
+
+    /// Закрытие задачи пишет событие done в журнал.
+    #[test]
+    fn done_writes_ledger_event() {
+        let (_d, root) = git_repo_fixture();
+        let id = add_task(&root, &me(), "P2", "событие done");
+        run(&root, "start", &[id.as_str()]).expect("start");
+        complete_dod(&root, &id);
+        run(&root, "done", &[id.as_str(), "--f", "F0"]).expect("done");
+        let text = std::fs::read_to_string(dir(&root).join("ledger.jsonl")).expect("ledger.jsonl");
+        let entries = crate::core::ledger::tail(&text, 10);
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.task_id.as_deref() == Some(id.as_str()) && e.event == crate::core::ledger::LedgerEvent::Done),
+            "событие done записано: {text}"
+        );
+    }
+
+    /// Успешное слияние ветки агента пишет событие merged в журнал.
+    #[test]
+    fn merge_writes_ledger_event() {
+        let (_d, root, wt) = agent_wt_fixture();
+        let reg = reg_with_agent("beam", &wt);
+        let out = auto_merge_agent(&root, &reg, "beam", "T-merge").expect("результат слияния");
+        assert_eq!(out.state, "влито", "{out:?}");
+        let text = std::fs::read_to_string(dir(&root).join("ledger.jsonl")).expect("ledger.jsonl");
+        let entries = crate::core::ledger::tail(&text, 10);
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.event == crate::core::ledger::LedgerEvent::Merged),
+            "событие merged записано: {text}"
+        );
     }
 
     /// Merge не вопрос агенту: харнесс сам вливает ветку в главную.

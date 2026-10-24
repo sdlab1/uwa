@@ -12,6 +12,7 @@
 //! добавляются в конец. `tail` возвращает последние N записей в том же порядке.
 
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 
 /// Тип события в журнале оркестратора.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -149,6 +150,26 @@ pub fn format_entry(entry: &LedgerEntry) -> String {
     parts.join(" ")
 }
 
+
+/// Записать событие в JSONL-журнал (append-only).
+///
+/// Создаёт файл и/или родительские директории при необходимости.
+/// Использует `OpenOptions::append` для атомарности append
+/// между процессами (каждая запись = одна строка + newline).
+pub fn log_event(path: &Path, entry: &LedgerEntry) -> std::io::Result<()> {
+    use std::io::Write;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    let line = entry_to_line(entry);
+    f.write_all(line.as_bytes())?;
+    f.write_all(b"\n")?;
+    Ok(())
+}
 #[cfg(test)]
 mod tests {
     use super::*;
