@@ -212,3 +212,31 @@ fn registry_is_written_under_harness_orch() {
     let path = env.root.join(".harness/orch/registry.json");
     assert!(path.exists(), "реестр лежит в .harness/orch/registry.json");
 }
+
+#[test]
+fn task_owned_by_alias_is_taken_by_canonical_caller() {
+    // Задача закреплена за СИНОНИМОМ (ag-test → worker1), вызывающий — канон
+    // worker1. Сравнение владельца должно идти по канону имени, иначе агент
+    // не может взять свою же задачу (инцидент с двумя адресами одного агента).
+    let env = Env::new();
+    fs::write(
+        env.msg.join("aliases.json"),
+        r#"{"aliases": {"ag-test": "worker1"}}"#,
+    )
+    .unwrap();
+    env.write_registry(
+        r#"{
+  "seq": 1,
+  "tasks": [
+    {"id": "T-1", "agent": "ag-test", "title": "Task", "complexity": 1, "c_level": 2, "status": "queued", "zones": ["zone.rs"], "note": "", "created": 100, "updated": 100}
+  ],
+  "agents": [{"name": "worker1", "role": "worker", "fail_streak": 0}],
+  "lead": "lead",
+  "plan": {"deps": {}, "prio": {"T-1": 0}}
+}"#,
+    );
+
+    let (_out, err, code) = env.run("worker1", &["start", "T-1"]);
+    assert_eq!(code, 0, "задача за синонимом берётся каноном: {err}");
+    assert!(!err.contains("закреплена за"), "отказ по владельцу: {err}");
+}

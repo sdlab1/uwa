@@ -951,9 +951,12 @@ fn start(root: &Path, args: &[String]) -> anyhow::Result<()> {
             t.started_by.clone().unwrap_or_else(|| "-".to_string()),
         )
     };
+    // Владелец сравнивается ПО КАНОНУ имени: задача может быть закреплена за
+    // синонимом (ag-xxxx → step5), а вызывающий — его канон.
+    let owner_canon = crate::core::identity::canonical(&owner);
     // Self-service: задача из БУФЕРА ведущего — ведомый забирает её сам.
-    let from_buffer = lead.as_deref() == Some(owner.as_str()) && status == Status::Queued;
-    if owner != caller && !from_buffer {
+    let from_buffer = lead.as_deref() == Some(owner_canon.as_str()) && status == Status::Queued;
+    if owner_canon != caller && !from_buffer {
         return Err(anyhow!(
             "devh orch start: задача {id} закреплена за {owner} — бери свою задачу \
              (devh orch list --agent {caller})"
@@ -1689,14 +1692,15 @@ fn list(root: &Path, args: &[String]) -> anyhow::Result<()> {
             // Ведомому — только свои задачи и свободные задачи буфера ведущего:
             // чужие зоны и служебные секции панели ему не нужны.
             let mine = crate::core::identity::canonical(&t.agent) == caller;
-            let from_buffer = lead.as_deref() == Some(t.agent.as_str())
+            let t_agent = crate::core::identity::canonical(&t.agent);
+            let from_buffer = lead.as_deref() == Some(t_agent.as_str())
                 && t.status == Status::Queued;
             if !mine && !from_buffer {
                 continue;
             }
         }
         // Задачи сложнее потолка модели агента — скрыты (нельзя взять).
-        if t.agent == caller && t.status == Status::Queued {
+        if crate::core::identity::canonical(&t.agent) == caller && t.status == Status::Queued {
             if let Some(c) = t.c_level {
                 if c > ceiling {
                     hidden = hidden.saturating_add(1);
