@@ -5,6 +5,7 @@
 //! выдачей/сдачей задачи и получает единый отчёт: ok / warn / problem.
 
 pub mod backlog_guard;
+pub mod decomposition_guard;
 pub mod deps_guard;
 pub mod merge_guard;
 pub mod module_list_guard;
@@ -144,6 +145,14 @@ pub fn run_all(guards: &[&dyn Guard], ctx: &GuardContext) -> GuardReport {
     report
 }
 
+/// Общий selfcheck встроенных guard'ов (без чтения реестра и без побочных
+/// эффектов): каждый guard проверяет себя на каноническом примере.
+pub fn selfcheck() -> GuardReport {
+    let mut report = GuardReport::new();
+    report.push(decomposition_guard::ID, decomposition_guard::selfcheck());
+    report
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -194,6 +203,14 @@ mod tests {
         assert!(r.is_clean());
         assert!(r.problems().is_empty());
         assert_eq!(r.summary(), "guards: 0 всего, 0 ok, 0 warn, 0 problem");
+    }
+
+    #[test]
+    fn builtin_selfcheck_is_clean() {
+        let report = selfcheck();
+        assert!(report.is_clean(), "{:?}", report.problems());
+        assert_eq!(report.entries().len(), 1);
+        assert_eq!(report.entries()[0].0, "decomposition_guard");
     }
 
     #[test]
