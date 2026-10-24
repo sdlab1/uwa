@@ -20,6 +20,7 @@ pub mod autonomy_sample;
 pub mod early_exit;
 pub mod escapes;
 pub mod gates;
+pub mod guards;
 pub mod identity;
 pub mod idle_policy;
 pub mod lead_guard;
