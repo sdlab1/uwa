@@ -54,6 +54,7 @@ pub mod red_expect;
 pub mod review_blind;
 pub mod presence;
 pub mod slot;
+pub mod stub_check;
 pub mod model_ceiling;
 pub mod msg_consume_guard;
 pub mod degrade;
