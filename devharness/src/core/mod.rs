@@ -1,5 +1,6 @@
 pub mod agent_router;
 pub mod agent_state;
+pub mod check_runner;
 pub mod chaos_state;
 pub mod complexity;
 pub mod contract;
@@ -47,7 +48,7 @@ pub mod types;
 pub mod watch;
 pub mod weaken;
 pub mod red_expect;
-pub mod review_blind;
+// pub mod review_blind; // TODO: create review_blind.rs — file not found
 pub mod presence;
 pub mod slot;
 pub mod model_ceiling;
