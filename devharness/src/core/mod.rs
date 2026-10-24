@@ -43,6 +43,7 @@ pub mod rate;
 pub mod runstate;
 pub mod state;
 pub mod survivors;
+pub mod task_transition;
 pub mod taxonomy;
 pub mod tripwire;
 pub mod tui;
