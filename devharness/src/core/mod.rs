@@ -26,6 +26,7 @@ pub mod escapes;
 pub mod gates;
 pub mod guards;
 pub mod identity;
+pub mod identity_ledger;
 pub mod idle_policy;
 pub mod idle_guard;
 pub mod lead_guard;
