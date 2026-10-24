@@ -234,7 +234,10 @@ mod tests {
     #[test]
     fn canonical_name_resolution() {
         let reg = Registry::default();
-        let a = make_agent("beam", None, None);
+        // Имя, которого заведомо НЕТ в живом канале /tmp/devh-msg: тест не должен
+        // зависеть от того, кто сейчас онлайн (раньше был \"beam\" — падал,
+        // когда beam был жив: source=\"канал\" вместо \"нет сигналов\").
+        let a = make_agent("__test_no_such_agent__", None, None);
         let now = 1_000_000u64;
         let act = compute_activity(&reg, &a, now, 1_200);
         assert_eq!(act.source, "нет сигналов");
