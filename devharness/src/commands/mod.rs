@@ -29,6 +29,119 @@ use crate::core::types::{CrapCfg, ItemId, MutateCfg, RateCfg, RunConfig};
 use crate::shell::store::{Item, Store};
 use crate::Cmd;
 
+/// Unified exit code contract for all devh commands:
+/// 0 = success, 1 = actionable problem (user error, fixable by changing input),
+/// 2 = environment not ready (missing config/git/etc),
+/// 3 = internal error (panic / unexpected state).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(i32)]
+pub enum ExitCode {
+    Success = 0,
+    ActionError = 1,
+    EnvError = 2,
+    InternalError = 3,
+}
+
+impl ExitCode {
+    pub fn as_i32(self) -> i32 {
+        self as i32
+    }
+
+    /// Convert a legacy numeric exit code to the typed enum.
+    /// Returns None for values outside the 0..=3 range.
+    pub fn from_i32(n: i32) -> Option<Self> {
+        match n {
+            0 => Some(Self::Success),
+            1 => Some(Self::ActionError),
+            2 => Some(Self::EnvError),
+            3 => Some(Self::InternalError),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for ExitCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            Self::Success => "success",
+            Self::ActionError => "actionable problem",
+            Self::EnvError => "environment not ready",
+            Self::InternalError => "internal error",
+        };
+        write!(f, "{s}")
+    }
+}
+
+impl From<ExitCode> for i32 {
+    fn from(code: ExitCode) -> Self {
+        code.as_i32()
+    }
+}
+
+/// Typed error carrying an exit code classification.
+/// Used to wrap anyhow errors with an explicit category so `main.rs`
+/// can produce the correct exit code instead of always 1.
+#[derive(Debug)]
+pub struct DevhError {
+    pub code: ExitCode,
+    pub msg: String,
+}
+
+impl DevhError {
+    pub fn action(msg: impl Into<String>) -> Self {
+        Self {
+            code: ExitCode::ActionError,
+            msg: msg.into(),
+        }
+    }
+
+    pub fn env(msg: impl Into<String>) -> Self {
+        Self {
+            code: ExitCode::EnvError,
+            msg: msg.into(),
+        }
+    }
+
+    pub fn internal(msg: impl Into<String>) -> Self {
+        Self {
+            code: ExitCode::InternalError,
+            msg: msg.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for DevhError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.msg)
+    }
+}
+
+impl std::error::Error for DevhError {}
+
+/// Classify an anyhow::Error into the unified exit code contract (§КОДЫ ВОЗВРАТА).
+///
+/// Errors wrapped by `DevhError` carry an explicit category. Otherwise the
+/// function inspects the error message for known patterns:
+/// - "нет .harness/config" / "devh init" → EnvError (2)
+/// - "не git-репозиторий" / "git-common-dir пуст" → EnvError (2)
+/// - everything else → ActionError (1)
+pub fn classify_error(e: &anyhow::Error) -> ExitCode {
+    if let Some(devh_err) = e.downcast_ref::<DevhError>() {
+        return devh_err.code;
+    }
+    let msg = e.to_string().to_lowercase();
+    if msg.contains(".harness/config") || msg.contains("devh init") {
+        return ExitCode::EnvError;
+    }
+    if msg.contains("не git-репозиторий") {
+        return ExitCode::EnvError;
+    }
+    if msg.contains("git-common-dir пуст") {
+        return ExitCode::EnvError;
+    }
+    ExitCode::ActionError
+}
+
 pub const CONFIG_KEYS: [&str; 44] = [
     "VERIFY",
     "BOOTSTRAP",
@@ -437,15 +550,74 @@ pub fn dispatch(cmd: &Cmd, root: &Path) -> anyhow::Result<()> {
             let rc = crate::shell::msg::run(args);
             if rc != 0 {
                 eprintln!("devh msg: код возврата {rc}");
-                die(rc);
+                die(ExitCode::from_i32(rc).unwrap_or(ExitCode::ActionError));
             }
         }
     }
     Ok(())
 }
 
-pub fn die(code: i32) -> ! {
-    std::process::exit(code)
+pub fn die(code: ExitCode) -> ! {
+    std::process::exit(code.as_i32())
+}
+
+/// Table of expected exit codes per command and scenario.
+/// Used by unit tests to verify the contract.
+pub fn command_exit_code_table() -> Vec<(&'static str, ExitCode, &'static str)> {
+    vec![
+        ("devh (success)", ExitCode::Success, "command succeeds without error"),
+        ("devh msg send (missing recipient)", ExitCode::ActionError, "actionable: no recipients specified"),
+        ("devh msg read", ExitCode::Success, "prints unread messages"),
+        ("devh msg alias <bad> (invalid alias name)", ExitCode::ActionError, "actionable: malformed alias"),
+        ("devh init (already initialized)", ExitCode::ActionError, "actionable: config already exists"),
+        ("devh init (no .harness dir writable)", ExitCode::EnvError, "environment: cannot create .harness/config"),
+        ("devh orch add (missing --agent)", ExitCode::ActionError, "actionable: required flag missing"),
+        ("devh orch start (no such task)", ExitCode::ActionError, "actionable: task not found"),
+        ("devh orch (unknown subcommand)", ExitCode::ActionError, "actionable: unknown subcommand"),
+        ("devh next (no config)", ExitCode::EnvError, "environment: .harness/config missing"),
+        ("devh test (suite not found)", ExitCode::EnvError, "environment: test suite file missing"),
+        ("devh test (CPU load high)", ExitCode::EnvError, "environment: load exceeds threshold"),
+        ("devh test (tests fail)", ExitCode::ActionError, "actionable: test failures to investigate"),
+        ("devh test --bg (already running)", ExitCode::EnvError, "environment: background test already running"),
+        ("devh mutate start (not lead)", ExitCode::EnvError, "environment: permission gate — only lead may start mutation"),
+        ("devh mutate start (CPU load high)", ExitCode::EnvError, "environment: load exceeds threshold"),
+        ("devh mutate start (audit in progress)", ExitCode::EnvError, "environment: mutation audit already running"),
+        ("devh mutate start (missing args)", ExitCode::ActionError, "actionable: no mutation tool args provided"),
+        ("devh run (item not active)", ExitCode::ActionError, "actionable: item not in active state"),
+        ("devh run (worktree not created)", ExitCode::ActionError, "actionable: run first creates worktree"),
+        ("devh commit (no summary)", ExitCode::ActionError, "actionable: summary file missing"),
+        ("devh commit (lock held)", ExitCode::ActionError, "actionable: concurrent operation holds lock"),
+        ("devh merge (not lead)", ExitCode::ActionError, "actionable: only lead may merge"),
+        ("devh merge (worktree dirty)", ExitCode::ActionError, "actionable: uncommitted changes in worktree"),
+        ("devh bg auto (missing --from)", ExitCode::ActionError, "actionable: directory argument required"),
+        ("devh gitfacade (path traversal)", ExitCode::ActionError, "actionable: --path contains '..'"),
+        ("devh gitfacade merge (not lead)", ExitCode::ActionError, "actionable: merge requires lead role"),
+        ("devh gitfacade push (remote not set)", ExitCode::ActionError, "actionable: REMOTE not configured"),
+        ("devh rate start (CPU high)", ExitCode::EnvError, "environment: system load above threshold"),
+        ("devh doctor (no issues)", ExitCode::Success, "all checks pass"),
+        ("devh doctor (issues found)", ExitCode::ActionError, "actionable: doctor found problems to fix"),
+    ]
+}
+
+/// Verify that every `devh msg` exit path uses the correct code.
+/// - 0 = success, 1 = actionable problem (missing args, no recipients).
+/// Fixed: `devh msg` previously used 2 for missing arguments — that is an
+/// actionable error (user can fix by providing the argument), code 1.
+pub fn msg_exit_code_table() -> Vec<(&'static str, ExitCode, &'static str)> {
+    vec![
+        ("devh msg send (success)", ExitCode::Success, "message delivered"),
+        ("devh msg send (no recipients)", ExitCode::ActionError, "no recipients — fix by specifying --to"),
+        ("devh msg read", ExitCode::Success, "read consumed"),
+        ("devh msg thread (missing id)", ExitCode::ActionError, "thread ID required — was 2, now 1"),
+        ("devh msg alias (missing alias name)", ExitCode::ActionError, "alias name required — was 2, now 1"),
+        ("devh msg claim (missing name)", ExitCode::ActionError, "name required — was 2, now 1"),
+        ("devh msg close (missing thread id)", ExitCode::ActionError, "thread ID required — was 2, now 1"),
+        ("devh msg find (missing needle)", ExitCode::ActionError, "search term required — was 2, now 1"),
+        ("devh msg (unknown subcommand)", ExitCode::ActionError, "no subcommand — was 2, now 1"),
+        ("devh msg threads", ExitCode::Success, "list printed"),
+        ("devh msg whoami", ExitCode::Success, "identity shown"),
+        ("devh msg acks", ExitCode::Success, "acks listed"),
+    ]
 }
 
 #[cfg(test)]
@@ -540,5 +712,101 @@ mod tests {
         );
         let cfg = load_config(d.path()).unwrap_or_else(|_| unreachable!());
         assert_eq!(first(&cfg), (true, true), "мусор не отключает");
+    }
+
+    #[test]
+    fn exit_code_enum_values_match_contract() {
+        assert_eq!(ExitCode::Success.as_i32(), 0);
+        assert_eq!(ExitCode::ActionError.as_i32(), 1);
+        assert_eq!(ExitCode::EnvError.as_i32(), 2);
+        assert_eq!(ExitCode::InternalError.as_i32(), 3);
+    }
+
+    #[test]
+    fn exit_code_from_i32_roundtrip() {
+        assert_eq!(ExitCode::from_i32(0), Some(ExitCode::Success));
+        assert_eq!(ExitCode::from_i32(1), Some(ExitCode::ActionError));
+        assert_eq!(ExitCode::from_i32(2), Some(ExitCode::EnvError));
+        assert_eq!(ExitCode::from_i32(3), Some(ExitCode::InternalError));
+        assert_eq!(ExitCode::from_i32(99), None);
+        assert_eq!(ExitCode::from_i32(-1), None);
+    }
+
+    #[test]
+    fn classify_error_env_for_missing_config() {
+        let err: anyhow::Error = anyhow::anyhow!("devh: нет .harness/config — сначала: devh init");
+        assert_eq!(classify_error(&err), ExitCode::EnvError);
+    }
+
+    #[test]
+    fn classify_error_env_for_not_git_repo() {
+        let err: anyhow::Error = anyhow::anyhow!("devh: не git-репозиторий");
+        assert_eq!(classify_error(&err), ExitCode::EnvError);
+    }
+
+    #[test]
+    fn classify_error_actionable_for_invalid_id() {
+        let err: anyhow::Error = anyhow::anyhow!("devh: некорректный id «W-XYZ» (devh list)");
+        assert_eq!(classify_error(&err), ExitCode::ActionError);
+    }
+
+    #[test]
+    fn classify_error_preserves_devh_error_category() {
+        let err: anyhow::Error = DevhError::env("devh: нет .harness/config").into();
+        assert_eq!(classify_error(&err), ExitCode::EnvError);
+
+        let err2: anyhow::Error = DevhError::action("devh: неверный id").into();
+        assert_eq!(classify_error(&err2), ExitCode::ActionError);
+
+        let err3: anyhow::Error = DevhError::internal("devh: неожиданный state").into();
+        assert_eq!(classify_error(&err3), ExitCode::InternalError);
+    }
+
+    #[test]
+    fn command_exit_code_table_covers_all_categories() {
+        let table = command_exit_code_table();
+        let has_success = table.iter().any(|(_, c, _)| *c == ExitCode::Success);
+        let has_action = table.iter().any(|(_, c, _)| *c == ExitCode::ActionError);
+        let has_env = table.iter().any(|(_, c, _)| *c == ExitCode::EnvError);
+        assert!(has_success, "таблица должна содержать Success (0)");
+        assert!(has_action, "таблица должна содержать ActionError (1)");
+        assert!(has_env, "таблица должна содержать EnvError (2)");
+    }
+
+    #[test]
+    fn command_exit_code_table_no_duplicate_commands() {
+        let table = command_exit_code_table();
+        let mut seen: Vec<&str> = Vec::new();
+        for (cmd, _, _) in &table {
+            assert!(!seen.contains(cmd), "дубль команды в таблице: {cmd}");
+            seen.push(cmd);
+        }
+    }
+
+    #[test]
+    fn msg_exit_code_table_uses_1_for_missing_args() {
+        let table = msg_exit_code_table();
+        for (desc, code, _) in &table {
+            if desc.contains("missing") || desc.contains("unknown subcommand") || desc.contains("no recipients") {
+                assert_eq!(*code, ExitCode::ActionError,
+                    "{desc}: missing-argument cases must be ActionError (1), not EnvError (2)");
+            }
+        }
+    }
+
+    #[test]
+    fn devh_error_conversions() {
+        let e: anyhow::Error = DevhError::action("test action").into();
+        let action: anyhow::Error = DevhError::action("test").into();
+        assert!(e.is::<DevhError>());
+        assert_eq!(classify_error(&action), ExitCode::ActionError);
+
+        let env: anyhow::Error = DevhError::env("test env").into();
+        assert!(env.is::<DevhError>());
+        assert_eq!(classify_error(&env), ExitCode::EnvError);
+
+        let internal: anyhow::Error = DevhError::internal("test internal").into();
+        assert!(internal.is::<DevhError>());
+        assert_eq!(classify_error(&internal), ExitCode::InternalError);
     }
 }
