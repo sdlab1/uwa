@@ -280,6 +280,14 @@ pub fn set_alias_in(home: &Path, alias: &str, canon: &str) -> Result<(), String>
     if alias == canon {
         return Err("синоним совпадает с каноном".to_string());
     }
+    // Авто-имя одноразовое: привязка к нему «протухает» при рестарте
+    // рантайма и уводит агента в чужую личность. Каноном может быть
+    // только устойчивое (не сгенерированное) имя.
+    if looks_auto(&canon) {
+        return Err(format!(
+            "«{canon}» — авто-имя (генерируется заново); укажи устойчивый канон"
+        ));
+    }
     // Advisory lock: in-process mutex + fs2 file lock.
     let _guard = ALIAS_WRITE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     if let Some(parent) = home.join("agents").parent() {
@@ -506,14 +514,26 @@ fn host_alias_in(home: &Path, comm: &str) -> Option<String> {
         return None;
     }
     let map = alias_map_in(home);
-    let target = map.get(comm)?.trim().to_string();
-    if target.is_empty() || target == comm {
-        return None;
+    let mut current = comm.trim().to_string();
+    let mut target: Option<String> = None;
+    // Каждое звено цепочки должно быть «настоящим» именем: если хвост
+    // цепочки — одноразовое авто-имя, весь алиас не годится (иначе runtime
+    // утаскивает агента в чужую личность через промежуточный синоним).
+    for _ in 0..8 {
+        let Some(next) = map.get(&current) else {
+            break;
+        };
+        let next = next.trim().to_string();
+        if next.is_empty() || next == current {
+            break;
+        }
+        if looks_auto(&next) {
+            return None;
+        }
+        target = Some(next.clone());
+        current = next;
     }
-    // Цель должна быть «настоящим» именем, а не одноразовым авто-именем.
-    if looks_auto(&target) {
-        return None;
-    }
+    let target = target?;
     Some(canonical_in(home, &target))
 }
 
@@ -1174,9 +1194,34 @@ mod tests {
         set_alias_in(home, "opencode", "beam").unwrap_or_else(|_| unreachable!());
         assert_eq!(host_alias_in(home, "opencode"), Some("beam".to_string()));
         assert_eq!(host_alias_in(home, "goose"), None);
-        // Одноразовое авто-имя каноном быть не может.
-        set_alias_in(home, "claude", "goose-1a2b3c4d").unwrap_or_else(|_| unreachable!());
+        // Одноразовое авто-имя каноном быть не может: set_alias отвергает,
+        // а унаследованная карта не должна утаскивать runtime в авто-имя.
+        assert!(set_alias_in(home, "claude", "goose-1a2b3c4d").is_err());
+        let mut map = alias_map_in(home);
+        map.insert("claude".to_string(), "goose-1a2b3c4d".to_string());
+        write_alias_map_in(home, &map).unwrap_or_else(|_| unreachable!());
         assert_eq!(host_alias_in(home, "claude"), None);
+    }
+
+    #[test]
+    fn host_alias_rejects_auto_name_in_chain_tail() {
+        let dir = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let home = dir.path();
+        // opencode → kilo (легально), kilo → авто-имя (наследие).
+        set_alias_in(home, "opencode", "kilo").unwrap_or_else(|_| unreachable!());
+        let mut map = alias_map_in(home);
+        map.insert("kilo".to_string(), "kilo-2ba65640".to_string());
+        write_alias_map_in(home, &map).unwrap_or_else(|_| unreachable!());
+        assert_eq!(
+            host_alias_in(home, "opencode"),
+            None,
+            "авто-имя в хвосте цепочки запрещено"
+        );
+        // А без авто-звена та же цепочка работает.
+        let mut map = alias_map_in(home);
+        map.insert("kilo".to_string(), "beam2".to_string());
+        write_alias_map_in(home, &map).unwrap_or_else(|_| unreachable!());
+        assert_eq!(host_alias_in(home, "opencode"), Some("beam2".to_string()));
     }
 
     #[test]
