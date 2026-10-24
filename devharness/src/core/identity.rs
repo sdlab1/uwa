@@ -781,6 +781,11 @@ pub fn resolve(explicit: Option<&str>) -> Identity {
             remember_slot(&b.name, true);
             return finish(b.name.clone(), Source::Stored, key, false);
         }
+        // Несмотря на отсутствие claim, binding привязывает session-key к имени.
+        // host_alias (рантайм → канон) НЕ должен переопределять существующую
+        // привязку: иначе два разных агента с одинаковым runtime (kilo/openc)
+        // сольются в одну личность (kilo→openc-0a0e0cfc).
+        return finish(b.name.clone(), Source::Stored, key, false);
     }
     if let Ok(env) = std::env::var("DEVH_AGENT") {
         let env = env.trim().to_string();
@@ -789,7 +794,7 @@ pub fn resolve(explicit: Option<&str>) -> Identity {
         }
     }
     // Хост-рантайм с синонимом (opencode → deepseek): я — этот агент,
-    // даже если текущая сессия рантайма ещё не знает моего имени.
+    // даже если текущая сессии рантайма ещё не знает моего имени.
     // Это важнее авто-имени: иначе у одного агента два адреса.
     if let Some((_pid, comm, _start)) = runtime_ancestor() {
         if let Some(canon) = host_alias(&comm) {
@@ -797,9 +802,6 @@ pub fn resolve(explicit: Option<&str>) -> Identity {
             remember_slot(&canon, false);
             return finish(canon, Source::Runtime, key, false);
         }
-    }
-    if let Some(b) = binding {
-        return finish(b.name, Source::Stored, key, false);
     }
     // Слот: рантайм перезапустился, но редактор/слот тот же — имя прежнее.
     if let Some(b) = slot_binding() {
@@ -1175,5 +1177,23 @@ mod tests {
         // Одноразовое авто-имя каноном быть не может.
         set_alias_in(home, "claude", "goose-1a2b3c4d").unwrap_or_else(|_| unreachable!());
         assert_eq!(host_alias_in(home, "claude"), None);
+    }
+
+    #[test]
+    fn binding_takes_priority_over_host_alias() {
+        // Баг: kilo-2ba65640 с runtime "kilo", но host_alias("kilo") →
+        // openc-0a0e0cfc (от чужого агента openc). Без фикса binding
+        // переопределялся хост-алиасом → identity = openc-0a0e0cfc.
+        let dir = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let home = dir.path();
+        set_alias_in(home, "kilo", "openc-0a0e0cfc").unwrap_or_else(|_| unreachable!());
+        // Создаём binding для session-key с именем kilo-2ba65640 (unclaimed).
+        let key = "proc:3005:6231";
+        let _ = write_binding_in(home, key, "kilo-2ba65640", "kilo", false);
+        let canon = canonical_in(home, "kilo-2ba65640");
+        assert_eq!(
+            canon, "kilo-2ba65640",
+            "binding должен иметь приоритет над host_alias: kilo-2ba65640, а не openc-0a0e0cfc"
+        );
     }
 }

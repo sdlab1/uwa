@@ -3928,6 +3928,24 @@ mod tests {
     }
 
     #[test]
+    fn start_from_buffer_assigns_to_caller_not_alias() {
+        // Регрессия T-108: задача из БУФЕРА ведущего должна попадать к вызывающему,
+        // а не к канонизированному через host_alias имени.
+        let tmp = tempdir().expect("tmp");
+        let root = tmp.path();
+        let lead = "minimax";
+        let id = add_task(root, lead, "P1", "из буфера");
+        let mut reg = load(root);
+        reg.lead = Some(lead.to_string());
+        save(root, &reg).expect("save lead");
+        run(root, "start", &[id.as_str()]).expect("start из буфера");
+        let reg = load(root);
+        let task = reg.tasks.first().expect("задача");
+        assert_eq!(task.agent, me(), "задача должна быть назначена caller, а не openc-0a0e0cfc");
+        assert_eq!(task.started_by.as_deref(), Some(me().as_str()));
+    }
+
+    #[test]
     fn revoke_blocks_done_task() {
         let tmp = tempdir().expect("tmp");
         let root = tmp.path();
