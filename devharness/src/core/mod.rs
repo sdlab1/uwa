@@ -86,3 +86,4 @@ pub mod config_hygiene;
 pub mod model_report;
 pub mod worktree_escape;
 pub mod registry_ledger;
+pub mod rot_checker;
