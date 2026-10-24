@@ -95,6 +95,42 @@ pub fn queued_tasks_sorted(registry: &Registry) -> Vec<QueuedTask> {
     candidates
 }
 
+/// Порядок выдачи задач — ЕДИНЫЙ источник правды об очерёдности.
+///
+/// Сортировка: свои задачи → приоритет плана (0 — высший) → P (сложность) →
+/// возраст (FIFO по created) → ID (детерминированный tie-break).
+///
+/// `commands::orch::ready_tasks` только фильтрует этот порядок (владелец,
+/// буфер ведущего, зависимости) — правила сортировки там не дублируются.
+pub fn order_for_caller<'a>(registry: &'a Registry, caller: &str) -> Vec<&'a Task> {
+    let mut out: Vec<&Task> = registry
+        .tasks
+        .iter()
+        .filter(|t| t.status == Status::Queued && !t.agent.is_empty())
+        .collect();
+    out.sort_by(|a, b| {
+        let own_a = if crate::core::identity::canonical(&a.agent) == caller {
+            0
+        } else {
+            1
+        };
+        let own_b = if crate::core::identity::canonical(&b.agent) == caller {
+            0
+        } else {
+            1
+        };
+        let pa = registry.plan.prio.get(&a.id).copied().unwrap_or(0);
+        let pb = registry.plan.prio.get(&b.id).copied().unwrap_or(0);
+        own_a
+            .cmp(&own_b)
+            .then(pa.cmp(&pb))
+            .then(a.complexity.cmp(&b.complexity))
+            .then(a.created.cmp(&b.created))
+            .then(a.id.cmp(&b.id))
+    });
+    out
+}
+
 /// Проверить, что задача не заблокирована задачей с более высоким приоритетом у того же агента.
 ///
 /// Агент не может взять задачу P2, если у него в очереди есть P1.
@@ -314,4 +350,81 @@ mod tests {
         };
         assert!(!is_blocked_by_priority(&reg, "beam", &task), "нет ниже P -> не блокирует");
     }
+
+    fn task(id: &str, agent: &str, complexity: u8, created: u64) -> Task {
+        Task {
+            id: id.into(),
+            agent: agent.into(),
+            title: id.into(),
+            complexity,
+            c_level: None,
+            model: None,
+            model_source: None,
+            started_by: None,
+            started_at: None,
+            status: Status::Queued,
+            zones: vec![],
+            fail_level: None,
+            note: String::new(),
+            created,
+            updated: created,
+            dod: vec![],
+            checks: vec![],
+            acked: vec![],
+            evidence: vec![],
+            commit_sha: None,
+            override_reason: None,
+        }
+    }
+
+    #[test]
+    fn order_own_before_buffer() {
+        let mut reg = Registry::default();
+        reg.tasks = vec![
+            task("T-1", "lead", 1, 10),
+            task("T-2", "worker", 1, 20),
+        ];
+        let ids: Vec<String> = order_for_caller(&reg, "worker")
+            .iter()
+            .map(|t| t.id.clone())
+            .collect();
+        assert_eq!(ids, vec!["T-2".to_string(), "T-1".to_string()]);
+    }
+
+    #[test]
+    fn order_priority_then_complexity_then_age() {
+        let mut reg = Registry::default();
+        reg.tasks = vec![
+            task("T-1", "worker", 2, 10),
+            task("T-2", "worker", 1, 20),
+            task("T-3", "worker", 2, 30),
+        ];
+        // prio: 0 — высший; у T-1/T-2 приоритет ниже (число больше)
+        reg.plan.prio.insert("T-3".into(), 0);
+        reg.plan.prio.insert("T-1".into(), 9);
+        reg.plan.prio.insert("T-2".into(), 9);
+        let ids: Vec<String> = order_for_caller(&reg, "worker")
+            .iter()
+            .map(|t| t.id.clone())
+            .collect();
+        // prio=0 (T-3) → P1 (T-2) → P2 по возрасту (T-1)
+        assert_eq!(
+            ids,
+            vec!["T-3".to_string(), "T-2".to_string(), "T-1".to_string()]
+        );
+    }
+
+    #[test]
+    fn order_skips_non_queued() {
+        let mut reg = Registry::default();
+        let mut done = task("T-1", "worker", 1, 10);
+        done.status = Status::Done;
+        reg.tasks = vec![done, task("T-2", "worker", 1, 20)];
+        let ids: Vec<String> = order_for_caller(&reg, "worker")
+            .iter()
+            .map(|t| t.id.clone())
+            .collect();
+        assert_eq!(ids, vec!["T-2".to_string()]);
+    }
+
 }

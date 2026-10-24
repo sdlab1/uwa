@@ -1756,13 +1756,14 @@ fn deps_satisfied(reg: &Registry, t: &Task) -> (bool, Vec<String>) {
 }
 
 /// Кандидаты на выдачу: своя очередь + буфер ведущего, зависимости закрыты.
+///
+/// ПОРЯДОК — в `core::queue_policy::order_for_caller` (единый источник правды:
+/// свои → приоритет плана → P → возраст). Здесь только фильтры: владелец,
+/// буфер ведущего, закрытые зависимости.
 pub fn ready_tasks<'a>(reg: &'a Registry, caller: &str) -> Vec<&'a Task> {
     let (lead, _) = lead_of(reg);
     let mut out: Vec<&Task> = Vec::new();
-    for t in reg.tasks.iter() {
-        if t.status != Status::Queued {
-            continue;
-        }
+    for t in crate::core::queue_policy::order_for_caller(reg, caller) {
         let owner = crate::core::identity::canonical(&t.agent);
         let own = owner == caller;
         let from_buffer = lead.as_deref() == Some(owner.as_str()) && !own;
@@ -1774,16 +1775,6 @@ pub fn ready_tasks<'a>(reg: &'a Registry, caller: &str) -> Vec<&'a Task> {
         }
         out.push(t);
     }
-    out.sort_by(|a, b| {
-        let pa = reg.plan.prio.get(&a.id).copied().unwrap_or(0);
-        let pb = reg.plan.prio.get(&b.id).copied().unwrap_or(0);
-        let oa = if crate::core::identity::canonical(&a.agent) == caller { 0 } else { 1 };
-        let ob = if crate::core::identity::canonical(&b.agent) == caller { 0 } else { 1 };
-        oa.cmp(&ob)
-            .then(pa.cmp(&pb))
-            .then(a.complexity.cmp(&b.complexity))
-            .then(a.created.cmp(&b.created))
-    });
     out
 }
 
