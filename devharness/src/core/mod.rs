@@ -61,6 +61,7 @@ pub mod timeout_policy;
 pub mod lock_guard;
 pub mod lock_recovery;
 pub mod commit_audit;
+pub mod check_effect;
 pub mod task_deps;
 pub mod dod_policy;
 pub mod zone_guard;
