@@ -116,14 +116,28 @@ fn runtime_synonym_is_canonicalized() {
     assert_eq!(c.whoami_name(None, Some("opencode")), "deepseek");
 }
 
-/// 5. Слот: после claim имя восстанавливается в новой сессии того же слота.
+/// 5. Слот: новая сессия того же слота НЕ наследует канон (T-214, регресс T-213).
+///
+/// Раньше слот-привязка восстанавливала имя автоматически: новая goose-сессия
+/// в том же editor-slot получала адрес (и права) существующего lead — инцидент
+/// 2026-10-24 (session:20261024_5 унаследовала minimax). Теперь CLAIMED-привязка
+/// наследуется только той же lineage сессии; чужая сессия получает своё
+/// авто-имя, а права lead'а не переходят.
 #[test]
-fn slot_restores_name_after_session_change() {
+fn new_session_in_same_slot_does_not_inherit_claimed_name() {
     let c = Chan::new();
     let (code, out, err) = c.run(&["msg", "claim", "minimax"], Some("session-A"), None);
     assert_eq!(code, 0, "claim: {out}{err}");
-    // Другая сессия рантайма, тот же слот (cwd) — имя прежнее.
-    assert_eq!(c.whoami_name(Some("session-B"), None), "minimax");
+    // Другая сессия рантайма, тот же слот (cwd) — имя прежнее НЕ достаётся.
+    let name = c.whoami_name(Some("session-B"), None);
+    assert_ne!(
+        name, "minimax",
+        "новая сессия не должна наследовать канон lead: {name}"
+    );
+    assert!(
+        name.starts_with("ag-"),
+        "новая сессия получает своё авто-имя, а не чужой канон: {name}"
+    );
 }
 
 /// 6. Два minimax: имя уже закреплено другим агентом — второй claim отвергнут.
