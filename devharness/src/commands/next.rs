@@ -66,6 +66,13 @@ pub fn decide(root: &Path, cfg: &crate::core::types::RunConfig, store: &Store) -
         return n;
     }
 
+    // ── Orch tasks: очередь задач → devh orch start <id> ──────────────
+    // Приоритет выбора: сначала задача с меньшим prio, затем P (complexity),
+    // затем возраст (created). Блокированные по deps НЕ выдаются.
+    if let Some(n) = orch_task_next(root) {
+        return n;
+    }
+
     // ── item'ы: один живой, один готовый к работе ────────────────────
     let items = store.items();
     for it in &items {
@@ -355,6 +362,29 @@ fn has_entries(dir: &Path) -> bool {
     std::fs::read_dir(dir)
         .map(|mut rd| rd.next().is_some())
         .unwrap_or(false)
+}
+
+/// Следующая задача из очереди оркестратора (если есть готовая к выдаче).
+///
+/// Приоритет выбора: сначала задача с меньшим prio, затем P (complexity),
+/// затем возраст (created). Задачи с невыполненными deps НЕ выдаются.
+/// Реестр может отсутствовать (без ошибки) — тогда None.
+fn orch_task_next(root: &Path) -> Option<Next> {
+    let reg = crate::commands::orch::load(root);
+    let caller = crate::core::identity::canonical(&crate::core::identity::current().name);
+    let ready = crate::commands::orch::ready_tasks(&reg, &caller);
+    ready.into_iter().next().map(|t| {
+        Next::new(
+            &format!("devh orch start {}", t.id),
+            &format!(
+                "задача {id} (P{p} prio{p_p}) — {title}: взять в работу (очередь или буфер ведущего)",
+                id = t.id,
+                p = t.complexity,
+                p_p = reg.plan.prio.get(&t.id).copied().unwrap_or(0),
+                title = t.title
+            ),
+        )
+    })
 }
 
 /// Живой ли прогон item'а (pid-файл + процесс на месте).
@@ -787,5 +817,264 @@ mod tests {
         );
         let n = decide(store.root(), &cfg, &store);
         assert_eq!(n.command, "devh run W-001", "незавершённый прогон → run");
+    }
+
+    #[test]
+    fn no_registry_suggests_init() {
+        // S0: нет .harness/config → devh init (registry не загружается ошибкой).
+        let d = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let n = decide(
+            d.path(),
+            &crate::core::types::RunConfig::default(),
+            &Store::new(d.path()),
+        );
+        assert_eq!(n.command, "devh init");
+    }
+
+    #[test]
+    fn empty_queue_does_not_crash() {
+        // S0 пройден (конфиг есть), но реестр пуст / нет задач —
+        // оракул не падает и предлагает `devh init` или "готово".
+        let d = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let root = d.path().join("repo");
+        std::fs::create_dir_all(root.join(".harness/items")).unwrap_or_else(|_| unreachable!());
+        std::fs::write(root.join(".harness/config"), "VERIFY=\n").unwrap_or_else(|_| unreachable!());
+        // git init чтобы orch_root резолвился в root, а не в родительский репо
+        let _ = std::process::Command::new("git").arg("init").arg("-q").current_dir(&root).status();
+        let _ = std::process::Command::new("git").arg("config").arg("user.email").arg("t@t").current_dir(&root).status();
+        let _ = std::process::Command::new("git").arg("config").arg("user.name").arg("t").current_dir(&root).status();
+        std::fs::write(root.join("f.txt"), "x").unwrap_or_else(|_| unreachable!());
+        let _ = std::process::Command::new("git").arg("add").arg("f.txt").current_dir(&root).status();
+        let _ = std::process::Command::new("git").arg("commit").arg("-q").arg("-m").arg("base").current_dir(&root).status();
+        let n = decide(
+            &root,
+            &crate::core::types::RunConfig::default(),
+            &Store::new(&root),
+        );
+        // Без тасков, без items, без specs — оракул говорит "готово".
+        assert_eq!(n.command, "готово: активных item'ов нет, спек нет — работа завершена");
+    }
+
+    #[test]
+    fn ready_task_with_lower_prio_is_suggested() {
+        // Две задачи в очереди: T-001 (prio=5), T-002 (prio=0, P1).
+        // Приоритет: меньший prio → T-002 выдаётся первой.
+        let d = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let root = d.path().join("repo");
+        std::fs::create_dir_all(root.join(".harness/orch")).unwrap_or_else(|_| unreachable!());
+        std::fs::write(root.join(".harness/config"), "VERIFY=\n").unwrap_or_else(|_| unreachable!());
+
+        let agent = crate::core::identity::canonical(&crate::core::identity::current().name);
+        std::fs::write(root.join(".harness/config"), "VERIFY=\n").unwrap_or_else(|_| unreachable!());
+        let _ = std::process::Command::new("git").arg("init").arg("-q").current_dir(&root).status();
+        let _ = std::process::Command::new("git").arg("config").arg("user.email").arg("t@t").current_dir(&root).status();
+        let _ = std::process::Command::new("git").arg("config").arg("user.name").arg("t").current_dir(&root).status();
+        std::fs::write(root.join("f.txt"), "x").unwrap_or_else(|_| unreachable!());
+        let _ = std::process::Command::new("git").arg("add").arg("f.txt").current_dir(&root).status();
+        let _ = std::process::Command::new("git").arg("commit").arg("-q").arg("-m").arg("base").current_dir(&root).status();
+
+        let reg = crate::commands::orch::Registry {
+            seq: 2,
+            tasks: vec![
+                crate::commands::orch::Task {
+                    id: "T-001".to_string(),
+                    agent: agent.clone(),
+                    title: "high prio number".to_string(),
+                    complexity: 3,
+                    c_level: None,
+                    model: None,
+                    model_source: None,
+                    started_by: None,
+                    started_at: None,
+                    status: crate::commands::orch::Status::Queued,
+                    zones: vec![],
+                    fail_level: None,
+                    note: String::new(),
+                    created: 100,
+                    updated: 100,
+                    dod: vec![],
+                    checks: vec![],
+                    acked: vec![],
+                    evidence: vec![],
+                    commit_sha: None,
+                    override_reason: None,
+                },
+                crate::commands::orch::Task {
+                    id: "T-002".to_string(),
+                    agent: agent.clone(),
+                    title: "lower prio number".to_string(),
+                    complexity: 1,
+                    c_level: None,
+                    model: None,
+                    model_source: None,
+                    started_by: None,
+                    started_at: None,
+                    status: crate::commands::orch::Status::Queued,
+                    zones: vec![],
+                    fail_level: None,
+                    note: String::new(),
+                    created: 200,
+                    updated: 200,
+                    dod: vec![],
+                    checks: vec![],
+                    acked: vec![],
+                    evidence: vec![],
+                    commit_sha: None,
+                    override_reason: None,
+                },
+            ],
+            agents: vec![],
+            lead: None,
+            plan: crate::commands::orch::Plan {
+                prio: [("T-001".to_string(), 5), ("T-002".to_string(), 0)]
+                    .into_iter()
+                    .collect(),
+                deps: Default::default(),
+            },
+        };
+        crate::commands::orch::save(&root, &reg).unwrap_or_else(|_| unreachable!());
+
+        let n = orch_task_next(&root);
+        let n = n.unwrap_or_else(|| unreachable!());
+        assert_eq!(n.command, "devh orch start T-002", "меньший prio выдаётся первым");
+        assert!(n.why.contains("T-002"));
+    }
+
+    #[test]
+    fn blocked_by_deps_is_not_suggested() {
+        // T-002 зависит от T-001, которая НЕ выполнена (Queued) → T-002 НЕ выдаётся.
+        let d = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let root = d.path().join("repo");
+        std::fs::create_dir_all(root.join(".harness/orch")).unwrap_or_else(|_| unreachable!());
+        std::fs::write(root.join(".harness/config"), "VERIFY=\n").unwrap_or_else(|_| unreachable!());
+
+        let agent = crate::core::identity::canonical(&crate::core::identity::current().name);
+        std::fs::write(root.join(".harness/config"), "VERIFY=\n").unwrap_or_else(|_| unreachable!());
+        let _ = std::process::Command::new("git").arg("init").arg("-q").current_dir(&root).status();
+        let _ = std::process::Command::new("git").arg("config").arg("user.email").arg("t@t").current_dir(&root).status();
+        let _ = std::process::Command::new("git").arg("config").arg("user.name").arg("t").current_dir(&root).status();
+        std::fs::write(root.join("f.txt"), "x").unwrap_or_else(|_| unreachable!());
+        let _ = std::process::Command::new("git").arg("add").arg("f.txt").current_dir(&root).status();
+        let _ = std::process::Command::new("git").arg("commit").arg("-q").arg("-m").arg("base").current_dir(&root).status();
+
+        let reg = crate::commands::orch::Registry {
+            seq: 2,
+            tasks: vec![
+                crate::commands::orch::Task {
+                    id: "T-001".to_string(),
+                    agent: agent.clone(),
+                    title: "зависимость".to_string(),
+                    complexity: 1,
+                    c_level: None,
+                    model: None,
+                    model_source: None,
+                    started_by: None,
+                    started_at: None,
+                    status: crate::commands::orch::Status::Queued,
+                    zones: vec![],
+                    fail_level: None,
+                    note: String::new(),
+                    created: 100,
+                    updated: 100,
+                    dod: vec![],
+                    checks: vec![],
+                    acked: vec![],
+                    evidence: vec![],
+                    commit_sha: None,
+                    override_reason: None,
+                },
+                crate::commands::orch::Task {
+                    id: "T-002".to_string(),
+                    agent: agent.clone(),
+                    title: "зависит от T-001".to_string(),
+                    complexity: 1,
+                    c_level: None,
+                    model: None,
+                    model_source: None,
+                    started_by: None,
+                    started_at: None,
+                    status: crate::commands::orch::Status::Queued,
+                    zones: vec![],
+                    fail_level: None,
+                    note: String::new(),
+                    created: 200,
+                    updated: 200,
+                    dod: vec![],
+                    checks: vec![],
+                    acked: vec![],
+                    evidence: vec![],
+                    commit_sha: None,
+                    override_reason: None,
+                },
+            ],
+            agents: vec![],
+            lead: None,
+            plan: crate::commands::orch::Plan {
+                prio: Default::default(),
+                deps: [("T-002".to_string(), vec!["T-001".to_string()])].into_iter().collect(),
+            },
+        };
+        crate::commands::orch::save(&root, &reg).unwrap_or_else(|_| unreachable!());
+
+        // T-002 заблокирована deps (T-001 не выполнена), T-001 сама в очереди
+        // но может быть заблокирована другими — проверяем, что оракул НЕ
+        // падает и НЕ выдаёт заблокированную задачу напрямую.
+        let n = orch_task_next(&root);
+        // Если T-001 готова (deps satisfied), она выдаётся; если нет — None.
+        // Главное: T-002 НЕ выдаётся, т.к. её deps не выполнены.
+        if let Some(n) = &n {
+            assert!(!n.command.contains("T-002"), "заблокированная задача не должна выдаваться: {}", n.command);
+        }
+    }
+
+    #[test]
+    fn orch_task_next_no_placeholders() {
+        let d = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let root = d.path().join("repo");
+        std::fs::create_dir_all(root.join(".harness/orch")).unwrap_or_else(|_| unreachable!());
+        std::fs::write(root.join(".harness/config"), "VERIFY=\n").unwrap_or_else(|_| unreachable!());
+        let _ = std::process::Command::new("git").arg("init").arg("-q").current_dir(&root).status();
+        let _ = std::process::Command::new("git").arg("config").arg("user.email").arg("t@t").current_dir(&root).status();
+        let _ = std::process::Command::new("git").arg("config").arg("user.name").arg("t").current_dir(&root).status();
+        std::fs::write(root.join("f.txt"), "x").unwrap_or_else(|_| unreachable!());
+        let _ = std::process::Command::new("git").arg("add").arg("f.txt").current_dir(&root).status();
+        let _ = std::process::Command::new("git").arg("commit").arg("-q").arg("-m").arg("base").current_dir(&root).status();
+
+        let agent = crate::core::identity::canonical(&crate::core::identity::current().name);
+        let reg = crate::commands::orch::Registry {
+            seq: 1,
+            tasks: vec![crate::commands::orch::Task {
+                id: "T-001".to_string(),
+                agent: agent.clone(),
+                title: "test task".to_string(),
+                complexity: 1,
+                c_level: None,
+                model: None,
+                model_source: None,
+                started_by: None,
+                started_at: None,
+                status: crate::commands::orch::Status::Queued,
+                zones: vec![],
+                fail_level: None,
+                note: String::new(),
+                created: 100,
+                updated: 100,
+                dod: vec![],
+                checks: vec![],
+                acked: vec![],
+                evidence: vec![],
+                commit_sha: None,
+                override_reason: None,
+            }],
+            agents: vec![],
+            lead: None,
+            plan: Default::default(),
+        };
+        crate::commands::orch::save(&root, &reg).unwrap_or_else(|_| unreachable!());
+
+        if let Some(n) = orch_task_next(&root) {
+            assert!(!n.command.contains('<'), "без плейсхолдеров: {}", n.command);
+            assert!(n.command.starts_with("devh orch start "), "{}", n.command);
+        }
     }
 }
