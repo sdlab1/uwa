@@ -53,6 +53,12 @@ pub enum Status {
     Revoked,
 }
 
+impl std::fmt::Display for Status {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.label())
+    }
+}
+
 impl Status {
     /// Короткая метка для таблиц.
     pub fn label(self) -> &'static str {
@@ -563,7 +569,7 @@ pub fn orch(root: &Path, sub: &str, args: &[String]) -> anyhow::Result<()> {
     // репозиторий: отсутствие/старость бинаря только предупреждает.
     let _ = install_hook_internal(root, false);
     match sub {
-        "board" => board(root),
+        "board" => board(root, args),
         "list" => list(root, args),
         "next" => next_cmd(root),
         "selfcheck" => selfcheck(root),
@@ -2546,15 +2552,265 @@ fn zones_overlap(a: &str, b: &str) -> bool {
     crate::core::guards::zone_overlap_guard::zones_overlap(a, b)
 }
 
+/// JSON-снимок доски (для `board --json`).
+#[derive(serde::Serialize)]
+struct BoardJson {
+    lead: Option<String>,
+    agents: Vec<AgentJson>,
+    buffer: Vec<TaskJson>,
+    warnings: Vec<String>,
+    totals: TotalsJson,
+}
+
+#[derive(serde::Serialize)]
+struct AgentJson {
+    name: String,
+    role: String,
+    model: String,
+    last_fail: String,
+    suspicion: String,
+    worktree: String,
+    wt_synced_at: u64,
+    active_count: usize,
+    queued_count: usize,
+    active: Vec<TaskJson>,
+    queued: Vec<TaskJson>,
+}
+
+#[derive(serde::Serialize)]
+struct TaskJson {
+    id: String,
+    status: String,
+    complexity: u8,
+    c_level: u8,
+    zones: Vec<String>,
+    title: String,
+}
+
+#[derive(serde::Serialize)]
+struct TotalsJson {
+    tasks: usize,
+    queued: usize,
+    active: usize,
+    done: usize,
+    failed: usize,
+    revoked: usize,
+    agents: usize,
+}
+
+#[derive(serde::Serialize)]
+struct WorkerBoardJson {
+    agent: String,
+    model: String,
+    lead: String,
+    last_fail: String,
+    suspicion: String,
+    worktree: String,
+    wt_synced_at: u64,
+    merge_state: String,
+    merged_sha: String,
+    active: Vec<TaskJson>,
+    queued: Vec<TaskJson>,
+    buffer: Vec<TaskJson>,
+}
+
+fn board_worker_json(reg: &Registry, lead: Option<&str>, caller: &str) -> String {
+    let (active, queued) = agent_sections(reg, caller);
+    let buffer = buffer_tasks(reg, lead);
+
+    let state = reg
+        .agents
+        .iter()
+        .find(|a| crate::core::identity::canonical(&a.name) == caller);
+
+    let model = state
+        .and_then(|s| s.model.clone())
+        .unwrap_or_else(|| "—".to_string());
+    let last_f = state
+        .and_then(|s| s.last_fail)
+        .map(|f| format!("F{f}"))
+        .unwrap_or_else(|| "—".to_string());
+    let susp = state.and_then(|s| s.suspicion.clone()).unwrap_or_default();
+    let worktree = state.and_then(|s| s.worktree.clone()).unwrap_or_default();
+    let wt_synced_at = state.and_then(|s| s.wt_synced_at).unwrap_or(0);
+    let merge_state = state.and_then(|s| s.merge_state.clone()).unwrap_or_default();
+    let merged_sha = state.and_then(|s| s.merged_sha.clone()).unwrap_or_default();
+
+    let to_task = |t: &Task| TaskJson {
+        id: t.id.clone(),
+        status: t.status.label().to_string(),
+        complexity: t.complexity,
+        c_level: t.c_level.unwrap_or(0),
+        zones: t.zones.clone(),
+        title: t.title.clone(),
+    };
+
+    let worker = WorkerBoardJson {
+        agent: caller.to_string(),
+        model,
+        lead: lead.unwrap_or_default().to_string(),
+        last_fail: last_f,
+        suspicion: susp,
+        worktree,
+        wt_synced_at,
+        merge_state,
+        merged_sha,
+        active: active.iter().map(|t| to_task(t)).collect(),
+        queued: queued.iter().map(|t| to_task(t)).collect(),
+        buffer: buffer.iter().map(|t| to_task(t)).collect(),
+    };
+
+    serde_json::to_string(&worker).unwrap_or_else(|_| "{}".to_string())
+}
+
 /// `devh orch board` — дашборд ведущего.
-fn board(root: &Path) -> anyhow::Result<()> {
+fn board(root: &Path, args: &[String]) -> anyhow::Result<()> {
     let reg = load(root);
     let (board_lead, _) = lead_of(&reg);
     let caller = crate::core::identity::canonical(&crate::core::identity::current().name);
+    let as_json = args.iter().any(|a| a == "--json");
     // Панель ведущего — служебная: чужим агентам она не достаётся. Новичок
     // должен видеть СВОИ задачи и свободные задачи буфера, а не чужие зоны.
     if board_lead.as_deref() != Some(caller.as_str()) {
-        return board_worker(&reg, board_lead.as_deref(), &caller);
+        return board_worker(&reg, board_lead.as_deref(), &caller, as_json);
+    }
+    if as_json {
+        // Собираем данные для детерминированного JSON (как в текстовом выводе ниже)
+        let mut names: Vec<String> = reg.agents.iter().map(|a| a.name.clone()).collect();
+        for t in reg.tasks.iter() {
+            if !names.contains(&t.agent) {
+                names.push(t.agent.clone());
+            }
+        }
+        names.sort();
+
+        let mut warns: Vec<String> = Vec::new();
+        let mut agents_json = Vec::new();
+        for name in names.iter() {
+            let state = reg.agents.iter().find(|a| &a.name == name);
+            let (active, queued) = agent_sections(&reg, name);
+            let model = state
+                .and_then(|s| s.model.clone())
+                .unwrap_or_else(|| "—".to_string());
+            let last_f = state
+                .and_then(|s| s.last_fail)
+                .map(|f| format!("F{f}"))
+                .unwrap_or_else(|| "—".to_string());
+            let susp = state.and_then(|s| s.suspicion.clone());
+            let worktree = state.and_then(|s| s.worktree.clone());
+            let wt_synced_at = state.and_then(|s| s.wt_synced_at);
+            let active_tasks: Vec<_> = active.iter().map(|t| TaskJson {
+                id: t.id.clone(),
+                status: t.status.label().to_string(),
+                complexity: t.complexity,
+                c_level: t.c_level.unwrap_or(0),
+                zones: t.zones.clone(),
+                title: t.title.clone(),
+            }).collect();
+            let queued_tasks: Vec<_> = queued.iter().map(|t| TaskJson {
+                id: t.id.clone(),
+                status: t.status.label().to_string(),
+                complexity: t.complexity,
+                c_level: t.c_level.unwrap_or(0),
+                zones: t.zones.clone(),
+                title: t.title.clone(),
+            }).collect();
+            let queued_len = queued.len();
+            let has_suspicion = susp.is_some();
+            agents_json.push(AgentJson {
+                name: name.clone(),
+                role: state.and_then(|s| s.role.clone()).unwrap_or_else(|| "—".to_string()),
+                model,
+                last_fail: last_f,
+                suspicion: susp.unwrap_or_default(),
+                worktree: worktree.unwrap_or_default(),
+                wt_synced_at: wt_synced_at.unwrap_or(0),
+                active_count: active.len(),
+                queued_count: queued_len,
+                active: active_tasks,
+                queued: queued_tasks,
+            });
+            if queued_len < 2 && board_lead.as_deref() != Some(name.as_str()) {
+                warns.push(format!(
+                    "{name}: в очереди {} задач (<2, O1) — выдать задачу (devh orch add --agent {name} ...)",
+                    queued_len
+                ));
+            }
+            if has_suspicion {
+                let heavy = queued.iter().filter(|t| t.complexity >= 3).count();
+                if heavy > 0 {
+                    warns.push(format!(
+                        "{name}: подозрение + в очереди P>=3 ({heavy} шт.) — понизь P (devh orch degrade --agent {name})",
+                    ));
+                }
+            }
+        }
+
+        let live: Vec<&Task> = reg
+            .tasks
+            .iter()
+            .filter(|t| t.status == Status::Active || t.status == Status::Queued)
+            .collect();
+        for (i, a) in live.iter().enumerate() {
+            for b in live.iter().skip(i.saturating_add(1)) {
+                if a.agent == b.agent {
+                    continue;
+                }
+                for za in a.zones.iter() {
+                    for zb in b.zones.iter() {
+                        if zones_overlap(za, zb) {
+                            warns.push(format!(
+                                "пересечение зон: {} ({}) ∩ {} ({}): {za} / {zb}",
+                                a.id, a.agent, b.id, b.agent
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        let buffer = buffer_tasks(&reg, board_lead.as_deref());
+        let buffer_tasks_json: Vec<_> = buffer.iter().map(|t| TaskJson {
+            id: t.id.clone(),
+            status: t.status.label().to_string(),
+            complexity: t.complexity,
+            c_level: t.c_level.unwrap_or(0),
+            zones: t.zones.clone(),
+            title: t.title.clone(),
+        }).collect();
+        if buffer.len() < BUFFER_MIN {
+            warns.push(format!(
+                "буфер ведущего: {} задач (<{BUFFER_MIN}) — наполни доску: devh orch add --agent <lead> --buffer --dod ... --check ...",
+                buffer.len()
+            ));
+        }
+
+        let queued_total = reg.tasks.iter().filter(|t| t.status == Status::Queued).count();
+        let active_total = reg.tasks.iter().filter(|t| t.status == Status::Active).count();
+        let done_total = reg.tasks.iter().filter(|t| t.status == Status::Done).count();
+        let failed_total = reg.tasks.iter().filter(|t| t.status == Status::Failed).count();
+        let revoked_total = reg.tasks.iter().filter(|t| t.status == Status::Revoked).count();
+
+        let board_json = BoardJson {
+            lead: board_lead,
+            agents: agents_json,
+            buffer: buffer_tasks_json,
+            warnings: warns,
+            totals: TotalsJson {
+                tasks: reg.tasks.len(),
+                queued: queued_total,
+                active: active_total,
+                done: done_total,
+                failed: failed_total,
+                revoked: revoked_total,
+                agents: reg.agents.len(),
+            },
+        };
+
+        let mut serializer = serde_json::Serializer::new(std::io::stdout());
+        board_json.serialize(&mut serializer).map_err(|e| anyhow!("json serialize: {e}"))?;
+        println!();
+        return Ok(());
     }
     let ts = now();
     println!("=== ДАШБОРД ОРКЕСТРАТОРА ===");
@@ -2757,7 +3013,7 @@ fn board(root: &Path) -> anyhow::Result<()> {
 /// Ведущий видит всю панель (все агенты, буфер, пересечения зон, предупреждения).
 /// Ведомому достаются: его модель/состояние, его worktree, его задачи (в работе
 /// и в очереди) и свободные задачи буфера ведущего — их можно взять самому.
-fn board_worker(reg: &Registry, lead: Option<&str>, caller: &str) -> anyhow::Result<()> {
+fn board_worker(reg: &Registry, lead: Option<&str>, caller: &str, as_json: bool) -> anyhow::Result<()> {
     let state = reg.agents.iter().find(|a| {
         crate::core::identity::canonical(&a.name) == caller
     });
@@ -2769,6 +3025,57 @@ fn board_worker(reg: &Registry, lead: Option<&str>, caller: &str) -> anyhow::Res
         .and_then(|s| s.last_fail)
         .map(|f| format!("F{f}"))
         .unwrap_or_else(|| "—".to_string());
+    let susp = state.and_then(|s| s.suspicion.clone());
+    let worktree = state.and_then(|s| s.worktree.clone());
+    let wt_synced_at = state.and_then(|s| s.wt_synced_at);
+    let merge_state = state.and_then(|s| s.merge_state.clone());
+    let merged_sha = state.and_then(|s| s.merged_sha.clone());
+    let active_tasks: Vec<_> = active.iter().map(|t| TaskJson {
+        id: t.id.clone(),
+        status: t.status.label().to_string(),
+        complexity: t.complexity,
+        c_level: t.c_level.unwrap_or(0),
+        zones: t.zones.clone(),
+        title: t.title.clone(),
+    }).collect();
+    let queued_tasks: Vec<_> = queued.iter().map(|t| TaskJson {
+        id: t.id.clone(),
+        status: t.status.label().to_string(),
+        complexity: t.complexity,
+        c_level: t.c_level.unwrap_or(0),
+        zones: t.zones.clone(),
+        title: t.title.clone(),
+    }).collect();
+    let buffer = buffer_tasks(reg, lead);
+    let buffer_tasks_json: Vec<_> = buffer.iter().map(|t| TaskJson {
+        id: t.id.clone(),
+        status: t.status.label().to_string(),
+        complexity: t.complexity,
+        c_level: t.c_level.unwrap_or(0),
+        zones: t.zones.clone(),
+        title: t.title.clone(),
+    }).collect();
+
+    if as_json {
+        let worker_json = WorkerBoardJson {
+            agent: caller.to_string(),
+            model,
+            last_fail: last_f,
+            suspicion: susp.unwrap_or_default(),
+            worktree: worktree.unwrap_or_default(),
+            wt_synced_at: wt_synced_at.unwrap_or(0),
+            merge_state: merge_state.unwrap_or_default(),
+            merged_sha: merged_sha.unwrap_or_default(),
+            lead: lead.unwrap_or_default().to_string(),
+            active: active_tasks,
+            queued: queued_tasks,
+            buffer: buffer_tasks_json,
+        };
+        let mut serializer = serde_json::Serializer::new(std::io::stdout());
+        worker_json.serialize(&mut serializer).map_err(|e| anyhow!("json serialize: {e}"))?;
+        println!();
+        return Ok(());
+    }
     println!("=== МОЯ ДОСКА ({caller}) ===");
     println!(
         "модель={model}  последний={last_f}  в работе={}  очередь={}",
@@ -4770,5 +5077,223 @@ mod tests {
         assert_eq!(a.merge_state.as_deref(), Some("влито"));
         assert_eq!(a.merged_sha.as_deref(), Some("abc1234"));
         assert!(a.merged_at.is_some(), "время слияния записано");
+    }
+
+    #[test]
+    fn board_json_structure() {
+        // Test BoardJson serialization
+        let board = BoardJson {
+            lead: Some("lead".to_string()),
+            agents: vec![AgentJson {
+                name: "worker1".to_string(),
+                role: "worker".to_string(),
+                model: "test".to_string(),
+                last_fail: "F0".to_string(),
+                suspicion: "".to_string(),
+                worktree: "/tmp/wt".to_string(),
+                wt_synced_at: 1000,
+                active_count: 1,
+                queued_count: 2,
+                active: vec![TaskJson {
+                    id: "T-1".to_string(),
+                    status: "active".to_string(),
+                    complexity: 1,
+                    c_level: 2,
+                    zones: vec!["zone.rs".to_string()],
+                    title: "Task 1".to_string(),
+                }],
+                queued: vec![TaskJson {
+                    id: "T-2".to_string(),
+                    status: "queued".to_string(),
+                    complexity: 1,
+                    c_level: 2,
+                    zones: vec!["zone.rs".to_string()],
+                    title: "Task 2".to_string(),
+                }],
+            }],
+            buffer: vec![TaskJson {
+                id: "T-3".to_string(),
+                status: "queued".to_string(),
+                complexity: 1,
+                c_level: 2,
+                zones: vec!["buffer.rs".to_string()],
+                title: "Buffer".to_string(),
+            }],
+            warnings: vec!["warn1".to_string()],
+            totals: TotalsJson {
+                tasks: 3,
+                queued: 2,
+                active: 1,
+                done: 0,
+                failed: 0,
+                revoked: 0,
+                agents: 1,
+            },
+        };
+        let json = serde_json::to_string(&board).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        assert!(parsed["agents"].is_array());
+        assert!(parsed["buffer"].is_array());
+        assert!(parsed["warnings"].is_array());
+        assert!(parsed["totals"]["tasks"].is_number());
+    }
+
+    #[test]
+    fn worker_board_json_structure() {
+        let worker = WorkerBoardJson {
+            agent: "worker1".to_string(),
+            model: "test".to_string(),
+            last_fail: "F0".to_string(),
+            suspicion: "".to_string(),
+            worktree: "/tmp/wt".to_string(),
+            wt_synced_at: 1000,
+            merge_state: "".to_string(),
+            merged_sha: "".to_string(),
+            lead: "lead".to_string(),
+            active: vec![TaskJson {
+                id: "T-1".to_string(),
+                status: "active".to_string(),
+                complexity: 1,
+                c_level: 2,
+                zones: vec!["zone.rs".to_string()],
+                title: "Task 1".to_string(),
+            }],
+            queued: vec![TaskJson {
+                id: "T-2".to_string(),
+                status: "queued".to_string(),
+                complexity: 1,
+                c_level: 2,
+                zones: vec!["zone.rs".to_string()],
+                title: "Task 2".to_string(),
+            }],
+            buffer: vec![TaskJson {
+                id: "T-3".to_string(),
+                status: "queued".to_string(),
+                complexity: 1,
+                c_level: 2,
+                zones: vec!["buffer.rs".to_string()],
+                title: "Buffer".to_string(),
+            }],
+        };
+        let json = serde_json::to_string(&worker).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        assert!(parsed["agent"].is_string());
+        assert!(parsed["model"].is_string());
+        assert!(parsed["last_fail"].is_string());
+        assert!(parsed["active"].is_array());
+        assert!(parsed["queued"].is_array());
+        assert!(parsed["buffer"].is_array());
+    }
+
+    #[test]
+    fn board_json_deterministic() {
+        let board = BoardJson {
+            lead: Some("lead".to_string()),
+            agents: vec![],
+            buffer: vec![],
+            warnings: vec![],
+            totals: TotalsJson {
+                tasks: 0,
+                queued: 0,
+                active: 0,
+                done: 0,
+                failed: 0,
+                revoked: 0,
+                agents: 0,
+            },
+        };
+        let json1 = serde_json::to_string(&board).unwrap();
+        let json2 = serde_json::to_string(&board).unwrap();
+        assert_eq!(json1, json2, "JSON должен быть детерминирован");
+    }
+
+    #[test]
+    fn board_json_contains_required_fields() {
+        let board = BoardJson {
+            lead: Some("lead".to_string()),
+            agents: vec![AgentJson {
+                name: "worker1".to_string(),
+                role: "worker".to_string(),
+                model: "test".to_string(),
+                last_fail: "F0".to_string(),
+                suspicion: "".to_string(),
+                worktree: "".to_string(),
+                wt_synced_at: 0,
+                active_count: 1,
+                queued_count: 1,
+                active: vec![TaskJson {
+                    id: "T-1".to_string(),
+                    status: "active".to_string(),
+                    complexity: 1,
+                    c_level: 2,
+                    zones: vec!["zone.rs".to_string()],
+                    title: "Active task".to_string(),
+                }],
+                queued: vec![TaskJson {
+                    id: "T-2".to_string(),
+                    status: "queued".to_string(),
+                    complexity: 1,
+                    c_level: 2,
+                    zones: vec!["zone.rs".to_string()],
+                    title: "Queued task".to_string(),
+                }],
+            }],
+            buffer: vec![TaskJson {
+                id: "T-3".to_string(),
+                status: "queued".to_string(),
+                complexity: 1,
+                c_level: 2,
+                zones: vec!["buf.rs".to_string()],
+                title: "Buffer".to_string(),
+            }],
+            warnings: vec!["test warning".to_string()],
+            totals: TotalsJson {
+                tasks: 3,
+                queued: 2,
+                active: 1,
+                done: 0,
+                failed: 0,
+                revoked: 0,
+                agents: 1,
+            },
+        };
+        let json = serde_json::to_string(&board).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        assert!(parsed["lead"].is_string());
+        assert!(parsed["agents"].is_array());
+        assert!(parsed["tasks"].is_array() || parsed["buffer"].is_array());
+        assert!(parsed["warnings"].is_array());
+        assert!(parsed["totals"].is_object());
+    }
+
+    #[test]
+    fn board_json_totals_counts_correctly() {
+        let totals = TotalsJson {
+            tasks: 10,
+            queued: 3,
+            active: 2,
+            done: 4,
+            failed: 1,
+            revoked: 0,
+            agents: 3,
+        };
+        let json = serde_json::to_string(&totals).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        assert_eq!(parsed["tasks"], 10);
+        assert_eq!(parsed["queued"], 3);
+        assert_eq!(parsed["active"], 2);
+        assert_eq!(parsed["done"], 4);
+        assert_eq!(parsed["failed"], 1);
+        assert_eq!(parsed["revoked"], 0);
+        assert_eq!(parsed["agents"], 3);
+    }
+
+    #[test]
+    fn status_display_matches_label() {
+        assert_eq!(Status::Queued.to_string(), "queued");
+        assert_eq!(Status::Active.to_string(), "active");
+        assert_eq!(Status::Done.to_string(), "done");
+        assert_eq!(Status::Failed.to_string(), "failed");
+        assert_eq!(Status::Revoked.to_string(), "revoked");
     }
 }
