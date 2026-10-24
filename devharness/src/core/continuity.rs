@@ -146,6 +146,7 @@ mod tests {
             acked: vec![],
             evidence: vec![],
             commit_sha: None,
+            main_sha: None,
             override_reason: None,
         }
     }

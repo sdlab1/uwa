@@ -172,6 +172,7 @@ mod tests {
             acked: Vec::new(),
             evidence: Vec::new(),
             commit_sha: None,
+            main_sha: None,
             override_reason: None,
         }
     }

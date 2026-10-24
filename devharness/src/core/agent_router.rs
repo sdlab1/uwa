@@ -206,6 +206,7 @@ mod tests {
             acked: vec![],
             evidence: vec![],
             commit_sha: None,
+            main_sha: None,
             override_reason: None,
         };
         let display = prepare_display_tasks(&[task.clone()], "unknown", &history);

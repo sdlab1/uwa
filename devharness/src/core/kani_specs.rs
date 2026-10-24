@@ -283,6 +283,7 @@ mod tests {
             acked: Vec::new(),
             evidence: Vec::new(),
             commit_sha: sha.map(|s| s.to_string()),
+            main_sha: None,
             override_reason: None,
         }
     }

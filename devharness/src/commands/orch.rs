@@ -120,6 +120,11 @@ pub struct Task {
     /// SHA коммита, сделанного по задаче.
     #[serde(default)]
     pub commit_sha: Option<String>,
+    /// SHA коммита в `main`, куда попала работа задачи (пишется при слиянии).
+    /// Поле обязано жить в структуре: иначе serde теряет его при КАЖДОЙ
+    /// записи реестра (любая команда `devh orch` перезаписывает файл).
+    #[serde(default)]
+    pub main_sha: Option<String>,
     /// Причина обхода DoD ведущим.
     #[serde(default)]
     pub override_reason: Option<String>,
@@ -857,6 +862,7 @@ fn add(root: &Path, args: &[String]) -> anyhow::Result<()> {
         acked: Vec::new(),
         evidence: Vec::new(),
         commit_sha: None,
+        main_sha: None,
         override_reason: None,
     });
     if agent_index(&reg, &agent).is_none() {
@@ -1174,6 +1180,8 @@ fn close(root: &Path, args: &[String], status: Status) -> anyhow::Result<()> {
         if let Some(out) = auto_merge_agent(root, &reg, &agent, &id) {
             let mut merged = reg.clone();
             record_merge(&mut merged, &agent, &out);
+            // SHA коммита в main — для сданной задачи (след в реестре).
+            mark_main_sha(&mut merged, &id, out.sha.as_deref());
             let _ = save(root, &merged);
             println!("devh orch: автослияние {agent}: {} — {}", out.state, out.detail);
             notify_merge(&agent, &id, &out);
@@ -1373,6 +1381,21 @@ fn retry_pending_merges(root: &Path, reg: &mut Registry) -> Vec<String> {
         if let Some(out) = auto_merge_agent(root, reg, &agent, &task_id) {
             if out.state == "влито" {
                 record_merge(reg, &agent, &out);
+                // Все сданные задачи этого агента теперь в main — фиксируем SHA.
+                let done_ids: Vec<String> = reg
+                    .tasks
+                    .iter()
+                    .filter(|t| {
+                        t.status == Status::Done
+                            && crate::core::identity::canonical(&t.agent)
+                                == crate::core::identity::canonical(&agent)
+                            && t.main_sha.is_none()
+                    })
+                    .map(|t| t.id.clone())
+                    .collect();
+                for tid in done_ids {
+                    mark_main_sha(reg, &tid, out.sha.as_deref());
+                }
                 notes.push(format!("{agent}: {} — {}", out.state, out.detail));
                 notify_merge(&agent, &task_id, &out);
             } else if out.state.starts_with("ошибка") {
@@ -1384,6 +1407,19 @@ fn retry_pending_merges(root: &Path, reg: &mut Registry) -> Vec<String> {
         }
     }
     notes
+}
+
+/// Проставить SHA главной ветки в задачу (после слияния ветки агента).
+///
+/// `main_sha` — это SHA коммита в `main`, куда попала работа задачи. Без него
+/// нельзя отличить «работа агента» от «работа, которая реально в main».
+fn mark_main_sha(reg: &mut Registry, task_id: &str, sha: Option<&str>) {
+    let Some(sha) = sha else { return; };
+    if let Some(idx) = find_task_index(reg, task_id) {
+        if let Some(t) = reg.tasks.get_mut(idx) {
+            t.main_sha = Some(sha.to_string());
+        }
+    }
 }
 
 /// `devh orch revoke <ID> --reason R`.
@@ -1656,6 +1692,7 @@ fn bug(root: &Path, args: &[String]) -> anyhow::Result<()> {
         acked: Vec::new(),
         evidence: Vec::new(),
         commit_sha: None,
+        main_sha: None,
         override_reason: None,
     };
     if agent_index(&reg, &target).is_none() {
@@ -3823,6 +3860,7 @@ fn onboard_register(root: &Path, args: &[String]) -> anyhow::Result<Onboarded> {
         acked: Vec::new(),
         evidence: Vec::new(),
         commit_sha: None,
+        main_sha: None,
         override_reason: None,
     });
     // Если ведущий ещё не назначен — назначаем того, кто проводит онбординг.
@@ -4648,6 +4686,73 @@ mod tests {
     }
 
     /// Состояние слияния пишется в реестр.
+    #[test]
+    fn task_main_sha_survives_registry_roundtrip() {
+        // РЕГРЕССИЯ: поле main_sha обязано переживать запись реестра.
+        // Без него в структуре serde ТИХО теряет его при каждом сохранении.
+        let mut reg = Registry::default();
+        reg.tasks.push(Task {
+            id: "T-1".into(),
+            agent: "beam".into(),
+            title: "t".into(),
+            complexity: 1,
+            c_level: None,
+            model: None,
+            model_source: None,
+            started_by: None,
+            started_at: None,
+            status: Status::Done,
+            zones: vec![],
+            fail_level: Some(0),
+            note: String::new(),
+            created: 1,
+            updated: 1,
+            dod: vec![],
+            checks: vec![],
+            acked: vec![],
+            evidence: vec![],
+            commit_sha: Some("aaa".into()),
+            main_sha: Some("bbb".into()),
+            override_reason: None,
+        });
+        let json = serde_json::to_string(&reg).expect("json");
+        let back: Registry = serde_json::from_str(&json).expect("roundtrip");
+        assert_eq!(back.tasks[0].main_sha.as_deref(), Some("bbb"));
+    }
+
+    #[test]
+    fn mark_main_sha_writes_sha_to_task() {
+        let mut reg = Registry::default();
+        reg.tasks.push(Task {
+            id: "T-1".into(),
+            agent: "beam".into(),
+            title: "t".into(),
+            complexity: 1,
+            c_level: None,
+            model: None,
+            model_source: None,
+            started_by: None,
+            started_at: None,
+            status: Status::Done,
+            zones: vec![],
+            fail_level: Some(0),
+            note: String::new(),
+            created: 1,
+            updated: 1,
+            dod: vec![],
+            checks: vec![],
+            acked: vec![],
+            evidence: vec![],
+            commit_sha: Some("aaa".into()),
+            main_sha: None,
+            override_reason: None,
+        });
+        mark_main_sha(&mut reg, "T-1", Some("bbb"));
+        assert_eq!(reg.tasks[0].main_sha.as_deref(), Some("bbb"));
+        mark_main_sha(&mut reg, "T-1", None);
+        assert_eq!(reg.tasks[0].main_sha.as_deref(), Some("bbb"));
+    }
+
     #[test]
     fn record_merge_writes_state() {
         let mut reg = Registry::default();

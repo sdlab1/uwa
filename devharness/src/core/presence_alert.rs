@@ -258,6 +258,7 @@ mod tests {
             acked: vec![],
             evidence: vec![],
             commit_sha: None,
+            main_sha: None,
             override_reason: None,
         });
         reg.agents.iter_mut().find(|a| a.name == "worker-1").unwrap().worktree = Some("/tmp/wt-1".into());
