@@ -7,6 +7,7 @@ pub mod coverage_index;
 pub mod diff_scope;
 pub mod digest;
 pub mod early;
+pub mod board_view;
 pub mod zone_index;
 pub mod fail_reason;
 pub mod facade_policy;
