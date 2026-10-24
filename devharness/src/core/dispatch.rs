@@ -107,14 +107,10 @@ pub fn select(candidates: &[TaskCandidate], ceiling: Option<u8>, active_zones: &
     DispatchResult { selected, rejected }
 }
 
+/// Пересечение зон — ЕДИНАЯ реализация (core::guards::zone_overlap_guard):
+/// каталог покрывает свой подкаталог, но не соседний с тем же префиксом.
 fn zones_overlap(a: &str, b: &str) -> bool {
-    // простое пересечение путей: один является префиксом другого или равны
-    if a == b {
-        return true;
-    }
-    let a = a.trim_end_matches('/');
-    let b = b.trim_end_matches('/');
-    a.starts_with(b) || b.starts_with(a)
+    crate::core::guards::zone_overlap_guard::zones_overlap(a, b)
 }
 
 /// Dispatch по реестру: единый пул (свои + буфер lead).

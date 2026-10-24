@@ -29,6 +29,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::core::ledger::{LedgerEntry, LedgerEvent, log_event};
 use crate::core::agent_state::{AgentState as CoreAgentState, degrade_p};
 
+use crate::core::guards::zone_guard::{OwnedTask, ZoneGuard};
+use crate::core::guards::{Guard, GuardContext, GuardVerdict};
+
 /// Роль ведущего (lead): назначается и переназначается в реестре.
 pub const ROLE_LEAD: &str = "lead";
 /// Роль ведомого (worker).
@@ -984,6 +987,48 @@ fn start(root: &Path, args: &[String]) -> anyhow::Result<()> {
             status.label()
         ));
     }
+    // O5: зоны задачи не пересекаются с зонами активных задач.
+    // Тот же инвариант, что и в core::dispatch (автовыдача), — но и для ручного
+    // `orch start`: иначе два исполнителя правят одни и те же файлы одновременно.
+    // Собственные пересечения тоже запрещены: «двойная работа своими руками».
+    {
+        let cand_id = reg.tasks[idx].id.clone();
+        let cand_zones = reg.tasks[idx].zones.clone();
+        let cand_agent = if from_buffer {
+            caller.clone()
+        } else {
+            owner.clone()
+        };
+        let mut conflicts: Vec<String> = Vec::new();
+        for t in reg.tasks.iter() {
+            if t.id == cand_id || t.status != Status::Active {
+                continue;
+            }
+            let mut pairs: Vec<String> = Vec::new();
+            for za in cand_zones.iter() {
+                for zb in t.zones.iter() {
+                    if zones_overlap(za, zb) {
+                        pairs.push(format!("{za} ↔ {zb}"));
+                    }
+                }
+            }
+            if !pairs.is_empty() {
+                conflicts.push(format!(
+                    "{} ({}) — {}",
+                    t.id,
+                    t.agent,
+                    pairs.join(", ")
+                ));
+            }
+        }
+        if !conflicts.is_empty() {
+            return Err(anyhow!(
+                "devh orch start: {id} ({cand_agent}) — пересечение зон с активными задачами: {} — \
+                 зоны не пересекаются (O5): дождись закрытия или уточни зону задачи",
+                conflicts.join("; ")
+            ));
+        }
+    }
     let ts = now();
     let agent = if from_buffer {
         caller.clone()
@@ -1026,7 +1071,7 @@ fn start(root: &Path, args: &[String]) -> anyhow::Result<()> {
     let ledger_path = dir(root).join("ledger.jsonl");
     let _ = log_event(&ledger_path, &LedgerEntry::new(&agent, LedgerEvent::Started, ts).with_task(&id));
     println!(
-        "devh orch: {id} взята в работаю ({agent}, P{p} C{}){}",
+        "devh orch: {id} взята в работу ({agent}, P{p} C{}){}",
         reg.tasks[idx].c_level.unwrap_or(0),
         if from_buffer {
             " [из буфера ведущего]"
@@ -1857,6 +1902,30 @@ fn selfcheck(root: &Path) -> anyhow::Result<()> {
             }
         }
     }
+    // 3b. Самопересечение зон внутри одного агента («двойная работа своими руками»).
+    //     zone_overlap_guard ищет конфликты между разными агентами; этот guard
+    //     ловит две активные задачи одного исполнителя с пересекающимися зонами.
+    for a in reg.agents.iter() {
+        let canon = crate::core::identity::canonical(&a.name);
+        let active: Vec<OwnedTask> = reg
+            .tasks
+            .iter()
+            .filter(|t| {
+                t.status == Status::Active
+                    && crate::core::identity::canonical(&t.agent) == canon
+            })
+            .map(|t| OwnedTask {
+                id: t.id.clone(),
+                zones: t.zones.clone(),
+                active: true,
+            })
+            .collect();
+        let verdict = ZoneGuard::new(active).run(&GuardContext::default());
+        if let GuardVerdict::Problem(m) = verdict {
+            problems.push(format!("{canon}: двойная работа своими руками: {m}"));
+        }
+    }
+
     // 4. Буфер ведущего ≥ 15 (O1) и очередь каждого ведомого ≥ 2.
     let (lead, _) = lead_of(&reg);
     let buffer_n = reg
@@ -2436,13 +2505,13 @@ fn zones(root: &Path) -> anyhow::Result<()> {
 }
 
 /// Пересечение зон: path-префикс (один путь — начало другого).
+/// Пересечение зон — ЕДИНАЯ реализация (core::guards::zone_overlap_guard):
+/// зона-каталог покрывает свой подкаталог, но НЕ соседний каталог с тем же
+/// префиксом («src» ≠ «src2»). Раньше здесь был свой вариант с `starts_with`
+/// без границы `/` — из-за него «devharness/src» считался родителем
+/// «devharness/src2/...» (ложные пересечения зон в гейтах и в выдаче задач).
 fn zones_overlap(a: &str, b: &str) -> bool {
-    let a = a.trim().trim_end_matches('/');
-    let b = b.trim().trim_end_matches('/');
-    if a.is_empty() || b.is_empty() {
-        return false;
-    }
-    a == b || a.starts_with(b) || b.starts_with(a)
+    crate::core::guards::zone_overlap_guard::zones_overlap(a, b)
 }
 
 /// `devh orch board` — дашборд ведущего.
