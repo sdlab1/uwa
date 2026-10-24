@@ -134,6 +134,8 @@ struct Binding {
     name: String,
     /// Имя закреплено ЯВНО (`devh msg claim`) — такое перекрывает `DEVH_AGENT`.
     claimed: bool,
+    /// Ключ сессии, который ИСХОДНО закрепил это имя (для проверки lineage в slot).
+    original_key: String,
 }
 
 /// Прочитать привязку (None — привязки нет).
@@ -148,7 +150,40 @@ fn read_binding_in(home: &Path, key: &str) -> Option<Binding> {
         .get("claimed")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
-    Some(Binding { name, claimed })
+    let original_key = value
+        .get("key")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    Some(Binding {
+        name,
+        claimed,
+        original_key,
+    })
+}
+
+/// Прочитать сырую привязку из файла слота (чтобы получить original_key).
+fn read_slot_binding_raw(home: &Path, slot: &str) -> Option<Binding> {
+    let text = fs::read_to_string(binding_path_in(home, slot)).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let name = value.get("name")?.as_str()?.trim().to_string();
+    if name.is_empty() {
+        return None;
+    }
+    let claimed = value
+        .get("claimed")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let original_key = value
+        .get("key")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    Some(Binding {
+        name,
+        claimed,
+        original_key,
+    })
 }
 
 /// Записать привязку (атомарно: tmp + rename).
@@ -589,9 +624,25 @@ pub fn slot_key() -> Option<String> {
 }
 
 /// Закреплённое имя для слота (переживает рестарт рантайма).
+///
+/// CLAIMED slot binding допускается ТОЛЬКО если текущая сессия —
+/// продолжение той же lineage (original_key совпадает с текущим context()).
+/// Иначе при одновременных сессиях в одном редакторе второй перехватывал
+/// бы имя первого (баг T-214). При неоднозначности — None, авто-имя.
 fn slot_binding() -> Option<Binding> {
     let slot = slot_key()?;
-    read_binding_in(&msg_home(), &slot)
+    let home = msg_home();
+    let binding = read_slot_binding_raw(&home, &slot)?;
+    if !binding.claimed {
+        return Some(binding); // unclaimed slot binding is fine to inherit
+    }
+    // CLAIMED slot: verify current session is continuation of original claimant
+    let (current_key, _label) = context();
+    if binding.original_key == current_key {
+        return Some(binding); // same session key = same session (restart)
+    }
+    // Not the same session lineage: don't inherit claimed name.
+    None
 }
 
 /// Найти claimed-привязку для заданного имени (если есть).
@@ -628,11 +679,13 @@ fn claimed_binding_for_name(home: &Path, name: &str) -> Option<(String, Binding)
             .and_then(|x| x.as_str())
             .unwrap_or_default()
             .to_string();
+        let original_key = key.clone();
         return Some((
             key,
             Binding {
                 name: binding_name.trim().to_string(),
                 claimed,
+                original_key,
             },
         ));
     }
@@ -646,16 +699,44 @@ fn claimed_binding_for_name(home: &Path, name: &str) -> Option<(String, Binding)
 /// отделена от процесса goose) получили бы один слот и один ящик:
 /// второй перехватил бы имя первого. Тогда лучше потерять непрерывность,
 /// чем перепутать личности.
+///
+/// Храним original_key = session key (context()), чтобы slot_binding()
+/// мог проверить lineage: только та же сессия или её перезапуск получает
+/// claimed-имя. Одновременные сессии в одном редакторе получат авто-имена.
 fn remember_slot(name: &str, claimed: bool) {
     let Some(slot) = slot_key() else {
         return;
     };
-    if let Some(existing) = read_binding_in(&msg_home(), &slot) {
+    let home = msg_home();
+    let (current_key, _label) = context();
+    // Read existing to preserve original_key if already claimed
+    let existing_original_key = read_slot_binding_raw(&home, &slot)
+        .map(|b| b.original_key)
+        .filter(|k| !k.is_empty())
+        .unwrap_or(current_key);
+    if let Some(existing) = read_binding_in(&home, &slot) {
         if existing.claimed && existing.name != name {
             return;
         }
     }
-    let _ = write_binding_in(&msg_home(), &slot, name, "slot", claimed);
+    // Write to slot filename but store session key as original_key
+    let path = binding_path_in(&home, &slot);
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let body = serde_json::json!({
+        "key": existing_original_key,  // store session key, not slot key
+        "name": name,
+        "label": "slot",
+        "claimed": claimed,
+        "updated": unix_now(),
+    });
+    let tmp = path.with_extension("json.tmp");
+    let _ = fs::write(
+        &tmp,
+        serde_json::to_string_pretty(&body).unwrap_or_default(),
+    );
+    let _ = fs::rename(&tmp, &path);
 }
 
 /// Ключ и метка контекста сессии.
@@ -969,7 +1050,8 @@ mod tests {
             read_binding_in(home, "proc:1:2"),
             Some(Binding {
                 name: "deepseek".to_string(),
-                claimed: false
+                claimed: false,
+                original_key: "proc:1:2".to_string()
             })
         );
         // другой ключ — другое имя
