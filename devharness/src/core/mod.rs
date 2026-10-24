@@ -53,6 +53,7 @@ pub mod red_expect;
 pub mod presence;
 pub mod slot;
 pub mod model_ceiling;
+pub mod msg_consume_guard;
 pub mod degrade;
 pub mod timeout_policy;
 pub mod lock_guard;
