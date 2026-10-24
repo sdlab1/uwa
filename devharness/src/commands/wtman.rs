@@ -31,6 +31,15 @@ pub fn agent_branch(agent: &str) -> String {
     format!("devh/agent-{}", sanitize(agent))
 }
 
+/// Ветка WIP-чекпоинта агента: `devh/wip-<адрес>`.
+///
+/// Сюда сохраняется незакоммиченная работа агента, когда worktree нужно
+/// освободить (отзыв задачи, watchdog, ребут): работа не пропадает — её
+/// всегда можно забрать обратно (`git cherry-pick`/`git merge`).
+pub fn wip_branch(agent: &str) -> String {
+    format!("devh/wip-{}", sanitize(agent))
+}
+
 /// Канонический путь worktree агента (детерминированный: агент ↔ путь).
 pub fn agent_path(cfg: &RunConfig, root: &Path, agent: &str) -> PathBuf {
     cfg.wt_root
@@ -90,6 +99,207 @@ fn git_ok(cwd: &Path, args: &[&str]) -> bool {
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
+}
+
+/// Git с дополнительным окружением (`GIT_INDEX_FILE` и т.п.).
+fn git_env(cwd: &Path, env: &[(&str, String)], args: &[&str]) -> anyhow::Result<String> {
+    let mut cmd = Command::new("git");
+    cmd.args(args).current_dir(cwd);
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    let out = cmd.output()?;
+    if !out.status.success() {
+        anyhow::bail!(
+            "git {}: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// Сохранить грязное дерево агента в ветку WIP (`devh/wip-<адрес>`).
+///
+/// Механика: временный индекс → `read-tree HEAD` → `add -A` → `write-tree` →
+/// `commit-tree -p HEAD` → `update-ref refs/heads/devh/wip-<адрес>`.
+/// Рабочее дерево не трогаем: это чекпоинт, а не коммит в ветку агента.
+pub fn checkpoint(cfg: &RunConfig, root: &Path, agent: &str) -> anyhow::Result<String> {
+    let path = agent_path(cfg, root, agent);
+    if !path.exists() {
+        anyhow::bail!("worktree агента {agent} не выдан — нечего сохранять");
+    }
+    let idx = std::env::temp_dir().join(format!("devh-wip-index-{}", sanitize(agent)));
+    let _ = std::fs::remove_file(&idx);
+    let idx_s = idx.to_string_lossy().to_string();
+    let env = vec![
+        ("GIT_INDEX_FILE", idx_s),
+        ("GIT_AUTHOR_NAME", "devh".to_string()),
+        ("GIT_AUTHOR_EMAIL", "devh@localhost".to_string()),
+        ("GIT_COMMITTER_NAME", "devh".to_string()),
+        ("GIT_COMMITTER_EMAIL", "devh@localhost".to_string()),
+    ];
+    let res = (|| -> anyhow::Result<String> {
+        git_env(&path, &env, &["read-tree", "HEAD"])?;
+        git_env(&path, &env, &["add", "-A"])?;
+        let tree = git_env(&path, &env, &["write-tree"])?;
+        let msg = format!("WIP({agent}): чекпоинт незакоммиченной работы");
+        let commit = git_env(
+            &path,
+            &env,
+            &["commit-tree", &tree, "-p", "HEAD", "-m", &msg],
+        )?;
+        let refname = format!("refs/heads/{}", wip_branch(agent));
+        git_env(&path, &env, &["update-ref", &refname, &commit])?;
+        Ok(commit)
+    })();
+    let _ = std::fs::remove_file(&idx);
+    res
+}
+
+/// Имя модуля из строки `pub mod xxx;`.
+fn mod_name(line: &str) -> Option<String> {
+    let t = line.trim();
+    let rest = t.strip_prefix("pub mod ")?;
+    let name = rest.strip_suffix(';')?.trim();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
+    }
+}
+
+/// Объединить два списка `pub mod ...;` (конфликт в `core/mod.rs`).
+///
+/// Смысл такого конфликта — объединение: разные агенты добавили разные
+/// модули в один `mod.rs`, ни одна строка не должна пропасть. Дубли
+/// убираются (иначе сборка падает с E0428 — такое уже бывало).
+pub fn union_mod_lists(a: &str, b: &str) -> String {
+    let a_lines: Vec<&str> = a.lines().collect();
+    let b_lines: Vec<&str> = b.lines().collect();
+    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut head: Vec<String> = Vec::new();
+    let mut mods: Vec<String> = Vec::new();
+    let mut tail: Vec<String> = Vec::new();
+    let mut seen_mod = false;
+    for line in &a_lines {
+        match mod_name(line) {
+            Some(name) => {
+                seen_mod = true;
+                if seen.insert(name) {
+                    mods.push((*line).to_string());
+                }
+            }
+            None => {
+                if seen_mod {
+                    tail.push((*line).to_string());
+                } else {
+                    head.push((*line).to_string());
+                }
+            }
+        }
+    }
+    for line in &b_lines {
+        if let Some(name) = mod_name(line) {
+            if seen.insert(name) {
+                mods.push((*line).to_string());
+            }
+        }
+    }
+    let mut out = String::new();
+    for l in head.iter().chain(mods.iter()).chain(tail.iter()) {
+        out.push_str(l);
+        out.push('\n');
+    }
+    out
+}
+
+/// Файлы с конфликтами rebase.
+fn conflict_files(path: &Path) -> Vec<String> {
+    git_out(path, &["diff", "--name-only", "--diff-filter=U"])
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect()
+}
+
+/// Известный авторазрешаемый конфликт: список модулей `core/mod.rs`.
+fn is_mod_list_file(file: &str) -> bool {
+    file.ends_with("core/mod.rs")
+}
+
+/// Разрешить конфликт в `core/mod.rs` объединением списков модулей.
+fn resolve_union_mod_list(path: &Path, file: &str) -> anyhow::Result<()> {
+    let ours = git_out(path, &["show", &format!(":2:{file}")]);
+    let theirs = git_out(path, &["show", &format!(":3:{file}")]);
+    if ours.is_empty() || theirs.is_empty() {
+        anyhow::bail!("не читать версии конфликта {file}");
+    }
+    let resolved = union_mod_lists(&ours, &theirs);
+    std::fs::write(path.join(file), resolved)?;
+    git(path, &["add", file])?;
+    Ok(())
+}
+
+/// Rebase с авторазрешением единственного известного конфликта.
+///
+/// * конфликт в списке `pub mod ...;` → объединение (ни одна строка не теряется);
+/// * любой другой конфликт → `rebase --abort` и отказ: работа агента цела;
+/// * пустой коммит после разрешения → `rebase --skip`.
+pub fn rebase_auto(path: &Path, upstream: &str) -> anyhow::Result<()> {
+    if crate::shell::git::rebase(path, upstream).is_ok() {
+        return Ok(());
+    }
+    for _ in 0..64u32 {
+        let conflicted = conflict_files(path);
+        if conflicted.is_empty() {
+            if git_ok(path, &["rebase", "--skip"]) {
+                continue;
+            }
+            let _ = git_ok(path, &["rebase", "--abort"]);
+            anyhow::bail!("rebase на {upstream} остановился без конфликтов — откачен");
+        }
+        let mut known = true;
+        for f in &conflicted {
+            if is_mod_list_file(f) {
+                resolve_union_mod_list(path, f)?;
+            } else {
+                known = false;
+            }
+        }
+        if !known {
+            let _ = git_ok(path, &["rebase", "--abort"]);
+            anyhow::bail!(
+                "конфликт rebase в {} — rebase откачен, работа агента цела",
+                conflicted.join(", ")
+            );
+        }
+        let out = Command::new("git")
+            .args(["rebase", "--continue"])
+            .env("GIT_EDITOR", "true")
+            .current_dir(path)
+            .output();
+        match out {
+            Ok(o) if o.status.success() => return Ok(()),
+            Ok(o) => {
+                let err = String::from_utf8_lossy(&o.stderr).to_string();
+                if git_ok(path, &["rebase", "--skip"]) {
+                    continue;
+                }
+                if !conflict_files(path).is_empty() {
+                    continue;
+                }
+                let _ = git_ok(path, &["rebase", "--abort"]);
+                anyhow::bail!("rebase --continue не удался: {}", err.trim());
+            }
+            Err(e) => {
+                let _ = git_ok(path, &["rebase", "--abort"]);
+                anyhow::bail!("rebase --continue: {e}");
+            }
+        }
+    }
+    let _ = git_ok(path, &["rebase", "--abort"]);
+    anyhow::bail!("rebase не сошёлся за 64 шага — откачен");
 }
 
 /// Зарегистрирован ли путь в `git worktree list`.
@@ -254,6 +464,13 @@ fn count(wt: &Path, range: &str) -> u32 {
 pub fn ensure(cfg: &RunConfig, root: &Path, agent: &str) -> anyhow::Result<(PathBuf, bool)> {
     let path = agent_path(cfg, root, agent);
     let branch = agent_branch(agent);
+    // Каталог worktree'ов может быть вне /tmp и ещё не существовать.
+    if let Err(e) = std::fs::create_dir_all(&cfg.wt_root) {
+        anyhow::bail!(
+            "не создать каталог worktree'ов {}: {e}",
+            cfg.wt_root.display()
+        );
+    }
 
     if path.exists() && registered(root, &path) {
         return Ok((path, false));
@@ -454,13 +671,9 @@ pub fn merge(cfg: &RunConfig, root: &Path, agent: &str) -> anyhow::Result<MergeR
     }
     // База = origin/main, только если он содержит локальный main; иначе main.
     let upstream = base_ref(root, &cfg.main_branch);
-    if crate::shell::git::rebase(&path, &upstream).is_err() {
-        let _ = git_ok(&path, &["rebase", "--abort"]);
-        anyhow::bail!(
-            "конфликт rebase {branch} на {upstream} — rebase откачен, работа агента цела; \
-             разреши вручную в {}",
-            path.display()
-        );
+    // Rebase с авторазрешением известного конфликта (список модулей).
+    if let Err(e) = rebase_auto(&path, &upstream) {
+        anyhow::bail!("{e}");
     }
     let sha = crate::shell::git::short_head(&path);
     if crate::shell::git::tree_dirty(root) {
@@ -505,13 +718,18 @@ pub fn release(cfg: &RunConfig, root: &Path, agent: &str) -> anyhow::Result<Stri
         ));
     }
     let st = status(cfg, root, agent);
+    // Грязное дерево НЕ теряем: сначала WIP-чекпоинт в `devh/wip-<адрес>`.
+    let mut wip: Option<String> = None;
     if st.dirty {
-        anyhow::bail!(
-            "worktree {} грязный ({}): сначала закоммить или сохрани — \
-             освобождать нельзя, работа не потеряется",
-            path.display(),
-            st.dirty_files.join(", ")
-        );
+        let sha = checkpoint(cfg, root, agent).map_err(|e| {
+            anyhow::anyhow!(
+                "worktree {} грязный ({}), но WIP-чекпоинт не сохранился: {e} — \
+                 работа не потерялась, освобождать нельзя",
+                path.display(),
+                st.dirty_files.join(", ")
+            )
+        })?;
+        wip = Some(sha);
     }
     let branch = st.branch.clone();
     if registered(root, &path) {
@@ -527,10 +745,15 @@ pub fn release(cfg: &RunConfig, root: &Path, agent: &str) -> anyhow::Result<Stri
             let _ = git_ok(root, &["branch", "-D", b]);
         }
     }
-    Ok(format!(
-        "worktree агента {agent} освобождён: {}",
-        path.display()
-    ))
+    Ok(match wip {
+        Some(sha) => format!(
+            "worktree агента {agent} освобождён: {} (WIP сохранён в {}: {})",
+            path.display(),
+            wip_branch(agent),
+            sha
+        ),
+        None => format!("worktree агента {agent} освобождён: {}", path.display()),
+    })
 }
 
 /// Уборка: prune регистраций + снос мёртвых каталогов worktree'ов этого репо.
@@ -675,17 +898,88 @@ mod tests {
         );
     }
 
+    /// Грязное дерево при освобождении НЕ теряется: работа сохраняется
+    /// в ветку `devh/wip-<агент>` (а не просто отказ).
     #[test]
-    fn release_refuses_dirty_tree() {
+    fn release_saves_dirty_tree_as_wip_branch() {
         let (_d, root) = repo_fixture();
         let c = cfg();
         let (p, _) = ensure(&c, &root, "beam").unwrap_or_else(|_| unreachable!());
         std::fs::write(p.join("a.txt"), "dirty\n").unwrap_or_else(|_| unreachable!());
-        assert!(
-            release(&c, &root, "beam").is_err(),
-            "грязное дерево не освобождаем"
+        let msg = release(&c, &root, "beam").unwrap_or_else(|_| unreachable!());
+        assert!(msg.contains("WIP"), "{msg}");
+        assert!(!p.exists(), "worktree снят");
+        let wip =
+            git(&root, &["rev-parse", &wip_branch("beam")]).unwrap_or_else(|_| unreachable!());
+        let content = git(&root, &["show", &format!("{wip}:a.txt")]).unwrap_or_default();
+        assert_eq!(content.trim(), "dirty", "работа сохранена в WIP-ветке");
+    }
+
+    #[test]
+    fn checkpoint_creates_wip_branch_with_uncommitted_work() {
+        let (_d, root) = repo_fixture();
+        let c = cfg();
+        let (p, _) = ensure(&c, &root, "beam").unwrap_or_else(|_| unreachable!());
+        std::fs::write(p.join("a.txt"), "wip\n").unwrap_or_else(|_| unreachable!());
+        let sha = checkpoint(&c, &root, "beam").unwrap_or_else(|_| unreachable!());
+        assert_eq!(sha.len(), 40, "полный sha коммита: {sha}");
+        let head =
+            git(&root, &["rev-parse", &wip_branch("beam")]).unwrap_or_else(|_| unreachable!());
+        assert_eq!(head, sha, "ветка WIP указывает на чекпоинт");
+        assert_eq!(
+            git(&root, &["show", &format!("{sha}:a.txt")])
+                .unwrap_or_default()
+                .trim(),
+            "wip"
         );
-        assert!(p.exists(), "каталог остался на месте");
+        // Рабочее дерево не тронуто: изменения всё ещё грязные.
+        assert!(status(&c, &root, "beam").dirty);
+    }
+
+    #[test]
+    fn union_mod_lists_keeps_both_sides_and_drops_duplicates() {
+        let a = "pub mod alpha;\npub mod beta;\n";
+        let b = "pub mod beta;\npub mod gamma;\n";
+        let u = union_mod_lists(a, b);
+        assert!(u.contains("pub mod alpha;"));
+        assert!(u.contains("pub mod beta;"));
+        assert!(u.contains("pub mod gamma;"));
+        assert_eq!(
+            u.matches("pub mod beta;").count(),
+            1,
+            "дубль модуля убран (иначе E0428): {u}"
+        );
+    }
+
+    /// Rebase с конфликтом в списке модулей разрешается объединением.
+    #[test]
+    fn rebase_auto_unions_conflicting_mod_lists() {
+        let (_d, root) = repo_fixture();
+        let c = cfg();
+        let (p, _) = ensure(&c, &root, "beam").unwrap_or_else(|_| unreachable!());
+        // Главный репо и ветка агента правят один и тот же core/mod.rs.
+        let g = |args: &[&str]| {
+            let _ = Command::new("git").args(args).current_dir(&root).output();
+        };
+        let gp = |args: &[&str]| {
+            let _ = Command::new("git").args(args).current_dir(&p).output();
+        };
+        std::fs::create_dir_all(p.join("core")).unwrap_or_else(|_| unreachable!());
+        std::fs::write(p.join("core/mod.rs"), "pub mod beta;\n").unwrap_or_else(|_| unreachable!());
+        gp(&["add", "-A"]);
+        gp(&["commit", "-qm", "agent adds core/mod.rs"]);
+        std::fs::create_dir_all(root.join("core")).unwrap_or_else(|_| unreachable!());
+        std::fs::write(root.join("core/mod.rs"), "pub mod alpha;\npub mod gamma;\n")
+            .unwrap_or_else(|_| unreachable!());
+        g(&["add", "-A"]);
+        g(&["commit", "-qm", "main adds core/mod.rs"]);
+        // Rebase агента на main: конфликт в core/mod.rs.
+        let out = rebase_auto(&p, "main");
+        assert!(out.is_ok(), "конфликт списка модулей разрешён: {out:?}");
+        let text = std::fs::read_to_string(p.join("core/mod.rs")).unwrap_or_default();
+        assert!(text.contains("pub mod alpha;"), "{text}");
+        assert!(text.contains("pub mod beta;"), "{text}");
+        assert!(text.contains("pub mod gamma;"), "{text}");
     }
 
     #[test]
