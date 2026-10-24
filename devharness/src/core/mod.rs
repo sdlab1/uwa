@@ -23,6 +23,7 @@ pub mod gates;
 pub mod guards;
 pub mod identity;
 pub mod idle_policy;
+pub mod idle_guard;
 pub mod lead_guard;
 pub mod kani_targets;
 pub mod killmap;
