@@ -214,6 +214,43 @@ pub fn union_mod_lists(a: &str, b: &str) -> String {
     out
 }
 
+/// Проверка списка модулей `pub mod ...;`.
+///
+/// Страховка от битого объединения: если после union список невалиден
+/// (нет `;`, дубль, мусор в имени) — слияние откатывается, а не едет в
+/// главную битым. Именно такой битый список однажды ломал сборку сразу у
+/// нескольких агентов.
+pub fn validate_mod_list(text: &str) -> anyhow::Result<()> {
+    use std::collections::BTreeSet;
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    for (i, line) in text.lines().enumerate() {
+        let t = line.split("//").next().unwrap_or("").trim();
+        if t.is_empty() {
+            continue;
+        }
+        let Some(rest) = t.strip_prefix("pub mod ") else {
+            if t.contains("pub mod") {
+                anyhow::bail!("строка {}: нераспознанная строка списка модулей: '{t}'", i + 1);
+            }
+            continue;
+        };
+        let Some(name) = rest.strip_suffix(';') else {
+            anyhow::bail!("строка {}: битая строка '{t}' — нет ';'", i + 1);
+        };
+        let name = name.trim();
+        if name.is_empty() {
+            anyhow::bail!("строка {}: битая строка '{t}' — нет имени модуля", i + 1);
+        }
+        if !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+            anyhow::bail!("строка {}: недопустимое имя модуля '{name}'", i + 1);
+        }
+        if !seen.insert(name.to_string()) {
+            anyhow::bail!("строка {}: дубль модуля '{name}'", i + 1);
+        }
+    }
+    Ok(())
+}
+
 /// Файлы с конфликтами rebase.
 fn conflict_files(path: &Path) -> Vec<String> {
     git_out(path, &["diff", "--name-only", "--diff-filter=U"])
@@ -236,6 +273,10 @@ fn resolve_union_mod_list(path: &Path, file: &str) -> anyhow::Result<()> {
         anyhow::bail!("не читать версии конфликта {file}");
     }
     let resolved = union_mod_lists(&ours, &theirs);
+    // Объединённый список должен быть валиден — иначе откатываем rebase.
+    if let Err(e) = validate_mod_list(&resolved) {
+        anyhow::bail!("объединение списка модулей в {file} невалидно: {e} — rebase откачен, работа агента цела");
+    }
     std::fs::write(path.join(file), resolved)?;
     git(path, &["add", file])?;
     Ok(())
@@ -1103,5 +1144,24 @@ mod tests {
             "origin/main",
             "origin впереди -> берём origin/main (main подтянется fast-forward)"
         );
+    }
+
+    /// Валидатор списка модулей: страховка от битого union.
+    #[test]
+    fn validate_mod_list_accepts_union() {
+        let text = "pub mod alpha;\npub mod beta;\n";
+        validate_mod_list(text).unwrap_or_else(|e| unreachable!("{e}"));
+    }
+
+    #[test]
+    fn validate_mod_list_rejects_broken_lines() {
+        // Без точки с запятой.
+        assert!(validate_mod_list("pub mod alpha\n").is_err());
+        // Точка в имени.
+        assert!(validate_mod_list("pub mod al.pha;\n").is_err());
+        // Пробел в имени.
+        assert!(validate_mod_list("pub mod al pha;\n").is_err());
+        // Дубль модуля.
+        assert!(validate_mod_list("pub mod alpha;\npub mod alpha;\n").is_err());
     }
 }

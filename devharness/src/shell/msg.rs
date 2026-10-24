@@ -961,6 +961,31 @@ pub fn unread_brief(agent: &str) -> String {
     out
 }
 
+/// Сколько непрочитанных писем у агента (свой ящик + legacy).
+///
+/// Инструмент ведущего: «кто не прочитал мои письма» — без разбора логов.
+pub fn unread_count(agent: &str) -> usize {
+    let canon = crate::core::identity::canonical(agent);
+    let mut n = 0usize;
+    for f in inbox_files(&canon) {
+        n = n.saturating_add(blocks_in_file(&f).len());
+    }
+    n
+}
+
+/// Когда агент последний раз проявлял активность (секунд назад).
+///
+/// `None` — присутствия не было вовсе.
+pub fn presence_age_secs(agent: &str) -> Option<u64> {
+    let canon = crate::core::identity::canonical(agent);
+    let ts = presence_rows()
+        .into_iter()
+        .filter(|(a, _, _, _)| crate::core::identity::canonical(a) == canon)
+        .map(|(_, _, ts, _)| ts)
+        .max()?;
+    Some(unix_now().saturating_sub(ts))
+}
+
 /// Уведомление о пачке сообщений: один popup на всю пачку.
 fn notify_summary(ids: &[String], blocks: &[String]) {
     use std::io::{Read, Seek, SeekFrom};

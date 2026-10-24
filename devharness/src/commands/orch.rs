@@ -1115,7 +1115,212 @@ fn close(root: &Path, args: &[String], status: Status) -> anyhow::Result<()> {
         },
         model.unwrap_or_else(|| "неизвестна".to_string())
     );
+    // Merge — не вопрос агенту: харнесс вливает ветку сам.
+    if status == Status::Done {
+        if let Some(out) = auto_merge_agent(root, &reg, &agent, &id) {
+            let mut merged = reg.clone();
+            record_merge(&mut merged, &agent, &out);
+            let _ = save(root, &merged);
+            println!("devh orch: автослияние {agent}: {} — {}", out.state, out.detail);
+            notify_merge(&agent, &id, &out);
+        }
+    }
     Ok(())
+}
+
+/// Итог автослияния ветки агента в главную.
+#[derive(Debug, Clone)]
+struct MergeOutcome {
+    /// Состояние для реестра: `влито` / `нечего вливать` / `ошибка: ...`.
+    state: String,
+    /// SHA слитого коммита.
+    sha: Option<String>,
+    /// Подробности для отчёта и письма агенту.
+    detail: String,
+}
+
+/// Автослияние: после сдачи задачи харнесс сам вливает ветку агента.
+///
+/// Merge не должен быть вопросом агенту («нужен devh orch wt merge X»):
+/// если worktree чистый и главное дерево чистое — вливаем сами, пишем
+/// состояние в реестр и уведомляем агента («действовать не нужно»).
+fn auto_merge_agent(root: &Path, reg: &Registry, agent: &str, task_id: &str) -> Option<MergeOutcome> {
+    let canon = crate::core::identity::canonical(agent);
+    let a = reg
+        .agents
+        .iter()
+        .find(|x| crate::core::identity::canonical(&x.name) == canon)?;
+    let wt = a.worktree.clone()?;
+    let path = PathBuf::from(&wt);
+    if !path.is_dir() {
+        return Some(MergeOutcome {
+            state: "ошибка: worktree отсутствует".to_string(),
+            sha: None,
+            detail: format!("worktree {wt} не найден (задача {task_id})"),
+        });
+    }
+    if crate::shell::git::tree_dirty(&path) {
+        let files = crate::shell::git::status_names(&path).join(", ");
+        return Some(MergeOutcome {
+            state: "ошибка: worktree грязный".to_string(),
+            sha: None,
+            detail: format!(
+                "незакоммиченные изменения ({files}) — закоммить и сказать lead'у ({task_id}); автослияние повторится"
+            ),
+        });
+    }
+    let branch = crate::shell::git::branch_current(&path).unwrap_or_default();
+    if branch.is_empty() {
+        return Some(MergeOutcome {
+            state: "ошибка: нет ветки".to_string(),
+            sha: None,
+            detail: format!("worktree в detached HEAD (задача {task_id})"),
+        });
+    }
+    let main_branch = crate::commands::load_config(root)
+        .map(|c| c.main_branch)
+        .unwrap_or_else(|_| "main".to_string());
+    let ahead = crate::shell::git::rev_list_count(&path, &main_branch).unwrap_or(0);
+    if ahead == 0 {
+        return Some(MergeOutcome {
+            state: "нечего вливать".to_string(),
+            sha: None,
+            detail: format!("на {branch} нет коммитов сверх {main_branch} (задача {task_id})"),
+        });
+    }
+    // Rebase на главную: конфликт списка модулей объединяется автоматически.
+    if let Err(e) = crate::commands::wtman::rebase_auto(&path, &main_branch) {
+        return Some(MergeOutcome {
+            state: "ошибка: rebase".to_string(),
+            sha: None,
+            detail: format!("{e} (задача {task_id})"),
+        });
+    }
+    let main_root =
+        crate::shell::git::main_root_from_cwd(&path).unwrap_or_else(|_| root.to_path_buf());
+    if crate::shell::git::tree_dirty(&main_root) {
+        return Some(MergeOutcome {
+            state: "ошибка: главное дерево грязное".to_string(),
+            sha: None,
+            detail: format!(
+                "главное дерево {} грязное — влить нельзя, работа агента цела ({task_id})",
+                main_root.display()
+            ),
+        });
+    }
+    if !crate::shell::git::merge_ff_only(&main_root, &branch) {
+        return Some(MergeOutcome {
+            state: "ошибка: merge".to_string(),
+            sha: None,
+            detail: format!("fast-forward {branch} в {main_branch} не удался ({task_id})"),
+        });
+    }
+    let sha = crate::shell::git::short_head(&main_root);
+    Some(MergeOutcome {
+        state: "влито".to_string(),
+        sha: Some(sha.clone()),
+        detail: format!("{branch} влит в {main_branch} ({sha})"),
+    })
+}
+
+/// Уведомить агента о результате автослияния (действовать не нужно).
+fn notify_merge(agent: &str, task_id: &str, out: &MergeOutcome) {
+    // «Нечего вливать» — не событие для агента: молча фиксируем в реестре.
+    if out.state != "влито" && !out.state.starts_with("ошибка") {
+        return;
+    }
+    // Тесты оркестратора не должны писать в живой почтовый ящик.
+    if std::env::var("DEVH_NO_MAIL").as_deref() == Ok("1") {
+        return;
+    }
+    let body = if out.state == "влито" {
+        format!(
+            "Задача {task_id} сдана.\nАвтослияние: {}\n{}\nДействовать не нужно: merge делает харнесс.",
+            out.state, out.detail
+        )
+    } else {
+        format!(
+            "Задача {task_id} сдана, но автослияние не прошло: {} — {}\nНужно от тебя: устрани причину (закоммить остатки / разрулить конфликт) и сообщить lead'у. Повтор слияния харнесс сделает сам.",
+            out.state, out.detail
+        )
+    };
+    let args = vec![
+        "send".to_string(),
+        "--to".to_string(),
+        agent.to_string(),
+        "--subject".to_string(),
+        format!("devh: автослияние после {task_id}"),
+        "--body".to_string(),
+        body,
+    ];
+    let _ = crate::shell::msg::send(&args);
+}
+
+/// Записать результат слияния в состояние агента.
+fn record_merge(reg: &mut Registry, agent: &str, out: &MergeOutcome) {
+    let canon = crate::core::identity::canonical(agent);
+    if let Some(a) = reg
+        .agents
+        .iter_mut()
+        .find(|x| crate::core::identity::canonical(&x.name) == canon)
+    {
+        a.merge_state = Some(out.state.clone());
+        a.merged_sha = out.sha.clone();
+        a.merged_at = Some(now());
+    }
+}
+
+/// Повтор автослияния для агентов, у которых слияние не удалось.
+///
+/// Merge не вопрос агенту: закоммитит остатки — слияние дойдёт само
+/// (повтор делает `pulse`/`selfcheck`).
+fn retry_pending_merges(root: &Path, reg: &mut Registry) -> Vec<String> {
+    let mut notes = Vec::new();
+    let (lead, _) = lead_of(reg);
+    let agents: Vec<String> = reg
+        .agents
+        .iter()
+        .filter(|a| {
+            let canon = crate::core::identity::canonical(&a.name);
+            if lead.as_deref() == Some(canon.as_str()) {
+                return false;
+            }
+            // Сданная задача с коммитом, а слияние не зафиксировано.
+            let has_done = reg.tasks.iter().any(|t| {
+                t.status == Status::Done
+                    && crate::core::identity::canonical(&t.agent) == canon
+                    && t.commit_sha.as_deref().is_some_and(|s| !s.is_empty())
+            });
+            has_done && a.merge_state.as_deref() != Some("влито")
+        })
+        .map(|a| a.name.clone())
+        .collect();
+    for agent in agents {
+        let canon = crate::core::identity::canonical(&agent);
+        let task_id = reg
+            .tasks
+            .iter()
+            .filter(|t| {
+                t.status == Status::Done
+                    && crate::core::identity::canonical(&t.agent) == canon
+            })
+            .map(|t| t.id.clone())
+            .next_back()
+            .unwrap_or_else(|| "-".to_string());
+        if let Some(out) = auto_merge_agent(root, reg, &agent, &task_id) {
+            if out.state == "влито" {
+                record_merge(reg, &agent, &out);
+                notes.push(format!("{agent}: {} — {}", out.state, out.detail));
+                notify_merge(&agent, &task_id, &out);
+            } else if out.state.starts_with("ошибка") {
+                // Ошибку фиксируем (selfcheck её покажет), но письмо не шлём
+                // на каждый повтор — агенту хватает одного письма.
+                record_merge(reg, &agent, &out);
+                notes.push(format!("{agent}: {} — {}", out.state, out.detail));
+            }
+        }
+    }
+    notes
 }
 
 /// `devh orch revoke <ID> --reason R`.
@@ -1736,8 +1941,18 @@ fn pulse(root: &Path) -> anyhow::Result<()> {
     if lead.as_deref() != Some(caller.as_str()) {
         anyhow::bail!("devh orch pulse: сводка ведущего (почта, активность, очереди)");
     }
+    let mut reg = load(root);
+    // Незакрытые слияния — дожимаем сами (merge не вопрос агенту).
+    let merged = retry_pending_merges(root, &mut reg);
+    if !merged.is_empty() {
+        let _ = save(root, &reg);
+        for m in &merged {
+            println!("  слито: {m}");
+        }
+    }
     println!("=== ПУЛЬС ОРКЕСТРАЦИИ ===");
     println!("почта: прочитать письма — devh msg read (consume-on-read, каждое письмо — задание)");
+    let mut attention: Vec<String> = Vec::new();
     for a in reg.agents.iter() {
         let canon = crate::core::identity::canonical(&a.name);
         let active = reg
@@ -1750,10 +1965,41 @@ fn pulse(root: &Path) -> anyhow::Result<()> {
             .iter()
             .filter(|t| t.status == Status::Queued && crate::core::identity::canonical(&t.agent) == canon)
             .count();
+        let unread = crate::shell::msg::unread_count(&canon);
+        let age = crate::shell::msg::presence_age_secs(&canon);
+        let presence = match age {
+            Some(sec) if sec < 90 => "только что".to_string(),
+            Some(sec) => format!("{} мин назад", sec / 60),
+            None => "не появлялся".to_string(),
+        };
         println!(
-            "  {canon}: в работе {active} · в очереди {queued} · merge {}",
+            "  {canon}: в работе {active} · в очереди {queued} · merge {} · непрочитанных {unread} · {presence}",
             a.merge_state.as_deref().unwrap_or("—")
         );
+        if unread > 0 {
+            attention.push(format!(
+                "{canon}: {unread} непрочитанных писем — devh msg send --to {canon} (спросить отчёт)"
+            ));
+        }
+        if let Some(sec) = age {
+            if sec > 20 * 60 {
+                attention.push(format!(
+                    "{canon}: нет активности {} мин — devh orch watchdog --dry-run (отзыв задач)",
+                    sec / 60
+                ));
+            }
+        }
+        if a.merge_state.as_deref().is_some_and(|s| s != "влито") {
+            attention.push(format!("{canon}: слияние не закрыто ({})", a.merge_state.as_deref().unwrap_or("—")));
+        }
+    }
+    if !attention.is_empty() {
+        println!("требуют внимания:");
+        for a in &attention {
+            println!("  • {a}");
+        }
+    } else {
+        println!("требуют внимания: нет");
     }
     println!("следующий шаг: devh msg read → devh orch next → devh orch selfcheck");
     Ok(())
@@ -3484,6 +3730,8 @@ mod tests {
 
     /// Задача с DoD: критерий приёмки + быстрая машинная проверка.
     fn add_task(root: &Path, agent: &str, p: &str, title: &str) -> String {
+        // Тесты не пишут в живой почтовый ящик.
+        std::env::set_var("DEVH_NO_MAIL", "1");
         run(
             root,
             "add",
@@ -3527,6 +3775,15 @@ mod tests {
         g(&["config", "user.name", "T"]);
         // Хуки выключаем: тест не должен зависеть от pre-commit окружения.
         g(&["config", "core.hooksPath", "/dev/null"]);
+        // Worktree агента — внутри tempdir: тест не трогает общий wt_root.
+        let cfg_dir = root.join(".harness");
+        std::fs::create_dir_all(&cfg_dir).expect("mkdir .harness");
+        let wt_root = root.join("wts").to_string_lossy().to_string();
+        std::fs::write(
+            cfg_dir.join("config"),
+            format!("WT_ROOT='{wt_root}'\nMAIN='main'\n"),
+        )
+        .expect("write config");
         assert!(root.join(".git").exists(), "git init не создал репозиторий");
         std::fs::write(root.join("a.txt"), "1\n").expect("write");
         g(&["add", "-A"]);
@@ -3989,5 +4246,97 @@ mod tests {
         let reg = load(root);
         let st = reg.agents.iter().find(|a| a.name == agent);
         assert!(st.is_some(), "агент зарегистрирован");
+    }
+
+    /// Репозиторий + worktree агента на отдельной ветке (для автослияния).
+    fn agent_wt_fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let (d, root) = git_repo_fixture();
+        let wt = d.path().join("wt-beam");
+        let g = |args: &[&str], cwd: &Path| {
+            let _ = std::process::Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .output();
+        };
+        let wt_arg = wt.to_string_lossy().to_string();
+        g(
+            &["worktree", "add", "-q", "-b", "devh/agent-beam", &wt_arg],
+            &root,
+        );
+        std::fs::write(wt.join("b.txt"), "2\n").expect("write");
+        g(&["add", "-A"], &wt);
+        g(&["commit", "-qm", "agent work"], &wt);
+        (d, root, wt)
+    }
+
+    fn reg_with_agent(agent: &str, wt: &Path) -> Registry {
+        let mut reg = Registry::default();
+        reg.agents.push(AgentState {
+            name: agent.to_string(),
+            worktree: Some(wt.to_string_lossy().to_string()),
+            ..Default::default()
+        });
+        reg
+    }
+
+    /// Merge не вопрос агенту: харнесс сам вливает ветку в главную.
+    #[test]
+    fn auto_merge_agent_merges_branch_into_main() {
+        let (_d, root, wt) = agent_wt_fixture();
+        let reg = reg_with_agent("beam", &wt);
+        let out = auto_merge_agent(&root, &reg, "beam", "T-001").expect("результат слияния");
+        assert_eq!(out.state, "влито", "{out:?}");
+        let head = crate::shell::git::short_head(&root);
+        assert!(out.sha.is_some(), "sha записан: {out:?}");
+        assert_eq!(Some(head), out.sha, "main на коммите агента");
+    }
+
+    /// Грязный worktree — слияние не делаем, причина в detail.
+    #[test]
+    fn auto_merge_reports_dirty_worktree() {
+        let (_d, root, wt) = agent_wt_fixture();
+        std::fs::write(wt.join("c.txt"), "3\n").expect("write");
+        let reg = reg_with_agent("beam", &wt);
+        let out = auto_merge_agent(&root, &reg, "beam", "T-002").expect("результат");
+        assert_eq!(out.state, "ошибка: worktree грязный", "{out:?}");
+        assert!(out.sha.is_none(), "sha не записан при ошибке");
+    }
+
+    /// Нет коммитов сверх главной — сливать нечего.
+    #[test]
+    fn auto_merge_reports_nothing_to_merge() {
+        let (d, root) = git_repo_fixture();
+        let wt = d.path().join("wt-beam");
+        let g = |args: &[&str]| {
+            let _ = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&root)
+                .output();
+        };
+        let wt_arg = wt.to_string_lossy().to_string();
+        g(&["worktree", "add", "-q", "-b", "devh/agent-beam", &wt_arg]);
+        let reg = reg_with_agent("beam", &wt);
+        let out = auto_merge_agent(&root, &reg, "beam", "T-003").expect("результат");
+        assert_eq!(out.state, "нечего вливать", "{out:?}");
+    }
+
+    /// Состояние слияния пишется в реестр.
+    #[test]
+    fn record_merge_writes_state() {
+        let mut reg = Registry::default();
+        reg.agents.push(AgentState {
+            name: "beam".to_string(),
+            ..Default::default()
+        });
+        let out = MergeOutcome {
+            state: "влито".to_string(),
+            sha: Some("abc1234".to_string()),
+            detail: "ok".to_string(),
+        };
+        record_merge(&mut reg, "beam", &out);
+        let a = reg.agents.iter().find(|a| a.name == "beam").expect("агент");
+        assert_eq!(a.merge_state.as_deref(), Some("влито"));
+        assert_eq!(a.merged_sha.as_deref(), Some("abc1234"));
+        assert!(a.merged_at.is_some(), "время слияния записано");
     }
 }
