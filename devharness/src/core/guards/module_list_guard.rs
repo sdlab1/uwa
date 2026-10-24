@@ -50,17 +50,27 @@ fn valid_ident(name: &str) -> bool {
 
 /// Разобрать одну строку объявления. `None` — строка не про `pub mod`.
 fn parse_line(trimmed: &str) -> Option<Result<String, String>> {
-    if !trimmed.starts_with("pub mod") {
-        return None;
+    let rest = trimmed.strip_prefix("pub mod")?;
+    if rest.is_empty() {
+        return Some(Err("нет завершающей `;`".to_string()));
     }
-    let rest = trimmed["pub mod".len()..].trim_start();
-    if !rest.starts_with(char::is_whitespace) && !rest.is_empty() && !rest.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_') {
-        return Some(Err("ожидалось имя модуля после `pub mod`".to_string()));
+    if !rest.starts_with(char::is_whitespace) {
+        // `pub modulex;`, `pub model` — это не объявление модуля.
+        return if rest.starts_with(';') {
+            Some(Err("пустое имя модуля".to_string()))
+        } else {
+            None
+        };
     }
-    let Some(body) = rest.strip_suffix(';') else {
+    let body = rest.trim_start();
+    let Some((name, tail)) = body.split_once(';') else {
         return Some(Err("нет завершающей `;`".to_string()));
     };
-    let name = body.trim();
+    let tail = tail.trim();
+    if !tail.is_empty() && !tail.starts_with("//") {
+        return Some(Err(format!("лишний текст после `;`: «{tail}»")));
+    }
+    let name = name.trim();
     if name.is_empty() {
         return Some(Err("пустое имя модуля".to_string()));
     }
@@ -232,6 +242,14 @@ mod tests {
         let d = dir_with(&["alpha"]);
         let text = "// pub mod ghost;\nuse alpha;\n\npub mod alpha;\n";
         assert!(validate(d.path(), text).is_empty());
+        // Похожие, но не объявления: не должны давать ложных MissingFile.
+        assert!(validate(d.path(), "pub modulex;\npub model;\n").is_empty());
+    }
+
+    #[test]
+    fn trailing_comment_after_semicolon_is_allowed() {
+        let d = dir_with(&["alpha"]);
+        assert!(validate(d.path(), "pub mod alpha; // модуль\n").is_empty());
     }
 
     #[test]
