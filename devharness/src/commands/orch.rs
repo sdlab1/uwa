@@ -22,6 +22,7 @@
 
 use anyhow::anyhow;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -176,6 +177,20 @@ pub struct AgentState {
     pub merged_at: Option<u64>,
 }
 
+/// План выдачи задач: приоритеты и зависимости (последовательность).
+///
+/// Задача не выдаётся «как попало»: сначала проверяются зависимости
+/// (все зависимости закрыты), затем порядок — приоритет, сложность, возраст.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Plan {
+    /// Приоритет задачи: 0 — высший (выдаётся раньше).
+    #[serde(default)]
+    pub prio: BTreeMap<String, u8>,
+    /// Зависимости задачи: ID задач, которые должны быть закрыты (done).
+    #[serde(default)]
+    pub deps: BTreeMap<String, Vec<String>>,
+}
+
 /// Реестр задач и исполнителей.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Registry {
@@ -188,6 +203,9 @@ pub struct Registry {
     /// Назначенный ведущий (канонический адрес).
     #[serde(default)]
     pub lead: Option<String>,
+    /// План выдачи: приоритеты и зависимости задач.
+    #[serde(default)]
+    pub plan: Plan,
 }
 
 fn now() -> u64 {
@@ -540,6 +558,9 @@ pub fn orch(root: &Path, sub: &str, args: &[String]) -> anyhow::Result<()> {
     match sub {
         "board" => board(root),
         "list" => list(root, args),
+        "next" => next_cmd(root),
+        "selfcheck" => selfcheck(root),
+        "pulse" => pulse(root),
         "add" => add(root, args),
         "start" => start(root, args),
         "done" => close(root, args, Status::Done),
@@ -725,6 +746,25 @@ fn add(root: &Path, args: &[String]) -> anyhow::Result<()> {
         }
     }
     let note = flag(args, "--note").unwrap_or_default();
+    // Последовательность: приоритет (0 — высший) и зависимости (ID задач).
+    let prio = match flag(args, "--prio").as_ref() {
+        Some(raw) => {
+            let v: u8 = raw
+                .trim()
+                .parse()
+                .map_err(|_| anyhow!("devh orch add: --prio должен быть числом 0..9"))?;
+            if v > 9 {
+                anyhow::bail!("devh orch add: --prio 0..9 (0 — высший)");
+            }
+            v
+        }
+        None => 0,
+    };
+    let deps: Vec<String> = flags_all(args, "--dep")
+        .into_iter()
+        .flat_map(|raw| raw.split(',').map(|s| s.trim().to_string()).collect::<Vec<String>>())
+        .filter(|s| !s.is_empty())
+        .collect();
     let dod: Vec<String> = flags_all(args, "--dod")
         .into_iter()
         .map(|s| s.trim().to_string())
@@ -780,6 +820,12 @@ fn add(root: &Path, args: &[String]) -> anyhow::Result<()> {
     reg.seq = reg.seq.saturating_add(1);
     let id = format!("T-{:03}", reg.seq);
     let ts = now();
+    // Зависимости должны существовать: иначе задача невыдаваема навсегда.
+    for d in &deps {
+        if !reg.tasks.iter().any(|t| &t.id == d) {
+            anyhow::bail!("devh orch add: зависимость {d} не существует — сначала создай её");
+        }
+    }
     reg.tasks.push(Task {
         id: id.clone(),
         agent: agent.clone(),
@@ -817,11 +863,18 @@ fn add(root: &Path, args: &[String]) -> anyhow::Result<()> {
             ..Default::default()
         });
     }
+    reg.plan.prio.insert(id.clone(), prio);
+    if !deps.is_empty() {
+        reg.plan.deps.insert(id.clone(), deps.clone());
+    }
     save(root, &reg)?;
     println!(
-        "devh orch: {id} добавлена в очередь {agent}: P{complexity} C{} — {title}",
+        "devh orch: {id} добавлена в очередь {agent}: P{complexity} C{} prio{prio} — {title}",
         c_level.unwrap_or(0)
     );
+    if !deps.is_empty() {
+        println!("devh orch: зависимости: {}", deps.join(", "));
+    }
     if zones.is_empty() {
         println!("devh orch: ⚠ зона не указана (--zone) — пересечения зон не проверятся");
     }
@@ -903,6 +956,17 @@ fn start(root: &Path, args: &[String]) -> anyhow::Result<()> {
             "devh orch start: задача {id} закреплена за {owner} — бери свою задачу \
              (devh orch list --agent {caller})"
         ));
+    }
+    // Последовательность: зависимости закрыты — иначе задача не выдаётся.
+    {
+        let (ok, blocked) = deps_satisfied(&reg, &reg.tasks[idx]);
+        if !ok {
+            return Err(anyhow!(
+                "devh orch start: {id} заблокирована зависимостями: {} — \
+                 сначала закрой их (devh orch next)",
+                blocked.join(", ")
+            ));
+        }
     }
     // Потолок модели: задача выше потолка — не выдаётся.
     if let Some(c) = reg.tasks[idx].c_level {
@@ -1341,7 +1405,7 @@ fn list(root: &Path, args: &[String]) -> anyhow::Result<()> {
     let caller = crate::core::identity::canonical(&crate::core::identity::current().name);
     let ceiling = agent_ceiling(&reg, &caller);
     let mut hidden = 0usize;
-    println!("ID      агент   P  C   статус    F  зоны                     задача");
+    println!("ID      агент   P  C   pr  статус    F  зоны                     задача");
     let (lead, _) = lead_of(&reg);
     let is_lead = lead.as_deref() == Some(caller.as_str());
     for t in reg.tasks.iter() {
@@ -1368,12 +1432,20 @@ fn list(root: &Path, args: &[String]) -> anyhow::Result<()> {
                 }
             }
         }
+        let (ok, blocked) = deps_satisfied(&reg, t);
+        let prio = reg.plan.prio.get(&t.id).copied().unwrap_or(0);
+        let dep_mark = if blocked.is_empty() {
+            String::new()
+        } else {
+            format!(" [заблокирована: {}]", blocked.join(", "))
+        };
         println!(
-            "{:<6} {:<7} P{} C{:<3} {:<9} {:<2} {:<24} {}",
+            "{:<6} {:<7} P{} C{:<3} {:<2} {:<9} {:<2} {:<24} {}{dep_mark}",
             t.id,
             t.agent,
             t.complexity,
             t.c_level.unwrap_or(0),
+            prio,
             t.status.label(),
             t.fail_level
                 .map(|f| format!("F{f}"))
@@ -1381,12 +1453,309 @@ fn list(root: &Path, args: &[String]) -> anyhow::Result<()> {
             t.zones.join(","),
             t.title
         );
+        let _ = ok;
     }
     if hidden > 0 {
         println!(
             "⚠ скрыто задач выше потолка модели (C{ceiling}): {hidden} — узнать: devh orch models"
         );
     }
+    Ok(())
+}
+
+/// Зависимости задачи закрыты? (последовательность выдачи)
+fn deps_satisfied(reg: &Registry, t: &Task) -> (bool, Vec<String>) {
+    let mut blocked = Vec::new();
+    for d in reg.plan.deps.get(&t.id).map(Vec::as_slice).unwrap_or(&[]) {
+        match reg.tasks.iter().find(|x| &x.id == d) {
+            Some(dep) => {
+                if dep.status != Status::Done {
+                    blocked.push(format!("{d} ({})", dep.status.label()));
+                }
+            }
+            None => blocked.push(format!("{d} (нет такой задачи)")),
+        }
+    }
+    (blocked.is_empty(), blocked)
+}
+
+/// Кандидаты на выдачу: своя очередь + буфер ведущего, зависимости закрыты.
+fn ready_tasks<'a>(reg: &'a Registry, caller: &str) -> Vec<&'a Task> {
+    let (lead, _) = lead_of(reg);
+    let mut out: Vec<&Task> = Vec::new();
+    for t in reg.tasks.iter() {
+        if t.status != Status::Queued {
+            continue;
+        }
+        let owner = crate::core::identity::canonical(&t.agent);
+        let own = owner == caller;
+        let from_buffer = lead.as_deref() == Some(owner.as_str()) && !own;
+        if !own && !from_buffer {
+            continue;
+        }
+        if !deps_satisfied(reg, t).0 {
+            continue;
+        }
+        out.push(t);
+    }
+    out.sort_by(|a, b| {
+        let pa = reg.plan.prio.get(&a.id).copied().unwrap_or(0);
+        let pb = reg.plan.prio.get(&b.id).copied().unwrap_or(0);
+        let oa = if crate::core::identity::canonical(&a.agent) == caller { 0 } else { 1 };
+        let ob = if crate::core::identity::canonical(&b.agent) == caller { 0 } else { 1 };
+        oa.cmp(&ob)
+            .then(pa.cmp(&pb))
+            .then(a.complexity.cmp(&b.complexity))
+            .then(a.created.cmp(&b.created))
+    });
+    out
+}
+
+/// `devh orch next` — ровно одна следующая задача и одна команда на неё.
+fn next_cmd(root: &Path) -> anyhow::Result<()> {
+    let reg = load(root);
+    let caller = crate::core::identity::canonical(&crate::core::identity::current().name);
+    let (lead, _) = lead_of(&reg);
+    let ready = ready_tasks(&reg, &caller);
+    let blocked: Vec<&Task> = reg
+        .tasks
+        .iter()
+        .filter(|t| t.status == Status::Queued)
+        .filter(|t| {
+            crate::core::identity::canonical(&t.agent) == caller
+                || lead.as_deref() == Some(crate::core::identity::canonical(&t.agent).as_str())
+        })
+        .filter(|t| !deps_satisfied(&reg, t).0)
+        .collect();
+    if ready.is_empty() {
+        println!("devh orch next: доступных задач нет");
+        if !blocked.is_empty() {
+            println!("заблокированы зависимостями: {}", blocked.iter().map(|t| t.id.as_str()).collect::<Vec<_>>().join(", "));
+        }
+        println!("следующий шаг: devh msg read → взять задачу → dod/verify/commit/done");
+        return Ok(());
+    }
+    let t = ready[0];
+    let prio = reg.plan.prio.get(&t.id).copied().unwrap_or(0);
+    let own = crate::core::identity::canonical(&t.agent) == caller;
+    if lead.as_deref() == Some(caller.as_str()) {
+        println!(
+            "devh orch next: {id} (P{p} C{c} prio{prio}) — {title}",
+            id = t.id,
+            p = t.complexity,
+            c = t.c_level.unwrap_or(0),
+            title = t.title
+        );
+        println!("выдать ведомому: devh orch reassign {id} --agent <ведомый>", id = t.id);
+    } else if own {
+        println!(
+            "devh orch next: {id} (P{p} C{c} prio{prio}) — {title}",
+            id = t.id,
+            p = t.complexity,
+            c = t.c_level.unwrap_or(0),
+            title = t.title
+        );
+        println!("взять: devh orch start {id}", id = t.id);
+    } else {
+        println!(
+            "devh orch next: {id} (буфер ведущего, P{p} prio{prio}) — {title}",
+            id = t.id,
+            p = t.complexity,
+            prio = prio,
+            title = t.title
+        );
+        println!("взять из буфера: devh orch start {id}", id = t.id);
+    }
+    Ok(())
+}
+
+/// `devh orch selfcheck` — автоматические guards критической инфраструктуры.
+///
+/// Проверяет инварианты, нарушение которых ломает оркестрацию: активная
+/// задача без worktree, неизвестные/циклические зависимости, пересечение
+/// зон двумя исполнителями, пустой буфер, потерянные слияния, worktree в /tmp.
+fn selfcheck(root: &Path) -> anyhow::Result<()> {
+    let reg = load(root);
+    let mut problems: Vec<String> = Vec::new();
+    let mut warns: Vec<String> = Vec::new();
+
+    // 1. Активная задача → живой worktree.
+    for t in reg.tasks.iter().filter(|t| t.status == Status::Active) {
+        let st = reg
+            .agents
+            .iter()
+            .find(|a| crate::core::identity::canonical(&a.name) == crate::core::identity::canonical(&t.agent));
+        match st.and_then(|a| a.worktree.clone()) {
+            Some(w) if Path::new(&w).is_dir() => {
+                if w.starts_with("/tmp/") {
+                    warns.push(format!(
+                        "{}: worktree в /tmp ({w}) — переживёт перезапуск? перенеси в персистентный wt_root",
+                        t.id
+                    ));
+                }
+            }
+            Some(w) => problems.push(format!("{} ({}): worktree {w} не существует", t.id, t.agent)),
+            None => problems.push(format!("{} ({}): worktree не выдан", t.id, t.agent)),
+        }
+    }
+    // 2. Зависимости: неизвестные ID и циклы.
+    for t in &reg.tasks {
+        for d in reg.plan.deps.get(&t.id).map(Vec::as_slice).unwrap_or(&[]) {
+            if !reg.tasks.iter().any(|x| &x.id == d) {
+                problems.push(format!("{}: зависимость {d} не существует", t.id));
+            }
+        }
+        if has_cycle(&reg, &t.id) {
+            problems.push(format!("{}: цикл зависимостей", t.id));
+        }
+    }
+    // 3. Пересечение зон: две активные задачи разных агентов в одной зоне.
+    let active: Vec<&Task> = reg.tasks.iter().filter(|t| t.status == Status::Active).collect();
+    for i in 0..active.len() {
+        for j in (i + 1)..active.len() {
+            let a = active[i];
+            let b = active[j];
+            if crate::core::identity::canonical(&a.agent) == crate::core::identity::canonical(&b.agent) {
+                continue;
+            }
+            for za in &a.zones {
+                for zb in &b.zones {
+                    if za == zb {
+                        problems.push(format!(
+                            "пересечение зон {za}: {} ({}) и {} ({})",
+                            a.id, a.agent, b.id, b.agent
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    // 4. Буфер ведущего ≥ 15 (O1) и очередь каждого ведомого ≥ 2.
+    let (lead, _) = lead_of(&reg);
+    let buffer_n = reg
+        .tasks
+        .iter()
+        .filter(|t| {
+            t.status == Status::Queued
+                && lead.as_deref() == Some(crate::core::identity::canonical(&t.agent).as_str())
+        })
+        .count();
+    if buffer_n < 15 {
+        warns.push(format!("буфер ведущего: {buffer_n} задач (<15, O1) — наполни"));
+    }
+    for a in reg.agents.iter() {
+        if a.role.as_deref() == Some(ROLE_LEAD) {
+            continue;
+        }
+        let canon = crate::core::identity::canonical(&a.name);
+        let n = reg
+            .tasks
+            .iter()
+            .filter(|t| {
+                t.status == Status::Queued
+                    && crate::core::identity::canonical(&t.agent) == canon
+                    && lead.as_deref() != Some(canon.as_str())
+            })
+            .count();
+        if n < 2 {
+            warns.push(format!("{canon}: в очереди {n} задач (<2, O1) — выдать задачу"));
+        }
+    }
+    // 5. Закрытые задачи без слияния — работа не дошла до главной ветки.
+    for a in reg.agents.iter() {
+        let canon = crate::core::identity::canonical(&a.name);
+        let done: Vec<&Task> = reg
+            .tasks
+            .iter()
+            .filter(|t| {
+                t.status == Status::Done
+                    && crate::core::identity::canonical(&t.agent) == canon
+                    && t.commit_sha.is_some()
+            })
+            .collect();
+        if done.is_empty() {
+            continue;
+        }
+        let state = a.merge_state.clone().unwrap_or_default();
+        if state != "влито" {
+            warns.push(format!(
+                "{canon}: {} закрытых задач, merge_state={}",
+                done.len(),
+                if state.is_empty() { "нет" } else { &state }
+            ));
+        }
+    }
+    println!("=== САМОПРОВЕРКА ОРКЕСТРАЦИИ ===");
+    for p in &problems {
+        println!("✗ {p}");
+    }
+    for w in &warns {
+        println!("⚠ {w}");
+    }
+    println!(
+        "итого: проблем {} · предупреждений {}",
+        problems.len(),
+        warns.len()
+    );
+    if !problems.is_empty() {
+        anyhow::bail!("selfcheck: {} критических проблем оркестрации", problems.len());
+    }
+    Ok(())
+}
+
+/// Есть ли цикл зависимостей, начинающийся с `start`?
+fn has_cycle(reg: &Registry, start: &str) -> bool {
+    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut stack = vec![start.to_string()];
+    let mut steps = 0usize;
+    while let Some(cur) = stack.pop() {
+        steps += 1;
+        if steps > 256 {
+            return true;
+        }
+        if cur == start && steps > 1 {
+            return true;
+        }
+        if !seen.insert(cur.clone()) {
+            continue;
+        }
+        if let Some(t) = reg.tasks.iter().find(|x| x.id == cur) {
+            for d in reg.plan.deps.get(&t.id).map(Vec::as_slice).unwrap_or(&[]) {
+                stack.push(d.clone());
+            }
+        }
+    }
+    false
+}
+
+/// `devh orch pulse` — сводка для ведущего: почта, активность, очереди.
+fn pulse(root: &Path) -> anyhow::Result<()> {
+    let reg = load(root);
+    let caller = crate::core::identity::canonical(&crate::core::identity::current().name);
+    let (lead, _) = lead_of(&reg);
+    if lead.as_deref() != Some(caller.as_str()) {
+        anyhow::bail!("devh orch pulse: сводка ведущего (почта, активность, очереди)");
+    }
+    println!("=== ПУЛЬС ОРКЕСТРАЦИИ ===");
+    println!("почта: прочитать письма — devh msg read (consume-on-read, каждое письмо — задание)");
+    for a in reg.agents.iter() {
+        let canon = crate::core::identity::canonical(&a.name);
+        let active = reg
+            .tasks
+            .iter()
+            .filter(|t| t.status == Status::Active && crate::core::identity::canonical(&t.agent) == canon)
+            .count();
+        let queued = reg
+            .tasks
+            .iter()
+            .filter(|t| t.status == Status::Queued && crate::core::identity::canonical(&t.agent) == canon)
+            .count();
+        println!(
+            "  {canon}: в работе {active} · в очереди {queued} · merge {}",
+            a.merge_state.as_deref().unwrap_or("—")
+        );
+    }
+    println!("следующий шаг: devh msg read → devh orch next → devh orch selfcheck");
     Ok(())
 }
 
@@ -3532,5 +3901,93 @@ mod tests {
         assert_eq!(wins, 1, "задачу должен взять ровно один агент");
         let reg = load(root.as_path());
         assert_eq!(reg.tasks.first().map(|t| t.status), Some(Status::Active));
+    }
+
+    /// Последовательность: задача с зависимостью не выдаётся, пока
+    /// зависимость не закрыта.
+    #[test]
+    fn dependency_gate_blocks_start_until_dep_is_done() {
+        let d = tempdir().expect("tmp");
+        let root = d.path();
+        let agent = me();
+        let base = add_task(root, &agent, "1", "базовая");
+        let owned: Vec<String> = vec![
+            "--agent".into(),
+            agent.clone(),
+            "--p".into(),
+            "1".into(),
+            "--title".into(),
+            "зависимая".into(),
+            "--dod".into(),
+            "критерий приёмки".into(),
+            "--check".into(),
+            "true".into(),
+            "--dep".into(),
+            base.clone(),
+        ];
+        let refs: Vec<&str> = owned.iter().map(String::as_str).collect();
+        run(root, "add", &refs).expect("add");
+        let reg = load(root);
+        let dep_id = reg.tasks.last().map(|t| t.id.clone()).unwrap_or_default();
+        let err = run(root, "start", &[dep_id.as_str()]).expect_err("заблокирована");
+        assert!(
+            err.to_string().contains("заблокирована зависимостями"),
+            "{err}"
+        );
+        // Закрываем зависимость — задача выдаётся.
+        complete_dod(root, &base);
+        run(root, "done", &[base.as_str(), "--f", "0"]).expect("done");
+        run(root, "start", &[dep_id.as_str()]).expect("start после закрытия зависимости");
+    }
+
+    /// Порядок выдачи: сначала задача с меньшим приоритетом (prio).
+    #[test]
+    fn next_prefers_lowest_prio() {
+        let d = tempdir().expect("tmp");
+        let root = d.path();
+        let agent = me();
+        let mut ids = Vec::new();
+        for (prio, title) in [("5", "позже"), ("1", "раньше")] {
+            let owned: Vec<String> = vec![
+                "--agent".into(),
+                agent.clone(),
+                "--p".into(),
+                "1".into(),
+                "--title".into(),
+                title.into(),
+                "--dod".into(),
+                "критерий".into(),
+                "--check".into(),
+                "true".into(),
+                "--prio".into(),
+                prio.into(),
+            ];
+            let refs: Vec<&str> = owned.iter().map(String::as_str).collect();
+        run(root, "add", &refs).expect("add");
+            let reg = load(root);
+            ids.push(reg.tasks.last().map(|t| t.id.clone()).unwrap_or_default());
+        }
+        let reg = load(root);
+        let ready = ready_tasks(&reg, &agent);
+        assert_eq!(
+            ready.first().map(|t| t.id.clone()),
+            Some(ids[1].clone()),
+            "prio1 должен идти раньше prio5"
+        );
+    }
+
+    /// Guard: активная задача без worktree — критическая проблема.
+    #[test]
+    fn selfcheck_reports_active_task_without_worktree() {
+        let d = tempdir().expect("tmp");
+        let root = d.path();
+        let agent = me();
+        let id = add_task(root, &agent, "1", "без worktree");
+        run(root, "start", &[id.as_str()]).expect("start");
+        let err = run(root, "selfcheck", &[]).expect_err("selfcheck должен ругаться");
+        assert!(err.to_string().contains("selfcheck"), "{err}");
+        let reg = load(root);
+        let st = reg.agents.iter().find(|a| a.name == agent);
+        assert!(st.is_some(), "агент зарегистрирован");
     }
 }
