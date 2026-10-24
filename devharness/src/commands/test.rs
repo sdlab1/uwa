@@ -204,7 +204,7 @@ pub fn test(root: &Path, args: &[String]) -> anyhow::Result<()> {
         }
         if names.is_empty() {
             println!("devh test --list: список пуст — нет ни лога, ни сьюта");
-            crate::commands::die(2);
+            crate::commands::die(crate::commands::ExitCode::EnvError);
         }
         for (i, n) in names.iter().enumerate() {
             // enumerate starts at 0; display 1-based without arithmetic on index.
@@ -238,7 +238,7 @@ pub fn test(root: &Path, args: &[String]) -> anyhow::Result<()> {
     if want_case {
         let Some(arg) = filter.filter(|s| !s.trim().is_empty()) else {
             println!("devh test --case: нужен номер или имя проверки (devh test --list)");
-            crate::commands::die(1);
+            crate::commands::die(crate::commands::ExitCode::ActionError);
         };
         filter = Some(resolve_case(&arg, &log_dir, &suite));
     }
@@ -246,11 +246,11 @@ pub fn test(root: &Path, args: &[String]) -> anyhow::Result<()> {
     // ── запуск ────────────────────────────────────────────────────────
     if !suite.is_file() {
         println!("devh test: нет сьюта {} — среда не готова", suite.display());
-        crate::commands::die(2);
+        crate::commands::die(crate::commands::ExitCode::EnvError);
     }
     if fs::create_dir_all(&log_dir).is_err() {
         println!("devh test: не создать каталог логов {}", log_dir.display());
-        crate::commands::die(2);
+        crate::commands::die(crate::commands::ExitCode::EnvError);
     }
     // Тяжёлый вход: СВЕЖАЯ проверка нагрузки (не устаревший снимок).
     // Под контенцией сьют стоит в разы дольше и мешает соседнему агенту.
@@ -260,7 +260,7 @@ pub fn test(root: &Path, args: &[String]) -> anyhow::Result<()> {
         if let Some(why) = crate::core::load::block_reason(env.as_deref(), load) {
             println!("devh test: {why}");
             println!("сьют не запущен — дождись, пока соседний прогон освободит CPU");
-            crate::commands::die(2);
+            crate::commands::die(crate::commands::ExitCode::EnvError);
         }
     }
 
@@ -277,7 +277,7 @@ pub fn test(root: &Path, args: &[String]) -> anyhow::Result<()> {
         Ok(c) => c,
         Err(e) => {
             println!("devh test: сьют не запустился ({e}) — среда не готова");
-            crate::commands::die(2);
+            crate::commands::die(crate::commands::ExitCode::EnvError);
         }
     };
 
@@ -318,7 +318,7 @@ pub fn test(root: &Path, args: &[String]) -> anyhow::Result<()> {
     let Some(t) = totals else {
         println!("итог сьюта не прочитан — прогон не состоялся (среда)");
         println!("лог: {}", log.display());
-        crate::commands::die(2);
+        crate::commands::die(crate::commands::ExitCode::EnvError);
     };
 
     println!();
@@ -336,9 +336,9 @@ pub fn test(root: &Path, args: &[String]) -> anyhow::Result<()> {
     // `pass > 0` — страховка от «пустого зелёного»: если фильтр не нашёл
     // ни одной проверки, засчитывать нечего → это не «чисто» (rc=1).
     let rc = if t.fail == 0 && t.pass > 0 && status.and_then(|s| s.code()) == Some(0) {
-        0
+        crate::commands::ExitCode::Success
     } else {
-        1
+        crate::commands::ExitCode::ActionError
     };
     crate::commands::die(rc);
 }
@@ -356,7 +356,7 @@ fn bg(root: &Path, log_dir: &Path, args: &[String]) -> anyhow::Result<()> {
                 log_dir.join("test-bg.log").display()
             );
             println!("статус: devh test --status");
-            crate::commands::die(2);
+            crate::commands::die(crate::commands::ExitCode::EnvError);
         }
     }
     let log = log_dir.join("test-bg.log");
@@ -423,7 +423,7 @@ fn status(_root: &Path, log_dir: &Path) -> anyhow::Result<()> {
                 "тест идёт: PID {pid}, {el}s; лог: {}",
                 log_dir.join("test-bg.log").display()
             );
-            crate::commands::die(2);
+            crate::commands::die(crate::commands::ExitCode::EnvError);
         }
         let mt = pid_path.metadata().and_then(|m| m.modified()).ok();
         let _ = fs::remove_file(&pid_path);
@@ -433,7 +433,7 @@ fn status(_root: &Path, log_dir: &Path) -> anyhow::Result<()> {
     };
     let Some(log) = latest_log(log_dir) else {
         println!("devh test --status: фонового прогона и лога нет — среда не готова");
-        crate::commands::die(2);
+        crate::commands::die(crate::commands::ExitCode::EnvError);
     };
     // Guard: лог должен быть новее pid-файла — иначе это лог прошлого прогона.
     let log_mtime = log.metadata().and_then(|m| m.modified()).ok();
@@ -442,7 +442,7 @@ fn status(_root: &Path, log_dir: &Path) -> anyhow::Result<()> {
             "devh test --status: нет свежего прогона (лог старше pid-файла): {}",
             log.display()
         );
-        crate::commands::die(2);
+        crate::commands::die(crate::commands::ExitCode::EnvError);
     }
     let text = fs::read_to_string(&log)?;
     let Some(t) = parse_totals(&text) else {
@@ -450,12 +450,16 @@ fn status(_root: &Path, log_dir: &Path) -> anyhow::Result<()> {
             "devh test --status: итог не найден (лог: {})",
             log.display()
         );
-        crate::commands::die(2);
+        crate::commands::die(crate::commands::ExitCode::EnvError);
     };
     println!("PASS: {}", t.pass);
     println!("FAIL: {}", t.fail);
     println!("лог: {}", log.display());
-    let rc = if t.fail == 0 && t.pass > 0 { 0 } else { 1 };
+    let rc = if t.fail == 0 && t.pass > 0 {
+        crate::commands::ExitCode::Success
+    } else {
+        crate::commands::ExitCode::ActionError
+    };
     crate::commands::die(rc);
 }
 
@@ -482,7 +486,7 @@ fn resolve_case(arg: &str, log_dir: &Path, suite: &Path) -> String {
             "devh test --case {n}: нет такой проверки (в списке {} шт.) — devh test --list",
             names.len()
         );
-        crate::commands::die(1);
+        crate::commands::die(crate::commands::ExitCode::ActionError);
     }
     // Подстрока: берём первое совпадение, иначе — саму подстроку (пусто ≠
     // «ничего не нашлось»: это тихо превратилось бы в «всё зелёное»).
@@ -493,7 +497,7 @@ fn resolve_case(arg: &str, log_dir: &Path, suite: &Path) -> String {
         "devh test --case {arg}: проверка не найдена (в списке {} шт.) — devh test --list",
         names.len()
     );
-    crate::commands::die(1);
+    crate::commands::die(crate::commands::ExitCode::ActionError);
 }
 
 #[cfg(test)]

@@ -422,12 +422,12 @@ fn start(root: &Path, args: &[String]) -> anyhow::Result<()> {
             "аудит уже идёт (супервизор pid {}) — смотри: devh mutate status",
             st.pid
         );
-        crate::commands::die(2);
+        crate::commands::die(crate::commands::ExitCode::EnvError);
     }
     let args: Vec<String> = args.iter().filter(|a| *a != "--").cloned().collect();
     if args.is_empty() {
         help();
-        crate::commands::die(1);
+        crate::commands::die(crate::commands::ExitCode::ActionError);
     }
     // T-034: машинный гейт.
     let reg = crate::commands::orch::load(root);
@@ -455,7 +455,7 @@ fn start(root: &Path, args: &[String]) -> anyhow::Result<()> {
         Ok(()) => {}
         Err(msg) => {
             eprintln!("devh mutate start: {}", msg);
-            crate::commands::die(2);
+            crate::commands::die(crate::commands::ExitCode::EnvError);
         }
     }
     // R11: фоновый аудит не мутирует дерево агента.
@@ -468,7 +468,7 @@ fn start(root: &Path, args: &[String]) -> anyhow::Result<()> {
              дерево агента (R11). Оставьте флаги как есть: cargo-mutants сам работает\n\
              в copy-режиме. In-place гейт живёт внутри devh run (там своя worktree)."
         );
-        crate::commands::die(1);
+        crate::commands::die(crate::commands::ExitCode::ActionError);
     }
     // Тяжёлый вход: СВЕЖАЯ проверка нагрузки (не устаревший снимок).
     // Под контенцией мутации стоят ×2–4 (§9.10) — лучше не начинать вовсе.
@@ -478,7 +478,7 @@ fn start(root: &Path, args: &[String]) -> anyhow::Result<()> {
         if let Some(why) = crate::core::load::block_reason(env.as_deref(), load) {
             println!("devh mutate start: {why}");
             println!("аудит не запущен — дождись, пока соседний прогон освободит CPU");
-            crate::commands::die(2);
+            crate::commands::die(crate::commands::ExitCode::EnvError);
         }
     }
     let dir = work_dir(root);
@@ -495,7 +495,7 @@ fn start(root: &Path, args: &[String]) -> anyhow::Result<()> {
                 println!(
                     "  тот же каталог аудита уже переписывается — дождись конца чужого прогона"
                 );
-                crate::commands::die(2);
+                crate::commands::die(crate::commands::ExitCode::EnvError);
             }
         };
     // Старые артефакты харнесса — вон (каталог самого прогона убирает
@@ -1121,7 +1121,7 @@ fn status(root: &Path, args: &[String]) -> anyhow::Result<()> {
     if audit.total.is_none() && audit.done == 0 && !audit.alive && aborted_state.is_none() {
         // Аудита нет вообще — это не «чисто», это «нечего смотреть».
         println!("аудит не запущен (нет mutants.out) — devh mutate start <args>");
-        crate::commands::die(2);
+        crate::commands::die(crate::commands::ExitCode::EnvError);
     }
     if stopped(root).is_some() {
         println!("⚠ аудит остановлен по требованию оператора — результата нет (вердикт = rc 2)");
@@ -1161,11 +1161,11 @@ fn status(root: &Path, args: &[String]) -> anyhow::Result<()> {
         // Оборванный аудит: результата нет → вердикт выносить не по чему
         // (rc=2, среда не готова), даже если частичные данные уже накопились.
         if aborted_state.is_some() {
-            crate::commands::die(2);
+            crate::commands::die(crate::commands::ExitCode::EnvError);
         }
         // Проблема видна СЕЙЧАС — даже если аудит ещё идёт (problem-first).
         if audit.blocks_clean_verdict() {
-            crate::commands::die(1);
+            crate::commands::die(crate::commands::ExitCode::ActionError);
         }
         return Ok(());
     }
@@ -1174,7 +1174,7 @@ fn status(root: &Path, args: &[String]) -> anyhow::Result<()> {
     // «вердикт: чисто» при мёртвом супервизоре). Результата нет — rc=2.
     if aborted_state.is_some() {
         println!("аудит оборвался — результата нет, вердикт не выносим (devh next: перезапуск)");
-        crate::commands::die(2);
+        crate::commands::die(crate::commands::ExitCode::EnvError);
     }
     let cur = current_mutant(&audit_dir(root, &eff));
     println!("{}", tui::legend(&colors()));
@@ -1184,7 +1184,7 @@ fn status(root: &Path, args: &[String]) -> anyhow::Result<()> {
     }
     // Проблема видна СЕЙЧАС — даже если аудит ещё идёт (problem-first).
     if audit.blocks_clean_verdict() {
-        crate::commands::die(1);
+        crate::commands::die(crate::commands::ExitCode::ActionError);
     }
     Ok(())
 }
@@ -1245,7 +1245,7 @@ fn watch(root: &Path, args: &[String]) -> anyhow::Result<()> {
         && aborted(root).is_none()
     {
         println!("аудит не запущен (нет mutants.out) — devh mutate start <args>");
-        crate::commands::die(2);
+        crate::commands::die(crate::commands::ExitCode::EnvError);
     }
     // Наблюдаем и каталог прогона, и каталог артефактов: супервизор пишет
     // туда финальные verdict/state — по этому событию watch замечает финал
@@ -1254,7 +1254,7 @@ fn watch(root: &Path, args: &[String]) -> anyhow::Result<()> {
         Ok(w) => w,
         Err(e) => {
             println!("devh mutate watch: inotify недоступен ({e})");
-            crate::commands::die(2);
+            crate::commands::die(crate::commands::ExitCode::EnvError);
         }
     };
     let mut first = true;
@@ -1290,7 +1290,7 @@ fn watch(root: &Path, args: &[String]) -> anyhow::Result<()> {
                 for l in problem_blocks(&audit) {
                     println!("  {l}");
                 }
-                crate::commands::die(1);
+                crate::commands::die(crate::commands::ExitCode::ActionError);
             }
         }
 
@@ -1303,11 +1303,11 @@ fn watch(root: &Path, args: &[String]) -> anyhow::Result<()> {
                     "⚠ аудит оборвался: результата нет, вердикт не выносим \
                      (devh next: перезапуск)"
                 );
-                crate::commands::die(2);
+                crate::commands::die(crate::commands::ExitCode::EnvError);
             }
             if stopped(root).is_some() {
                 println!("⚠ аудит остановлен — результата нет (вердикт = rc 2)");
-                crate::commands::die(2);
+                crate::commands::die(crate::commands::ExitCode::EnvError);
             }
             for l in report_lines(&audit) {
                 println!("{l}");
@@ -1315,7 +1315,7 @@ fn watch(root: &Path, args: &[String]) -> anyhow::Result<()> {
             // Проблема — немедленно код возврата 1 (problem-first), даже
             // если аудит только что закончился.
             if audit.blocks_clean_verdict() {
-                crate::commands::die(1);
+                crate::commands::die(crate::commands::ExitCode::ActionError);
             }
             return Ok(());
         }
@@ -1348,7 +1348,7 @@ fn watch(root: &Path, args: &[String]) -> anyhow::Result<()> {
             }
             Err(e) => {
                 println!("\nнаблюдатель отвалился: {e}");
-                crate::commands::die(3);
+                crate::commands::die(crate::commands::ExitCode::InternalError);
             }
         }
     }
@@ -1364,7 +1364,7 @@ fn problems(root: &Path, args: &[String]) -> anyhow::Result<()> {
     let aborted_state = aborted(root);
     if audit.total.is_none() && audit.done == 0 && !audit.alive && aborted_state.is_none() {
         println!("аудит не запущен — нечего чинить (devh mutate start <args>)");
-        crate::commands::die(2);
+        crate::commands::die(crate::commands::ExitCode::EnvError);
     }
     // Проблемы уровня инструмента/деталей — тоже проблемы: чинить нечего,
     // но и «проблем нет» сказать нельзя.
@@ -1430,7 +1430,7 @@ fn problems(root: &Path, args: &[String]) -> anyhow::Result<()> {
             serde_json::to_string_pretty(&json).unwrap_or_default()
         );
         if !audit.bad.is_empty() || !extra.is_empty() {
-            crate::commands::die(1);
+            crate::commands::die(crate::commands::ExitCode::ActionError);
         }
         return Ok(());
     }
@@ -1452,7 +1452,7 @@ fn problems(root: &Path, args: &[String]) -> anyhow::Result<()> {
     for l in extra {
         println!("  {l}");
     }
-    crate::commands::die(1);
+    crate::commands::die(crate::commands::ExitCode::ActionError);
 }
 
 // ──────────────────────────────── recheck ────────────────────────────────
@@ -1566,12 +1566,12 @@ fn recheck(root: &Path, args: &[String]) -> anyhow::Result<()> {
         .unwrap_or_default();
     if name.trim().is_empty() {
         println!("devh mutate recheck <имя мутанта> — имя из devh mutate problems");
-        crate::commands::die(1);
+        crate::commands::die(crate::commands::ExitCode::ActionError);
     }
     let base = effective_args(root, &[]);
     if base.is_empty() {
         println!("аудит не запускался — нет флагов для recheck (devh mutate start <args>)");
-        crate::commands::die(2);
+        crate::commands::die(crate::commands::ExitCode::EnvError);
     }
     let out = work_dir(root).join("recheck");
     let _ = fs::remove_dir_all(&out);
@@ -1596,7 +1596,7 @@ fn recheck(root: &Path, args: &[String]) -> anyhow::Result<()> {
     let log = format!("{}\n{}", tail(&stdout, 12), tail(&stderr, 12));
     let Some((caught, found)) = recheck_find(&dir, &name, rc) else {
         println!("{}", recheck_miss_reason(&dir, &name, rc, &log));
-        crate::commands::die(2);
+        crate::commands::die(crate::commands::ExitCode::EnvError);
     };
     let json = serde_json::json!({
         "updated": now_secs(),
@@ -1618,7 +1618,7 @@ fn recheck(root: &Path, args: &[String]) -> anyhow::Result<()> {
         Ok(())
     } else {
         println!("recheck: {}", mutaudit::bad_line(&found));
-        crate::commands::die(1);
+        crate::commands::die(crate::commands::ExitCode::ActionError);
     }
 }
 
@@ -1656,12 +1656,12 @@ fn verdict(root: &Path) -> anyhow::Result<()> {
     let audit = snapshot(root, &eff);
     if audit.alive {
         println!("прогон ещё идёт — финальный вердикт не выносим (devh mutate status)");
-        crate::commands::die(2);
+        crate::commands::die(crate::commands::ExitCode::EnvError);
     }
     // Остановленный прогон: часть мутантов могла не дойти → результата нет.
     if stopped(root).is_some() {
         println!("аудит остановлен по требованию оператора — результата нет, вердикт не выносим");
-        crate::commands::die(2);
+        crate::commands::die(crate::commands::ExitCode::EnvError);
     }
     // Супервизор мёртв, а состояние — «running»: результата НЕТ. Проверка
     // ДО любой арифметики: упавший аудит с частичными данными не должен
@@ -1673,18 +1673,18 @@ fn verdict(root: &Path) -> anyhow::Result<()> {
              результата нет, вердикт не выносим",
             st.pid
         );
-        crate::commands::die(2);
+        crate::commands::die(crate::commands::ExitCode::EnvError);
     }
     if audit.total.is_none() && audit.done == 0 {
         println!("аудит не запущен — нечего вердиктовать (devh mutate start <args>)");
-        crate::commands::die(2);
+        crate::commands::die(crate::commands::ExitCode::EnvError);
     }
     if audit_stale(root) {
         println!(
             "вердикт: не выносим — дерево изменилось после старта аудита, \
              результат относится к старому снимку; перепрогони тем же прогоном"
         );
-        crate::commands::die(2);
+        crate::commands::die(crate::commands::ExitCode::EnvError);
     }
     for l in report_lines(&audit) {
         println!("{l}");
@@ -1698,7 +1698,7 @@ fn verdict(root: &Path) -> anyhow::Result<()> {
             "вердикт: ПРОВАЛ — неизвестный исход мутанта: {} — поимка не подтверждена",
             audit.unknown
         );
-        crate::commands::die(1);
+        crate::commands::die(crate::commands::ExitCode::ActionError);
     }
     // Канонический судья — тот же, что у синхронного гейта (F-3/R5):
     // расхождение двух входов = «красивый» отчёт в одном и честный провал
@@ -1738,34 +1738,34 @@ fn verdict(root: &Path) -> anyhow::Result<()> {
         gates::Verdict::Pass => {}
         gates::Verdict::Fail { tail, .. } => {
             println!("вердикт: ПРОВАЛ — {tail}");
-            crate::commands::die(1);
+            crate::commands::die(crate::commands::ExitCode::ActionError);
         }
         gates::Verdict::EnvBlocked { missing } => {
             println!("вердикт: ПРОВАЛ — {missing}");
-            crate::commands::die(1);
+            crate::commands::die(crate::commands::ExitCode::ActionError);
         }
         gates::Verdict::SpecBlock { tail, .. } => {
             println!("вердикт: ПРОВАЛ — {tail}");
-            crate::commands::die(1);
+            crate::commands::die(crate::commands::ExitCode::ActionError);
         }
     }
     // Детали аудита — тоже блок «чистого» вердикта: без них доказать
     // «чисто» нечем.
     if audit.malformed {
         println!("вердикт: ПРОВАЛ — детали аудита повреждены (outcomes.json не читается)");
-        crate::commands::die(1);
+        crate::commands::die(crate::commands::ExitCode::ActionError);
     }
     if audit.details_missing {
         println!("вердикт: ПРОВАЛ — детали аудита отсутствуют (outcomes.json нет)");
-        crate::commands::die(1);
+        crate::commands::die(crate::commands::ExitCode::ActionError);
     }
     if audit.details_mismatch {
         println!("вердикт: ПРОВАЛ — детали аудита расходятся со счётчиками");
-        crate::commands::die(1);
+        crate::commands::die(crate::commands::ExitCode::ActionError);
     }
     if let Some(t) = &audit.tool_problem {
         println!("вердикт: ПРОВАЛ — {t}");
-        crate::commands::die(1);
+        crate::commands::die(crate::commands::ExitCode::ActionError);
     }
     println!("вердикт: чисто");
     Ok(())
@@ -1855,10 +1855,10 @@ fn stop(root: &Path) -> anyhow::Result<()> {
                     st.pid
                 );
             }
-            crate::commands::die(2);
+            crate::commands::die(crate::commands::ExitCode::EnvError);
         }
         println!("нечего останавливать: аудит не идёт (devh mutate status)");
-        crate::commands::die(2);
+        crate::commands::die(crate::commands::ExitCode::EnvError);
     };
     let dir = work_dir(root);
     fs::create_dir_all(&dir)?;

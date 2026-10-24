@@ -47,11 +47,11 @@ pub fn commit(store: &Store, cfg: &RunConfig, id: &ItemId) -> anyhow::Result<()>
             store.summary_file(id).display(),
             c.z
         );
-        crate::commands::die(1);
+        crate::commands::die(crate::commands::ExitCode::ActionError);
     }
     if prompt::is_blocked(&summary) {
         println!("{}", summary.lines().next().unwrap_or("").trim());
-        crate::commands::die(1);
+        crate::commands::die(crate::commands::ExitCode::ActionError);
     }
     let title = store.read(item_rel(id, "title")).unwrap_or_default();
     let msg = prompt::commit_msg_from_summary(&summary, id, &title);
@@ -63,7 +63,7 @@ pub fn commit(store: &Store, cfg: &RunConfig, id: &ItemId) -> anyhow::Result<()>
                 store.summary_file(id).display(),
                 c.z
             );
-            crate::commands::die(1);
+            crate::commands::die(crate::commands::ExitCode::ActionError);
         }
     }
 
@@ -71,7 +71,7 @@ pub fn commit(store: &Store, cfg: &RunConfig, id: &ItemId) -> anyhow::Result<()>
         git::add_all(&wt)?;
         if !git::has_staged(&wt) {
             eprintln!("{}FAIL: изменений нет{}", c.r, c.z);
-            crate::commands::die(1);
+            crate::commands::die(crate::commands::ExitCode::ActionError);
         }
         git::commit(&wt, &msg)?;
         println!("{}OK commit: {msg}{}", c.g, c.z);

@@ -2,6 +2,10 @@ use clap::Command;
 use devh::Cmd;
 
 fn main() {
+    std::panic::set_hook(Box::new(|info| {
+        eprintln!("devh: внутренняя ошибка (panic): {info}");
+        std::process::exit(3);
+    }));
     // `devh msg ...` — канал агентов: обрабатывается ДО clap и без варианта Cmd,
     // чтобы не спорить с правкой диспетчера (commands/mod.rs) из других сессий.
     let argv: Vec<String> = std::env::args().collect();
@@ -28,12 +32,14 @@ fn main() {
                 std::path::PathBuf::from(".")
             } else {
                 eprintln!("{e}");
-                std::process::exit(1);
+                let code = devh::commands::classify_error(&e);
+                std::process::exit(code.as_i32());
             }
         }
     };
     if let Err(e) = devh::commands::dispatch(&cmd, &root) {
+        let code = devh::commands::classify_error(&e);
         eprintln!("{e}");
-        std::process::exit(1);
+        std::process::exit(code.as_i32());
     }
 }

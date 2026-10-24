@@ -1418,7 +1418,7 @@ pub fn send(args: &[String]) -> i32 {
             let id = m.first();
             if id.is_empty() {
                 eprintln!("нужен ID треда");
-                return 2;
+                return 1;
             }
             let text = fs::read_to_string(thread_path(&id)).unwrap_or_default();
             let (_h, blocks) = split_log(&text);
@@ -1612,7 +1612,7 @@ pub fn send(args: &[String]) -> i32 {
                     eprintln!(
                         "нужно: devh msg alias <синоним> [--for <канон>] | --list | --remove <синоним>"
                     );
-                    return 2;
+                    return 1;
                 }
                 let canon = m.value("for").unwrap_or_else(|| me(None));
                 match crate::core::identity::set_alias(&alias, &canon) {
@@ -1632,7 +1632,7 @@ pub fn send(args: &[String]) -> i32 {
             let raw = m.first();
             if raw.is_empty() {
                 eprintln!("нужно имя: devh msg claim <имя>");
-                return 2;
+                return 1;
             }
             match crate::core::identity::claim(&raw) {
                 Ok(id) => {
@@ -1872,7 +1872,7 @@ pub fn send(args: &[String]) -> i32 {
             let needle = m.first();
             if needle.is_empty() {
                 eprintln!("нужен тэг или префикс ID");
-                return 2;
+                return 1;
             }
             let mut hits = 0usize;
             let mut files: Vec<PathBuf> = Vec::new();
@@ -1913,7 +1913,7 @@ pub fn send(args: &[String]) -> i32 {
             let thread = m.first();
             if thread.is_empty() {
                 eprintln!("нужен ID треда");
-                return 2;
+                return 1;
             }
             let actor = m
                 .value("by")
@@ -2005,7 +2005,7 @@ pub fn send(args: &[String]) -> i32 {
                  указание на код: --at путь[:строка] (регион с контекстом) или --diff файл (unified diff);\n\
                  привязка к коду — по содержимому (контексту), номер строки может сдвинуться"
             );
-            2
+            1
         }
     }
 }

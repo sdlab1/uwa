@@ -35,7 +35,7 @@ impl Drop for PidGuard<'_> {
     }
 }
 
-fn die(store: &Store, id: &ItemId, code: i32) -> ! {
+fn die(store: &Store, id: &ItemId, code: crate::commands::ExitCode) -> ! {
     store.remove_pid(id);
     crate::commands::die(code)
 }
@@ -188,7 +188,7 @@ pub fn run(store: &Store, cfg: &RunConfig, id: &ItemId) -> anyhow::Result<()> {
                 store.log_file(id, "agent").display(),
                 c.z
             );
-            die(store, id, 1);
+            die(store, id, crate::commands::ExitCode::ActionError);
         }
 
         // F-1: проверка ДО гейтов — агент не должен успеть повлиять на входы,
@@ -285,7 +285,7 @@ pub fn run(store: &Store, cfg: &RunConfig, id: &ItemId) -> anyhow::Result<()> {
                 _ => "",
             }
         );
-        die(store, id, 1);
+        die(store, id, crate::commands::ExitCode::ActionError);
     }
     red_mutate_phase(store, cfg, id, &wt, &red, &mut timing)?;
     if let Some(stop) = tripwire_gate(
@@ -309,7 +309,7 @@ pub fn run(store: &Store, cfg: &RunConfig, id: &ItemId) -> anyhow::Result<()> {
                 _ => "",
             }
         );
-        die(store, id, 1);
+        die(store, id, crate::commands::ExitCode::ActionError);
     }
     if let Some(stop) = tripwire_gate(
         store,
@@ -332,7 +332,7 @@ pub fn run(store: &Store, cfg: &RunConfig, id: &ItemId) -> anyhow::Result<()> {
                 _ => "",
             }
         );
-        die(store, id, 1);
+        die(store, id, crate::commands::ExitCode::ActionError);
     }
     // Все обязательные стадии прошли — теперь вердикт «гейты зелёные» честен.
     mark_phase(store, id, &wt, runstate::Phase::GatesOk);
@@ -528,7 +528,7 @@ fn red_pre_phase(
                         store.log_file(id, "agent").display(),
                         c.z
                     );
-                    die(store, id, 1);
+                    die(store, id, crate::commands::ExitCode::ActionError);
                 }
                 has_red = red_file.is_file();
                 if !has_red && attempt >= max_attempt {
@@ -539,7 +539,7 @@ fn red_pre_phase(
                         store.item_dir(id).join("no-red").display(),
                         c.z
                     );
-                    die(store, id, 1);
+                    die(store, id, crate::commands::ExitCode::ActionError);
                 }
                 if !has_red {
                     continue;
@@ -563,7 +563,7 @@ fn red_pre_phase(
                     id,
                     c.z
                 );
-                die(store, id, 1);
+                die(store, id, crate::commands::ExitCode::ActionError);
             }
             let _ = std::fs::remove_file(&red_file);
             has_red = false;
@@ -612,7 +612,7 @@ fn red_pre_phase(
                     );
                     eprintln!("{tail}");
                     eprintln!("      лог: {}{}", store.log_file(id, "red").display(), c.z);
-                    die(store, id, 1);
+                    die(store, id, crate::commands::ExitCode::ActionError);
                 }
                 Verdict::EnvBlocked { missing } => {
                     eprintln!(
@@ -622,14 +622,14 @@ fn red_pre_phase(
                         store.log_file(id, "red").display(),
                         c.z
                     );
-                    die(store, id, 2);
+                    die(store, id, crate::commands::ExitCode::EnvError);
                 }
                 Verdict::Fail { .. } => {
                     eprintln!(
                         "{}FAIL: red.cmd уже зелёный на чистом HEAD — это не баг. Почини red.cmd или удали.{}",
                         c.r, c.z
                     );
-                    die(store, id, 1);
+                    die(store, id, crate::commands::ExitCode::ActionError);
                 }
             }
         }
@@ -689,7 +689,7 @@ fn red_post(
                 c.r, c.z
             );
             mark_phase_named(store, id, wt, runstate::Phase::GateFailed, "red-post", 1);
-            die(store, id, 1);
+            die(store, id, crate::commands::ExitCode::ActionError);
         }
     }
     timing.stage("red-post", store, id);
@@ -719,7 +719,7 @@ fn red_mutate_phase(
                 "      пример: RED_MUTATE=\"bash scripts/mutate.sh '{{test}}'\" — прогон мутантов, которые ловятся только red-тестом; и повтори: devh run {}{}",
                 id, c.z
             );
-            die(store, id, 1);
+            die(store, id, crate::commands::ExitCode::ActionError);
         }
         let red_cmd = std::fs::read_to_string(&red.file).unwrap_or_default();
         let stamp = store.item_dir(id).join("mutcache.stamp");
@@ -744,7 +744,7 @@ fn red_mutate_phase(
                 "red-mutation",
                 1,
             );
-            die(store, id, 1);
+            die(store, id, crate::commands::ExitCode::ActionError);
         });
         let mpath = store.log_file(id, "redmut");
         std::fs::write(&mpath, &rep.log).ok();
@@ -769,7 +769,7 @@ fn red_mutate_phase(
                     "red-mutation",
                     2,
                 );
-                die(store, id, 2);
+                die(store, id, crate::commands::ExitCode::EnvError);
             }
             Verdict::Fail { .. } => {
                 // Причина (kill-rate / ранний STOP) — в консоль.
@@ -792,7 +792,7 @@ fn red_mutate_phase(
                     "red-mutation",
                     1,
                 );
-                die(store, id, 1);
+                die(store, id, crate::commands::ExitCode::ActionError);
             }
             Verdict::Pass => {
                 // P7-2.3: SAMPLE — досрочная остановка на выборке: причина
@@ -842,11 +842,11 @@ fn commit_push(
             store.summary_file(id).display(),
             c.z
         );
-        die(store, id, 1);
+        die(store, id, crate::commands::ExitCode::ActionError);
     }
     if prompt::is_blocked(&summary) {
         println!("{}", summary.lines().next().unwrap_or("").trim());
-        die(store, id, 1);
+        die(store, id, crate::commands::ExitCode::ActionError);
     }
 
     let title = store.read(item_rel(id, "title")).unwrap_or_default();
@@ -863,14 +863,14 @@ fn commit_push(
                 store.summary_file(id).display(),
                 id.dir_name()
             );
-            die(store, id, 1);
+            die(store, id, crate::commands::ExitCode::ActionError);
         }
     }
 
     git::add_all(wt)?;
     if !git::has_staged(wt) {
         eprintln!("{}FAIL: агент не оставил изменений{}", c.r, c.z);
-        die(store, id, 1);
+        die(store, id, crate::commands::ExitCode::ActionError);
     }
     println!("— staged:");
     let stat = git::staged_stat(wt);
@@ -1010,7 +1010,11 @@ fn give_up(
             eprintln!("{tail}");
         }
     }
-    die(store, id, code)
+    die(
+        store,
+        id,
+        crate::commands::ExitCode::from_i32(code).unwrap_or(crate::commands::ExitCode::ActionError),
+    )
 }
 
 /// Остановка гейта: вердикт (роутинг + gate/tail для fix-раунда) + полный лог.
@@ -1414,7 +1418,7 @@ fn tripwire_gate(
                 "{}FAIL (tripwire/{phase}): откат не удался — {e}{}",
                 c.r, c.z
             );
-            die(store, id, 2)
+            die(store, id, crate::commands::ExitCode::EnvError)
         }
         *incidents = incidents.saturating_add(1);
         if die_now || *incidents > 1 {
@@ -1424,7 +1428,7 @@ fn tripwire_gate(
             );
             eprintln!("{tail}");
             let _ = tripwire_shell::append_log(store, id, &format!("{phase}: DIE {tail}"));
-            die(store, id, 1)
+            die(store, id, crate::commands::ExitCode::ActionError)
         }
         Some(GateStop {
             verdict: Verdict::Fail {
@@ -1439,7 +1443,7 @@ fn tripwire_gate(
         CheckOutcome::Env(e) => {
             eprintln!("{}FAIL (tripwire/{phase}): блокер среды — {e}{}", c.r, c.z);
             let _ = tripwire_shell::append_log(store, id, &format!("{phase}: ENV {e}"));
-            die(store, id, 2)
+            die(store, id, crate::commands::ExitCode::EnvError)
         }
         CheckOutcome::Warn(v) => {
             for x in &v {
@@ -1677,7 +1681,7 @@ fn gate_ladder(
         })
         .unwrap_or_else(|e| {
             eprintln!("{}{e}{}", c.r, c.z);
-            die(store, id, 1);
+            die(store, id, crate::commands::ExitCode::ActionError);
         });
         let mpath = store.log_file(id, "mutate");
         std::fs::write(&mpath, &rep.log).ok();
@@ -1712,7 +1716,7 @@ fn gate_ladder(
                         mpath.display(),
                         c.z
                     );
-                    die(store, id, 1);
+                    die(store, id, crate::commands::ExitCode::ActionError);
                 }
                 return Err(GateStop {
                     verdict: rep.verdict.clone(),
