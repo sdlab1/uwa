@@ -22,6 +22,7 @@ pub mod identity;
 pub mod idle_policy;
 pub mod lead_guard;
 pub mod killmap;
+pub mod ledger;
 pub mod load;
 pub mod modelrank;
 pub mod mutate_cache;
