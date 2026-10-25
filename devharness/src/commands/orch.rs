@@ -2673,6 +2673,7 @@ struct AgentJson {
     wt_synced_at: u64,
     active_count: usize,
     queued_count: usize,
+    unread_count: usize,
     active: Vec<TaskJson>,
     queued: Vec<TaskJson>,
 }
@@ -2815,8 +2816,11 @@ fn board(root: &Path, args: &[String]) -> anyhow::Result<()> {
                 zones: t.zones.clone(),
                 title: t.title.clone(),
             }).collect();
-            let queued_len = queued.len();
-            let has_suspicion = susp.is_some();
+            let unread_count = if board_lead.as_deref() == Some(name.as_str()) {
+                crate::shell::msg_events::count_unread(name)
+            } else {
+                0
+            };
             agents_json.push(AgentJson {
                 name: name.clone(),
                 role: state.and_then(|s| s.role.clone()).unwrap_or_else(|| "—".to_string()),
@@ -2827,6 +2831,7 @@ fn board(root: &Path, args: &[String]) -> anyhow::Result<()> {
                 wt_synced_at: wt_synced_at.unwrap_or(0),
                 active_count: active.len(),
                 queued_count: queued_len,
+                unread_count,
                 active: active_tasks,
                 queued: queued_tasks,
             });
