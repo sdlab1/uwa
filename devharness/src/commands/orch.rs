@@ -250,7 +250,7 @@ fn orch_root(root: &Path) -> PathBuf {
     crate::shell::git::main_root_from_cwd(root).unwrap_or_else(|_| root.to_path_buf())
 }
 
-fn dir(root: &Path) -> PathBuf {
+pub(crate) fn dir(root: &Path) -> PathBuf {
     orch_root(root).join(".harness").join("orch")
 }
 
@@ -587,6 +587,7 @@ pub fn orch(root: &Path, sub: &str, args: &[String]) -> anyhow::Result<()> {
         "selfcheck" => selfcheck(root, args),
         "pulse" => pulse(root),
         "add" => add(root, args),
+        "autoassign" => crate::commands::autoassign::run(root, args),
         "start" => start(root, args),
         "done" => close(root, args, Status::Done),
         "fail" => close(root, args, Status::Failed),
@@ -635,6 +636,9 @@ fn print_help() {
   list [--agent X]           таблица задач
   add --agent X --p N --title T --dod <критерий> [--check <команда>]...
        [--zone path]... [--note N] [--notify]
+  autoassign [--dry-run] [--json] [--notify]
+                          АВТОРАЗДАЧА: буфер lead'а сам закрепляется за исполнителями
+                          (приоритет, потолок C, роль, зоны, зависимости, нагрузка)
   start <ID>                 задача взята в работу
   dod <ID> [--add <критерий>] [--ack <критерий>|N] [--check <команда>] [--zone path]
   verify <ID>                прогнать машинные проверки DoD
@@ -2816,6 +2820,8 @@ fn board(root: &Path, args: &[String]) -> anyhow::Result<()> {
                 zones: t.zones.clone(),
                 title: t.title.clone(),
             }).collect();
+            let queued_len = queued.len();
+            let has_suspicion = susp.is_some();
             let unread_count = if board_lead.as_deref() == Some(name.as_str()) {
                 crate::shell::msg_events::count_unread(name)
             } else {
