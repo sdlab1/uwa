@@ -636,6 +636,7 @@ pub fn orch(root: &Path, sub: &str, args: &[String]) -> anyhow::Result<()> {
         "ceiling" => ceiling_cmd(root, args),
         "identify" => identify(root, args),
         "retune" => retune(root, args),
+        "backfill-sha" => backfill_sha(root, args),
         "zones" => zones(root),
         "dod" => dod_cmd(root, args),
         "verify" => verify_cmd(root, args),
@@ -1323,6 +1324,13 @@ fn close(root: &Path, args: &[String], status: Status) -> anyhow::Result<()> {
             println!("devh orch: автослияние {agent}: {} — {}", out.state, out.detail);
             notify_merge(&agent, &id, &out);
         }
+        // Работа, сделанная прямо в main (ведущий), не имеет слияния ветки —
+        // но след в реестре (main_sha) обязателен.
+        let mut reg2 = load(root);
+        if mark_main_sha_if_already_in_main(root, &mut reg2, &id) {
+            let _ = save(root, &reg2);
+            println!("devh orch: {id}: main_sha проставлен (работа уже в main)");
+        }
     }
     Ok(())
 }
@@ -1569,6 +1577,99 @@ fn mark_main_sha(reg: &mut Registry, task_id: &str, sha: Option<&str>) {
             t.main_sha = Some(sha.to_string());
         }
     }
+}
+
+/// Проставить `main_sha`, если работа задачи УЖЕ лежит в главном дереве.
+///
+/// Ведущий коммитит прямо в `main` — слияния ветки агента не происходит, а
+/// след в реестре (`main_sha`) обязателен: без него задача выглядит
+/// «не попавшей в main» (и selfcheck ругается).
+fn mark_main_sha_if_already_in_main(root: &Path, reg: &mut Registry, task_id: &str) -> bool {
+    let Some(idx) = find_task_index(reg, task_id) else {
+        return false;
+    };
+    let (already, sha) = {
+        let t = &reg.tasks[idx];
+        (t.main_sha.is_some(), t.commit_sha.clone())
+    };
+    if already {
+        return false;
+    }
+    let Some(sha) = sha.filter(|s| !s.trim().is_empty()) else {
+        return false;
+    };
+    let main_root = orch_root(root);
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&main_root)
+        .args(["merge-base", "--is-ancestor", sha.as_str(), "HEAD"])
+        .output();
+    match out {
+        Ok(o) if o.status.success() => {
+            if let Some(t) = reg.tasks.get_mut(idx) {
+                t.main_sha = Some(sha);
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
+/// `devh orch backfill-sha [--dry-run]` — проставить `main_sha` сданным
+/// задачам, чей `commit_sha` уже в `main` (след в реестре без слияния).
+fn backfill_sha(root: &Path, args: &[String]) -> anyhow::Result<()> {
+    let _lock = crate::shell::lock::OutputLock::try_acquire(root, &path(root), "devh orch")
+        .map_err(|e| anyhow!("devh orch: реестр занят ({e}) — повтори через секунду"))?;
+    let dry = args.iter().any(|a| a == "--dry-run");
+    let mut reg = load(root);
+    let ids: Vec<String> = reg
+        .tasks
+        .iter()
+        .filter(|t| t.status == Status::Done && t.main_sha.is_none())
+        .map(|t| t.id.clone())
+        .collect();
+    let mut fixed: Vec<String> = Vec::new();
+    let mut no_commit: Vec<String> = Vec::new();
+    let mut not_in_main: Vec<String> = Vec::new();
+    for id in &ids {
+        let sha = reg
+            .tasks
+            .iter()
+            .find(|t| &t.id == id)
+            .and_then(|t| t.commit_sha.clone())
+            .filter(|s| !s.trim().is_empty());
+        let Some(_sha) = sha else {
+            no_commit.push(id.clone());
+            continue;
+        };
+        if mark_main_sha_if_already_in_main(root, &mut reg, id) {
+            fixed.push(id.clone());
+        } else {
+            not_in_main.push(id.clone());
+        }
+    }
+    if !dry && !fixed.is_empty() {
+        save(root, &reg)?;
+    }
+    println!(
+        "devh orch backfill-sha: проставлено main_sha: {}{}; без commit_sha (legacy): {}; \
+         коммит не в main: {}",
+        fixed.len(),
+        if fixed.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", fixed.join(", "))
+        },
+        no_commit.len(),
+        not_in_main.len()
+    );
+    if !no_commit.is_empty() {
+        println!("  без commit_sha: {}", no_commit.join(", "));
+    }
+    if !not_in_main.is_empty() {
+        println!("  коммит не в main: {}", not_in_main.join(", "));
+    }
+    Ok(())
 }
 
 /// `devh orch revoke <ID> --reason R`.
@@ -2459,6 +2560,7 @@ fn retune(root: &Path, args: &[String]) -> anyhow::Result<()> {
     let zones = list_flag(args, "--zone")?;
     let dod = list_flag(args, "--dod")?;
     let deps = list_flag(args, "--dep")?;
+    let no_dep = args.iter().any(|a| a == "--no-dep");
     if let Some(raw) = flag(args, "--c") {
         let c = parse_c_level(&raw)?;
         if let Some(t) = reg.tasks.get_mut(idx) {
@@ -2500,6 +2602,12 @@ fn retune(root: &Path, args: &[String]) -> anyhow::Result<()> {
         }
         changed.push(format!("критерии ×{}", vals.len()));
     }
+    if no_dep {
+        // Снять зависимости задачи (ошибочная зависимость — не повод
+        // revoke/recreate).
+        reg.plan.deps.remove(&id);
+        changed.push("зависимости сняты".to_string());
+    }
     if let Some(vals) = deps {
         // Зависимости задачи: порядок реализации (например, слой -> очередь
         // слияния -> флашер). Значение ЗАМЕНЯЕТ список зависимостей.
@@ -2516,7 +2624,7 @@ fn retune(root: &Path, args: &[String]) -> anyhow::Result<()> {
     }
     if changed.is_empty() {
         anyhow::bail!(
-            "devh orch retune: ничего не менял — укажи --c/--p/--title/--check/--zone/--dod/--dep"
+            "devh orch retune: ничего не менял — укажи --c/--p/--title/--check/--zone/--dod/--dep/--no-dep"
         );
     }
     if let Some(t) = reg.tasks.get_mut(idx) {
@@ -5122,6 +5230,30 @@ mod tests {
         );
         assert!(t.acked.is_empty(), "подтверждения сброшены");
         assert!(t.evidence.is_empty(), "доказательства сброшены");
+    }
+
+    /// Бэкфилл SHA: без `commit_sha` main_sha НЕ выдумывается (честность
+    /// реестра), задача остаётся без следа до появления коммита.
+    #[test]
+    fn backfill_sha_does_not_invent_main_sha() {
+        let tmp = tempdir().expect("tmp");
+        let root = tmp.path();
+        add_task(root, &me(), "P1", "задача без коммита");
+        let mut reg = load(root);
+        reg.lead = Some(me());
+        if let Some(t) = reg.tasks.first_mut() {
+            t.status = Status::Done;
+            t.commit_sha = None;
+            t.main_sha = None;
+        }
+        save(root, &reg).expect("save");
+        run(root, "backfill-sha", &["--dry-run"]).expect("backfill");
+        let reg = load(root);
+        let t = reg.tasks.first().expect("task");
+        assert!(
+            t.main_sha.is_none(),
+            "main_sha не выдумывается без commit_sha"
+        );
     }
 
     /// Зависимости задачи задаются починкой (`--dep`): порядок реализации
