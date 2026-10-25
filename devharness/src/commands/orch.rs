@@ -108,6 +108,7 @@ pub struct Task {
     /// Зоны ответственности (пути) — для контроля пересечений.
     pub zones: Vec<String>,
     /// Фактический уровень отказа (0 = F0 … 5 = F5), если задача закрыта.
+    #[serde(default)]
     pub fail_level: Option<u8>,
     /// Заметка ведущего/исполнителя.
     pub note: String,
