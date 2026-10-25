@@ -23,6 +23,7 @@ chrono = { version = "0.4", features = ["serde"] }
 
 [dev-dependencies]
 tempfile = "3"
+filetime = "0.2"
 # integration-тесты читают машинный JSON состояния (.harness/killmap.json и
 # подобные) как значение, а не грепом по строкам: содержимое карты —
 # часть контракта §5, доступ по имени поля устойчивее подстрочных проверок.
