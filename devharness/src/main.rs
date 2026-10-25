@@ -9,6 +9,19 @@ fn main() {
     // `devh msg ...` — канал агентов: обрабатывается ДО clap и без варианта Cmd,
     // чтобы не спорить с правкой диспетчера (commands/mod.rs) из других сессий.
     let argv: Vec<String> = std::env::args().collect();
+    // Событийный приёмник входящих (`devh msg events` / `devh events`) —
+    // родной inotify без sleep-цикла. Обрабатывается ДО clap: так он не
+    // спорит с правкой диспетчера (commands/mod.rs) из других сессий.
+    if argv.get(1).map(String::as_str) == Some("events") {
+        let rest: Vec<String> = argv.into_iter().skip(2).collect();
+        std::process::exit(devh::shell::msg_events::run(&rest));
+    }
+    if argv.get(1).map(String::as_str) == Some("msg")
+        && argv.get(2).map(String::as_str) == Some("events")
+    {
+        let rest: Vec<String> = argv.into_iter().skip(3).collect();
+        std::process::exit(devh::shell::msg_events::run(&rest));
+    }
     if argv.get(1).map(String::as_str) == Some("msg") {
         let rest: Vec<String> = argv.into_iter().skip(2).collect();
         std::process::exit(devh::shell::msg::run(&rest));
