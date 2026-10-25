@@ -1334,10 +1334,10 @@ mod tests {
         g(&["commit", "-qm", "agent work"], &p);
         // Незакоммиченная работа агента не должна мешать слиянию.
         std::fs::write(p.join("c.txt"), "3\n").unwrap_or_else(|_| unreachable!());
-        let sha = merge_via_cherry_pick(&root, "main", &agent_branch("beam"), "beam")
+        let result = merge_via_cherry_pick(&root, "main", &agent_branch("beam"), "beam")
             .unwrap_or_else(|e| unreachable!("{e}"));
         let head = git(&root, &["rev-parse", "--short", "HEAD"]).unwrap_or_default();
-        assert_eq!(sha, head, "вернули sha главной");
+        assert_eq!(result.sha, head, "вернули sha главной");
         assert!(root.join("b.txt").exists(), "коммит агента попал в главную");
         assert!(
             !root.join("c.txt").exists(),
