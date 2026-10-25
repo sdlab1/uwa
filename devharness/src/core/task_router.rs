@@ -335,9 +335,11 @@ pub fn plan(reg: &Registry, lead: Option<&str>) -> RouterPlan {
 
         match best {
             Some((agent, ceiling, queued, busy, role)) => {
-                let reason = format!(
-                    "потолок C{ceiling}, в очереди {queued}, активных {busy}, роль {}{}",
-                    if role.is_empty() { "worker" } else { &role }
+let reason = format!(
+                    "потолок C{ceiling}, активных {busy}, роль {role}",
+                    ceiling = ceiling,
+                    busy = busy,
+                    role = if role.is_empty() { "worker" } else { &role }
                 );
                 out.assignments.push(Assignment {
                     task_id: t.id.clone(),
