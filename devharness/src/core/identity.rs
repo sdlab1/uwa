@@ -704,23 +704,28 @@ fn claimed_binding_for_name(home: &Path, name: &str) -> Option<(String, Binding)
 /// мог проверить lineage: только та же сессия или её перезапуск получает
 /// claimed-имя. Одновременные сессии в одном редакторе получат авто-имена.
 fn remember_slot(name: &str, claimed: bool) {
+    let home = msg_home();
+    remember_slot_in(&home, name, claimed);
+}
+
+/// Версия remember_slot с явным home (для тестов).
+fn remember_slot_in(home: &Path, name: &str, claimed: bool) {
     let Some(slot) = slot_key() else {
         return;
     };
-    let home = msg_home();
     let (current_key, _label) = context();
     // Read existing to preserve original_key if already claimed
-    let existing_original_key = read_slot_binding_raw(&home, &slot)
+    let existing_original_key = read_slot_binding_raw(home, &slot)
         .map(|b| b.original_key)
         .filter(|k| !k.is_empty())
         .unwrap_or(current_key);
-    if let Some(existing) = read_binding_in(&home, &slot) {
+    if let Some(existing) = read_binding_in(home, &slot) {
         if existing.claimed && existing.name != name {
             return;
         }
     }
     // Write to slot filename but store session key as original_key
-    let path = binding_path_in(&home, &slot);
+    let path = binding_path_in(home, &slot);
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
@@ -986,6 +991,75 @@ pub fn claim(raw: &str) -> Result<Identity, String> {
     Ok(finish(name, Source::Stored, key, false))
 }
 
+/// Безопасный возврат канона после рестарта рантайма (T-261).
+///
+/// Позволяет агенту взять назад закреплённое имя после перезапуска
+/// рантайма, если:
+/// - имя действительно закреплено (`claimed=true`) другой сессией;
+/// - чужая сессия использовала ТОТ ЖЕ слот (slot_key) — т.е. это
+///   перезапуск того же редактора/рантайма, а не пришпилённый сосед;
+/// - текущая сессия ещё НЕ закрепила себя за этим именем.
+///
+/// Авторизация lead'ом (токен/пароль) проверяется на уровне orch.rs/msg.rs;
+/// здесь гарантируем только техническую безопасность: чужой слот не отдаёт имя.
+pub fn claim_takeover(raw: &str) -> Result<Identity, String> {
+    let name = sanitize_name(raw)?;
+    let canon = canonical(&name);
+    if canon != name {
+        return Err(format!(
+            "«{name}» — синоним агента «{canon}»; закрепляй каноническое имя"
+        ));
+    }
+    let (key, label) = context();
+    let home = msg_home();
+    claim_takeover_with_home(&home, &name, &key, &label)
+}
+
+fn claim_takeover_with_home(
+    home: &Path,
+    name: &str,
+    key: &str,
+    label: &str,
+) -> Result<Identity, String> {
+    // 1. Имя должно быть закреплено (claimed) кем-то другим.
+    let (existing_key, existing_binding) = claimed_binding_for_name(home, name)
+        .ok_or_else(|| format!("имя «{name}» не закреплено; используйте claim"))?;
+    if existing_key == key {
+        // Уже закреплено этой же сессией — идемпотентно.
+        return Ok(finish(name.to_string(), Source::Stored, key.to_string(), false));
+    }
+    if !existing_binding.claimed {
+        return Err(format!("имя «{name}» не закреплено; используйте claim"));
+    }
+
+    // 2. Безопасность: чужой слот не отдаёт имя.
+    //    Слот старой сессии должен совпадать со слотом текущей — иначе это
+    //    другой редактор/рантайм, и takeover запрещается.
+    let Some(slot) = slot_key() else {
+        return Err("слот не определён (нет ppid=1); takeover невозможен".to_string());
+    };
+    let sb = read_slot_binding_raw(home, &slot);
+    match sb {
+        Some(ref b) if b.claimed && b.name == name => {
+            // Слот хранит claimed-имя: это наш случай (перезапуск того же редактора).
+        }
+        _ => {
+            return Err(format!(
+                "имя «{name}» закреплено в другом слоте; --takeover только в том же редакторе/рантайме"
+            ));
+        }
+    }
+
+    // 3. Перезаписать старую привязку для новой сессии.
+    write_binding_in(home, key, name, label, true)
+        .map_err(|e| format!("не записать привязку: {e}"))?;
+    // 4. Обновить слот: теперь original_key = текущая сессия.
+    remember_slot_in(home, name, true);
+    auto_register_alias(name);
+
+    Ok(finish(name.to_string(), Source::Stored, key.to_string(), false))
+}
+
 /// claim для тестов с явным home и key.
 #[cfg(test)]
 fn claim_with_home(home: &Path, name: &str, key: &str) -> Result<Identity, String> {
@@ -1010,6 +1084,12 @@ fn claim_with_home(home: &Path, name: &str, key: &str) -> Result<Identity, Strin
     auto_register_alias_in(home, &name);
     // remember_slot requires slot_key, skip for tests.
     Ok(finish(name, Source::Stored, key.to_string(), false))
+}
+
+/// claim_takeover для тестов с явным home и key.
+#[cfg(test)]
+fn claim_takeover_with_home_test(home: &Path, name: &str, key: &str) -> Result<Identity, String> {
+    claim_takeover_with_home(home, name, key, "test")
 }
 
 #[cfg(test)]
@@ -1331,5 +1411,45 @@ mod tests {
             canon, "kilo-2ba65640",
             "binding должен иметь приоритет над host_alias: kilo-2ba65640, а не openc-0a0e0cfc"
         );
+    }
+
+    #[test]
+    fn takeover_rejects_unclaimed_name() {
+        let dir = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let home = dir.path();
+        let result = claim_takeover_with_home_test(home, "minimax", "proc:9:9");
+        assert!(result.is_err(), "takeover незакрепленного имени должен падать");
+        assert!(result.unwrap_err().contains("не закреплено"));
+    }
+
+    #[test]
+    fn takeover_rejects_different_slot() {
+        let dir = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let home = dir.path();
+        // Смоделируем: имя закреплено в другом слоте (не нашем).
+        let fake_slot = "slot:fake:0:other";
+        write_binding_in(home, fake_slot, "minimax", "slot", true).unwrap_or_else(|_| unreachable!());
+        // Текущий слот не имеет binding для minimax → takeover падает.
+        let result = claim_takeover_with_home_test(home, "minimax", "session:new");
+        assert!(result.is_err(), "takeover из другого слота должен падать");
+        assert!(result.unwrap_err().contains("другом слоте"));
+    }
+
+    #[test]
+    fn takeover_idempotent_for_same_key() {
+        let dir = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let home = dir.path();
+        let key = "proc:1:2";
+        // Сначала claim.
+        claim_with_home(home, "minimax", key).unwrap_or_else(|_| unreachable!());
+        // Запишем тот же ключ в слот (как делает claim через remember_slot).
+        if let Some(slot) = slot_key() {
+            write_binding_in(home, &slot, "minimax", "slot", true).unwrap_or_else(|_| unreachable!());
+        }
+        // Takeover тем же ключом — идемпотентно.
+        let result = claim_takeover_with_home_test(home, "minimax", key);
+        if let Ok(id) = result {
+            assert_eq!(id.name, "minimax");
+        }
     }
 }
