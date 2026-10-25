@@ -899,9 +899,18 @@ pub fn resolve(explicit: Option<&str>) -> Identity {
     // Это важнее авто-имени: иначе у одного агента два адреса.
     if let Some((_pid, comm, _start)) = runtime_ancestor() {
         if let Some(canon) = host_alias(&comm) {
-            let _ = write_binding_in(&home, &key, &canon, &label, false);
-            remember_slot(&canon, false);
-            return finish(canon, Source::Runtime, key, false);
+            // T-213: не унаследовать чужое claimed-имя через алиас.
+            // Если canon — claimed-имя чужой сессии (owner_key != key),
+            // host_alias не применим: иначе новая сессия в том же слоте
+            // получает адрес и права существующего lead.
+            let safe = claimed_binding_for_name(&home, &canon)
+                .map(|(owner_key, _)| owner_key == key)
+                .unwrap_or(true);
+            if safe {
+                let _ = write_binding_in(&home, &key, &canon, &label, false);
+                remember_slot(&canon, false);
+                return finish(canon, Source::Runtime, key, false);
+            }
         }
     }
     // Слот: рантайм перезапустился, но редактор/слот тот же — имя прежнее.
