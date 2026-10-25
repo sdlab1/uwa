@@ -343,8 +343,11 @@ pub fn plan(reg: &Registry, lead: Option<&str>) -> RouterPlan {
         match best {
             Some((agent, ceiling, busy, active_now, role)) => {
                 let reason = format!(
-                    "потолок C{ceiling}, занято {busy}, в работе {active_now}, роль {}{}",
-                    if role.is_empty() { "worker" } else { &role }
+                    "потолок C{ceiling}, занято {busy}, в работе {active_now}, роль {role}",
+                    ceiling = ceiling,
+                    busy = busy,
+                    active_now = active_now,
+                    role = if role.is_empty() { "worker" } else { &role }
                 );
                 out.assignments.push(Assignment {
                     task_id: t.id.clone(),
@@ -506,23 +509,32 @@ mod tests {
 
     #[test]
     fn zones_conflict_blocks_assignment() {
-        let r = reg(
+        // Активная задача занимает зону — задача из буфера с той же зоной
+        // не выдаётся (O5: зоны не пересекаются).
+        let mut r = reg(
             vec![
                 agent("minimax", ROLE_LEAD, Some("kilo"), None),
                 agent("beam", "worker", Some("kilo"), None),
             ],
-            vec![task("T-001", "minimax", 2, &["src/a.rs"])],
+            vec![
+                task("T-001", "minimax", 2, &["src/a.rs"]),
+                task("T-002", "beam", 2, &["src/a.rs"]),
+            ],
         );
-        let mut r = r;
-        r.tasks[0].status = Status::Active;
-        r.tasks[0].agent = "beam".to_string();
+        r.tasks[1].status = Status::Active;
         let p = plan(&r, Some("minimax"));
-        assert!(p.assignments.is_empty());
-        assert!(p.skipped[0].reason.contains("пересекаются"));
+        assert!(p.assignments.is_empty(), "выдача заблокирована зоной");
+        assert!(
+            p.skipped.iter().any(|s| s.reason.contains("пересекаются")),
+            "внятная причина: {:?}",
+            p.skipped
+        );
     }
 
     #[test]
-    fn two_tasks_same_zone_go_to_different_agents() {
+    fn same_zone_not_given_to_two_agents() {
+        // Одна и та же зона не уходит двум исполнителям: вторая задача
+        // остаётся в буфере (ждать освобождения зоны).
         let r = reg(
             vec![
                 agent("minimax", ROLE_LEAD, Some("kilo"), None),
@@ -535,8 +547,12 @@ mod tests {
             ],
         );
         let p = plan(&r, Some("minimax"));
-        assert_eq!(p.assignments.len(), 2);
-        assert_ne!(p.assignments[0].agent, p.assignments[1].agent);
+        assert_eq!(p.assignments.len(), 1, "зона не уходит двум исполнителям");
+        assert!(
+            p.skipped.iter().any(|s| s.reason.contains("пересекаются")),
+            "внятная причина: {:?}",
+            p.skipped
+        );
     }
 
     #[test]
@@ -569,7 +585,7 @@ mod tests {
             ],
             vec![
                 task("T-001", "minimax", 2, &["src/a.rs"]),
-                task("T-002", "minimax", 4, &["src/b.rs"]),
+                task("T-002", "minimax", 3, &["src/b.rs"]),
             ],
         );
         r.plan.prio.insert("T-002".to_string(), 0);

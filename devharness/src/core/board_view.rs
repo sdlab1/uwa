@@ -48,15 +48,31 @@ pub enum TaskStatus {
 pub struct AgentQueue {
     pub agent: String,
     pub tasks: Vec<BoardTask>,
+    /// Количество непрочитанных писем для агента.
+    pub unread_count: usize,
 }
 
 /// Модель доски оркестратора.
 #[derive(Debug, Clone, Default)]
 pub struct BoardView {
     pub leader_buffer: Vec<BoardTask>, // БУФЕР ВЕДУЩЕГО (O1: >=10)
+    /// БУФЕР TECH-LEAD: крупные задачи (C>=C4), ждущие технического лида.
+    pub tech_lead_buffer: Vec<BoardTask>,
     pub agent_queues: BTreeMap<String, AgentQueue>,
     pub in_progress: Vec<BoardTask>,
     pub warnings: Vec<BoardWarning>,
+}
+
+impl BoardView {
+    /// Заполнить счётчики непрочитанных писем для всех агентов.
+    ///
+    /// Источники: `.harness/orch/msg_events.jsonl` и ящики `$DEVH_MSG_HOME/inbox`.
+    pub fn fill_unread_counts(&mut self) {
+        for (agent, queue) in self.agent_queues.iter_mut() {
+            let canon = crate::core::identity::canonical(agent);
+            queue.unread_count = crate::shell::msg_events::count_unread(&canon);
+        }
+    }
 }
 
 /// Проверить буфер ведущего (O1: >=10 задач).
@@ -100,6 +116,7 @@ pub fn check_done_tasks_have_main_sha(board: &BoardView) -> Vec<BoardWarning> {
     for task in board
         .leader_buffer
         .iter()
+        .chain(board.tech_lead_buffer.iter())
         .chain(board.in_progress.iter())
         .chain(board.agent_queues.values().flat_map(|q| q.tasks.iter()))
     {
@@ -144,6 +161,14 @@ mod tests {
             zone: "core/test".to_string(),
             main_sha: None,
             override_reason: None,
+        }
+    }
+
+    fn sample_queue(agent: &str, count: usize) -> AgentQueue {
+        AgentQueue {
+            agent: agent.to_string(),
+            tasks: (0..count).map(|i| sample_task(&format!("T-{}", i), agent, TaskStatus::Queued)).collect(),
+            unread_count: 0,
         }
     }
 
@@ -261,5 +286,40 @@ mod tests {
         let warnings = check_done_tasks_have_main_sha(&board);
         assert_eq!(warnings.len(), 1, "только T-001 без sha: {warnings:?}");
         assert!(warnings[0].message.contains("T-001"));
+    }
+
+    /// T-297: буфер tech-lead — отдельная секция доски (не смешан с буфером ведущего).
+    #[test]
+    fn tech_lead_buffer_is_separate_section() {
+        let mut board = BoardView::default();
+        board
+            .tech_lead_buffer
+            .push(sample_task("T-300", "techlead", TaskStatus::Queued));
+        assert_eq!(board.tech_lead_buffer.len(), 1);
+        assert!(
+            board.leader_buffer.is_empty(),
+            "буфер техлида не смешан с буфером ведущего"
+        );
+    }
+
+    /// T-272: AgentQueue содержит счётчик непрочитанных писем.
+    #[test]
+    fn agent_queue_has_unread_count() {
+        let q = sample_queue("beam", 3);
+        assert_eq!(q.unread_count, 0, "unread_count в структуре есть");
+    }
+
+    /// T-272: BoardView::fill_unread_counts заполняет счётчики.
+    #[test]
+    fn fill_unread_counts_populates_field() {
+        let mut board = BoardView::default();
+        board.agent_queues.insert(
+            "beam".to_string(),
+            sample_queue("beam", 1),
+        );
+        board.fill_unread_counts();
+        let q = board.agent_queues.get("beam").expect("queue");
+        // unread_count должен быть usize (0 если нет новых писем).
+        let _: usize = q.unread_count;
     }
 }

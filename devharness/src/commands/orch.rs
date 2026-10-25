@@ -304,6 +304,40 @@ pub fn buffer_tasks<'a>(reg: &'a Registry, lead: Option<&str>) -> Vec<&'a Task> 
         .collect()
 }
 
+/// БУФЕР TECH-LEAD: крупные задачи (C>=C4), ждущие технического лида.
+///
+/// Технический лид не занимается мелочью (C<=3) и не берёт задачи из очереди
+/// ведущего: его собственная доска — только крупное (C4-C5) и ревью.
+pub fn tech_lead_buffer_tasks<'a>(reg: &'a Registry) -> Vec<&'a Task> {
+    let tech_leads: Vec<String> = reg
+        .agents
+        .iter()
+        .filter(|a| a.role.as_deref() == Some(ROLE_TECH_LEAD))
+        .map(|a| crate::core::identity::canonical(&a.name))
+        .collect();
+    if tech_leads.is_empty() {
+        return Vec::new();
+    }
+    reg.tasks
+        .iter()
+        .filter(|t| t.status == Status::Queued)
+        .filter(|t| {
+            let owner = crate::core::identity::canonical(&t.agent);
+            let is_tl = tech_leads.iter().any(|tl| tl == &owner);
+            is_tl && t.c_level.unwrap_or(t.complexity) >= crate::core::task_router::TECH_LEAD_MIN_C
+        })
+        .collect()
+}
+
+/// Роль вызывающего в реестре ("" — агент не зарегистрирован).
+fn caller_role_of(reg: &Registry, caller: &str) -> String {
+    reg.agents
+        .iter()
+        .find(|a| crate::core::identity::canonical(&a.name) == caller)
+        .and_then(|a| a.role.clone())
+        .unwrap_or_default()
+}
+
 /// Норма буфера: сколько подготовленных задач должно лежать на доске ведущего.
 /// Норма 15-20 задач; больше 20 — тоже норма (запас на случай простоя ведущего:
 /// если ведущий завис, встанет вся работа — очередь должна это пережить).
@@ -635,7 +669,10 @@ fn print_help() {
   board                      дашборд: кто/какие задачи/P/F/зоны/очередь/предупреждения
   list [--agent X]           таблица задач
   add --agent X --p N --title T --dod <критерий> [--check <команда>]...
-       [--zone path]... [--note N] [--notify]
+       [--zone path]... [--note N] [--notify] [--c C0..C10] [--buffer] [--no-test]
+                          создаёт ведущий или tech-lead; tech-lead назначает --c,
+                          в свою очередь кладёт только C>=C4 (БУФЕР TECH-LEAD),
+                          мелочь C<=3 отдаёт простым исполнителям
   autoassign [--dry-run] [--json] [--notify]
                           АВТОРАЗДАЧА: буфер lead'а сам закрепляется за исполнителями
                           (приоритет, потолок C, роль, зоны, зависимости, нагрузка)
@@ -647,7 +684,7 @@ fn print_help() {
   guard-commit               гейт для pre-commit хука
   install-hook               установить pre-commit хук
   lead [--set ADDR] [--notify]  актуальный ведущий / назначение (смена — по паролю)
-  role --agent X --role lead|worker  роль (lead — только ведущий и по паролю)
+  role --agent X --role lead|worker|tech_lead  роль (lead — только ведущий и по паролю)
   elevate <агент> [--password P]     выдать роль lead (только текущий ведущий, по паролю)
   passwd [--password P]              задать/сменить пароль ведущего (только ведущий)
   watchdog [--minutes 20] [--dry-run]  сторож простоя: отзыв задач, освобождение worktree
@@ -755,10 +792,15 @@ fn agent_ceiling(reg: &Registry, agent: &str) -> u8 {
     crate::core::tech_lead::effective_ceiling(explicit, base)
 }
 
-/// Разбор C-уровня (C0..C10).
+/// Разбор C-уровня (C0..C10). Принимает и «4», и «C4».
 fn parse_c_level(v: &str) -> anyhow::Result<u8> {
-    let c = v
-        .trim()
+    let raw = v.trim();
+    let digits = raw
+        .strip_prefix('C')
+        .or_else(|| raw.strip_prefix('c'))
+        .unwrap_or(raw)
+        .trim();
+    let c = digits
         .parse::<u8>()
         .map_err(|_| anyhow!("неверный C-уровень «{v}» (нужно C0..C10)"))?;
     if c > crate::core::complexity::Complexity::MAX {
@@ -829,12 +871,23 @@ fn add(root: &Path, args: &[String]) -> anyhow::Result<()> {
     let is_lead = lead.as_deref() == Some(agent.as_str());
     let caller = crate::core::identity::canonical(&crate::core::identity::current().name);
     let caller_is_lead = lead.as_deref() == Some(caller.as_str());
-    // Сложность C0-C10 назначает ТОЛЬКО ведущий; иначе — из уровня P.
+    let caller_role = caller_role_of(&reg, &caller);
+    let caller_is_tech_lead = caller_role == ROLE_TECH_LEAD;
+    // Право наполнять доску: ведущий И технический лид. Ведомый докладывает
+    // о баге через `devh orch bug` (O21) — иначе буфер засоряется задачами.
+    if caller_role == ROLE_WORKER {
+        return Err(anyhow!(
+            "devh orch add: задачи для доски создаёт ведущий или tech-lead \
+             (у тебя роль «worker»). Доклад о баге — devh orch bug \"<что сломалось>\" \
+             --from {caller} --p P1"
+        ));
+    }
+    // Сложность C0-C10 назначает ведущий ИЛИ технический лид; иначе — из уровня P.
     let c_level = match flag(args, "--c").as_ref() {
         Some(raw) => {
-            if !caller_is_lead {
+            if !(caller_is_lead || caller_is_tech_lead) {
                 return Err(anyhow!(
-                    "devh orch add: сложность C назначает только ведущий (--c C0..C10)"
+                    "devh orch add: сложность C назначает ведущий или tech-lead (--c C0..C10)"
                 ));
             }
             Some(parse_c_level(raw)?)
@@ -854,10 +907,27 @@ fn add(root: &Path, args: &[String]) -> anyhow::Result<()> {
              (--buffer: подготовленная задача на доске, готовая к выдаче)"
         ));
     }
-    if checks.is_empty() && !(is_lead && args.iter().any(|a| a == "--no-test")) {
+    // Технический лид не занимается мелочью: в собственную очередь — только C>=4.
+    let tech_lead_own = caller_is_tech_lead && agent == caller;
+    if tech_lead_own {
+        let c = c_level.unwrap_or(0);
+        if c < crate::core::task_router::TECH_LEAD_MIN_C {
+            return Err(anyhow!(
+                "devh orch add: tech-lead не занимается мелочными задачами (C{c} < C{}) — \
+                 назначь простого исполнителя (--agent <ведомый>)",
+                crate::core::task_router::TECH_LEAD_MIN_C
+            ));
+        }
+    }
+    let no_test = args.iter().any(|a| a == "--no-test");
+    if checks.is_empty() && !(no_test && (is_lead || caller_is_tech_lead)) {
         return Err(anyhow!(
             "devh orch add: для ведомого нужна минимум одна машинная проверка --check \"команда\"{}",
-            if is_lead { " (для lead укажи --no-test)" } else { "" }
+            if is_lead || caller_is_tech_lead {
+                " (для lead/tech-lead укажи --no-test)"
+            } else {
+                ""
+            }
         ));
     }
 
@@ -920,6 +990,12 @@ fn add(root: &Path, args: &[String]) -> anyhow::Result<()> {
         "devh orch: {id} добавлена в очередь {agent}: P{complexity} C{} prio{prio} — {title}",
         c_level.unwrap_or(0)
     );
+    if tech_lead_own {
+        println!(
+            "devh orch: → БУФЕР TECH-LEAD (C{} — крупная задача для технического лида)",
+            c_level.unwrap_or(0)
+        );
+    }
     if !deps.is_empty() {
         println!("devh orch: зависимости: {}", deps.join(", "));
     }
@@ -1201,6 +1277,9 @@ fn close(root: &Path, args: &[String], status: Status) -> anyhow::Result<()> {
             t.updated = now();
         }
     }
+    // Автораздача: освободившийся исполнитель и новые приоритеты разбираются
+    // сами — lead не вмешивается в выдачу.
+    crate::commands::autoassign::auto_trigger(root, &mut reg);
     save(root, &reg)?;
     // Ledger: событие Done или Failed
     let event = if status == Status::Done { LedgerEvent::Done } else { LedgerEvent::Failed };
@@ -3158,6 +3237,31 @@ fn board(root: &Path, args: &[String]) -> anyhow::Result<()> {
             "буфер ведущего: {} задач (<{BUFFER_MIN}) — наполни доску: devh orch add --agent <lead> --buffer --dod ... --check ...",
             buffer.len()
         ));
+    }
+
+    // ── буфер tech-lead ──
+    let tl_buffer = tech_lead_buffer_tasks(&reg);
+    println!(
+        "\nБУФЕР TECH-LEAD ({} задач C>=C4 — крупное и ревью):",
+        tl_buffer.len()
+    );
+    if tl_buffer.is_empty() {
+        println!("    — пусто");
+    }
+    for t in tl_buffer.iter() {
+        println!(
+            "    {} {:<7} P{} C{} {:<24} {}",
+            t.id,
+            t.status.label(),
+            t.complexity,
+            t.c_level.unwrap_or(0),
+            if t.zones.is_empty() {
+                "зона не задана".to_string()
+            } else {
+                t.zones.join(",")
+            },
+            t.title
+        );
     }
 
     if !warns.is_empty() {

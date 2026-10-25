@@ -98,7 +98,8 @@ fn worker_cannot_set_complexity_c() {
     let env = Env::new();
     env.write_registry(reg_three_workers());
 
-    // Сложность C назначает только ведущий (O17).
+    // Задачи для доски создаёт ведущий или tech-lead; ведомый докладывает
+    // о баге через `devh orch bug` (O21).
     let (_out, err, code) = env.run(
         "worker1",
         &[
@@ -119,8 +120,11 @@ fn worker_cannot_set_complexity_c() {
             "true",
         ],
     );
-    assert_ne!(code, 0, "ведомый не назначает C");
-    assert!(err.contains("только ведущий"), "внятная причина отказа: {err}");
+    assert_ne!(code, 0, "ведомый не создаёт задачи для доски и не назначает C");
+    assert!(
+        err.contains("tech-lead"),
+        "внятная причина отказа: {err}"
+    );
 }
 
 #[test]

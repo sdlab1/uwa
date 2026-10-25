@@ -197,6 +197,138 @@ fn unknown_role_is_rejected() {
 }
 
 #[test]
+fn tech_lead_creates_task_for_board() {
+    // Право tech-lead: создавать задачи для доски оркестрации (в т.ч. с --c).
+    let env = Env::new();
+    env.write_registry(reg_with_tech_lead());
+
+    let (out, err, code) = env.run(
+        "techlead",
+        &[
+            "add",
+            "--agent",
+            "worker1",
+            "--p",
+            "P2",
+            "--c",
+            "C4",
+            "--title",
+            "Крупная задача от техлида",
+            "--zone",
+            "devharness/src/core/x.rs",
+            "--dod",
+            "критерий приёмки",
+            "--check",
+            "true",
+        ],
+    );
+    assert_eq!(code, 0, "tech-lead создаёт задачу для доски: {err}\n{out}");
+    let reg = env.registry();
+    assert!(
+        reg.contains("Крупная задача от техлида"),
+        "задача в реестре:\n{reg}"
+    );
+    assert!(reg.contains("\"c_level\": 4"), "C назначен:\n{reg}");
+}
+
+#[test]
+fn tech_lead_own_task_requires_c4() {
+    // Техлид не занимается мелочью: в собственную очередь — только C>=4.
+    let env = Env::new();
+    env.write_registry(reg_with_tech_lead());
+
+    let (_out, err, code) = env.run(
+        "techlead",
+        &[
+            "add",
+            "--agent",
+            "techlead",
+            "--p",
+            "P1",
+            "--c",
+            "C2",
+            "--title",
+            "Мелочь",
+            "--dod",
+            "критерий",
+            "--check",
+            "true",
+        ],
+    );
+    assert_ne!(code, 0, "мелочная задача себе в очередь — отказ");
+    assert!(
+        err.contains("мелочными задачами"),
+        "внятная причина отказа: {err}"
+    );
+
+    let (out, err, code) = env.run(
+        "techlead",
+        &[
+            "add",
+            "--agent",
+            "techlead",
+            "--p",
+            "P3",
+            "--c",
+            "C4",
+            "--title",
+            "Крупное ревью",
+            "--dod",
+            "критерий",
+            "--check",
+            "true",
+        ],
+    );
+    assert_eq!(code, 0, "крупная задача себе — можно: {err}\n{out}");
+    assert!(out.contains("БУФЕР TECH-LEAD"), "отчёт о буфере техлида:\n{out}");
+}
+
+#[test]
+fn board_has_tech_lead_buffer_section() {
+    let env = Env::new();
+    env.write_registry(reg_with_tech_lead());
+
+    let (out, err, code) = env.run("lead", &["board"]);
+    assert_eq!(code, 0, "доска: {err}");
+    assert!(
+        out.contains("БУФЕР TECH-LEAD"),
+        "отдельная секция буфера техлида:\n{out}"
+    );
+}
+
+#[test]
+fn worker_cannot_create_board_task() {
+    let env = Env::new();
+    env.write_registry(reg_with_tech_lead());
+
+    let (_out, err, code) = env.run(
+        "worker1",
+        &[
+            "add",
+            "--agent",
+            "worker1",
+            "--p",
+            "P1",
+            "--title",
+            "Задача ведомого",
+            "--dod",
+            "критерий",
+            "--check",
+            "true",
+        ],
+    );
+    assert_ne!(code, 0, "ведомый не наполняет доску");
+    assert!(
+        err.contains("tech-lead"),
+        "внятная причина отказа: {err}"
+    );
+    assert!(
+        err.contains("orch bug"),
+        "указано, куда докладывать: {err}"
+    );
+}
+
+#[test]
 fn tech_lead_fixes_model_only_with_confirm() {
     let env = Env::new();
     env.write_registry(reg_with_tech_lead());
