@@ -12,7 +12,6 @@
 //! Функция `reconcile` сверяет декларацию модели с записью в реестре;
 //! расхождение => "модель не подтверждена" + fail-closed (потолок C0).
 
-use std::collections::HashSet;
 use std::fs;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -42,7 +41,7 @@ pub struct IdentityEvent {
 }
 
 /// Тип события.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum EventLabel {
     Declare,
@@ -54,91 +53,177 @@ pub enum EventLabel {
 }
 
 /// Путь к файлу журнала.
+///
+/// Оверрайд из тестов и env — это КОРЕНЬ хранилища (как `DEVH_MSG_HOME`),
+/// а не сам файл: журнал всегда лежит в `<home>/orch/identities.jsonl`.
+/// Раньше оверрайд возвращался как путь файла, и тест, подменявший хранилище
+/// на корень временного каталога, получал журналом КАТАЛОГ — чтение такого
+/// «файла» вечно возвращает EISDIR, а `lines().flatten()` эту ошибку глотал
+/// бесконечно (реальный зависон на 100% CPU).
 fn journal_path() -> PathBuf {
-    let home = match std::env::var("DEVH_MSG_HOME") {
+    let home = JOURNAL_OVERRIDE
+        .with(|cell| cell.borrow().clone())
+        .unwrap_or_else(env_home);
+    home.join("orch").join("identities.jsonl")
+}
+
+/// Корень хранилища из окружения (`DEVH_MSG_HOME` или `/tmp/devh-msg`).
+fn env_home() -> PathBuf {
+    match std::env::var("DEVH_MSG_HOME") {
         Ok(v) if !v.is_empty() => PathBuf::from(v),
         _ => PathBuf::from("/tmp/devh-msg"),
-    };
-    home.join("orch").join("identities.jsonl")
+    }
+}
+
+thread_local! {
+    static JOURNAL_OVERRIDE: std::cell::RefCell<Option<PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn use_home(dir: &Path) {
+    JOURNAL_OVERRIDE.with(|cell| *cell.borrow_mut() = Some(dir.to_path_buf()));
 }
 
 /// Максимальное количество строк в журнале (ротация).
 const MAX_LINES: usize = 10_000;
 
-/// Записать событие в журнал (append-only, с дедупом и ротацией).
+/// Записать событие в журнал (append-only, дедуп O(1) + ротация).
+///
+/// Почему так: прежняя версия перечитывала и парсила ВЕСЬ журнал на каждое
+/// событие (O(n^2) на прогон, 10100 событий = ~6 минут). Теперь:
+/// - дедуп по (key, label) — файл-маркер в `seen/` (O(1) на событие);
+/// - добавление строки — append (O(1));
+/// - ротация — счётчик строк в `identities.count` (O(1) на событие,
+///   перезапись хвоста — раз в MAX_LINES событий, амортизированно O(1));
+/// - при ротации маркеры вычеркнутых строк удаляются, чтобы пара
+///   (key, label) после выпадения из окна снова могла быть записана
+///   (поведение как у прежкой версии).
 pub fn log_event(event: IdentityEvent) -> std::io::Result<()> {
     let path = journal_path();
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
+    let Some(dir) = path.parent() else {
+        return Ok(());
+    };
+    fs::create_dir_all(dir)?;
+    fs::create_dir_all(seen_dir(dir))?;
+
+    let label_str = label_of(event.label);
+    let marker = seen_marker(dir, &event.key, label_str);
+    if marker.exists() {
+        return Ok(()); // эта пара (key, label) уже в журнале — не дублируем
     }
 
-    // Читаем существующие строки для дедупа и ротации
-    let mut existing: Vec<String> = Vec::new();
-    let mut seen: HashSet<(String, String)> = HashSet::new(); // (key, label)
-
-    if path.exists() {
-        let file = fs::File::open(&path)?;
-        let reader = BufReader::new(file);
-        for line in reader.lines() {
-            let line = line?;
-            if line.trim().is_empty() {
-                continue;
-            }
-            // Парсим только key и label для дедупа
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
-                let key = v
-                    .get("key")
-                    .and_then(|x| x.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let label = v
-                    .get("label")
-                    .and_then(|x| x.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let dedup_key = (key, label);
-                if seen.insert(dedup_key) {
-                    existing.push(line);
-                }
-            } else {
-                existing.push(line);
-            }
-        }
+    let json = serde_json::to_string(&event)?;
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)?;
+    {
+        let mut writer = BufWriter::new(file);
+        writeln!(writer, "{json}")?;
+        writer.flush()?;
     }
+    fs::write(&marker, b"1")?;
 
-    // Проверяем дедуп для нового события (label в snake_case как в JSON)
-    let label_str = match event.label {
+    let count = read_line_count(dir, &path).saturating_add(1);
+    if count > MAX_LINES as u64 {
+        rotate_journal(dir, &path)?;
+    } else {
+        write_line_count(dir, count)?;
+    }
+    Ok(())
+}
+
+/// Метка события в JSON-виде (snake_case) — для дедупа и маркеров.
+fn label_of(label: EventLabel) -> &'static str {
+    match label {
         EventLabel::Declare => "declare",
         EventLabel::Claim => "claim",
         EventLabel::ModelChange => "model_change",
         EventLabel::RoleChange => "role_change",
         EventLabel::TaskStart => "task_start",
         EventLabel::TaskDone => "task_done",
-    };
-    let new_dedup_key = (event.key.clone(), label_str.to_string());
-    if seen.contains(&new_dedup_key) {
-        return Ok(()); // уже есть — не дублируем
     }
+}
 
-    // Добавляем новое событие
-    let json = serde_json::to_string(&event)?;
-    existing.push(json);
+/// Каталог маркеров дедупа (`<home>/orch/seen`).
+fn seen_dir(dir: &Path) -> PathBuf {
+    dir.join("seen")
+}
 
-    // Ротация: оставляем последние MAX_LINES
-    if existing.len() > MAX_LINES {
-        existing.drain(0..existing.len() - MAX_LINES);
+/// Файл-маркер дедупа: стабильный хэш пары (key, label).
+/// FNV-1a — детерминирован между процессами (в отличие от DefaultHasher).
+fn seen_marker(dir: &Path, key: &str, label: &str) -> PathBuf {
+    let mut raw = String::with_capacity(key.len() + label.len() + 1);
+    raw.push_str(key);
+    raw.push('\u{1}');
+    raw.push_str(label);
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in raw.as_bytes() {
+        hash ^= u64::from(*b);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
+    seen_dir(dir).join(format!("{hash:016x}.seen"))
+}
 
-    // Атомарная запись
+/// Достать (key, label) из строки журнала (без полного парсинга события).
+fn key_label_of_line(line: &str) -> Option<(String, String)> {
+    let value: serde_json::Value = serde_json::from_str(line).ok()?;
+    let key = value.get("key")?.as_str()?.to_string();
+    let label = value.get("label")?.as_str()?.to_string();
+    Some((key, label))
+}
+
+/// Путь к файлу счётчика строк.
+fn count_path(dir: &Path) -> PathBuf {
+    dir.join("identities.count")
+}
+
+/// Число строк журнала: быстрый путь — счётчик; нет/битый — посчитать один раз.
+fn read_line_count(dir: &Path, path: &Path) -> u64 {
+    if let Ok(text) = fs::read_to_string(count_path(dir)) {
+        if let Ok(n) = text.trim().parse::<u64>() {
+            return n;
+        }
+    }
+    fs::read_to_string(path)
+        .map(|t| t.lines().filter(|l| !l.trim().is_empty()).count() as u64)
+        .unwrap_or(0)
+}
+
+/// Записать счётчик строк (мелочь: читать его дороже, чем записать).
+fn write_line_count(dir: &Path, count: u64) -> std::io::Result<()> {
+    fs::write(count_path(dir), count.to_string())
+}
+
+/// Ротация: оставить последние MAX_LINES строк, обновить счётчик и убрать
+/// маркеры вычеркнутых строк. Вызывается редко (раз в MAX_LINES событий).
+fn rotate_journal(dir: &Path, path: &Path) -> std::io::Result<()> {
+    let text = fs::read_to_string(path).unwrap_or_default();
+    let mut lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+    let evicted = lines.len().saturating_sub(MAX_LINES);
+    for line in lines.iter().take(evicted) {
+        if let Some((key, label)) = key_label_of_line(line) {
+            let _ = fs::remove_file(seen_marker(dir, &key, &label));
+        }
+    }
+    lines.drain(0..evicted);
     let tmp = path.with_extension("jsonl.tmp");
     {
         let file = fs::File::create(&tmp)?;
         let mut writer = BufWriter::new(file);
-        for line in existing {
-            writeln!(writer, "{}", line)?;
+        for line in &lines {
+            writeln!(writer, "{line}")?;
         }
+        writer.flush()?;
     }
-    fs::rename(&tmp, &path)?;
+    fs::rename(&tmp, path)?;
+    // Счётчик синхронизируем с фактическим числом строк файла — самолечение
+    // при дрейфе от параллельных append'ов.
+    let actual = fs::read_to_string(path)
+        .map(|t| t.lines().filter(|l| !l.trim().is_empty()).count() as u64)
+        .unwrap_or_else(|_| u64::try_from(lines.len()).unwrap_or(0));
+    write_line_count(dir, actual)?;
     Ok(())
 }
 
@@ -270,7 +355,10 @@ pub fn reconcile(registry_root: &Path, agent: &str) -> ReconcileResult {
         Err(_) => return ReconcileResult::NotDeclared,
     };
     let reader = BufReader::new(file);
-    for line in reader.lines().flatten() {
+    for line in reader.lines() {
+        // Ошибка чтения (EISDIR на пути-каталоге, испорченный файл) —
+        // не глотаем молча: flatten() на вечном EISDIR крутил 100% CPU.
+        let Ok(line) = line else { break };
         if line.trim().is_empty() {
             continue;
         }
@@ -325,7 +413,10 @@ pub fn read_agent_events(agent: &str) -> Vec<IdentityEvent> {
         Err(_) => return out,
     };
     let reader = BufReader::new(file);
-    for line in reader.lines().flatten() {
+    for line in reader.lines() {
+        // Ошибка чтения (EISDIR на пути-каталоге, испорченный файл) —
+        // не глотаем молча: flatten() на вечном EISDIR крутил 100% CPU.
+        let Ok(line) = line else { break };
         if line.trim().is_empty() {
             continue;
         }
@@ -348,67 +439,11 @@ mod tests {
         dir.join("orch").join("identities.jsonl")
     }
 
-    fn log_event_to(event: IdentityEvent, dir: &Path) -> std::io::Result<()> {
-        let path = test_journal_path(dir);
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let mut existing: Vec<String> = Vec::new();
-        let mut seen: HashSet<(String, String)> = HashSet::new();
-        if path.exists() {
-            let file = fs::File::open(&path)?;
-            let reader = BufReader::new(file);
-            for line in reader.lines() {
-                let line = line?;
-                if line.trim().is_empty() {
-                    continue;
-                }
-                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
-                    let key = v
-                        .get("key")
-                        .and_then(|x| x.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let label = v
-                        .get("label")
-                        .and_then(|x| x.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let dedup_key = (key, label);
-                    if seen.insert(dedup_key) {
-                        existing.push(line);
-                    }
-                } else {
-                    existing.push(line);
-                }
-            }
-        }
-        let new_dedup_key = (event.key.clone(), format!("{:?}", event.label));
-        if seen.contains(&new_dedup_key) {
-            return Ok(());
-        }
-        let json = serde_json::to_string(&event)?;
-        existing.push(json);
-        if existing.len() > MAX_LINES {
-            existing.drain(0..existing.len() - MAX_LINES);
-        }
-        let tmp = path.with_extension("jsonl.tmp");
-        {
-            let file = fs::File::create(&tmp)?;
-            let mut writer = BufWriter::new(file);
-            for line in existing {
-                writeln!(writer, "{}", line)?;
-            }
-        }
-        fs::rename(&tmp, &path)?;
-        Ok(())
-    }
-
     #[test]
     fn journal_write_read_roundtrip() {
         let dir = tempdir().unwrap();
         // Переопределяем DEVH_MSG_HOME для теста
-        std::env::set_var("DEVH_MSG_HOME", dir.path());
+        use_home(dir.path());
 
         log_declare(
             "beam",
@@ -429,9 +464,30 @@ mod tests {
     }
 
     #[test]
+    fn journal_path_is_directory_read_terminates() {
+        // Регрессия на зависон: журнал, оказавшийся КАТАЛОГОМ (битое
+        // хранилище), читался через `lines().flatten()` — вечный EISDIR
+        // глотал ошибку и крутил 100% CPU. Чтение обязано закончиться.
+        let dir = tempdir().unwrap();
+        let as_dir = dir.path().join("orch").join("identities.jsonl");
+        fs::create_dir_all(&as_dir).unwrap();
+        use_home(dir.path());
+
+        assert!(
+            read_agent_events("beam").is_empty(),
+            "каталог вместо журнала — не события, чтение завершается"
+        );
+        assert_eq!(
+            reconcile(dir.path(), "beam"),
+            ReconcileResult::NotDeclared,
+            "каталог вместо журнала — не подтверждено (fail-closed)"
+        );
+    }
+
+    #[test]
     fn journal_dedup_by_key_and_label() {
         let dir = tempdir().unwrap();
-        std::env::set_var("DEVH_MSG_HOME", dir.path());
+        use_home(dir.path());
 
         // Два одинаковых declare — второе должно отброситься
         log_declare(
@@ -460,7 +516,7 @@ mod tests {
     #[test]
     fn journal_rotation_limits_size() {
         let dir = tempdir().unwrap();
-        std::env::set_var("DEVH_MSG_HOME", dir.path());
+        use_home(dir.path());
 
         // Записываем больше MAX_LINES событий с разными label
         for i in 0..MAX_LINES + 100 {
@@ -475,9 +531,52 @@ mod tests {
     }
 
     #[test]
+    fn rotation_clears_markers_of_evicted_lines() {
+        // Ротация обязана вернуть паре (key,label) право снова быть записанной:
+        // маркеры вычеркнутых строк удаляются, маркеры оставшихся — живут.
+        let dir = tempdir().unwrap();
+        let path = test_journal_path(dir.path());
+        let home = path.parent().unwrap().to_path_buf();
+        fs::create_dir_all(&home).unwrap();
+        fs::create_dir_all(seen_dir(&home)).unwrap();
+        let total = MAX_LINES + 2;
+        let mut lines = Vec::new();
+        for i in 0..total {
+            lines.push(format!(
+                r#"{{"ts":1,"agent":"a","key":"session:{i}","label":"declare","source":"s"}}"#
+            ));
+        }
+        fs::write(&path, format!("{}\n", lines.join("\n"))).unwrap();
+        for i in 0..total {
+            let key = format!("session:{i}");
+            let marker = seen_marker(&home, &key, "declare");
+            fs::write(&marker, b"1").unwrap();
+        }
+        rotate_journal(&home, &path).unwrap();
+
+        let text = fs::read_to_string(&path).unwrap();
+        let left = text.lines().filter(|l| !l.trim().is_empty()).count();
+        assert_eq!(left, MAX_LINES, "после ротации ровно MAX_LINES строк");
+        assert!(
+            !seen_marker(&home, "session:0", "declare").exists(),
+            "маркер вычеркнутой строки обязан быть удалён"
+        );
+        assert!(
+            seen_marker(&home, "session:2", "declare").exists(),
+            "маркер оставшейся строки обязан жить"
+        );
+        let count: u64 = fs::read_to_string(count_path(&home))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert_eq!(count, MAX_LINES as u64, "счётчик синхронизирован с файлом");
+    }
+
+    #[test]
     fn reconcile_confirmed_when_models_match() {
         let dir = tempdir().unwrap();
-        std::env::set_var("DEVH_MSG_HOME", dir.path());
+        use_home(dir.path());
 
         // Журнал: декларация модели
         log_declare(
@@ -509,7 +608,7 @@ mod tests {
     #[test]
     fn reconcile_mismatch_fail_closed() {
         let dir = tempdir().unwrap();
-        std::env::set_var("DEVH_MSG_HOME", dir.path());
+        use_home(dir.path());
 
         // Журнал: декларирована model-a
         log_declare(
@@ -549,7 +648,7 @@ mod tests {
     #[test]
     fn reconcile_unknown_agent() {
         let dir = tempdir().unwrap();
-        std::env::set_var("DEVH_MSG_HOME", dir.path());
+        use_home(dir.path());
 
         log_declare(
             "beam",
@@ -573,7 +672,7 @@ mod tests {
     #[test]
     fn reconcile_not_declared() {
         let dir = tempdir().unwrap();
-        std::env::set_var("DEVH_MSG_HOME", dir.path());
+        use_home(dir.path());
 
         // Журнал пуст (нет декларации)
         // Реестр: агент с моделью
@@ -595,7 +694,7 @@ mod tests {
     #[test]
     fn reconcile_no_model_in_registry() {
         let dir = tempdir().unwrap();
-        std::env::set_var("DEVH_MSG_HOME", dir.path());
+        use_home(dir.path());
 
         log_declare(
             "beam",
@@ -626,7 +725,7 @@ mod tests {
     #[test]
     fn task_events_logged() {
         let dir = tempdir().unwrap();
-        std::env::set_var("DEVH_MSG_HOME", dir.path());
+        use_home(dir.path());
 
         log_task_start("beam", "session:1", "T-100");
         log_task_done("beam", "session:1", "T-100", "Done");
