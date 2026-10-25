@@ -290,6 +290,49 @@ fn resolve_union_mod_list(path: &Path, file: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Коммиты ветки агента, которые НАДО переносить в главную (T-262).
+///
+/// Фильтры:
+/// 1. `git cherry` — коммиты, чей патч уже лежит в main (patch-эквивалент),
+///    не переносятся: агент перебазировался на main и принёс копию старой
+///    работы — её повторное применение даёт конфликты и дубли.
+/// 2. WIP-чекпоинты (`WIP(<агент>): ...`) — это сохранённая грязь, а НЕ
+///    результат задачи. Перенос такого коммита в main откатывал чужие
+///    файлы (devharness/tests/orch_roles.rs был снесён именно так).
+///    Работа не теряется: она лежит в ветке `devh/wip-<агент>`.
+/// 3. Порядок — от старых к новым (как при cherry-pick).
+fn transfer_commits(
+    main_root: &Path,
+    main_branch: &str,
+    branch: &str,
+) -> anyhow::Result<Vec<String>> {
+    let cherry = git(main_root, &["cherry", main_branch, branch])?;
+    let mut out: Vec<String> = Vec::new();
+    for line in cherry.lines() {
+        let mut it = line.split_whitespace();
+        let sign = it.next().unwrap_or("");
+        let sha = it.next().unwrap_or("").trim().to_string();
+        // '-' = такой же патч уже в main — переносить нечего.
+        if sign != "+" || sha.is_empty() {
+            continue;
+        }
+        if is_wip_checkpoint(main_root, &sha) {
+            continue;
+        }
+        out.push(sha);
+    }
+    // `git cherry` печатает от новых к старым; перенос идёт от старых к новым.
+    out.reverse();
+    Ok(out)
+}
+
+/// Коммит-чекпоинт незакоммиченной работы (`WIP(<агент>): ...`).
+fn is_wip_checkpoint(main_root: &Path, sha: &str) -> bool {
+    let subject = git_out(main_root, &["log", "-1", "--format=%s", sha]);
+    let subject = subject.trim();
+    subject.starts_with("WIP(") || subject.starts_with("WIP:")
+}
+
 /// Влить ветку агента в главную, не трогая его worktree.
 ///
 /// Почему не rebase: у агента почти всегда грязное дерево (он работает),
@@ -304,12 +347,7 @@ pub fn merge_via_cherry_pick(
     branch: &str,
     agent: &str,
 ) -> anyhow::Result<String> {
-    let range = format!("{main_branch}..{branch}");
-    let commits: Vec<String> = git(main_root, &["rev-list", "--reverse", &range])?
-        .lines()
-        .map(|l| l.trim().to_string())
-        .filter(|l| !l.is_empty())
-        .collect();
+    let commits = transfer_commits(main_root, main_branch, branch)?;
     if commits.is_empty() {
         anyhow::bail!("нечего вливать: на {branch} нет коммитов сверх {main_branch}");
     }
@@ -1299,6 +1337,59 @@ mod tests {
             "незакоммиченное агента не попало в главную"
         );
         assert!(p.join("c.txt").exists(), "работа агента на месте");
+    }
+
+    /// T-262: WIP-чекпоинт агента — это сохранённая грязь, а не результат
+    /// задачи: в главную он попадать не должен (он откатывал чужие файлы).
+    #[test]
+    fn transfer_commits_skips_wip_checkpoint() {
+        let (d, root) = repo_fixture();
+        let c = cfg_in(&d);
+        let (p, _) = ensure(&c, &root, "beam").unwrap_or_else(|_| unreachable!());
+        let g = |args: &[&str], cwd: &Path| {
+            let _ = Command::new("git").args(args).current_dir(cwd).output();
+        };
+        std::fs::write(p.join("task.txt"), "task\n").unwrap_or_else(|_| unreachable!());
+        g(&["add", "-A"], &p);
+        g(&["commit", "-qm", "chore(task T-1): работа агента"], &p);
+        // WIP-чекпоинт: откат чужого файла (именно так терялся orch_roles.rs).
+        std::fs::write(p.join("other.txt"), "wip\n").unwrap_or_else(|_| unreachable!());
+        g(&["add", "-A"], &p);
+        g(&["commit", "-qm", "WIP(beam): чекпоинт незакоммиченной работы"], &p);
+        let commits = transfer_commits(&root, "main", &agent_branch("beam"))
+            .unwrap_or_else(|e| unreachable!("{e}"));
+        assert_eq!(
+            commits.len(),
+            1,
+            "в перенос идёт только коммит задачи, без WIP: {commits:?}"
+        );
+        let subject = git(&root, &["log", "-1", "--format=%s", &commits[0]]).unwrap_or_default();
+        assert!(subject.contains("работа агента"), "тема: {subject}");
+    }
+
+    /// T-262: коммит, чей патч уже в главной, повторно не переносится
+    /// (агент перебазировался на main и принёс копию старой работы).
+    #[test]
+    fn transfer_commits_skips_patch_already_in_main() {
+        let (d, root) = repo_fixture();
+        let c = cfg_in(&d);
+        let (p, _) = ensure(&c, &root, "beam").unwrap_or_else(|_| unreachable!());
+        let g = |args: &[&str], cwd: &Path| {
+            let _ = Command::new("git").args(args).current_dir(cwd).output();
+        };
+        std::fs::write(p.join("same.txt"), "same\n").unwrap_or_else(|_| unreachable!());
+        g(&["add", "-A"], &p);
+        g(&["commit", "-qm", "chore(task T-2): общий коммит"], &p);
+        // Тот же патч в главной (другим агентом) — переносить нечего.
+        std::fs::write(root.join("same.txt"), "same\n").unwrap_or_else(|_| unreachable!());
+        g(&["add", "-A"], &root);
+        g(&["commit", "-qm", "chore(task T-9): тот же патч в main"], &root);
+        let commits = transfer_commits(&root, "main", &agent_branch("beam"))
+            .unwrap_or_else(|e| unreachable!("{e}"));
+        assert!(
+            commits.is_empty(),
+            "patch-эквивалентный коммит не переносится повторно: {commits:?}"
+        );
     }
 
     /// Конфликт списка модулей (`core/mod.rs`) объединяется автоматически:

@@ -215,6 +215,26 @@ fn block_recipients(block: &str) -> String {
     }
 }
 
+/// Письмо адресовано только самому отправителю (по канону, с учётом синонимов)?
+fn addressed_only_to_self(block: &str, canon: &str) -> bool {
+    let to = block_recipients(block);
+    if to.is_empty() {
+        return false;
+    }
+    let mut any = false;
+    for raw in to.split(',') {
+        let name = raw.trim();
+        if name.is_empty() {
+            continue;
+        }
+        any = true;
+        if crate::core::identity::canonical(name) != canon {
+            return false;
+        }
+    }
+    any
+}
+
 /// Голоса за закрытие треда: по строке на агента.
 fn votes_path(thread: &str) -> PathBuf {
     threads_dir().join(format!("{}.votes", safe_name(thread)))
@@ -1752,6 +1772,10 @@ pub fn send(args: &[String]) -> i32 {
         "pending" => {
             // Что из отправленного ещё не прочитано адресатами.
             let agent = me(m.value("agent").as_deref());
+            let canon = crate::core::identity::canonical(&agent);
+            // Синнонимные ящики — в канонический (дедуп по ID): иначе они
+            // считаются отдельными письмами и раздувают счёт (R-8).
+            migrate_synonym_inboxes(&canon);
             let sent_text = fs::read_to_string(outbox_path(&safe_name(&agent))).unwrap_or_default();
             let (_h, sent_blocks) = split_log(&sent_text);
             // Читаем acks из канонического ящика + всех синонимов + legacy имён.
@@ -1775,6 +1799,13 @@ pub fn send(args: &[String]) -> i32 {
             for b in sent_blocks.iter() {
                 let id = block_field(b, "ID: ").unwrap_or_default();
                 if id.is_empty() || read_ids.iter().any(|r| r == &id) {
+                    continue;
+                }
+                // Письмо самому себе (в т.ч. по синониму) не ждёт чужого
+                // прочтения: оно лежит в своём ящике и читается через
+                // `devh msg read`. Считать его «ожидающим» нельзя — иначе
+                // счёт пухнет от писем самому себе (R-8).
+                if addressed_only_to_self(b, &canon) {
                     continue;
                 }
                 let to = block_recipients(b);
@@ -1824,6 +1855,14 @@ pub fn send(args: &[String]) -> i32 {
             0
         }
         "list" => {
+            // Уведомление о новых входящих: один popup на пачку, без повторов
+            // (дедуп по notified/<агент>.log). Раньше auto_notify пропускался
+            // для всех `cmd msg`, поэтому агент, запустивший `msg list`,
+            // терял уведомление, и письма «висели» молча (R-4).
+            {
+                let who = me(None);
+                auto_notify(&who);
+            }
             let mut rows: Vec<(String, usize)> = Vec::new();
             if let Ok(dir) = fs::read_dir(inbox_dir()) {
                 for e in dir.flatten() {
@@ -2048,6 +2087,42 @@ mod tests {
         std::fs::create_dir_all(&inbox).unwrap_or_default();
         let text = format!("{block}{SEP}\n");
         std::fs::write(inbox.join(format!("{agent}.log")), text).unwrap_or_default();
+    }
+
+    /// Письмо самому себе (в т.ч. по синониму) не ждёт чужого прочтения —
+    /// иначе счёт `pending` пухнет от писем самому себе (R-8).
+    #[test]
+    fn addressed_only_to_self_detects_self_letters() {
+        let home = std::env::temp_dir().join(format!(
+            "devh-test-self-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&home).unwrap_or_default();
+        std::fs::write(
+            home.join("aliases.json"),
+            r#"{"aliases": {"deepseek": "beam"}}"#,
+        )
+        .unwrap_or_default();
+        with_msg_home(&home, || {
+            let to_self = "[10:00] ОТ: beam — КОМУ: deepseek\nID: x1\nТЕМА: t";
+            assert!(
+                addressed_only_to_self(to_self, "beam"),
+                "письмо по синониму — себе"
+            );
+            let to_self_direct = "[10:00] ОТ: beam — КОМУ: beam\nID: x2\nТЕМА: t";
+            assert!(addressed_only_to_self(to_self_direct, "beam"));
+            let to_other = "[10:00] ОТ: beam — КОМУ: target\nID: x3\nТЕМА: t";
+            assert!(
+                !addressed_only_to_self(to_other, "beam"),
+                "письмо другому — не себе"
+            );
+            let to_mixed = "[10:00] ОТ: beam — КОМУ: beam, target\nID: x4\nТЕМА: t";
+            assert!(
+                !addressed_only_to_self(to_mixed, "beam"),
+                "письмо себе и другому — ждёт другого"
+            );
+        });
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]
