@@ -25,6 +25,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 use crate::core::ledger::{LedgerEntry, LedgerEvent, log_event};
 use crate::core::agent_state::{AgentState as CoreAgentState, degrade_p};
@@ -2423,6 +2424,73 @@ fn selfcheck(root: &Path, args: &[String]) -> anyhow::Result<()> {
                 "{}: задача Done без main_sha и без override_reason — слияние не зафиксировано",
                 t.id
             ));
+        }
+    }
+    // 5c. Пересечения зон между задачами разных агентов (T-313).
+    //     Ловим конфликты зон между любыми задачами в статусах Queued/Active,
+    //     а не только между Active (как делает шаг 3).
+    let conflicting: Vec<&Task> = reg
+        .tasks
+        .iter()
+        .filter(|t| {
+            t.status == Status::Queued || t.status == Status::Active
+        })
+        .collect();
+    for i in 0..conflicting.len() {
+        for j in (i + 1)..conflicting.len() {
+            let a = conflicting[i];
+            let b = conflicting[j];
+            if crate::core::identity::canonical(&a.agent) == crate::core::identity::canonical(&b.agent) {
+                continue;
+            }
+            for za in &a.zones {
+                for zb in &b.zones {
+                    if zones_overlap(za, zb) {
+                        warns.push(format!(
+                            "пересечение зон {za}: {} ({}) и {} ({}) — возможна двойная работа",
+                            a.id, a.status.label(), b.id, b.status.label()
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    // 5d. merge_state ошибка без merge-SHA (T-313).
+    for a in reg.agents.iter() {
+        let state = a.merge_state.as_deref().unwrap_or("");
+        if state.contains("ошибка") || state.contains("грязн") {
+            if a.merged_sha.is_none() {
+                warns.push(format!(
+                    "{}: merge_state={} без merge-SHA — слияние не завершено",
+                    crate::core::identity::canonical(&a.name),
+                    if state.is_empty() { "нет" } else { state }
+                ));
+            }
+        }
+    }
+    // 5e. Грязные worktree'и агентов — незакоммиченные изменения.
+    for a in reg.agents.iter().filter(|a| a.worktree.is_some()) {
+        if let Some(wt) = &a.worktree {
+            let dirty = Command::new("git")
+                .arg("status")
+                .arg("--porcelain")
+                .current_dir(wt)
+                .output()
+                .map(|o| {
+                    String::from_utf8_lossy(&o.stdout)
+                        .lines()
+                        .filter(|l| !l.is_empty())
+                        .count()
+                })
+                .unwrap_or(0);
+            if dirty > 0 {
+                warns.push(format!(
+                    "{}: worktree {} грязный ({} незакоммиченных изменений)",
+                    crate::core::identity::canonical(&a.name),
+                    wt,
+                    dirty
+                ));
+            }
         }
     }
     // 6. Просроченные письма без ответа (T-271).
