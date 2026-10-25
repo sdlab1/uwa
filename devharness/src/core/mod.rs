@@ -84,6 +84,7 @@ pub mod tripwire;
 pub mod tui;
 pub mod types;
 pub mod untracked_work;
+pub mod unsaved_watch;
 pub mod watch;
 pub mod weaken;
 pub mod worktree_escape;
