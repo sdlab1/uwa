@@ -1215,6 +1215,22 @@ fn close(root: &Path, args: &[String], status: Status) -> anyhow::Result<()> {
             record_merge(&mut merged, &agent, &out);
             // SHA коммита в main — для сданной задачи (след в реестре).
             mark_main_sha(&mut merged, &id, out.sha.as_deref());
+            // Также помечаем все остальные done-задачи этого агента,
+            // чей коммит попал в main в этом batch-слиянии.
+            let canon_agent = crate::core::identity::canonical(&agent);
+            let sibling_ids: Vec<String> = merged
+                .tasks
+                .iter()
+                .filter(|t| {
+                    t.status == Status::Done
+                        && crate::core::identity::canonical(&t.agent) == canon_agent
+                        && t.main_sha.is_none()
+                })
+                .map(|t| t.id.clone())
+                .collect();
+            for tid in sibling_ids {
+                mark_main_sha(&mut merged, &tid, out.sha.as_deref());
+            }
             let _ = save(root, &merged);
             println!("devh orch: автослияние {agent}: {} — {}", out.state, out.detail);
             notify_merge(&agent, &id, &out);
@@ -3570,7 +3586,7 @@ fn validate_commit_sha(tree: &Path, sha: &str, agent: &str, reg: &Registry) -> a
     // Ветка берётся ИЗ РЕЕСТРА (переданного reg), а не из worktree агента:
     // в worktree реестра нет, и старая проверка молча пропускала ЛЮБОЙ SHA
     // (fail-open — ровно тот баг, который чинит T-210).
-    let canon_agent = crate::core::identity::canonical(agent);
+    let canon_agent = crate::core::identity::canonical(&agent);
     let agent_state = reg
         .agents
         .iter()
@@ -5468,6 +5484,68 @@ mod tests {
         assert_eq!(reg.tasks[0].main_sha.as_deref(), Some("bbb"));
         mark_main_sha(&mut reg, "T-1", None);
         assert_eq!(reg.tasks[0].main_sha.as_deref(), Some("bbb"));
+    }
+
+    /// T-280: при сдаче задачи через `done`, все sibling done-задачи того же агента
+    /// должны получить main_sha (их коммит попал в main в одном batch-слиянии).
+    #[test]
+    fn done_marks_sibling_tasks_with_main_sha() {
+        let (_d, root, wt) = agent_wt_fixture();
+        let mut reg = reg_with_agent("beam", &wt);
+        // Две задачи от одного агента — обе Done, обе без main_sha.
+        for id in ["T-sib1", "T-sib2"] {
+            reg.tasks.push(Task {
+                id: id.into(),
+                agent: "beam".into(),
+                title: "t".into(),
+                complexity: 1,
+                c_level: None,
+                model: None,
+                model_source: None,
+                started_by: None,
+                started_at: None,
+                status: Status::Done,
+                zones: vec![],
+                fail_level: Some(0),
+                note: String::new(),
+                created: 1,
+                updated: 1,
+                dod: vec![],
+                checks: vec![],
+                acked: vec![],
+                evidence: vec![],
+                commit_sha: Some("aaa".into()),
+                main_sha: None,
+                override_reason: None,
+            });
+        }
+        // Симулируем: auto_merge succeeded → mark_main_sha для всех Done задач агента.
+        let out = auto_merge_agent(&root, &reg, "beam", "T-sib1").expect("merge");
+        let mut merged = reg.clone();
+        let canon_agent = crate::core::identity::canonical("beam");
+        let sibling_ids: Vec<String> = merged
+            .tasks
+            .iter()
+            .filter(|t| {
+                t.status == Status::Done
+                    && crate::core::identity::canonical(&t.agent) == canon_agent
+                    && t.main_sha.is_none()
+            })
+            .map(|t| t.id.clone())
+            .collect();
+        for tid in sibling_ids {
+            mark_main_sha(&mut merged, &tid, out.sha.as_deref());
+        }
+        save(&root, &merged).expect("save");
+        // Обе задачи теперь имеют main_sha = SHA слияния.
+        for id in ["T-sib1", "T-sib2"] {
+            let t = merged.tasks.iter().find(|t| t.id == id).expect("task");
+            assert_eq!(
+                t.main_sha.as_deref(),
+                out.sha.as_deref().map(str::trim),
+                "main_sha должен быть установлен для {id}"
+            );
+        }
     }
 
     #[test]
