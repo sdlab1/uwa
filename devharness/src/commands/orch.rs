@@ -730,9 +730,10 @@ fn model_key(model: &str) -> String {
 
 /// Модель агента из реестра оркестратора.
 fn registry_model(reg: &Registry, agent: &str) -> Option<String> {
+    let canon = crate::core::identity::canonical(agent);
     reg.agents
         .iter()
-        .find(|a| a.name == agent)
+        .find(|a| crate::core::identity::canonical(&a.name) == canon)
         .and_then(|a| a.model.clone())
 }
 
@@ -784,10 +785,11 @@ fn agent_ceiling(reg: &Registry, agent: &str) -> u8 {
         Some(m) => ceiling_for_model(&m, &model_records(reg)),
         None => crate::core::complexity::ModelCeiling::DEFAULT,
     };
+    let canon = crate::core::identity::canonical(agent);
     let explicit = reg
         .agents
         .iter()
-        .find(|a| a.name == crate::core::identity::canonical(agent))
+        .find(|a| crate::core::identity::canonical(&a.name) == canon)
         .and_then(|a| a.c_ceiling);
     crate::core::tech_lead::effective_ceiling(explicit, base)
 }
