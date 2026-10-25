@@ -1142,24 +1142,29 @@ pub fn salvage(root: &Path, cand: &Candidate) -> anyhow::Result<String> {
     if !crate::shell::git::show_ref(root, &reclaim_branch) {
         // Создаём ветку от текущего HEAD worktree'а.
         let head = crate::shell::git::short_head(wt_path);
-        eprintln!("DEBUG: wt={} head={} branch={}", wt_path.display(), head, reclaim_branch);
         // Попытка 1: создать ветку в worktree.
-        let r1 = git_ok(wt_path, &["checkout", "-b", &reclaim_branch]);
-        eprintln!("DEBUG checkout -b: {}", r1);
-        if !r1 {
+        if !git_ok(wt_path, &["checkout", "-b", &reclaim_branch]) {
             // Попытка 2: создать ветку в main repo.
             if !git_ok(root, &["branch", &reclaim_branch, &head]) {
                 anyhow::bail!("не удалось создать ветку {}", reclaim_branch);
             }
             // Переключить worktree на новую ветку.
             if !git_ok(wt_path, &["checkout", &reclaim_branch]) {
-                anyhow::bail!("не удалось переключить {} на {}", wt_path.display(), reclaim_branch);
+                anyhow::bail!(
+                    "не удалось переключить {} на {}",
+                    wt_path.display(),
+                    reclaim_branch
+                );
             }
         }
     } else {
         // Ветка уже существует — переключаемся.
         if !git_ok(wt_path, &["checkout", &reclaim_branch]) {
-            anyhow::bail!("не удалось переключить {} на {}", wt_path.display(), reclaim_branch);
+            anyhow::bail!(
+                "не удалось переключить {} на {}",
+                wt_path.display(),
+                reclaim_branch
+            );
         }
     }
 
@@ -1934,12 +1939,22 @@ mod tests {
         let wt = d.path().join("wt-abandoned");
         // Create abandoned worktree
         let _ = std::process::Command::new("git")
-            .args(["worktree", "add", "-b", "devh/agent-ghost", &wt.to_string_lossy()])
+            .args([
+                "worktree",
+                "add",
+                "-b",
+                "devh/agent-ghost",
+                &wt.to_string_lossy(),
+            ])
             .current_dir(&root)
             .output();
         // Make it dirty
-        std::fs::write(wt.join("dirty.txt"), "dirty content
-").unwrap();
+        std::fs::write(
+            wt.join("dirty.txt"),
+            "dirty content
+",
+        )
+        .unwrap();
         // Create candidate
         let cand = Candidate {
             kind: CandidateKind::AbandonedWorktree,
@@ -1951,9 +1966,16 @@ mod tests {
         let sha = salvage(&root, &cand).unwrap();
         assert!(!sha.is_empty(), "salvage returns SHA");
         // Check reclaim branch exists
-        assert!(crate::shell::git::show_ref(&root, "devh/reclaim-ghost"), "reclaim branch created");
+        assert!(
+            crate::shell::git::show_ref(&root, "devh/reclaim-ghost"),
+            "reclaim branch created"
+        );
         // Check commit message
-        let out = std::process::Command::new("git").args(["log", "-1", "--format=%s", "devh/reclaim-ghost"]).current_dir(&root).output().unwrap();
+        let out = std::process::Command::new("git")
+            .args(["log", "-1", "--format=%s", "devh/reclaim-ghost"])
+            .current_dir(&root)
+            .output()
+            .unwrap();
         let msg = String::from_utf8_lossy(&out.stdout).to_string();
         assert!(msg.contains("reclaim: ghost"), "commit message: {msg}");
     }
@@ -1964,7 +1986,13 @@ mod tests {
         let root = init_repo(d.path());
         let wt = d.path().join("wt-clean");
         let _ = std::process::Command::new("git")
-            .args(["worktree", "add", "-b", "devh/agent-clean", &wt.to_string_lossy()])
+            .args([
+                "worktree",
+                "add",
+                "-b",
+                "devh/agent-clean",
+                &wt.to_string_lossy(),
+            ])
             .current_dir(&root)
             .output();
         let cand = Candidate {
@@ -1989,7 +2017,13 @@ mod tests {
             .current_dir(&root)
             .output();
         assert!(rescue_ref(&root, "rescue-test", &head), "matching SHA");
-        assert!(!rescue_ref(&root, "rescue-test", "deadbeef"), "non-matching SHA");
-        assert!(!rescue_ref(&root, "nonexistent-branch", &head), "nonexistent branch");
+        assert!(
+            !rescue_ref(&root, "rescue-test", "deadbeef"),
+            "non-matching SHA"
+        );
+        assert!(
+            !rescue_ref(&root, "nonexistent-branch", &head),
+            "nonexistent branch"
+        );
     }
 }
