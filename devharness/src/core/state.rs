@@ -26,6 +26,11 @@ impl Status {
             _ => Status::Open,
         }
     }
+
+    /// Является ли статус «закрытым» (не занимает worktree).
+    pub fn is_done(&self) -> bool {
+        matches!(self, Status::Done)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

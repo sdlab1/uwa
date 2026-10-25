@@ -126,6 +126,10 @@ pub fn ensure(store: &Store, cfg: &RunConfig, id: &ItemId) -> anyhow::Result<(Pa
 /// reuse-путь занят веткой ДРУГОЙ живой задачи: значит кто-то уже гоняет
 /// `devh run` параллельно, и общее дерево стали бы перезаписывать друг друга.
 /// Такая коллизия → этот прогон уходит на per-id путь (изоляция важнее грэпа).
+///
+/// Считаем ветку занятой по любой НЕЗАКРЫТОЙ задаче (queued/active/open),
+/// а не только по Active: иначе два агента получают один worktree
+/// (T-315).
 fn reuse_busy_elsewhere(store: &Store, root: &Path, cfg: &RunConfig, id: &ItemId) -> bool {
     if !cfg.wt_reuse {
         return false;
@@ -141,7 +145,8 @@ fn reuse_busy_elsewhere(store: &Store, root: &Path, cfg: &RunConfig, id: &ItemId
     let Some(other) = ItemId::from_branch(&head) else {
         return false;
     };
-    store.status_of(&other) == Status::Active
+    let status = store.status_of(&other);
+    !status.is_done()
 }
 
 #[cfg(test)]
@@ -255,15 +260,12 @@ mod tests {
     }
 
     #[test]
-    fn reuse_not_busy_when_sibling_done_or_open() {
-        for st in [Status::Done, Status::Open] {
-            let (_d, main, store, cfg) = busy_fixture("devh/W-007", st);
-            assert!(
-                !reuse_busy_elsewhere(&store, &main, &cfg, &ItemId(9)),
-                "{}: неактивная задача не блокирует общий путь",
-                st.as_str()
-            );
-        }
+    fn reuse_not_busy_when_sibling_done() {
+        let (_d, main, store, cfg) = busy_fixture("devh/W-007", Status::Done);
+        assert!(
+            !reuse_busy_elsewhere(&store, &main, &cfg, &ItemId(9)),
+            "Done: закрытая задача не блокирует общий путь"
+        );
     }
 
     #[test]
@@ -283,5 +285,27 @@ mod tests {
             ..cfg
         };
         assert!(!reuse_busy_elsewhere(&store, &main, &cfg, &ItemId(9)));
+    }
+
+    /// T-315: ветка с незакрытой (Open) задачей блокирует reuse.
+    /// Раньше проверка была только == Active → два агента могли получить
+    /// один worktree.
+    #[test]
+    fn reuse_busy_on_open_sibling() {
+        let (_d, main, store, cfg) = busy_fixture("devh/W-007", Status::Open);
+        assert!(
+            reuse_busy_elsewhere(&store, &main, &cfg, &ItemId(9)),
+            "Open задача в чужой ветке блокирует reuse"
+        );
+    }
+
+    /// T-315: Done-задача не блокирует reuse.
+    #[test]
+    fn reuse_free_when_sibling_done() {
+        let (_d, main, store, cfg) = busy_fixture("devh/W-007", Status::Done);
+        assert!(
+            !reuse_busy_elsewhere(&store, &main, &cfg, &ItemId(9)),
+            "Done задача не блокирует reuse"
+        );
     }
 }
