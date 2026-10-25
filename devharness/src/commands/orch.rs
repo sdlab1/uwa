@@ -1615,6 +1615,112 @@ fn mark_main_sha_if_already_in_main(root: &Path, reg: &mut Registry, task_id: &s
     }
 }
 
+/// patch-id коммита (стабильный) — одинаковый патч в разных коммитах имеет
+/// одинаковый patch-id, даже если SHA разные (перенос через sync/cherry-pick).
+fn patch_id_of(root: &Path, sha: &str) -> Option<String> {
+    let script = format!(
+        "git -C '{}' show --format= --no-ext-diff {} | git patch-id --stable",
+        root.display(),
+        sha
+    );
+    let out = std::process::Command::new("sh").arg("-c").arg(script).output().ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    text.split_whitespace()
+        .next()
+        .map(|s| s.to_string())
+        .filter(|s| !s.is_empty() && s.len() == 40)
+}
+
+/// Карта patch-id -> коммит в `main` (один проход по истории).
+fn main_patch_index(root: &Path) -> std::collections::BTreeMap<String, String> {
+    let mut map = std::collections::BTreeMap::new();
+    let script = format!(
+        "git -C '{}' log --format=%H -p --no-merges --no-ext-diff main | git patch-id --stable",
+        root.display()
+    );
+    if let Ok(out) = std::process::Command::new("sh").arg("-c").arg(script).output() {
+        for line in String::from_utf8_lossy(&out.stdout).lines() {
+            let mut it = line.split_whitespace();
+            let (Some(pid), Some(commit)) = (it.next(), it.next()) else {
+                continue;
+            };
+            map.entry(pid.to_string()).or_insert_with(|| commit.to_string());
+        }
+    }
+    map
+}
+
+/// Файлы, изменённые коммитом агента.
+fn changed_paths(root: &Path, sha: &str) -> Vec<String> {
+    let script = format!(
+        "git -C '{}' diff --name-only {}^ {}",
+        root.display(),
+        sha,
+        sha
+    );
+    std::process::Command::new("sh")
+        .arg("-c")
+        .arg(script)
+        .output()
+        .ok()
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Содержимое файлов коммита агента совпадает с содержимым в `main`?
+fn content_matches_main(root: &Path, sha: &str, paths: &[String]) -> bool {
+    if paths.is_empty() {
+        return false;
+    }
+    let joined = paths
+        .iter()
+        .map(|p| format!("'{}'", p.replace('\'', "'\\''")))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let script = format!(
+        "git -C '{}' diff --quiet {} main -- {}",
+        root.display(),
+        sha,
+        joined
+    );
+    std::process::Command::new("sh")
+        .arg("-c")
+        .arg(script)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Последний коммит `main`, трогавший эти файлы (точка приземления работы).
+fn last_touching_commit(root: &Path, paths: &[String]) -> Option<String> {
+    if paths.is_empty() {
+        return None;
+    }
+    let joined = paths
+        .iter()
+        .map(|p| format!("'{}'", p.replace('\'', "'\\''")))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let script = format!(
+        "git -C '{}' log -1 --format=%H main -- {}",
+        root.display(),
+        joined
+    );
+    let out = std::process::Command::new("sh").arg("-c").arg(script).output().ok()?;
+    let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
+}
+
 /// `devh orch backfill-sha [--dry-run]` — проставить `main_sha` сданным
 /// задачам, чей `commit_sha` уже в `main` (след в реестре без слияния).
 fn backfill_sha(root: &Path, args: &[String]) -> anyhow::Result<()> {
@@ -1629,8 +1735,13 @@ fn backfill_sha(root: &Path, args: &[String]) -> anyhow::Result<()> {
         .map(|t| t.id.clone())
         .collect();
     let mut fixed: Vec<String> = Vec::new();
+    let mut relanded: Vec<String> = Vec::new();
     let mut no_commit: Vec<String> = Vec::new();
     let mut not_in_main: Vec<String> = Vec::new();
+    let main_root = orch_root(root);
+    // Индекс patch-id главной ветки: тот же патч под другим SHA (перенос
+    // через sync/cherry-pick) — это тоже «работа в main».
+    let patch_index = main_patch_index(&main_root);
     for id in &ids {
         let sha = reg
             .tasks
@@ -1638,27 +1749,59 @@ fn backfill_sha(root: &Path, args: &[String]) -> anyhow::Result<()> {
             .find(|t| &t.id == id)
             .and_then(|t| t.commit_sha.clone())
             .filter(|s| !s.trim().is_empty());
-        let Some(_sha) = sha else {
+        let Some(sha) = sha else {
             no_commit.push(id.clone());
             continue;
         };
         if mark_main_sha_if_already_in_main(root, &mut reg, id) {
             fixed.push(id.clone());
-        } else {
-            not_in_main.push(id.clone());
+            continue;
         }
+        // Коммита агента в main нет — ищем ТОТ ЖЕ патч в main (перенос).
+        if let Some(pid) = patch_id_of(&main_root, &sha) {
+            if let Some(main_commit) = patch_index.get(&pid) {
+                if let Some(idx) = find_task_index(&mut reg, id) {
+                    if let Some(t) = reg.tasks.get_mut(idx) {
+                        t.main_sha = Some(main_commit.clone());
+                    }
+                }
+                relanded.push(id.clone());
+                continue;
+            }
+        }
+        // Патч перенесён в другой коммит (sync/cherry-pick с разными файлами):
+        // ищем точку приземления по СОДЕРЖИМОМУ файлов работы.
+        let paths = changed_paths(&main_root, &sha);
+        if content_matches_main(&main_root, &sha, &paths) {
+            if let Some(main_commit) = last_touching_commit(&main_root, &paths) {
+                if let Some(idx) = find_task_index(&mut reg, id) {
+                    if let Some(t) = reg.tasks.get_mut(idx) {
+                        t.main_sha = Some(main_commit.clone());
+                    }
+                }
+                relanded.push(id.clone());
+                continue;
+            }
+        }
+        not_in_main.push(id.clone());
     }
-    if !dry && !fixed.is_empty() {
+    if !dry && (!fixed.is_empty() || !relanded.is_empty()) {
         save(root, &reg)?;
     }
     println!(
-        "devh orch backfill-sha: проставлено main_sha: {}{}; без commit_sha (legacy): {}; \
-         коммит не в main: {}",
+        "devh orch backfill-sha: проставлено main_sha: {}{}; тот же патч в main (другой SHA): {}{}; \
+         без commit_sha (legacy): {}; коммит не в main: {}",
         fixed.len(),
         if fixed.is_empty() {
             String::new()
         } else {
             format!(" ({})", fixed.join(", "))
+        },
+        relanded.len(),
+        if relanded.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", relanded.join(", "))
         },
         no_commit.len(),
         not_in_main.len()
