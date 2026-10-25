@@ -34,7 +34,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
 
-const SEP: &str =
+pub const SEP: &str =
     "================================================================================";
 const NOTIFY_TIMEOUT_MS: u64 = 20_000;
 const DEDUPE_PATH: &str = "/tmp/messages.notified";
@@ -444,7 +444,7 @@ fn outbox_path(agent: &str) -> PathBuf {
 
 /// Имя агента → безопасное имя файла (без разделителей пути).
 /// Единая точка правды: `shell::msg_path_guard` (T-111).
-fn safe_name(agent: &str) -> String {
+pub fn safe_name(agent: &str) -> String {
     crate::shell::msg_path_guard::safe_agent(agent)
 }
 
@@ -1651,13 +1651,17 @@ pub fn send(args: &[String]) -> i32 {
             // Закрепить имя за текущей сессией: дальше devh сам знает, кто я.
             let raw = m.first();
             if raw.is_empty() {
-                eprintln!("нужно имя: devh msg claim <имя>");
+                eprintln!("нужно имя: devh msg claim <имя> [--takeover]");
                 return 1;
             }
-            match crate::core::identity::claim(&raw) {
+            let takeover = m.flag("takeover");
+            match crate::core::identity::claim(&raw, takeover) {
                 Ok(id) => {
                     println!("идентификация закреплена: {}", id.name);
                     println!("ключ сессии: {}", id.key);
+                    if takeover {
+                        println!("⚠ Использован флаг --takeover (авторизация ведущим)");
+                    }
                     // Мини-описание сразу после claim: агент отвечает на вопрос
                     // «какая ты модель / что у тебя в system prompt» (может быть
                     // приблизительно — но работает в большинстве случаев).
@@ -1667,6 +1671,63 @@ pub fn send(args: &[String]) -> i32 {
                 }
                 Err(e) => {
                     eprintln!("devh msg claim: {e}");
+                    1
+                }
+            }
+        }
+        "claim-authorize" => {
+            // Авторизовать takeover имени ведущим: devh msg claim-authorize <имя> --for <ключ>
+            let raw = m.first();
+            if raw.is_empty() {
+                eprintln!("нужно имя: devh msg claim-authorize <имя> --for <ключ>");
+                return 1;
+            }
+            let for_key = m.value("for");
+            if for_key.is_none() {
+                eprintln!("нужен ключ сессии: --for <ключ>");
+                return 1;
+            }
+            // Проверка: вызывающий должен быть ведущим (lead).
+            let caller = crate::core::identity::current().name;
+            let canon_caller = crate::core::identity::canonical(&caller);
+            let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            // Ищем .harness/orch/registry.json от текущей директории вверх.
+            let mut harness_path: Option<PathBuf> = None;
+            let mut cur = root.clone();
+            loop {
+                let candidate = cur.join(".harness/orch/registry.json");
+                if candidate.exists() {
+                    harness_path = Some(cur.clone());
+                    break;
+                }
+                if !cur.pop() {
+                    break;
+                }
+            }
+            if let Some(repo_root) = harness_path {
+                let reg = crate::commands::orch::load(&repo_root);
+                let (lead, _) = crate::commands::orch::lead_of(&reg);
+                if let Some(lead_addr) = lead {
+                    let canon_lead = crate::core::identity::canonical(&lead_addr);
+                    if canon_caller != canon_lead {
+                        eprintln!("devh msg claim-authorize: только ведущий ({}) может авторизовать takeover", canon_lead);
+                        return 1;
+                    }
+                } else {
+                    eprintln!("devh msg claim-authorize: ведущий не назначен (devh orch lead --set <адрес>)");
+                    return 1;
+                }
+            } else {
+                eprintln!("devh msg claim-authorize: не найден .harness/orch/registry.json (не в репозитории devh)");
+                return 1;
+            }
+            match crate::core::identity::authorize_takeover(&raw, &for_key.as_ref().unwrap()) {
+                Ok(_) => {
+                    println!("takeover авторизован для {} (ключ: {})", raw, for_key.as_ref().unwrap());
+                    0
+                }
+                Err(e) => {
+                    eprintln!("devh msg claim-authorize: {e}");
                     1
                 }
             }

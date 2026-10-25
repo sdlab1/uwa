@@ -301,7 +301,7 @@ fn resolve_union_mod_list(path: &Path, file: &str) -> anyhow::Result<()> {
 ///    файлы (devharness/tests/orch_roles.rs был снесён именно так).
 ///    Работа не теряется: она лежит в ветке `devh/wip-<агент>`.
 /// 3. Порядок — от старых к новым (как при cherry-pick).
-fn transfer_commits(
+pub fn transfer_commits(
     main_root: &Path,
     main_branch: &str,
     branch: &str,
@@ -792,7 +792,7 @@ pub enum MergeAction {
 }
 
 impl MergeAction {
-    pub fn label(self) -> &'static str {
+    pub fn label(&self) -> &'static str {
         match self {
             MergeAction::Merged => "влито",
             MergeAction::Nothing => "нечего вливать",

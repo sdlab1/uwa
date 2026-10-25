@@ -29,6 +29,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
 
+use crate::shell::msg_path_guard::safe_agent as safe_name;
+
 /// Блокировка read-modify-write aliases.json (in-process + cross-process).
 static ALIAS_WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -956,7 +958,11 @@ pub fn current() -> Identity {
 }
 
 /// Закрепить своё имя за текущей сессией (перекрывает `DEVH_AGENT`).
-pub fn claim(raw: &str) -> Result<Identity, String> {
+///
+/// Если `takeover=true`, проверяется авторизация ведущим (файл takeover-авторизации).
+/// Это позволяет безопасно вернуть канон после рестарта рантайма, когда сессионный
+/// ключ изменился, но ведущий явно разрешил возврат имени.
+pub fn claim(raw: &str, takeover: bool) -> Result<Identity, String> {
     let name = sanitize_name(raw)?;
     let canon = canonical(&name);
     if canon != name {
@@ -966,7 +972,7 @@ pub fn claim(raw: &str) -> Result<Identity, String> {
     }
     let (key, label) = context();
     let home = msg_home();
-    // Проверка: имя уже закреплено другим ключом?
+    // Проверка: имя уже закреплено этим же ключом?
     if let Some(existing) = read_binding_in(&home, &key) {
         if existing.claimed && existing.name == name {
             // Тот же ключ закрепляет то же имя — идемпотентно.
@@ -978,9 +984,22 @@ pub fn claim(raw: &str) -> Result<Identity, String> {
     // Проверка: имя уже закреплено ЧУЖИМ ключом?
     if let Some((existing_key, _existing_binding)) = claimed_binding_for_name(&home, &name) {
         if existing_key != key {
-            return Err(format!(
-                "имя «{name}» уже закреплено другим агентом (ключ {existing_key});                  используй другое имя или добавь синоним: devh msg alias {name} <другой>"
-            ));
+            if takeover {
+                // Проверяем авторизацию ведущим для этого takeover.
+                if !check_takeover_authorization(&home, &name, &key)? {
+                    return Err(format!(
+                        "имя «{name}» уже закреплено другим агентом (ключ {existing_key}); \
+                        для takeover нужна авторизация ведущим: devh msg claim-authorize {name} --for {key}"
+                    ));
+                }
+                // Авторизация есть — продолжаем.
+            } else {
+                return Err(format!(
+                    "имя «{name}» уже закреплено другим агентом (ключ {existing_key}); \
+                    используй другое имя или добавь синоним: devh msg alias {name} <другой> \
+                    (или --takeover с авторизацией ведущим)"
+                ));
+            }
         }
     }
     write_binding_in(&home, &key, &name, &label, true)
@@ -1058,6 +1077,77 @@ fn claim_takeover_with_home(
     auto_register_alias(name);
 
     Ok(finish(name.to_string(), Source::Stored, key.to_string(), false))
+}
+
+/// Путь к файлу авторизации takeover'а.
+fn takeover_auth_path(home: &Path, name: &str) -> PathBuf {
+    home.join("takeover").join(format!("{}.auth", safe_name(name)))
+}
+
+/// Проверить авторизацию takeover'а ведущим.
+///
+/// Авторизация — это файл в `$DEVH_MSG_HOME/takeover/<name>.auth`,
+/// содержащий JSON с полями:
+///   - "for_key": ключ сессии, которому разрешён takeover
+///   - "authorized_by": имя ведущего (каноническое)
+///   - "authorized_at": unix timestamp
+///
+/// Файл создаётся командой `devh msg claim-authorize` (только ведущий).
+fn check_takeover_authorization(home: &Path, name: &str, for_key: &str) -> Result<bool, String> {
+    let path = takeover_auth_path(home, name);
+    if !path.exists() {
+        return Ok(false);
+    }
+    let text = fs::read_to_string(&path).map_err(|e| format!("не прочитать авторизацию: {e}"))?;
+    let value: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("не разобрать авторизацию: {e}"))?;
+    let auth_for_key = value.get("for_key").and_then(|v| v.as_str()).unwrap_or("");
+    let authorized_by = value.get("authorized_by").and_then(|v| v.as_str()).unwrap_or("");
+    let authorized_at = value.get("authorized_at").and_then(|v| v.as_u64()).unwrap_or(0);
+    // Проверяем, что авторизация для нашего ключа.
+    if auth_for_key != for_key {
+        return Ok(false);
+    }
+    // Проверяем, что авторизовал ведущий (опционально: можно проверить через реестр).
+    // Для простоты доверяем файлу, так как он в защищённом каталоге.
+    // TTL: авторизация действительна 24 часа.
+    let now = unix_now();
+    if now.saturating_sub(authorized_at) > 24 * 3600 {
+        // Авторизация просрочена — удаляем файл.
+        let _ = fs::remove_file(&path);
+        return Ok(false);
+    }
+    if authorized_by.is_empty() {
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+/// Авторизовать takeover имени ведущим.
+///
+/// Создаёт файл авторизации в `$DEVH_MSG_HOME/takeover/<name>.auth`.
+/// Вызывается командой `devh msg claim-authorize <name> --for <key>`.
+/// Проверка, что вызывающий — ведущий, делается на уровне команды (orch.rs).
+pub fn authorize_takeover(name: &str, for_key: &str) -> Result<(), String> {
+    let home = msg_home();
+    let path = takeover_auth_path(&home, name);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("не создать каталог takeover: {e}"))?;
+    }
+    // Получаем имя ведущего из реестра (если доступно).
+    // Для простоты используем "lead" — проверка вызывающего делается в команде.
+    let authorized_by = "lead";
+    let body = serde_json::json!({
+        "for_key": for_key,
+        "authorized_by": authorized_by,
+        "authorized_at": unix_now(),
+    });
+    let tmp = path.with_extension("auth.tmp");
+    fs::write(
+        &tmp,
+        serde_json::to_string_pretty(&body).unwrap_or_default(),
+    ).map_err(|e| format!("не записать авторизацию: {e}"))?;
+    fs::rename(&tmp, &path).map_err(|e| format!("не переименовать авторизацию: {e}"))?;
+    Ok(())
 }
 
 /// claim для тестов с явным home и key.

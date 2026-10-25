@@ -36,6 +36,7 @@ pub mod kani_targets;
 pub mod killmap;
 pub mod ledger;
 pub mod load;
+pub mod merge_report;
 pub mod modelrank;
 pub mod mutate_cache;
 pub mod mutate_outcomes;
