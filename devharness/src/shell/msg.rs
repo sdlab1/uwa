@@ -39,7 +39,7 @@ pub const SEP: &str =
 const NOTIFY_TIMEOUT_MS: u64 = 20_000;
 const DEDUPE_PATH: &str = "/tmp/messages.notified";
 
-fn home() -> PathBuf {
+pub fn home() -> PathBuf {
     match std::env::var("DEVH_MSG_HOME") {
         Ok(v) if !v.is_empty() => PathBuf::from(v),
         _ => PathBuf::from("/tmp/devh-msg"),

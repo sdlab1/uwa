@@ -1317,7 +1317,7 @@ fn auto_merge_agent(root: &Path, reg: &Registry, agent: &str, task_id: &str) -> 
                     &main_root, &main_branch, &branch, &canon
                 ) {
                     let _ = crate::core::merge_report::send_merge_report(
-                        &crate::core::identity::msg_home(),
+                        &crate::shell::msg::home(),
                         &canon,
                         &report,
                     );
