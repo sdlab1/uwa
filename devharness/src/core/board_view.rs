@@ -27,6 +27,10 @@ pub struct BoardTask {
     pub complexity: u8,
     pub status: TaskStatus,
     pub zone: String,
+    /// SHA в `main`, куда попала работа (записывается при слиянии).
+    pub main_sha: Option<String>,
+    /// Причина обхода DoD ведущим (подавляет warning о missing main_sha).
+    pub override_reason: Option<String>,
 }
 
 /// Статус задачи на доске.
@@ -90,11 +94,38 @@ pub fn check_agent_queues(board: &BoardView) -> Vec<BoardWarning> {
     warnings
 }
 
+/// Проверить: задачи Done обязаны иметь main_sha или явную причину обхода.
+pub fn check_done_tasks_have_main_sha(board: &BoardView) -> Vec<BoardWarning> {
+    let mut warnings = Vec::new();
+    for task in board
+        .leader_buffer
+        .iter()
+        .chain(board.in_progress.iter())
+        .chain(board.agent_queues.values().flat_map(|q| q.tasks.iter()))
+    {
+        if task.status == TaskStatus::Done
+            && task.main_sha.is_none()
+            && task.override_reason.is_none()
+        {
+            warnings.push(BoardWarning {
+                agent: task.agent.clone(),
+                message: format!(
+                    "{}: задача Done без main_sha и без override_reason — слияние не зафиксировано",
+                    task.id
+                ),
+                severity: WarningSeverity::Warning,
+            });
+        }
+    }
+    warnings
+}
+
 /// Собрать все предупреждения доски.
 pub fn collect_warnings(board: &BoardView) -> Vec<BoardWarning> {
     let mut warnings = Vec::new();
     warnings.extend(check_lead_buffer(board));
     warnings.extend(check_agent_queues(board));
+    warnings.extend(check_done_tasks_have_main_sha(board));
     warnings.extend(board.warnings.clone());
     warnings
 }
@@ -111,6 +142,8 @@ mod tests {
             complexity: 0,
             status,
             zone: "core/test".to_string(),
+            main_sha: None,
+            override_reason: None,
         }
     }
 
@@ -172,5 +205,61 @@ mod tests {
     fn warning_severity_order() {
         assert!(WarningSeverity::Critical > WarningSeverity::Warning);
         assert!(WarningSeverity::Warning > WarningSeverity::Info);
+    }
+
+    #[test]
+    fn done_task_without_main_sha_warns() {
+        let mut board = BoardView::default();
+        let mut t = sample_task("T-001", "beam", TaskStatus::Done);
+        t.main_sha = None;
+        t.override_reason = None;
+        board.in_progress.push(t);
+        let warnings = check_done_tasks_have_main_sha(&board);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].message.contains("T-001"));
+        assert_eq!(warnings[0].severity, WarningSeverity::Warning);
+    }
+
+    #[test]
+    fn done_task_with_main_sha_no_warning() {
+        let mut board = BoardView::default();
+        let mut t = sample_task("T-001", "beam", TaskStatus::Done);
+        t.main_sha = Some("abc123".into());
+        board.in_progress.push(t);
+        let warnings = check_done_tasks_have_main_sha(&board);
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn done_task_with_override_reason_no_warning() {
+        let mut board = BoardView::default();
+        let mut t = sample_task("T-001", "beam", TaskStatus::Done);
+        t.main_sha = None;
+        t.override_reason = Some("manual merge".into());
+        board.in_progress.push(t);
+        let warnings = check_done_tasks_have_main_sha(&board);
+        assert!(warnings.is_empty(), "override_reason подавляет warning: {warnings:?}");
+    }
+
+    #[test]
+    fn non_done_task_no_warning_for_missing_sha() {
+        let mut board = BoardView::default();
+        let t = sample_task("T-001", "beam", TaskStatus::Queued);
+        board.in_progress.push(t);
+        let warnings = check_done_tasks_have_main_sha(&board);
+        assert!(warnings.is_empty(), "non-Done task не должен давать warning");
+    }
+
+    #[test]
+    fn multiple_done_tasks_all_warned() {
+        let mut board = BoardView::default();
+        let t1 = sample_task("T-001", "beam", TaskStatus::Done);
+        let mut t2 = sample_task("T-002", "beam2", TaskStatus::Done);
+        t2.main_sha = Some("deadbee".into());
+        board.in_progress.push(t1);
+        board.in_progress.push(t2);
+        let warnings = check_done_tasks_have_main_sha(&board);
+        assert_eq!(warnings.len(), 1, "только T-001 без sha: {warnings:?}");
+        assert!(warnings[0].message.contains("T-001"));
     }
 }
