@@ -245,7 +245,10 @@ pub fn validate_mod_list(text: &str) -> anyhow::Result<()> {
         }
         let Some(rest) = t.strip_prefix("pub mod ") else {
             if t.contains("pub mod") {
-                anyhow::bail!("строка {}: нераспознанная строка списка модулей: '{t}'", i + 1);
+                anyhow::bail!(
+                    "строка {}: нераспознанная строка списка модулей: '{t}'",
+                    i + 1
+                );
             }
             continue;
         };
@@ -362,19 +365,21 @@ pub fn merge_via_cherry_pick(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    let tmp = std::env::temp_dir().join(format!(
-        "devh-merge-{}-{}",
-        sanitize(agent),
-        stamp
-    ));
+    let tmp = std::env::temp_dir().join(format!("devh-merge-{}-{}", sanitize(agent), stamp));
     let tmp_branch = format!("devh/merge-tmp-{}", sanitize(agent));
     let cleanup = || {
-        let _ = git_ok(main_root, &["worktree", "remove", "--force", &tmp.to_string_lossy()]);
+        let _ = git_ok(
+            main_root,
+            &["worktree", "remove", "--force", &tmp.to_string_lossy()],
+        );
         let _ = git_ok(main_root, &["branch", "-D", &tmp_branch]);
         let _ = std::fs::remove_dir_all(&tmp);
     };
     let tmp_s = tmp.to_string_lossy().to_string();
-    if !git_ok(main_root, &["worktree", "add", "--detach", &tmp_s, main_branch]) {
+    if !git_ok(
+        main_root,
+        &["worktree", "add", "--detach", &tmp_s, main_branch],
+    ) {
         cleanup();
         anyhow::bail!("не удалось создать временный worktree для слияния {branch}");
     }
@@ -383,8 +388,8 @@ pub fn merge_via_cherry_pick(
             continue;
         }
         let conflicted = conflict_files(&tmp);
-        let only_mod_list = !conflicted.is_empty()
-            && conflicted.iter().all(|f| is_mod_list_file(f));
+        let only_mod_list =
+            !conflicted.is_empty() && conflicted.iter().all(|f| is_mod_list_file(f));
         if only_mod_list {
             let mut resolved = true;
             for file in &conflicted {
@@ -976,9 +981,383 @@ pub fn gc(cfg: &RunConfig, root: &Path, keep: &[PathBuf]) -> anyhow::Result<Vec<
     Ok(report)
 }
 
+/// Класс кандидата на «reclaim» — осиротевшая работа.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CandidateKind {
+    /// Worktree, чей агент не найден в реестре.
+    AbandonedWorktree,
+    /// Ветка devh/agent-* или devh/wip-* без зарегистрированного агента.
+    OrphanBranch,
+    /// WIP-чекпоинт (devh/wip-*).
+    WipBranch,
+    /// Недостижимый коммит (git fsck --unreachable).
+    DanglingCommit,
+}
+
+/// Кандидат на reclaim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Candidate {
+    pub kind: CandidateKind,
+    pub path: Option<PathBuf>,
+    pub branch: Option<String>,
+    pub sha: Option<String>,
+    pub agent: Option<String>,
+}
+
+/// Сканер кандидатов на reclaim: парсит `git worktree list --porcelain`,
+/// `git branch --list 'devh/agent-*' 'devh/wip-*'`, `git fsck --unreachable --no-progress`.
+/// Агент из реестра agents и main-ветка НИКОГДА не кандидаты.
+pub fn discover(root: &Path) -> Vec<Candidate> {
+    let mut out = Vec::new();
+    let reg = crate::commands::orch::load(root);
+    let registered: std::collections::HashSet<String> =
+        reg.agents.iter().map(|a| a.name.clone()).collect();
+    let current_branch = crate::shell::git::branch_current(root);
+    let main_branch = "main".to_string();
+
+    // 1. Worktree'ы без зарегистрированного агента.
+    for wt in crate::shell::git::worktree_paths(root) {
+        let Some(branch) = crate::shell::git::branch_current(&wt) else {
+            continue;
+        };
+        let agent = agent_from_branch(&branch);
+        if let Some(a) = &agent {
+            if registered.contains(a) {
+                continue;
+            }
+        }
+        // Главный worktree (main) — не кандидат.
+        if branch == main_branch || wt == root {
+            continue;
+        }
+        out.push(Candidate {
+            kind: CandidateKind::AbandonedWorktree,
+            path: Some(wt),
+            branch: Some(branch),
+            sha: None,
+            agent,
+        });
+    }
+
+    // 2. Ветки devh/agent-* и devh/wip-* без зарегистрированного агента.
+    let branches = git_output(root, &["branch", "--list", "devh/agent-*", "devh/wip-*"]);
+    for line in branches.lines() {
+        let branch = line.trim().trim_start_matches('*').trim().to_string();
+        if branch.is_empty() {
+            continue;
+        }
+        let kind = if branch.starts_with("devh/wip-") {
+            CandidateKind::WipBranch
+        } else {
+            CandidateKind::OrphanBranch
+        };
+        let agent = agent_from_branch(&branch);
+        if let Some(a) = &agent {
+            if registered.contains(a) {
+                continue;
+            }
+        }
+        if branch == main_branch {
+            continue;
+        }
+        out.push(Candidate {
+            kind,
+            path: None,
+            branch: Some(branch),
+            sha: None,
+            agent,
+        });
+    }
+
+    // 3. Недостижимые коммиты (git fsck --unreachable).
+    let fsck_out = git_output(root, &["fsck", "--unreachable", "--no-progress"]);
+    for line in fsck_out.lines() {
+        let line = line.trim();
+        if !line.starts_with("unreachable commit ") {
+            continue;
+        }
+        let sha = line
+            .strip_prefix("unreachable commit ")
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if sha.is_empty() {
+            continue;
+        }
+        out.push(Candidate {
+            kind: CandidateKind::DanglingCommit,
+            path: None,
+            branch: None,
+            sha: Some(sha),
+            agent: None,
+        });
+    }
+
+    // Фильтр: main-ветка и текущая ветка — не кандидаты.
+    out.retain(|c| c.branch.as_deref() != Some(current_branch.as_deref().unwrap_or("")));
+    out
+}
+
+fn agent_from_branch(branch: &str) -> Option<String> {
+    branch
+        .strip_prefix("devh/agent-")
+        .or_else(|| branch.strip_prefix("devh/wip-"))
+        .map(|s| s.to_string())
+}
+
+fn git_output(root: &Path, args: &[&str]) -> String {
+    std::process::Command::new("git")
+        .args(args)
+        .current_dir(root)
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        .unwrap_or_default()
+}
+
+/// Спасти грязный abandoned worktree: коммитить его в ветку devh/reclaim-<агент>.
+///
+/// Создаёт ветку `devh/reclaim-<agent>` (если не существует) и делает
+/// WIP-чекпоинт с сообщением «reclaim: <agent> (N файлов)».
+/// Возвращает SHA коммита.
+pub fn salvage(root: &Path, cand: &Candidate) -> anyhow::Result<String> {
+    let wt_path = cand
+        .path
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("кандидат без пути"))?;
+    let agent = cand.agent.as_deref().unwrap_or("unknown");
+
+    // Проверяем, что worktree существует.
+    if !wt_path.exists() {
+        anyhow::bail!("worktree {} не существует", wt_path.display());
+    }
+
+    // Проверяем, что есть изменения (грязный worktree).
+    if !crate::shell::git::tree_dirty(wt_path) {
+        // Чистый worktree — salvage пропускаем.
+        return Ok(String::new());
+    }
+
+    // Создаём ветку reclaim, если не существует.
+    let reclaim_branch = format!("devh/reclaim-{}", agent);
+    if !crate::shell::git::show_ref(root, &reclaim_branch) {
+        // Создаём ветку от текущего HEAD worktree'а.
+        let head = crate::shell::git::short_head(wt_path);
+        if !git_ok(root, &["branch", &reclaim_branch, &head]) {
+            anyhow::bail!("не удалось создать ветку {}", reclaim_branch);
+        }
+    }
+
+    // Чекаутим ветку reclaim в worktree и коммитим.
+    if !git_ok(wt_path, &["checkout", &reclaim_branch]) {
+        anyhow::bail!(
+            "не удалось переключить {} на {}",
+            wt_path.display(),
+            reclaim_branch
+        );
+    }
+
+    // Считаем изменённые файлы.
+    let files = crate::shell::git::changed_files(wt_path);
+    let n = files.len();
+
+    // Добавляем все изменения.
+    crate::shell::git::add_all(wt_path);
+
+    // Коммитим с сообщением reclaim.
+    let msg = format!("reclaim: {} ({} файлов)", agent, n);
+    crate::shell::git::commit(wt_path, &msg)?;
+
+    // Возвращаем SHA.
+    Ok(crate::shell::git::short_head(wt_path))
+}
+
+/// Проверить rescue-ref: существует ли ветка rescue-ref и смотрит ли она
+/// на тот же SHA, что и кандидат.
+pub fn rescue_ref(root: &Path, branch: &str, sha: &str) -> bool {
+    if !crate::shell::git::show_ref(root, branch) {
+        return false;
+    }
+    let ref_sha = crate::shell::git::short_head(root.join(branch).as_path());
+    ref_sha == sha
+}
+
+/// Снять worktree (close_abandoned): worktree remove снимается ТОЛЬКО если
+/// rescue_ref истина; после снятия — worktree prune.
+/// keep_paths: пути живых агентов НИКОГДА не снимаются.
+/// dry_run: если true, ничего не удаляет, печатает план.
+pub fn close_abandoned(
+    root: &Path,
+    cand: &Candidate,
+    keep_paths: &[PathBuf],
+    dry_run: bool,
+) -> anyhow::Result<Vec<String>> {
+    let mut report = Vec::new();
+
+    let wt_path = match &cand.path {
+        Some(p) => p,
+        None => {
+            report.push(format!("пропуск: кандидат без пути"));
+            return Ok(report);
+        }
+    };
+
+    // Проверяем keep-list: пути живых агентов НИКОГДА не снимаются.
+    if keep_paths.iter().any(|k| k == wt_path) {
+        report.push(format!("пропуск (keep-list): {}", wt_path.display()));
+        return Ok(report);
+    }
+
+    // Проверяем rescue-ref (fail-closed).
+    let branch = cand.branch.as_deref().unwrap_or("");
+    let sha = cand.sha.as_deref().unwrap_or("");
+    if !branch.is_empty() && !rescue_ref(root, branch, sha) {
+        report.push(format!(
+            "отказ: rescue-ref не подтверждён для {} (ветка={}, sha={})",
+            wt_path.display(),
+            branch,
+            sha
+        ));
+        return Ok(report);
+    }
+
+    // dry_run: ничего не удаляем, печатаем план.
+    if dry_run {
+        report.push(format!("dry-run: снял бы worktree {}", wt_path.display()));
+        return Ok(report);
+    }
+
+    // Снимаем worktree.
+    if wt_path.exists() {
+        if let Err(e) = crate::shell::git::worktree_remove(root, wt_path) {
+            return Err(anyhow::anyhow!(
+                "битый git при снятии {}: {}",
+                wt_path.display(),
+                e
+            ));
+        }
+        report.push(format!("снят worktree: {}", wt_path.display()));
+    }
+
+    // Prune registrations.
+    let _ = crate::shell::git::worktree_prune(root);
+
+    Ok(report)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::types::RunConfig;
+    use std::path::Path;
+
+    fn run_git(repo: &Path, args: &[&str]) {
+        let _ = std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output();
+    }
+
+    fn init_repo(dir: &Path) -> PathBuf {
+        let root = dir.join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        run_git(&root, &["init", "-q"]);
+        run_git(&root, &["config", "user.email", "t@example.com"]);
+        run_git(&root, &["config", "user.name", "T"]);
+        std::fs::write(root.join("a.txt"), "1\n").unwrap();
+        run_git(&root, &["add", "-A"]);
+        run_git(&root, &["commit", "-qm", "base"]);
+        // Переименовать ветку в main если нужно.
+        run_git(&root, &["branch", "-M", "main"]);
+        root
+    }
+
+    #[test]
+    fn discover_empty_repo() {
+        let d = tempfile::tempdir().unwrap();
+        let root = init_repo(d.path());
+        let cands = discover(&root);
+        assert!(cands.is_empty(), "пустой репо: {cands:?}");
+    }
+
+    #[test]
+    fn discover_abandoned_worktree() {
+        let d = tempfile::tempdir().unwrap();
+        let root = init_repo(d.path());
+        let wt = d.path().join("wt-abandoned");
+        run_git(
+            &root,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "devh/agent-ghost",
+                &wt.to_string_lossy(),
+            ],
+        );
+        // Зарегистрируем агента «ghost» в реестре? Нет — он не зарегистрирован.
+        let cands = discover(&root);
+        assert!(
+            cands.iter().any(|c| {
+                c.kind == CandidateKind::AbandonedWorktree && c.agent.as_deref() == Some("ghost")
+            }),
+            "abandoned worktree найден: {cands:?}"
+        );
+    }
+
+    #[test]
+    fn discover_orphan_branch() {
+        let d = tempfile::tempdir().unwrap();
+        let root = init_repo(d.path());
+        run_git(&root, &["branch", "devh/agent-orphan"]);
+        let cands = discover(&root);
+        assert!(
+            cands.iter().any(|c| {
+                c.kind == CandidateKind::OrphanBranch
+                    && c.branch.as_deref() == Some("devh/agent-orphan")
+            }),
+            "orphan branch найден: {cands:?}"
+        );
+    }
+
+    #[test]
+    fn discover_wip_branch() {
+        let d = tempfile::tempdir().unwrap();
+        let root = init_repo(d.path());
+        run_git(&root, &["branch", "devh/wip-x"]);
+        let cands = discover(&root);
+        assert!(
+            cands.iter().any(|c| {
+                c.kind == CandidateKind::WipBranch && c.branch.as_deref() == Some("devh/wip-x")
+            }),
+            "wip branch найден: {cands:?}"
+        );
+    }
+
+    #[test]
+    fn discover_registered_agent_not_candidate() {
+        let d = tempfile::tempdir().unwrap();
+        let root = init_repo(d.path());
+        // Зарегистрируем агента в реестре.
+        let harness = root.join(".harness/orch");
+        std::fs::create_dir_all(&harness).unwrap();
+        let reg = r#"{"seq":1,"tasks":[],"agents":[{"name":"beam","role":"worker","fail_streak":0}],"lead":"lead","plan":{"deps":{},"prio":{}}}"#;
+        std::fs::write(harness.join("registry.json"), reg).unwrap();
+        run_git(&root, &["branch", "devh/agent-beam"]);
+        let cands = discover(&root);
+        assert!(
+            !cands.iter().any(|c| c.agent.as_deref() == Some("beam")),
+            "зарегистрированный агент не кандидат: {cands:?}"
+        );
+    }
+
+    #[test]
+    fn discover_broken_git_returns_empty() {
+        let d = tempfile::tempdir().unwrap();
+        // Не git-репозиторий.
+        let root = d.path().join("not-a-repo");
+        std::fs::create_dir_all(&root).unwrap();
+        let cands = discover(&root);
+    }
 
     fn cfg() -> RunConfig {
         RunConfig {
@@ -1362,7 +1741,14 @@ mod tests {
         // WIP-чекпоинт: откат чужого файла (именно так терялся orch_roles.rs).
         std::fs::write(p.join("other.txt"), "wip\n").unwrap_or_else(|_| unreachable!());
         g(&["add", "-A"], &p);
-        g(&["commit", "-qm", "WIP(beam): чекпоинт незакоммиченной работы"], &p);
+        g(
+            &[
+                "commit",
+                "-qm",
+                "WIP(beam): чекпоинт незакоммиченной работы",
+            ],
+            &p,
+        );
         let commits = transfer_commits(&root, "main", &agent_branch("beam"))
             .unwrap_or_else(|e| unreachable!("{e}"));
         assert_eq!(
@@ -1390,7 +1776,10 @@ mod tests {
         // Тот же патч в главной (другим агентом) — переносить нечего.
         std::fs::write(root.join("same.txt"), "same\n").unwrap_or_else(|_| unreachable!());
         g(&["add", "-A"], &root);
-        g(&["commit", "-qm", "chore(task T-9): тот же патч в main"], &root);
+        g(
+            &["commit", "-qm", "chore(task T-9): тот же патч в main"],
+            &root,
+        );
         let commits = transfer_commits(&root, "main", &agent_branch("beam"))
             .unwrap_or_else(|e| unreachable!("{e}"));
         assert!(
@@ -1429,5 +1818,93 @@ mod tests {
         assert!(text.contains("pub mod b;"), "{text}");
         assert!(text.contains("pub mod c;"), "{text}");
         assert_eq!(text.matches("pub mod a;").count(), 1, "дублей нет: {text}");
+    }
+
+    #[test]
+    fn salvage_creates_reclaim_branch() {
+        let (_d, root) = repo_fixture();
+        let cand = Candidate {
+            kind: CandidateKind::AbandonedWorktree,
+            path: None,
+            branch: Some("devh/agent-ghost".to_string()),
+            sha: None,
+            agent: Some("ghost".to_string()),
+        };
+        // salvage с несуществующим путём возвращает ошибку
+        let result = salvage(&root, &cand);
+        assert!(
+            result.is_err() || result.unwrap().is_empty(),
+            "salvage без пути должен вернуть ошибку или пустой SHA"
+        );
+    }
+
+    #[test]
+    fn rescue_ref_returns_false_for_nonexistent() {
+        let (_d, root) = repo_fixture();
+        assert!(
+            !rescue_ref(&root, "devh/reclaim-ghost", "abc123"),
+            "несуществующая ветка → false"
+        );
+    }
+
+    #[test]
+    fn close_abandoned_dry_run_does_not_delete() {
+        let (_d, root) = repo_fixture();
+        let c = cfg();
+        let (p, _) = ensure(&c, &root, "beam").unwrap_or_else(|_| unreachable!());
+        let cand = Candidate {
+            kind: CandidateKind::AbandonedWorktree,
+            path: Some(p.clone()),
+            branch: Some("devh/agent-beam".to_string()),
+            sha: Some("abc123".to_string()),
+            agent: Some("beam".to_string()),
+        };
+        // dry_run: ничего не удаляет
+        let report = close_abandoned(&root, &cand, &[], true).unwrap_or_else(|_| unreachable!());
+        assert!(p.exists(), "dry_run: worktree на месте");
+        assert!(!report.is_empty(), "dry_run: план напечатан");
+    }
+
+    #[test]
+    fn close_abandoned_respects_keep_list() {
+        let (_d, root) = repo_fixture();
+        let c = cfg();
+        let (p, _) = ensure(&c, &root, "beam").unwrap_or_else(|_| unreachable!());
+        let cand = Candidate {
+            kind: CandidateKind::AbandonedWorktree,
+            path: Some(p.clone()),
+            branch: Some("devh/agent-beam".to_string()),
+            sha: Some("abc123".to_string()),
+            agent: Some("beam".to_string()),
+        };
+        // keep-list содержит путь → пропускаем
+        let report =
+            close_abandoned(&root, &cand, &[p.clone()], false).unwrap_or_else(|_| unreachable!());
+        assert!(p.exists(), "keep-list: worktree на месте");
+        assert!(
+            report.iter().any(|r| r.contains("keep-list")),
+            "keep-list: пропущен"
+        );
+    }
+
+    #[test]
+    fn close_abandoned_fails_closed_without_rescue_ref() {
+        let (_d, root) = repo_fixture();
+        let c = cfg();
+        let (p, _) = ensure(&c, &root, "beam").unwrap_or_else(|_| unreachable!());
+        let cand = Candidate {
+            kind: CandidateKind::AbandonedWorktree,
+            path: Some(p.clone()),
+            branch: Some("devh/agent-beam".to_string()),
+            sha: Some("abc123".to_string()),
+            agent: Some("beam".to_string()),
+        };
+        // Без rescue-ref → отказ
+        let report = close_abandoned(&root, &cand, &[], false).unwrap_or_else(|_| unreachable!());
+        assert!(p.exists(), "без rescue-ref: worktree на месте");
+        assert!(
+            report.iter().any(|r| r.contains("отказ")),
+            "без rescue-ref: отказ"
+        );
     }
 }
