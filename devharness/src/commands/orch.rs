@@ -703,6 +703,7 @@ pub fn orch(root: &Path, sub: &str, args: &[String]) -> anyhow::Result<()> {
         "degrade" => degrade(root, args),
         "model" => model(root, args),
         "bug" => bug(root, args),
+        "unsaved" => crate::commands::unsaved::run(root, args),
         "wt" => wt(root, args),
         "models" => models(root),
         "review" => review_cmd(root, args),

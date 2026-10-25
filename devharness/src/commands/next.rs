@@ -46,6 +46,9 @@ pub fn next(root: &Path, cfg: &crate::core::types::RunConfig) -> anyhow::Result<
     let store = Store::new(root);
     let answer = decide(root, cfg, &store);
     println!("{}: {}", answer.why, answer.command);
+    // Сторож несохранённой работы: тревога только в stderr — stdout
+    // `devh next` остаётся контрактом «ровно одна команда».
+    crate::commands::unsaved::auto_check(root);
     Ok(())
 }
 
