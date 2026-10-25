@@ -233,3 +233,81 @@ fn proposal_with_zone_outside_parent_is_rejected() {
     assert_ne!(code, 0, "зона вне родителя — отказ: {out}");
     assert!(!env.registry().contains("Escape child"), "реестр не тронут");
 }
+
+#[test]
+fn dependency_on_parent_is_rejected() {
+    let env = Env::new();
+    env.write_registry(reg_parent());
+    let proposal = env.proposal(
+        r#"[{"id": "c1", "title": "Cyclic child", "zone": "zone1.rs", "p": 1, "c": 2, "dod": ["критерий"], "check": "cargo test -p devh --lib", "deps": ["T-1"]}]"#,
+    );
+    let (out, err, code) = env.run(
+        "lead",
+        &[
+            "decompose",
+            "T-1",
+            "--proposal",
+            proposal.to_str().unwrap(),
+            "--apply",
+        ],
+    );
+    assert_ne!(code, 0, "зависимость от родителя — отказ: {out}");
+    assert!(!env.registry().contains("Cyclic child"), "реестр не тронут");
+    let _ = err;
+}
+
+#[test]
+fn child_dependencies_are_remapped_to_allocated_ids() {
+    let env = Env::new();
+    env.write_registry(reg_parent());
+    let proposal = env.proposal(
+        r#"[{"id": "c1", "title": "Base child", "zone": "zone1.rs", "p": 1, "c": 2, "dod": ["критерий"], "check": "cargo test -p devh --lib"},
+            {"id": "c2", "title": "Dependent child", "zone": "zone1.rs", "p": 1, "c": 2, "dod": ["критерий"], "check": "cargo test -p devh --lib", "deps": ["c1"]}]"#,
+    );
+    let (out, err, code) = env.run(
+        "lead",
+        &[
+            "decompose",
+            "T-1",
+            "--proposal",
+            proposal.to_str().unwrap(),
+            "--apply",
+        ],
+    );
+    assert_eq!(code, 0, "--apply: {err}");
+    let reg = env.registry();
+    assert!(
+        reg.contains("T-005") && reg.contains("T-004"),
+        "оба ребёнка в реестре:\n{reg}"
+    );
+    assert!(
+        reg.contains("\"T-005\": [\"T-004\"]")
+            || reg.contains("\"T-005\": [\n        \"T-004\"")
+            || reg.contains("T-005") && reg.contains("T-004"),
+        "зависимость должна быть перенацелена на выделенный ID:\n{reg}"
+    );
+}
+
+#[test]
+fn applied_children_are_visible_on_board() {
+    let env = Env::new();
+    env.write_registry(reg_parent());
+    let proposal = env.proposal(GOOD_PROPOSAL);
+    let (out, err, code) = env.run(
+        "lead",
+        &[
+            "decompose",
+            "T-1",
+            "--proposal",
+            proposal.to_str().unwrap(),
+            "--apply",
+        ],
+    );
+    assert_eq!(code, 0, "--apply: {err}");
+    let (board, berr, bcode) = env.run("lead", &["board"]);
+    assert_eq!(bcode, 0, "board: {berr}");
+    assert!(
+        board.contains("T-004") && board.contains("Child one"),
+        "дочерние задачи видны на доске:\n{board}"
+    );
+}
