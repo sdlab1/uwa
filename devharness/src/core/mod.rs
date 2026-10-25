@@ -88,3 +88,4 @@ pub mod model_report;
 pub mod worktree_escape;
 pub mod registry_ledger;
 pub mod rot_checker;
+pub mod mutation_hardening;
