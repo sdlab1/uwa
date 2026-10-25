@@ -172,6 +172,39 @@ pub fn checkpoint_at(path: &Path, agent: &str) -> anyhow::Result<String> {
     res
 }
 
+/// Сформировать единый WIP-коммит сообщения: `wip: <агент> <T-ID|-> <n> файлов`.
+///
+/// `task_ref` — Option<&str>: Some("T-316") → `T-316`, None → `-`.
+pub fn wip_commit_msg(agent: &str, task_ref: Option<&str>, n_files: usize) -> String {
+    let ref_part = task_ref.unwrap_or("-");
+    format!("wip: {} {} {} файла", agent, ref_part, n_files)
+}
+
+/// Распарсить WIP-коммит сообщение в `(agent, Option<T-ID>, n_files)`.
+///
+/// Возвращает `None`, если сообщение не соответствует формату.
+pub fn parse_wip_commit_msg(msg: &str) -> Option<(String, Option<String>, usize)> {
+    let body = msg.trim();
+    let rest = body.strip_prefix("wip: ")?;
+    let parts: Vec<&str> = rest.splitn(3, ' ').collect();
+    if parts.len() < 3 {
+        return None;
+    }
+    let agent = parts[0].to_string();
+    let ref_part = parts[1];
+    let rest = parts[2];
+    let (n_str, _) = rest.split_once(' ')?;
+    let n_files = n_str.parse::<usize>().ok()?;
+    let task_ref = if ref_part == "-" {
+        None
+    } else if ref_part.starts_with("T-") {
+        Some(ref_part.to_string())
+    } else {
+        return None;
+    };
+    Some((agent, task_ref, n_files))
+}
+
 /// Имя модуля из строки `pub mod xxx;`.
 fn mod_name(line: &str) -> Option<String> {
     let t = line.trim();
@@ -2025,5 +2058,32 @@ mod tests {
             !rescue_ref(&root, "nonexistent-branch", &head),
             "nonexistent branch"
         );
+    }
+
+    #[test]
+    fn wip_commit_msg_roundtrip_with_task() {
+        let msg = wip_commit_msg("opencode-0a0e0cfc", Some("T-316"), 3);
+        assert_eq!(msg, "wip: opencode-0a0e0cfc T-316 3 файла");
+        let parsed = parse_wip_commit_msg(&msg).unwrap();
+        assert_eq!(parsed.0, "opencode-0a0e0cfc");
+        assert_eq!(parsed.1, Some("T-316".to_string()));
+        assert_eq!(parsed.2, 3);
+    }
+
+    #[test]
+    fn wip_commit_msg_roundtrip_no_task() {
+        let msg = wip_commit_msg("opencode-0a0e0cfc", None, 0);
+        assert_eq!(msg, "wip: opencode-0a0e0cfc - 0 файла");
+        let parsed = parse_wip_commit_msg(&msg).unwrap();
+        assert_eq!(parsed.0, "opencode-0a0e0cfc");
+        assert_eq!(parsed.1, None);
+        assert_eq!(parsed.2, 0);
+    }
+
+    #[test]
+    fn parse_wip_commit_msg_rejects_garbage() {
+        assert!(parse_wip_commit_msg("not a wip commit").is_none());
+        assert!(parse_wip_commit_msg("wip: only-one-part").is_none());
+        assert!(parse_wip_commit_msg("wip: a b").is_none());
     }
 }
