@@ -466,6 +466,10 @@ fn print_help() {
 
 /// Точка входа: `devh msg events ...`.
 pub fn run(args: &[String]) -> i32 {
+    if args.first().map(String::as_str) == Some("service") {
+        let rest: Vec<String> = args.iter().skip(1).cloned().collect();
+        return crate::commands::msg_events_service::run(&rest);
+    }
     let opts = Opts::parse(args);
     if opts.help {
         print_help();

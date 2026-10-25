@@ -22,6 +22,7 @@ pub mod run;
 pub mod survivors;
 pub mod test;
 pub mod tickets;
+pub mod msg_events_service;
 pub mod watchdog;
 pub mod workflow;
 pub mod wtman;
