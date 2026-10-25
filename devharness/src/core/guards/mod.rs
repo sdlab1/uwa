@@ -5,6 +5,7 @@
 //! выдачей/сдачей задачи и получает единый отчёт: ok / warn / problem.
 
 pub mod backlog_guard;
+pub mod commit_review_guard;
 pub mod decomposition_guard;
 pub mod identity_guard;
 pub mod deps_guard;

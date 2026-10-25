@@ -11,9 +11,12 @@
 //!   1 — найдена actionable-проблема (инвариант нарушен),
 //!   2 — среда не готова (реестр недоступен/бит).
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use crate::core::guards::backlog_guard::{self, Severity};
+use crate::core::commit_audit::{commit_exists, is_commit_in_branch};
+use crate::core::guards::commit_review_guard::{self, CommitFacts, CommitRecord, MAIN_BRANCH};
 use crate::core::guards::deps_guard::check_deps;
 use crate::core::guards::identity_guard;
 use crate::core::guards::module_list_guard;
@@ -224,10 +227,91 @@ pub fn collect(root: &Path, reg: &Registry) -> GuardReport {
         },
     );
 
+    // ── ревью коммитов: commit_sha в ветке агента, main_sha в main ──
+    let (cr_problems, cr_warns) = commit_review_findings(root, reg);
+    report.push(
+        "commit_review_guard",
+        if !cr_problems.is_empty() {
+            GuardVerdict::Problem(cr_problems.join("; "))
+        } else if !cr_warns.is_empty() {
+            GuardVerdict::Warn(cr_warns.join("; "))
+        } else {
+            GuardVerdict::Ok
+        },
+    );
+
     // ── самопроверка guard'а декомпозиции ──
     report.push(decomposition_guard::ID, decomposition_guard::selfcheck());
 
     report
+}
+
+/// Находки ревью коммитов по реестру: закрытые задачи с недоказанным
+/// `commit_sha`/`main_sha`. Возвращает (проблемы, предупреждения).
+///
+/// Git дергается только для закрытых задач, и каждый SHA проверяется один раз:
+/// батч-коммит (одна работа — много задач) не плодит вызовов. Кэш живёт внутри
+/// одного прогона, побочных эффектов нет.
+fn commit_review_findings(root: &Path, reg: &Registry) -> (Vec<String>, Vec<String>) {
+    let branches: HashMap<String, String> = reg
+        .agents
+        .iter()
+        .filter_map(|a| {
+            a.wt_branch
+                .as_ref()
+                .map(|b| (crate::core::identity::canonical(&a.name), b.clone()))
+        })
+        .collect();
+    let mut exists: HashMap<String, bool> = HashMap::new();
+    let mut in_branch: HashMap<(String, String), bool> = HashMap::new();
+    let mut problems: Vec<String> = Vec::new();
+    let mut warns: Vec<String> = Vec::new();
+    for t in reg.tasks.iter().filter(|t| t.status == Status::Done) {
+        let record = CommitRecord {
+            task_id: t.id.clone(),
+            agent: crate::core::identity::canonical(&t.agent),
+            status: "done".to_string(),
+            commit_sha: t.commit_sha.clone(),
+            main_sha: t.main_sha.clone(),
+        };
+        let branch = branches
+            .get(&record.agent)
+            .map(String::as_str)
+            .filter(|b| !b.trim().is_empty());
+        let mut exists_of = |sha: &str| *exists.entry(sha.to_string()).or_insert_with(|| commit_exists(root, sha));
+        let mut in_of = |sha: &str, br: &str| {
+            *in_branch
+                .entry((sha.to_string(), br.to_string()))
+                .or_insert_with(|| is_commit_in_branch(root, sha, br))
+        };
+        let sha_ok = record
+            .commit_sha
+            .as_deref()
+            .is_some_and(|s| exists_of(s.trim()));
+        let main_ok = record
+            .main_sha
+            .as_deref()
+            .is_some_and(|s| exists_of(s.trim()) && in_of(s.trim(), MAIN_BRANCH));
+        let branch_ok = match (record.commit_sha.as_deref(), branch) {
+            (Some(s), Some(br)) if sha_ok => in_of(s.trim(), br),
+            _ => false,
+        };
+        let facts = CommitFacts {
+            agent_branch_known: branch.is_some(),
+            commit_in_agent_branch: branch_ok,
+            main_sha_in_main: main_ok,
+            commit_exists: sha_ok,
+        };
+        for issue in commit_review_guard::check_commit(&record, branch, &facts) {
+            let text = issue.to_string();
+            if commit_review_guard::is_blocking(&issue) {
+                problems.push(text);
+            } else {
+                warns.push(text);
+            }
+        }
+    }
+    (problems, warns)
 }
 
 /// Проблемы слияния по реестру: состояние «влито» без SHA и SHA не как git-хэш.
