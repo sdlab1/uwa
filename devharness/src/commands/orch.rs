@@ -2559,6 +2559,15 @@ fn wt(root: &Path, args: &[String]) -> anyhow::Result<()> {
         }
         "release" => {
             let agent = agent.ok_or_else(|| anyhow!("devh orch wt release: нужен агент"))?;
+            let reg = load(root);
+            let (lead, _) = lead_of(&reg);
+            let caller = crate::core::identity::canonical(&crate::core::identity::current().name);
+            if lead.as_deref() != Some(caller.as_str()) {
+                return Err(anyhow!(
+                    "devh orch wt release: освобождает только ведущий (текущий ведущий: {})",
+                    lead.unwrap_or_else(|| "не назначен".to_string())
+                ));
+            }
             let msg = crate::commands::wtman::release(&cfg, root, &agent)?;
             let mut reg = load(root);
             if let Some(i) = agent_index(&reg, &agent) {
@@ -2572,8 +2581,16 @@ fn wt(root: &Path, args: &[String]) -> anyhow::Result<()> {
             Ok(())
         }
         "gc" => {
-            let mut keep: Vec<std::path::PathBuf> = Vec::new();
             let reg = load(root);
+            let (lead, _) = lead_of(&reg);
+            let caller = crate::core::identity::canonical(&crate::core::identity::current().name);
+            if lead.as_deref() != Some(caller.as_str()) {
+                return Err(anyhow!(
+                    "devh orch wt gc: очищает только ведущий (текущий ведущий: {})",
+                    lead.unwrap_or_else(|| "не назначен".to_string())
+                ));
+            }
+            let mut keep: Vec<std::path::PathBuf> = Vec::new();
             for a in reg.agents.iter() {
                 keep.push(crate::commands::wtman::agent_path(&cfg, root, &a.name));
             }
@@ -2920,10 +2937,20 @@ fn board(root: &Path, args: &[String]) -> anyhow::Result<()> {
             .map(|f| format!("F{f}"))
             .unwrap_or_else(|| "—".to_string());
         let susp = state.and_then(|s| s.suspicion.clone());
+        let unread = if board_lead.as_deref() == Some(name.as_str()) {
+            Some(crate::shell::msg_events::count_unread(name))
+        } else {
+            None
+        };
         println!(
-            "\n{name}  модель={model}  последний={last_f}  очередь={}  в работе={}",
+            "\n{name}  модель={model}  последний={last_f}  очередь={}  в работе={}{}",
             queued.len(),
-            active.len()
+            active.len(),
+            if let Some(n) = unread {
+                format!("  письма без ответа: {n}")
+            } else {
+                String::new()
+            }
         );
         if let Some(s) = susp.as_ref() {
             println!("  ⚠ подозрение: {s}");

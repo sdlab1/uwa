@@ -164,6 +164,16 @@ fn scan(inbox: &Path, me: &str) -> Vec<Letter> {
     out
 }
 
+/// Количество непрочитанных писем для агента.
+///
+/// Читает все ящики в `$DEVH_MSG_HOME/inbox` и считает письма,
+/// адресованные `me` (включая "all").
+pub fn count_unread(agent: &str) -> usize {
+    let inbox = inbox_dir();
+    let letters = scan(&inbox, agent);
+    letters.len()
+}
+
 /// Опции команды.
 #[derive(Debug, Clone, Default)]
 struct Opts {

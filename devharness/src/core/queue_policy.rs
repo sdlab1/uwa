@@ -2,7 +2,39 @@
 //!
 //! Чистая функция выбора следующей задачи из очереди.
 
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use crate::commands::orch::{Registry, Task, Status};
+
+/// Порог голода (в секундах): задача, ждущая дольше, поднимается в приоритете.
+const STARVATION_THRESHOLD_SECS: u64 = 30 * 60;
+
+/// Сколько секунд задача ждёт в очереди.
+fn age_of(task: &Task, now: u64) -> u64 {
+    now.saturating_sub(task.created)
+}
+
+/// Задача "голодала" (ждала дольше порога)?
+fn is_starved(task: &Task, now: u64) -> bool {
+    age_of(task, now) > STARVATION_THRESHOLD_SECS
+}
+
+/// Ранг задачи в очереди: 0 = голодала (поднять), 1 = не голодала.
+fn starvation_rank(task: &Task, now: u64) -> u8 {
+    if is_starved(task, now) {
+        0
+    } else {
+        1
+    }
+}
+
+/// Unix now (fallback: 0 если часы назад).
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
 
 /// Задача-кандидат из очереди.
 #[derive(Debug, Clone)]
@@ -103,6 +135,15 @@ pub fn queued_tasks_sorted(registry: &Registry) -> Vec<QueuedTask> {
 /// `commands::orch::ready_tasks` только фильтрует этот порядок (владелец,
 /// буфер ведущего, зависимости) — правила сортировки там не дублируются.
 pub fn order_for_caller<'a>(registry: &'a Registry, caller: &str) -> Vec<&'a Task> {
+    order_for_caller_at(registry, caller, now_secs())
+}
+
+/// Герметичная версия `order_for_caller` с явным `now`.
+pub fn order_for_caller_at<'a>(
+    registry: &'a Registry,
+    caller: &str,
+    now: u64,
+) -> Vec<&'a Task> {
     let mut out: Vec<&Task> = registry
         .tasks
         .iter()
@@ -124,6 +165,9 @@ pub fn order_for_caller<'a>(registry: &'a Registry, caller: &str) -> Vec<&'a Tas
         own_a
             .cmp(&own_b)
             .then(pa.cmp(&pb))
+            // Задачи, голодавшие дольше порога, поднимаются над более новыми
+            // с тем же P, но не переступая приоритет плана (plan.prio выше).
+            .then(starvation_rank(a, now).cmp(&starvation_rank(b, now)))
             .then(a.complexity.cmp(&b.complexity))
             .then(a.created.cmp(&b.created))
             .then(a.id.cmp(&b.id))
@@ -431,6 +475,73 @@ mod tests {
             .map(|t| t.id.clone())
             .collect();
         assert_eq!(ids, vec!["T-2".to_string()]);
+    }
+
+    /// T-264: задача, голодавшая дольше порога, поднимается над более новыми
+    /// с тем же P (но не переступая plan.prio).
+    #[test]
+    fn starvation_bumps_old_task_over_newer_same_p() {
+        let now = 1_000_000u64;
+        let mut reg = Registry::default();
+        // T-new: P2, свежая; T-old: P2, голодавшая (created = now - threshold - 1).
+        reg.tasks = vec![
+            task("T-new", "worker", 2, now),
+            task("T-old", "worker", 2, now.saturating_sub(STARVATION_THRESHOLD_SECS + 1)),
+        ];
+        let ids: Vec<String> = order_for_caller_at(&reg, "worker", now)
+            .iter()
+            .map(|t| t.id.clone())
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["T-old".to_string(), "T-new".to_string()],
+            "голодавшая задача поднимается над более новыми того же P"
+        );
+    }
+
+    /// T-264: plan.prio всегда выше starvation (P1-задача с хорошим prio
+    /// не уступает голодной P2 с плохим prio).
+    #[test]
+    fn plan_prio_beats_starvation() {
+        let now = 1_000_000u64;
+        let mut reg = Registry::default();
+        // T-starved: P2, голодавшая, но plan.prio=9 (низкий).
+        // T-fresh-p1: P1, свежая, plan.prio=0 (высокий).
+        reg.plan.prio.insert("T-fresh-p1".into(), 0);
+        reg.plan.prio.insert("T-starved".into(), 9);
+        reg.tasks = vec![
+            task("T-fresh-p1", "worker", 1, now),
+            task("T-starved", "worker", 2, now.saturating_sub(STARVATION_THRESHOLD_SECS + 1)),
+        ];
+        let ids: Vec<String> = order_for_caller_at(&reg, "worker", now)
+            .iter()
+            .map(|t| t.id.clone())
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["T-fresh-p1".to_string(), "T-starved".to_string()],
+            "plan.prio=0 (T-fresh-p1) стоит выше, чем starvation (T-starved)"
+        );
+    }
+
+    /// T-264: задача, НЕ голодавшая, не поднимается (FIFO для свежих одного P).
+    #[test]
+    fn fresh_tasks_follow_fifo() {
+        let now = 1_000_000u64;
+        let mut reg = Registry::default();
+        reg.tasks = vec![
+            task("T-later", "worker", 2, now - 10),
+            task("T-earlier", "worker", 2, now - 100),
+        ];
+        let ids: Vec<String> = order_for_caller_at(&reg, "worker", now)
+            .iter()
+            .map(|t| t.id.clone())
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["T-earlier".to_string(), "T-later".to_string()],
+            "свежие задачи — по FIFO (created)"
+        );
     }
 
 }
