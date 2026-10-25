@@ -456,7 +456,7 @@ pub(crate) fn flags_all(args: &[String], name: &str) -> Vec<String> {
 }
 
 /// Флаги, за которыми идёт значение (остальные — булевы).
-const VALUE_FLAGS: [&str; 22] = [
+const VALUE_FLAGS: [&str; 28] = [
     "--agent",
     "--p",
     "--c",
@@ -479,6 +479,15 @@ const VALUE_FLAGS: [&str; 22] = [
     "--message",
     "--override",
     "--set",
+    // Значения этих флагов НЕ являются позиционными аргументами. Без них
+    // `devh orch identify --reply "MODEL: X"` принимал текст ответа за имя
+    // агента (в реестре появлялся фантом «MODEL: X»).
+    "--reply",
+    "--dep",
+    "--prio",
+    "--from",
+    "--role",
+    "--task",
 ];
 
 /// Позиционные аргументы (не флаги и не их значения).
@@ -3235,9 +3244,13 @@ fn identify(root: &Path, args: &[String]) -> anyhow::Result<()> {
     let pos = positional(args);
     // Агент не указан -> отвечает вызывающий (команда из вопроса идентификации
     // должна работать дословно: `devh orch identify --reply "MODEL: ..."`).
-    let agent = pos.first().cloned().unwrap_or_else(|| {
-        crate::core::identity::canonical(&crate::core::identity::current().name)
-    });
+    let agent = pos
+        .first()
+        .filter(|a| !a.trim().to_ascii_uppercase().starts_with("MODEL:"))
+        .cloned()
+        .unwrap_or_else(|| {
+            crate::core::identity::canonical(&crate::core::identity::current().name)
+        });
     let canon = crate::core::identity::canonical(&agent);
     let reg = load(root);
     let (lead, _) = lead_of(&reg);
@@ -6058,6 +6071,25 @@ mod tests {
             &[me().as_str(), "--reply", "MODEL: test-model-2026-01-01"],
         )
         .expect("идентификация");
+    }
+
+    /// R24: команда из вопроса идентификации не должна создавать фантом-агента
+    /// («MODEL: <имя>» — это текст ответа, а не имя агента).
+    #[test]
+    fn identify_reply_does_not_create_phantom_agent() {
+        let tmp = tempdir().expect("tmp");
+        let root = tmp.path();
+        identify_now(root);
+        let reg = load(root);
+        assert!(
+            !reg.agents.iter().any(|a| a.name.contains("MODEL:")),
+            "в реестре появился фантом-агент: {:?}",
+            reg.agents.iter().map(|a| &a.name).collect::<Vec<_>>()
+        );
+        assert!(
+            reg.agents.iter().any(|a| a.name == me() && a.model.is_some()),
+            "ответ должен попасть в карточку вызывающего агента"
+        );
     }
 
     /// R24: без ответа на вопрос идентификации задача НЕ выдаётся (fail-closed).
