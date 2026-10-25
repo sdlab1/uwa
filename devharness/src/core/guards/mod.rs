@@ -6,6 +6,7 @@
 
 pub mod backlog_guard;
 pub mod decomposition_guard;
+pub mod identity_guard;
 pub mod deps_guard;
 pub mod merge_guard;
 pub mod module_list_guard;
@@ -150,6 +151,7 @@ pub fn run_all(guards: &[&dyn Guard], ctx: &GuardContext) -> GuardReport {
 pub fn selfcheck() -> GuardReport {
     let mut report = GuardReport::new();
     report.push(decomposition_guard::ID, decomposition_guard::selfcheck());
+    report.push(identity_guard::ID, identity_guard::selfcheck());
     report
 }
 
@@ -209,8 +211,16 @@ mod tests {
     fn builtin_selfcheck_is_clean() {
         let report = selfcheck();
         assert!(report.is_clean(), "{:?}", report.problems());
-        assert_eq!(report.entries().len(), 1);
-        assert_eq!(report.entries()[0].0, "decomposition_guard");
+        let ids: Vec<String> = report.entries().iter().map(|(id, _)| id.clone()).collect();
+        assert!(
+            ids.iter().any(|id| id == "decomposition_guard"),
+            "строенный selfcheck обязан включать decomposition_guard: {ids:?}"
+        );
+        assert!(
+            ids.iter().any(|id| id == "identity_guard"),
+            "guard идентичностей обязан вызываться из selfcheck: {ids:?}"
+        );
+        assert_eq!(report.entries().len(), 2);
     }
 
     #[test]
