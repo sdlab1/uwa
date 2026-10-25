@@ -3829,6 +3829,14 @@ pub fn commit_cmd(root: &Path, args: &[String]) -> anyhow::Result<()> {
     if paths.is_empty() {
         paths = task.zones.clone();
     }
+    // Позиционные аргументы после ID задачи тоже считаются путями
+    // (devh orch commit ID --path A B C и devh orch commit ID A B C).
+    let pos = positional(args);
+    for pth in pos.into_iter().skip(1) {
+        if !paths.contains(&pth) {
+            paths.push(pth);
+        }
+    }
     if paths.is_empty() {
         return Err(anyhow!(
             "devh orch commit: не указан путь и у задачи нет зон (--path)"
