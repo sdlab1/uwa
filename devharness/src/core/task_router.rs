@@ -16,13 +16,14 @@
 //! 5. **Зоны (O5)**: зоны задачи не пересекаются с зонами активных задач и
 //!    не выдаются двум разным исполнителям одновременно.
 //! 6. **Зависимости**: задача с незакрытыми зависимостями не выдаётся.
-//! 7. **Нагрузка**: не больше [`MAX_ACTIVE_PER_AGENT`] активных задач на
-//!    агента; при равенстве потолков — менее загруженному, затем по имени.
+//! 7. **Нагрузка**: не больше [`MAX_ACTIVE_PER_AGENT`] задач В РАБОТЕ на
+//!    агента (длинная очередь — не запрет, а tie-break: при равенстве
+//!    потолков берёт тот, у кого короче очередь, затем кто свободнее).
 //!
 //! Модуль чистый: работает со снимком реестра и ничего не пишет на диск.
 //! Запись и блокировки — в `commands::autoassign`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::commands::orch::{Registry, Status, Task};
 
@@ -107,11 +108,22 @@ fn table_ceiling(model: &str) -> u8 {
 /// потолок модели по истории сдачи → таблица моделей → **C1** (fail-closed).
 pub fn ceiling_of(reg: &Registry, agent: &str) -> u8 {
     let canon = crate::core::identity::canonical(agent);
-    let state = reg.agents.iter().find(|a| {
-        crate::core::identity::canonical(&a.name) == canon
-    });
-    let explicit = state.and_then(|a| a.c_ceiling);
-    let model = state.and_then(|a| a.model.clone());
+    // Дубликаты записей агента (следствие T-284) НЕ должны прятать потолок
+    // или модель: собираем значения из ВСЕХ записей с этим каноном.
+    let mut explicit: Option<u8> = None;
+    let mut model: Option<String> = None;
+    for a in reg
+        .agents
+        .iter()
+        .filter(|a| crate::core::identity::canonical(&a.name) == canon)
+    {
+        if explicit.is_none() {
+            explicit = a.c_ceiling;
+        }
+        if model.is_none() {
+            model = a.model.clone();
+        }
+    }
     let base = match model {
         Some(m) => match history_ceiling(reg, &m) {
             Some(c) => c,
@@ -185,16 +197,24 @@ fn any_overlap(zones: &[String], other: &[String]) -> bool {
 }
 
 /// Может ли агент взять задачу сложности `c`.
+/// Роль агента по реестру: первая непустая среди записей с этим каноном
+/// (дубликаты записей — следствие T-284 — не должны прятать роль).
+fn role_of(reg: &Registry, agent: &str) -> String {
+    let canon = crate::core::identity::canonical(agent);
+    reg.agents
+        .iter()
+        .filter(|a| crate::core::identity::canonical(&a.name) == canon)
+        .filter_map(|a| a.role.clone())
+        .find(|r| !r.is_empty())
+        .unwrap_or_default()
+}
+
 fn agent_accepts(reg: &Registry, agent: &str, c: u8) -> Option<String> {
     let canon = crate::core::identity::canonical(agent);
     if EXCLUDED_AGENTS.iter().any(|e| canon == *e) {
         return Some("агент исключён решением lead'а".to_string());
     }
-    let state = reg
-        .agents
-        .iter()
-        .find(|a| crate::core::identity::canonical(&a.name) == canon);
-    let role = state.and_then(|a| a.role.clone()).unwrap_or_default();
+    let role = role_of(reg, &canon);
     if role == ROLE_LEAD {
         return Some("ведущий не берёт задачи из очереди".to_string());
     }
@@ -219,16 +239,19 @@ pub fn plan(reg: &Registry, lead: Option<&str>) -> RouterPlan {
 
     // Активные зоны (всех агентов) и текущая нагрузка.
     //
-    // `load` — занятость агента = активные + закреплённые в очереди. Это
-    // потолок параллелизма: у агента не может быть больше
-    // MAX_ACTIVE_PER_AGENT задач в работе. Буфер lead'а в нагрузку не входит
-    // (это резерв, а не занятость исполнителя).
+    // `active` — только задачи В РАБОТЕ: жёсткий потолок параллелизма
+    // (не больше MAX_ACTIVE_PER_AGENT задач одновременно у одного агента).
     //
-    // `active` — только задачи в работе: используется как tie-break, чтобы
-    // при равной занятости задачу брал тот, кто сейчас свободнее.
+    // `queue` — только задачи В ОЧЕРЕДИ: это tie-break (кто короче в очереди),
+    // а НЕ запрет. Раньше здесь считалось active+queued одним числом, и агент
+    // с длинной очередью (5+ ждущих задач) выглядел «перегруженным» — роутер
+    // не выдавал НИЧЕГО и молчал («уже 15 задач в работе/очереди»).
+    //
+    // Буфер lead'а не входит ни в `active`, ни в `queue`: это резерв, а не
+    // занятость исполнителя.
     let mut active_zones: Vec<String> = Vec::new();
-    let mut load: BTreeMap<String, usize> = BTreeMap::new();
     let mut active: BTreeMap<String, usize> = BTreeMap::new();
+    let mut queue: BTreeMap<String, usize> = BTreeMap::new();
     for t in &reg.tasks {
         let owner = crate::core::identity::canonical(&t.agent);
         let is_lead_buf = lead
@@ -238,12 +261,11 @@ pub fn plan(reg: &Registry, lead: Option<&str>) -> RouterPlan {
             Status::Active => {
                 active_zones.extend(t.zones.iter().cloned());
                 if !is_lead_buf {
-                    *load.entry(owner.clone()).or_insert(0) += 1;
                     *active.entry(owner).or_insert(0) += 1;
                 }
             }
             Status::Queued if !is_lead_buf => {
-                *load.entry(owner).or_insert(0) += 1;
+                *queue.entry(owner).or_insert(0) += 1;
             }
             _ => {}
         }
@@ -308,8 +330,13 @@ pub fn plan(reg: &Registry, lead: Option<&str>) -> RouterPlan {
         // очередь, затем меньше активных задач, затем имя (детерминизм).
         let mut best: Option<(String, u8, usize, usize, String)> = None;
         let mut rejects: Vec<String> = Vec::new();
+        let mut seen: BTreeSet<String> = BTreeSet::new();
         for a in &reg.agents {
             let canon = crate::core::identity::canonical(&a.name);
+            // Дубликат записи агента (следствие T-284) — считаем один раз.
+            if !seen.insert(canon.clone()) {
+                continue;
+            }
             if let Some(l) = lead {
                 if canon == crate::core::identity::canonical(l) {
                     continue;
@@ -319,19 +346,21 @@ pub fn plan(reg: &Registry, lead: Option<&str>) -> RouterPlan {
                 rejects.push(format!("{canon}: {reason}"));
                 continue;
             }
-            let busy = load.get(&canon).copied().unwrap_or(0);
-            if busy >= MAX_ACTIVE_PER_AGENT {
-                rejects.push(format!("{canon}: уже {busy} задач в работе/очереди"));
+            // Жёсткий потолок — только по задачам В РАБОТЕ.
+            let active_now = active.get(&canon).copied().unwrap_or(0);
+            if active_now >= MAX_ACTIVE_PER_AGENT {
+                rejects.push(format!("{canon}: уже {active_now} задач в работе"));
                 continue;
             }
-            let active_now = active.get(&canon).copied().unwrap_or(0);
+            // Очередь — только tie-break: короче очередь → приоритет.
+            let queued = queue.get(&canon).copied().unwrap_or(0);
             let ceiling = ceiling_of(reg, &canon);
-            let role = a.role.clone().unwrap_or_default();
-            let key = (canon.clone(), ceiling, busy, active_now, role);
+            let role = role_of(reg, &canon);
+            let key = (canon.clone(), ceiling, queued, active_now, role);
             let better = match &best {
                 None => true,
                 Some((_, bc, bb, ba, _)) => {
-                    (ceiling, busy, active_now, canon.as_str())
+                    (ceiling, queued, active_now, canon.as_str())
                         < (*bc, *bb, *ba, key.0.as_str())
                 }
             };
@@ -341,11 +370,11 @@ pub fn plan(reg: &Registry, lead: Option<&str>) -> RouterPlan {
         }
 
         match best {
-            Some((agent, ceiling, busy, active_now, role)) => {
+            Some((agent, ceiling, queued, active_now, role)) => {
                 let reason = format!(
-                    "потолок C{ceiling}, занято {busy}, в работе {active_now}, роль {role}",
+                    "потолок C{ceiling}, в очереди {queued}, в работе {active_now}, роль {role}",
                     ceiling = ceiling,
-                    busy = busy,
+                    queued = queued,
                     active_now = active_now,
                     role = if role.is_empty() { "worker" } else { &role }
                 );
@@ -355,7 +384,13 @@ pub fn plan(reg: &Registry, lead: Option<&str>) -> RouterPlan {
                     c_level: c,
                     reason,
                 });
-                *load.entry(agent.clone()).or_insert(0) += 1;
+                // Задача уходит из очереди прежнего владельца и становится
+                // активной у нового исполнителя.
+let prev = crate::core::identity::canonical(&t.agent);
+                if let Some(q) = queue.get_mut(&prev) {
+                    *q = q.saturating_sub(1);
+                }
+                *active.entry(agent.clone()).or_insert(0) += 1;
                 reserved.entry(agent).or_default().extend(t.zones.iter().cloned());
             }
             None => {
@@ -613,6 +648,59 @@ mod tests {
         let p = plan(&r, Some("minimax"));
         assert_eq!(p.assignments.len(), 1);
         assert_eq!(p.assignments[0].agent, "beam2");
+    }
+
+    #[test]
+    fn long_queue_does_not_block_assignment() {
+        // Агент с длинной очередью (5 задач ждут) и НУЛЕМ задач в работе
+        // ВСЁ РАВНО получает задачу: жёсткий потолок — только по активным.
+        // (Раньше очередь входила в «нагрузку», и роутер молчал: «уже 5
+        // задач в работе/очереди».)
+        let mut r = reg(
+            vec![
+                agent("minimax", ROLE_LEAD, Some("kilo"), None),
+                agent("beam", "worker", Some("kilo"), None),
+            ],
+            vec![task("T-001", "minimax", 2, &["src/a.rs"])],
+        );
+        for (id, zone) in [
+            ("T-100", "src/q1.rs"),
+            ("T-101", "src/q2.rs"),
+            ("T-102", "src/q3.rs"),
+            ("T-103", "src/q4.rs"),
+            ("T-104", "src/q5.rs"),
+        ] {
+            let mut t = task(id, "beam", 2, &[zone]);
+            t.status = Status::Queued;
+            r.tasks.push(t);
+        }
+        let p = plan(&r, Some("minimax"));
+        assert_eq!(
+            p.assignments.len(),
+            1,
+            "длинная очередь не должна блокировать выдачу: {:?}",
+            p.skipped
+        );
+        assert_eq!(p.assignments[0].agent, "beam");
+        assert_eq!(p.assignments[0].task_id, "T-001");
+    }
+
+    #[test]
+    fn duplicate_agent_entries_counted_once() {
+        // Дубликат записи агента (следствие T-284) не должен превращать
+        // потолок в «потолок первой записи» и не должен ломать выдачу.
+        let mut r = reg(
+            vec![
+                agent("minimax", ROLE_LEAD, Some("kilo"), None),
+                agent("step5", "worker", None, None),
+                agent("step5", ROLE_TECH_LEAD, Some("gpt-4"), Some(5)),
+            ],
+            vec![task("T-001", "minimax", 4, &["src/a.rs"])],
+        );
+        r.agents[1].role = None;
+        let p = plan(&r, Some("minimax"));
+        assert_eq!(p.assignments.len(), 1);
+        assert_eq!(p.assignments[0].agent, "step5");
     }
 
     #[test]
