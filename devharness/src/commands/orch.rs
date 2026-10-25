@@ -891,15 +891,15 @@ fn agent_ceiling_with(root: &Path, reg: &Registry, agent: &str) -> u8 {
 ///
 /// Ответ модели — one-shot: расходуется ровно одной выдачей (см. `consume`).
 /// Нет свежего ответа → вопрос задаётся (идемпотентно) и отправляется письмом,
-/// а задача НЕ выдаётся.
-fn require_identification(
+/// а задача ВЫДАЁТСЯ: идентификация ОТЛОЖЕНА (мягкий fail-closed).
+fn request_identification(
     root: &Path,
     reg: &Registry,
     caller: &str,
-) -> anyhow::Result<crate::core::reidentify::Answer> {
+) -> anyhow::Result<Option<crate::core::reidentify::Answer>> {
     let cfg = crate::commands::load_config(root).unwrap_or_default();
     if let Some(ans) = crate::core::reidentify::take_answer(root, caller, cfg.identify_ttl_secs) {
-        return Ok(ans);
+        return Ok(Some(ans));
     }
     let hint = registry_model(reg, caller);
     let ch = crate::core::reidentify::issue(root, caller, hint.as_deref())?;
@@ -916,15 +916,20 @@ fn require_identification(
             ch.question.clone(),
         ]);
     }
-    anyhow::bail!(
-        "devh orch start: {caller} — задача НЕ выдана (fail-closed, R24): сначала ответь на \
-         вопрос идентификации модели. Вопрос ушёл письмом (тема «ИДЕНТИФИКАЦИЯ: {}»).\n\
-         Ответь одной командой:\n  devh orch identify --reply \"MODEL: <полное имя модели из \
-         ТВОЕГО системного промпта, с датой/версией>\" --reply \"VERSION: <версия>\" \
-         --reply \"DATE: <YYYY-MM-DD>\"\n--- ВОПРОС ---\n{}",
-        ch.nonce,
-        ch.question
-    )
+    // Мягкий fail-closed: идентификация ОТЛОЖЕНА, но задача выдаётся.
+    // Жёсткий отказ здесь парализовал работу агентов (инцидент: после
+    // обязательного вопроса агент не мог взять задачу и стоял вхолостую).
+    // Теперь: вопрос ушёл письмом, работа продолжается, а неподтверждённая
+    // декларация видна техлиду в отчёте (undeclared) и попадает в доску.
+    eprintln!(
+        "devh orch start: ⚠ {caller} — идентификация ОТЛОЖЕНА (не блокирует работу): ответь \
+         на вопрос письмом (тема «ИДЕНТИФИКАЦИЯ: {}»):
+  devh orch identify --reply \"MODEL: \
+         <полное имя модели из ТВОЕГО системного промпта, с датой/версией>\" --reply \
+         \"VERSION: <версия>\" --reply \"DATE: <YYYY-MM-DD>\"",
+        ch.nonce
+    );
+    Ok(None)
 }
 
 /// Применить ответ идентификации: реестр + журнал (VERBATIM) + авто-задача.
@@ -1533,7 +1538,7 @@ fn start(root: &Path, args: &[String]) -> anyhow::Result<()> {
     // Проверка — последняя: до неё отказ даёт точную причину (зависимости,
     // потолок, «task taken»), а не «сначала ответь на вопрос».
     // Ответ — one-shot: расходуется ровно одной выдачей.
-    let ident = require_identification(root, &reg, &caller)?;
+    let ident = request_identification(root, &reg, &caller)?;
     let ts = now();
     let agent = if from_buffer {
         caller.clone()
@@ -1580,10 +1585,14 @@ fn start(root: &Path, args: &[String]) -> anyhow::Result<()> {
     }
     // Ответ идентификации принят: пишем VERBATIM в реестр и журнал, заводим
     // задачу техлиду на проверку имени модели.
-    let verify_task = apply_identification(&mut reg, &caller, &ident);
+    let verify_task = ident
+        .as_ref()
+        .and_then(|a| apply_identification(&mut reg, &caller, a));
     save(root, &reg)?;
     // Ответ израсходован: следующая выдача потребует нового ответа (R24).
-    let _ = crate::core::reidentify::consume(root, &caller);
+    if ident.is_some() {
+        let _ = crate::core::reidentify::consume(root, &caller);
+    }
     // Ledger: событие Started
     let ledger_path = dir(root).join("ledger.jsonl");
     let _ = log_event(&ledger_path, &LedgerEntry::new(&agent, LedgerEvent::Started, ts).with_task(&id));
@@ -1608,10 +1617,17 @@ fn start(root: &Path, args: &[String]) -> anyhow::Result<()> {
             }
         );
     }
-    println!(
-        "идентификация: модель {} — ответ принят (следующая выдача потребует нового ответа)",
-        ident.model
-    );
+    match &ident {
+        Some(a) => println!(
+            "идентификация: модель {} — ответ принят (следующая выдача потребует нового ответа)",
+            a.model
+        ),
+        None => println!(
+            "идентификация: ОТЛОЖЕНА — задача выдана, но модель не подтверждена; \
+             ответь письмом (тема «ИДЕНТИФИКАЦИЯ»): devh orch identify --reply \"MODEL: <...>\" \
+             --reply \"VERSION: <...>\" --reply \"DATE: <YYYY-MM-DD>\""
+        ),
+    }
     if let Some(t) = verify_task {
         println!("задача {t}: техлид проверяет названное имя модели");
     }
@@ -6147,29 +6163,39 @@ mod tests {
         );
     }
 
-    /// R24: без ответа на вопрос идентификации задача НЕ выдаётся (fail-closed).
+    /// R24 (мягкий fail-closed): без ответа на вопрос идентификации задача
+    /// ВЫДАЁТСЯ — идентификация ОТЛОЖЕНА. Жёсткий отказ парализовал работу
+    /// агентов (инцидент: после обязательного вопроса задачу взять нельзя).
     #[test]
-    fn start_without_identification_is_refused() {
+    fn start_without_identification_is_deferred_not_blocked() {
         let tmp = tempdir().expect("tmp");
         let root = tmp.path();
         let id = add_task(root, &me(), "P1", "без идентификации");
-        let err = run(root, "start", &[id.as_str()]).expect_err("без ответа — отказ");
-        assert!(err.to_string().contains("идентификац"), "{err}");
+        run(root, "start", &[id.as_str()]).expect("без ответа — выдача с отложенной идентификацией");
         let reg = load(root);
-        assert_eq!(reg.tasks.first().map(|t| t.status), Some(Status::Queued));
+        assert_eq!(reg.tasks.first().map(|t| t.status), Some(Status::Active));
+        // Вопрос идентификации поставлен и ждёт ответа (письмо уходит отдельно).
+        let ch = crate::core::reidentify::pending(root, &me()).expect("вопрос ждёт ответа");
+        assert!(ch.answer.is_none(), "ответ ещё не получен");
     }
 
-    /// Ответ на вопрос — one-shot: расходуется ровно одной выдачей.
+    /// Ответ на вопрос — one-shot: расходуется первой выдачей, но вторая
+    /// выдача НЕ блокируется (идентификация откладывается, а не стоп).
     #[test]
-    fn identification_answer_is_consumed_by_one_issuance() {
+    fn identification_answer_is_consumed_but_next_issuance_is_not_blocked() {
         let tmp = tempdir().expect("tmp");
         let root = tmp.path();
         let id1 = add_task(root, &me(), "P1", "первая выдача");
         identify_now(root);
         run(root, "start", &[id1.as_str()]).expect("start");
         let id2 = add_task(root, &me(), "P1", "вторая выдача");
-        let err = run(root, "start", &[id2.as_str()]).expect_err("вторая выдача требует ответа");
-        assert!(err.to_string().contains("идентификац"), "{err}");
+        run(root, "start", &[id2.as_str()]).expect("вторая выдача не блокируется");
+        let reg = load(root);
+        assert!(
+            reg.tasks.iter().all(|t| t.status == Status::Active),
+            "обе выдачи состоялись: {:?}",
+            reg.tasks.iter().map(|t| t.status).collect::<Vec<_>>()
+        );
     }
 
     /// Ответ сохраняется VERBATIM и заводит задачу техлиду (дедуп по заголовку).
