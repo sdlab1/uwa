@@ -15,6 +15,26 @@ use std::path::Path;
 use crate::core::task_router::{self, RouterPlan};
 use crate::shell::lock::OutputLock;
 
+/// Раздать задачи по уже загруженному реестру (без записи на диск).
+///
+/// Возвращает список выполненных назначений. Чистая мутация: вызывающий
+/// сам сохраняет реестр — так раздача не создаёт вторую запись и не теряет
+/// поля, изменённые в той же операции.
+pub fn apply_to(
+    reg: &mut crate::commands::orch::Registry,
+    lead: Option<&str>,
+) -> Vec<crate::core::task_router::Assignment> {
+    let plan = task_router::plan(reg, lead);
+    let ts = now();
+    for a in &plan.assignments {
+        if let Some(t) = reg.tasks.iter_mut().find(|t| t.id == a.task_id) {
+            t.agent = a.agent.clone();
+            t.updated = ts;
+        }
+    }
+    plan.assignments
+}
+
 /// Выполнить раздачу. Возвращает план (для вывода и тестов).
 pub fn assign(root: &Path, dry_run: bool) -> anyhow::Result<RouterPlan> {
     // Лок на реестр — тот же, что у остальных команд `devh orch`.
@@ -55,6 +75,36 @@ pub fn assign(root: &Path, dry_run: bool) -> anyhow::Result<RouterPlan> {
         }
     }
     Ok(plan)
+}
+
+/// Тихо раздать задачи после изменения реестра (вызывается из `add`/`done`).
+///
+/// Ошибки не ломают основную операцию: раздача — вспомогательная.
+pub fn auto_trigger(root: &Path, reg: &mut crate::commands::orch::Registry) {
+    let (lead, _) = crate::commands::orch::lead_of(reg);
+    let Some(lead) = lead else { return };
+    let assigned = apply_to(reg, Some(&lead));
+    if !assigned.is_empty() {
+        let ledger_path = crate::commands::orch::dir(root).join("ledger.jsonl");
+        let ts = now();
+        for a in &assigned {
+            let _ = crate::core::ledger::log_event(
+                &ledger_path,
+                &crate::core::ledger::LedgerEntry::new(
+                    "lead",
+                    crate::core::ledger::LedgerEvent::Reassigned,
+                    ts,
+                )
+                .with_task(&a.task_id)
+                .with_detail(&format!("autoassign: {}", a.agent)),
+            );
+        }
+        let summary: Vec<String> = assigned
+            .iter()
+            .map(|a| format!("{}→{}", a.task_id, a.agent))
+            .collect();
+        println!("devh orch autoassign: {}", summary.join(", "));
+    }
 }
 
 fn now() -> u64 {
