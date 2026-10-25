@@ -155,9 +155,9 @@ pub fn checkpoint_at(path: &Path, agent: &str) -> anyhow::Result<String> {
         ("GIT_COMMITTER_EMAIL", "devh@localhost".to_string()),
     ];
     let res = (|| -> anyhow::Result<String> {
-        git_env(&path, &env, &["read-tree", "HEAD"])?;
-        git_env(&path, &env, &["add", "-A"])?;
-        let tree = git_env(&path, &env, &["write-tree"])?;
+        git_env(path, &env, &["read-tree", "HEAD"])?;
+        git_env(path, &env, &["add", "-A"])?;
+        let tree = git_env(path, &env, &["write-tree"])?;
         let msg = format!("WIP({agent}): чекпоинт незакоммиченной работы");
         let commit = git_env(
             &path,
@@ -165,7 +165,7 @@ pub fn checkpoint_at(path: &Path, agent: &str) -> anyhow::Result<String> {
             &["commit-tree", &tree, "-p", "HEAD", "-m", &msg],
         )?;
         let refname = format!("refs/heads/{}", wip_branch(agent));
-        git_env(&path, &env, &["update-ref", &refname, &commit])?;
+        git_env(path, &env, &["update-ref", &refname, &commit])?;
         Ok(commit)
     })();
     let _ = std::fs::remove_file(&idx);

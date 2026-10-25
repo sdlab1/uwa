@@ -171,7 +171,7 @@ pub fn project(reg: &Registry) -> DashboardProjection {
 
         // Счётчики для более простых моделей.
         let mut simpler_model_counts: BTreeMap<u8, usize> = BTreeMap::new();
-        for (other_ceiling, _) in &agent_ceilings {
+        for (_other_ceiling, _) in &agent_ceilings {
             // Не считаем себя.
         }
         // Считаем задачи, доступные моделям с потолком < ceiling.
