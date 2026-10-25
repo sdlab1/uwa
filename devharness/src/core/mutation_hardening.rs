@@ -1,117 +1,143 @@
-//! P2: mutation hardening — рекомендация по классу слепоты выжившего мутанта.
-//! По описанию выжившего (`mutation` + `genre`) выдаёт рекомендацию: какой
-//! тест добавить (например, «ассерт на это условие» или «граничный случай»).
+//! C3-СПЛИТ T-199: mutation hardening — запрет --in-place и ручных правок артефактов аудита.
+//!
+//! Guard отклоняет конфиг мутации с --in-place (мутирует дерево агента) и запрет
+//! ручной правки артефактов аудита.
 
-/// Классы слепоты по жанру мутанта.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BlindClass {
-    /// Прямой ассерт результата функции.
-    Direct,
-    /// Граничный случай (edge case).
-    Boundary,
-    /// Отсутствие проверки побочного эффекта.
-    SideEffect,
-    /// Общий шаблон (неизвестный жанр → общий совет).
-    General,
-}
+use std::path::Path;
 
-/// Рекомендация по мутанту (мутация + жанр → класс слепоты + текст совета).
+/// Ошибки проверки hardening.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Recommendation {
-    /// Класс слепоты.
-    pub blind_class: BlindClass,
-    /// Текст совета (что добавить в тесты).
-    pub advice: String,
+pub enum HardeningError {
+    InPlaceForbidden,
+    ManualArtifactEditForbidden(String),
 }
 
-/// Выдать рекомендацию по описанию выжившего мутанта.
-/// Классификация по жанру (`genre`) — основа рекомендации.
-pub fn recommend(mut_name: &str, genre: &str, mutation: &str) -> Recommendation {
-    let lower_genre = genre.to_lowercase();
-    let lower_mut = mutation.to_lowercase();
-    let (class, advice) = if lower_genre.contains("fnvalue") || lower_genre.contains("function") {
-        (
-            BlindClass::Direct,
-            "прямой ассерт результата функции на этой строке".into(),
-        )
-    } else if lower_genre.contains("operator") || lower_genre.contains("binary") {
-        (
-            BlindClass::Boundary,
-            "граничный случай оператора (оба плеча условия)".into(),
-        )
-    } else if lower_genre.contains("statement") || lower_genre.contains("line") {
-        (
-            BlindClass::SideEffect,
-            "проверка побочного эффекта или отсутствия исключения".into(),
-        )
-    } else {
-        (
-            BlindClass::General,
-            "добавить тест на это условие (общий шаблон)".into(),
-        )
-    };
-    Recommendation {
-        blind_class: class,
-        advice,
+/// Проверить конфиг мутации на наличие запрещённых флагов.
+///
+/// Возвращает `Err(HardeningError::InPlaceForbidden)` если найден `--in-place`.
+pub fn check_mutation_config(args: &[String]) -> Result<(), HardeningError> {
+    for arg in args {
+        if arg == "--in-place" {
+            return Err(HardeningError::InPlaceForbidden);
+        }
     }
+    Ok(())
 }
 
-/// Короткая строка для лога / таблицы.
-pub fn format_recommendation(r: &Recommendation) -> String {
-    format!("[{:?}] {}", r.blind_class, r.advice)
+/// Проверить, что артефакт аудита не редактировался вручную.
+///
+/// Артефакты аудита: `mutants.out`, `iterator.json`, `mutants.log` в директории аудита.
+/// Проверка по mtime: если mtime артефакта новее, чем последняя запись в ledger,
+/// считаем что файл правили вручную.
+pub fn check_audit_artifact_not_manual(
+    artifact_path: &Path,
+    ledger_path: &Path,
+) -> Result<(), HardeningError> {
+    let artifact_meta = std::fs::metadata(artifact_path);
+    let ledger_meta = std::fs::metadata(ledger_path);
+
+    if let (Ok(a), Ok(l)) = (artifact_meta, ledger_meta) {
+        if let (Ok(a_time), Ok(l_time)) = (a.modified(), l.modified()) {
+            if a_time > l_time {
+                return Err(HardeningError::ManualArtifactEditForbidden(
+                    artifact_path.display().to_string(),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Проверить все артефакты в директории аудита.
+pub fn check_audit_directory(audit_dir: &Path, ledger_path: &Path) -> Vec<HardeningError> {
+    let mut errors = Vec::new();
+    let artifacts = ["mutants.out", "iterator.json", "mutants.log"];
+
+    for name in artifacts {
+        let path = audit_dir.join(name);
+        if path.exists() {
+            if let Err(e) = check_audit_artifact_not_manual(&path, ledger_path) {
+                errors.push(e);
+            }
+        }
+    }
+    errors
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use tempfile::TempDir;
 
-    /// Тест 1: функция (FnValue) → прямой ассерт.
     #[test]
-    fn fnvalue_genre_gives_direct() {
-        let r = recommend("mut_1", "FnValue", "replace -> Some(0.0)");
-        assert_eq!(r.blind_class, BlindClass::Direct);
-        assert!(r.advice.contains("прямой"));
+    fn in_place_config_rejected() {
+        let args = vec!["cargo".to_string(), "mutants".to_string(), "--in-place".to_string()];
+        let err = check_mutation_config(&args).unwrap_err();
+        assert_eq!(err, HardeningError::InPlaceForbidden);
     }
 
-    /// Тест 2: оператор (BinaryOperator) → граничный случай.
     #[test]
-    fn binary_genre_gives_boundary() {
-        let r = recommend("mut_2", "BinaryOperator", "+");
-        assert_eq!(r.blind_class, BlindClass::Boundary);
-        assert!(r.advice.contains("граничный"));
+    fn normal_config_accepted() {
+        let args = vec!["cargo".to_string(), "mutants".to_string(), "--json".to_string()];
+        assert!(check_mutation_config(&args).is_ok());
     }
 
-    /// Тест 3: неизвестный жанр → общий совет.
     #[test]
-    fn unknown_genre_gives_general() {
-        let r = recommend("mut_3", "UnknownGenre", "any mutation");
-        assert_eq!(r.blind_class, BlindClass::General);
+    fn empty_config_accepted() {
+        let args = vec![];
+        assert!(check_mutation_config(&args).is_ok());
     }
 
-    /// Тест 4: формат строки содержит класс и совет.
     #[test]
-    fn format_contains_class_and_advice() {
-        let r = recommend("m", "Statement", "x");
-        let s = format_recommendation(&r);
-        assert!(s.contains("SideEffect"));
-        assert!(s.contains("побочного"));
+    fn in_place_in_middle_rejected() {
+        let args = vec!["cargo".to_string(), "--in-place".to_string(), "mutants".to_string()];
+        let err = check_mutation_config(&args).unwrap_err();
+        assert_eq!(err, HardeningError::InPlaceForbidden);
     }
 
-    /// Тест 5: рекомендация по строке (statement) — побочный эффект.
     #[test]
-    fn statement_genre_gives_side_effect() {
-        let r = recommend("m", "Statement", "delete");
-        assert_eq!(r.blind_class, BlindClass::SideEffect);
+    fn audit_artifact_not_manual_ok() {
+        let tmp = TempDir::new().unwrap();
+        let ledger = tmp.path().join("ledger.jsonl");
+        let artifact = tmp.path().join("mutants.out");
+
+        fs::write(&ledger, "{}").unwrap();
+        fs::write(&artifact, "content").unwrap();
+
+        // Artifact older than ledger (just written, so roughly same time or ledger newer)
+        // We just test it doesn't error for normal case
+        assert!(check_audit_artifact_not_manual(&artifact, &ledger).is_ok());
     }
 
-    /// Тест 6: интеграция — несколько жанров дают разные классы.
     #[test]
-    fn different_genres_different_classes() {
-        let r1 = recommend("a", "FnValue", "");
-        let r2 = recommend("b", "BinaryOperator", "");
-        assert_ne!(
-            r1.blind_class, r2.blind_class,
-            "разные жанры → разные классы"
-        );
+    fn audit_directory_check_finds_manual_edits() {
+        let tmp = TempDir::new().unwrap();
+        let ledger = tmp.path().join("ledger.jsonl");
+        let artifact = tmp.path().join("mutants.out");
+
+        fs::write(&ledger, "{}").unwrap();
+        fs::write(&artifact, "content").unwrap();
+
+        // Wait a bit and "edit" the artifact
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        fs::write(&artifact, "manual edit").unwrap();
+
+        let errors = check_audit_directory(tmp.path(), &ledger);
+        assert_eq!(errors.len(), 1);
+        assert!(matches!(
+            errors[0],
+            HardeningError::ManualArtifactEditForbidden(_)
+        ));
+    }
+
+    #[test]
+    fn audit_directory_ignores_missing_files() {
+        let tmp = TempDir::new().unwrap();
+        let ledger = tmp.path().join("ledger.jsonl");
+        fs::write(&ledger, "{}").unwrap();
+
+        let errors = check_audit_directory(tmp.path(), &ledger);
+        assert!(errors.is_empty());
     }
 }
