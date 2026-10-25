@@ -66,6 +66,13 @@ pub fn decide(root: &Path, cfg: &crate::core::types::RunConfig, store: &Store) -
         return n;
     }
 
+    // ── Несохранённая работа в worktree (T-334) ───────────────────────
+    // Если есть worktree с >300 LOC изменений без коммита >30 мин —
+    // приоритет: закоммитить / застэшить, иначе теряем работу.
+    if let Some(n) = unsaved_work_next(root) {
+        return n;
+    }
+
     // ── Orch tasks: очередь задач → devh orch start <id> ──────────────
     // Приоритет выбора: сначала задача с меньшим prio, затем P (complexity),
     // затем возраст (created). Блокированные по deps НЕ выдаются.
@@ -362,6 +369,28 @@ fn has_entries(dir: &Path) -> bool {
     std::fs::read_dir(dir)
         .map(|mut rd| rd.next().is_some())
         .unwrap_or(false)
+}
+
+/// Проверка несохранённой работы в worktree (T-334).
+fn unsaved_work_next(root: &Path) -> Option<Next> {
+    use crate::core::unsaved_watch::{check_all_worktrees, WatchConfig};
+    let config = WatchConfig::default();
+    let results = check_all_worktrees(root, &config);
+    for r in results {
+        if r.alert {
+            let mins = r.stale_seconds / 60;
+            return Some(Next::new(
+                "git status",
+                &format!(
+                    "worktree {}: {} LOC изменений без коммита {} мин — закоммить или застэшить (T-334)",
+                    r.path.display(),
+                    r.loc,
+                    mins
+                ),
+            ));
+        }
+    }
+    None
 }
 
 /// Следующая задача из очереди оркестратора (если есть готовая к выдаче).
