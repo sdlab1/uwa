@@ -2415,6 +2415,15 @@ fn selfcheck(root: &Path, args: &[String]) -> anyhow::Result<()> {
             ));
         }
     }
+    // 5b. Закрытые задачи Done без main_sha и без override_reason (T-272/Т-312).
+    for t in reg.tasks.iter().filter(|t| t.status == Status::Done) {
+        if t.main_sha.is_none() && t.override_reason.is_none() {
+            warns.push(format!(
+                "{}: задача Done без main_sha и без override_reason — слияние не зафиксировано",
+                t.id
+            ));
+        }
+    }
     // 6. Просроченные письма без ответа (T-271).
     let lag_reports = crate::core::msg_lag::check_all_lag_reports(None);
     warns.extend(lag_reports);

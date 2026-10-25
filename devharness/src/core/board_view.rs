@@ -322,4 +322,35 @@ mod tests {
         // unread_count должен быть usize (0 если нет новых писем).
         let _: usize = q.unread_count;
     }
+
+    /// T-312: check_done_tasks_have_main_sha ловит Done без main_sha.
+    #[test]
+    fn check_done_tasks_have_main_sha_finds_done_without_sha() {
+        let mut board = BoardView::default();
+        let t = sample_task("T-401", "beam", TaskStatus::Done);
+        board.in_progress.push(t);
+        let warnings = check_done_tasks_have_main_sha(&board);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].message.contains("T-401"));
+        assert_eq!(warnings[0].severity, WarningSeverity::Warning);
+    }
+
+    /// T-312: Done с main_sha или override_reason не порождает warning.
+    #[test]
+    fn check_done_tasks_have_main_sha_ok_when_signed() {
+        let mut board = BoardView::default();
+        let mut t = sample_task("T-402", "beam", TaskStatus::Done);
+        t.main_sha = Some("abc".into());
+        board.in_progress.push(t);
+        assert!(check_done_tasks_have_main_sha(&board).is_empty());
+
+        let mut board = BoardView::default();
+        let mut t = sample_task("T-403", "beam", TaskStatus::Done);
+        t.override_reason = Some("manual merge".into());
+        board.in_progress.push(t);
+        assert!(
+            check_done_tasks_have_main_sha(&board).is_empty(),
+            "override_reason подавляет warning"
+        );
+    }
 }
