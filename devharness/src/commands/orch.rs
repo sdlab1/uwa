@@ -245,7 +245,7 @@ fn dir(root: &Path) -> PathBuf {
     orch_root(root).join(".harness").join("orch")
 }
 
-fn path(root: &Path) -> PathBuf {
+pub(crate) fn path(root: &Path) -> PathBuf {
     dir(root).join("registry.json")
 }
 
@@ -356,7 +356,7 @@ fn tasks_for<'a>(reg: &'a Registry, canon: &str) -> Vec<&'a Task> {
 }
 
 /// Вспомогательное: значение флага `--name value` или `--name=value`.
-fn flag(args: &[String], name: &str) -> Option<String> {
+pub(crate) fn flag(args: &[String], name: &str) -> Option<String> {
     let prefix = format!("{name}=");
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -371,7 +371,7 @@ fn flag(args: &[String], name: &str) -> Option<String> {
 }
 
 /// Все значения повторяемого флага.
-fn flags_all(args: &[String], name: &str) -> Vec<String> {
+pub(crate) fn flags_all(args: &[String], name: &str) -> Vec<String> {
     let prefix = format!("{name}=");
     let mut out = Vec::new();
     let mut it = args.iter();
@@ -388,11 +388,14 @@ fn flags_all(args: &[String], name: &str) -> Vec<String> {
 }
 
 /// Флаги, за которыми идёт значение (остальные — булевы).
-const VALUE_FLAGS: [&str; 19] = [
+const VALUE_FLAGS: [&str; 22] = [
     "--agent",
     "--p",
     "--c",
     "--title",
+    "--proposal",
+    "--ceiling",
+    "--max-children",
     "--zone",
     "--note",
     "--f",
@@ -411,7 +414,7 @@ const VALUE_FLAGS: [&str; 19] = [
 ];
 
 /// Позиционные аргументы (не флаги и не их значения).
-fn positional(args: &[String]) -> Vec<String> {
+pub(crate) fn positional(args: &[String]) -> Vec<String> {
     let mut out = Vec::new();
     let mut i = 0usize;
     while i < args.len() {
@@ -592,6 +595,8 @@ pub fn orch(root: &Path, sub: &str, args: &[String]) -> anyhow::Result<()> {
         "verify" => verify_cmd(root, args),
         "commit" => commit_cmd(root, args),
         "guard-commit" => guard_commit_cmd(root),
+        "guard" => crate::commands::guard::run(root, args),
+        "decompose" => crate::commands::decompose::run(root, args),
         "install-hook" => install_hook_cmd(root),
         "lead" => lead_cmd(root, args),
         "role" => role_cmd(root, args),
@@ -2929,6 +2934,80 @@ fn board(root: &Path, args: &[String]) -> anyhow::Result<()> {
                     }
                 }
             }
+        }
+    }
+
+    // ── простые задачи по моделям (weak-model readiness) ──
+    {
+        let stats = crate::core::modelrank::aggregate(&model_records(&reg));
+        let mut printed = false;
+        for a in reg.agents.iter() {
+            if Some(a.name.as_str()) == board_lead.as_deref() {
+                continue;
+            }
+            let model = registry_model(&reg, &a.name)
+                .unwrap_or_else(|| "модель неизвестна".to_string());
+            let ceiling = stats
+                .iter()
+                .find(|s| s.model == model)
+                .map(|s| s.ceiling)
+                .unwrap_or(crate::core::complexity::ModelCeiling::DEFAULT);
+            let simple: Vec<&Task> = reg
+                .tasks
+                .iter()
+                .filter(|t| t.agent == a.name && t.status == Status::Queued)
+                .filter(|t| t.c_level.unwrap_or(0) <= ceiling)
+                .collect();
+            if simple.is_empty() {
+                continue;
+            }
+            if !printed {
+                println!(
+                    "\nПРОСТЫЕ ЗАДАЧИ ПО МОДЕЛЯМ (потолок C модели, guardrails и blocked-by):"
+                );
+                printed = true;
+            }
+            println!("    {} ({}, потолок C{ceiling}):", a.name, model);
+            for t in simple.iter() {
+                let deps = reg.plan.deps.get(&t.id).cloned().unwrap_or_default();
+                let blocked: Vec<String> = deps
+                    .iter()
+                    .filter(|d| {
+                        reg.tasks
+                            .iter()
+                            .find(|x| x.id == **d)
+                            .map(|x| x.status != Status::Done)
+                            .unwrap_or(true)
+                    })
+                    .cloned()
+                    .collect();
+                let guardrail = t
+                    .checks
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| "⚠ без машинной проверки".to_string());
+                if blocked.is_empty() {
+                    println!(
+                        "      {} C{} ✅ готова  [{}]  {}",
+                        t.id,
+                        t.c_level.unwrap_or(0),
+                        guardrail,
+                        t.title
+                    );
+                } else {
+                    println!(
+                        "      {} C{} ⛔ blocked by {}  [{}]  {}",
+                        t.id,
+                        t.c_level.unwrap_or(0),
+                        blocked.join(", "),
+                        guardrail,
+                        t.title
+                    );
+                }
+            }
+        }
+        if !printed {
+            println!("\nПРОСТЫЕ ЗАДАЧИ ПО МОДЕЛЯМ: в очередях нет задач проще потолка модели");
         }
     }
 

@@ -259,10 +259,40 @@ impl Guard for IdentityGuard {
     }
 }
 
+/// Временный каталог для selfcheck'а.
+///
+/// `tempfile` объявлен только в dev-зависимостях, а `selfcheck()` живёт в
+/// обычном коде — использовать tempfile::tempdir() здесь нельзя: крейт не
+/// собирался (`cannot find module or crate tempfile`). Поэтому свой каталог
+/// на std::env::temp_dir() с уникальным именем и очисткой в Drop.
+struct TempDir(std::path::PathBuf);
+
+impl TempDir {
+    fn new(tag: &str) -> std::io::Result<Self> {
+        let base = std::env::temp_dir().join(format!(
+            "devh-identity-guard-{tag}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base)?;
+        Ok(Self(base))
+    }
+
+    fn path(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 /// Selfcheck на каноническом примере: чистое хранилище — Ok; примеры каждой
 /// проблемы — Problem. Побочных эффектов нет (каталог свой, временный).
 pub fn selfcheck() -> GuardVerdict {
-    let Some(dir) = tempfile::tempdir().ok() else {
+    let Some(dir) = TempDir::new("selfcheck").ok() else {
         return GuardVerdict::Problem("selfcheck: не могу создать tempdir".to_string());
     };
     let home = dir.path();
