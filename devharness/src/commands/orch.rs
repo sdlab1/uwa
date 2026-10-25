@@ -36,6 +36,10 @@ use crate::core::guards::{Guard, GuardContext, GuardVerdict};
 pub const ROLE_LEAD: &str = "lead";
 /// Роль ведомого (worker).
 pub const ROLE_WORKER: &str = "worker";
+/// Роль технического лида (tech_lead): ревью коммитов, уточнение моделей
+/// агентов и управление их потолком сложности (C). Без прав ведущего:
+/// без merge/push/mutate/passwd.
+pub const ROLE_TECH_LEAD: &str = "tech_lead";
 
 /// Статус задачи в реестре.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -167,9 +171,14 @@ pub struct AgentState {
     pub fail_streak: u32,
     /// Причина подозрения (смена модели, F3+, …).
     pub suspicion: Option<String>,
-    /// Роль агента: `lead` (ведущий) или `worker` (ведомый).
+    /// Роль агента: `lead` (ведущий), `worker` (ведомый) или `tech_lead`
+    /// (технический лид: ревью коммитов, модели, потолки сложности).
     #[serde(default)]
     pub role: Option<String>,
+    /// Явный потолок сложности (C), выданный ведущим или tech-lead.
+    /// `None` — потолок считается по модели (`core::modelrank`).
+    #[serde(default)]
+    pub c_ceiling: Option<u8>,
     /// Ждёт первого `orch welcome` (онбординг).
     #[serde(default)]
     pub pending_welcome: bool,
@@ -588,6 +597,8 @@ pub fn orch(root: &Path, sub: &str, args: &[String]) -> anyhow::Result<()> {
         "bug" => bug(root, args),
         "wt" => wt(root, args),
         "models" => models(root),
+        "review" => review_cmd(root, args),
+        "ceiling" => ceiling_cmd(root, args),
         "identify" => identify(root, args),
         "retune" => retune(root, args),
         "zones" => zones(root),
@@ -654,7 +665,11 @@ fn print_help() {
   wt release <агент>          освободить worktree (грязное — не трогаем)
   wt gc                       убрать осиротевшие worktree'и
   models                      рейтинг моделей: сдано, F-распределение, потолок C
-  identify <агент> [--set M]  модель агента (--set — только ведущий)
+  identify <агент> [--set M]  модель агента (--set — ведущий или tech-lead)
+  review [--agent X] [--json] [--notify] [--ask-model]
+                               ревью коммитов агентов (ведущий или tech-lead)
+  ceiling --agent X --c N     явный потолок сложности (C) агента (--clear — снять)
+  ceiling --list              потолки всех агентов
   retune <ID> [--c C --p P --title T --check CMD --zone PATH --dod TEXT]
                                починка задачи без revoke/recreate (только ведущий)
 
@@ -721,12 +736,19 @@ fn ceiling_for_model(model: &str, records: &[crate::core::modelrank::TaskRecord]
         .unwrap_or(crate::core::complexity::ModelCeiling::DEFAULT)
 }
 
-/// Потолок агента (по модели из реестра).
+/// Потолок агента: явное значение (выдано ведущим или tech-lead) имеет
+/// приоритет над потолком, вычисленным по модели.
 fn agent_ceiling(reg: &Registry, agent: &str) -> u8 {
-    match registry_model(reg, agent) {
+    let base = match registry_model(reg, agent) {
         Some(m) => ceiling_for_model(&m, &model_records(reg)),
         None => crate::core::complexity::ModelCeiling::DEFAULT,
-    }
+    };
+    let explicit = reg
+        .agents
+        .iter()
+        .find(|a| a.name == crate::core::identity::canonical(agent))
+        .and_then(|a| a.c_ceiling);
+    crate::core::tech_lead::effective_ceiling(explicit, base)
 }
 
 /// Разбор C-уровня (C0..C10).
@@ -1532,10 +1554,18 @@ fn model(root: &Path, args: &[String]) -> anyhow::Result<()> {
     let mut reg = load(root);
     let (lead, _) = lead_of(&reg);
     let caller = crate::core::identity::canonical(&crate::core::identity::current().name);
-    if lead.as_deref() != Some(caller.as_str()) {
+    let is_lead = lead.as_deref() == Some(caller.as_str());
+    let is_tech = !is_lead && caller_has_review_rights(&reg);
+    if !is_lead && !is_tech {
         return Err(anyhow!(
-            "devh orch model: модель/рантайм фиксирует только ведущий (текущий ведущий: {})",
+            "devh orch model: модель/рантайм фиксирует ведущий или tech-lead (текущий ведущий: {})",
             lead.as_deref().unwrap_or("не назначен")
+        ));
+    }
+    if is_tech && !confirmed {
+        return Err(anyhow!(
+            "devh orch model: tech-lead фиксирует модель только с --confirm (после ответа агента); \
+             без подтверждения — только ведущий"
         ));
     }
     if agent_index(&reg, &agent).is_none() {
@@ -2197,9 +2227,10 @@ fn identify(root: &Path, args: &[String]) -> anyhow::Result<()> {
     let (lead, _) = lead_of(&reg);
     let caller = crate::core::identity::canonical(&crate::core::identity::current().name);
     if let Some(m) = flag(args, "--set") {
-        if lead.as_deref() != Some(caller.as_str()) {
+        let is_lead = lead.as_deref() == Some(caller.as_str());
+        if !is_lead && !caller_has_review_rights(&reg) {
             return Err(anyhow!(
-                "devh orch identify --set: модель назначает только ведущий"
+                "devh orch identify --set: модель назначает ведущий или tech-lead"
             ));
         }
         let m = m.trim().to_string();
@@ -2219,7 +2250,16 @@ fn identify(root: &Path, args: &[String]) -> anyhow::Result<()> {
             }),
         }
         save(root, &reg)?;
-        println!("devh orch identify: {canon} — модель {m} (записано ведущим)");
+        // Журнал идентичностей: декларация модели — append-only, чтобы
+        // tech-lead мог сверить «декларация vs реестр» (core::identity_ledger).
+        crate::core::identity_ledger::log_model_change(
+            &canon,
+            &crate::core::identity::current().key,
+            &m,
+            None,
+        );
+        let who = if is_lead { "ведущим" } else { "tech-lead" };
+        println!("devh orch identify: {canon} — модель {m} (записано {who})");
         return Ok(());
     }
     let (model, source) = model_of(root, &reg, &canon);
@@ -3867,12 +3907,12 @@ pub fn role_cmd(root: &Path, args: &[String]) -> anyhow::Result<()> {
         .trim()
         .to_string();
     let role = flag(args, "--role")
-        .ok_or_else(|| anyhow!("devh orch role: нужен --role lead|worker"))?
+        .ok_or_else(|| anyhow!("devh orch role: нужен --role lead|worker|tech_lead"))?
         .trim()
         .to_lowercase();
-    if role != ROLE_LEAD && role != ROLE_WORKER {
+    if role != ROLE_LEAD && role != ROLE_WORKER && role != ROLE_TECH_LEAD {
         return Err(anyhow!(
-            "devh orch role: роль «{role}» неизвестна (допустимо: lead|worker)"
+            "devh orch role: роль «{role}» неизвестна (допустимо: lead|worker|tech_lead)"
         ));
     }
     let reg = load(root);
@@ -3890,12 +3930,281 @@ pub fn role_cmd(root: &Path, args: &[String]) -> anyhow::Result<()> {
         // назначил бы себя ведущим и обошёл все гейты).
         check_lead_password(root, args)?;
     }
+    if role == ROLE_TECH_LEAD {
+        let canon = crate::core::identity::canonical(&agent);
+        if lead_canon.as_deref() == Some(canon.as_str()) {
+            return Err(anyhow!(
+                "devh orch role: ведущего нельзя перевести в tech_lead — сначала назначь нового \
+                 lead (devh orch lead --set <адрес>), иначе доска останется без ведущего"
+            ));
+        }
+    }
     let mut reg = reg;
     apply_role(&mut reg, &agent, &role);
     save(root, &reg)?;
     println!(
         "devh orch: {} — роль {role}",
         crate::core::identity::canonical(&agent)
+    );
+    Ok(())
+}
+
+/// Права tech-lead: ревью коммитов, уточнение модели, потолок сложности.
+/// Ведущий сохраняет все права (tech-lead — подмножество).
+fn caller_has_review_rights(reg: &Registry) -> bool {
+    let caller = crate::core::identity::canonical(&crate::core::identity::current().name);
+    let (lead, _) = lead_of(reg);
+    if lead.as_deref() == Some(caller.as_str()) {
+        return true;
+    }
+    reg.agents
+        .iter()
+        .any(|a| a.name == caller && a.role.as_deref() == Some(ROLE_TECH_LEAD))
+}
+
+/// Отказ с указанием, кому доступно действие.
+fn require_review_rights(reg: &Registry, what: &str) -> anyhow::Result<()> {
+    if caller_has_review_rights(reg) {
+        return Ok(());
+    }
+    let (lead, _) = lead_of(reg);
+    Err(anyhow!(
+        "devh orch {what}: доступно ведущему или tech-lead (текущий ведущий: {})",
+        lead.unwrap_or_else(|| "не назначен".to_string())
+    ))
+}
+
+/// `devh orch review [--agent X] [--json] [--notify] [--ask-model]`.
+///
+/// Ревью коммитов агентов: у закрытых задач без `main_sha` проверяем, что
+/// `commit_sha` существует, лежит в ветке агента и дошёл до `main`.
+/// `--notify` — письма агентам с находками; `--ask-model` — запрос декларации
+/// модели у агентов, у которых её нет (или она расходится с реестром).
+fn review_cmd(root: &Path, args: &[String]) -> anyhow::Result<()> {
+    let reg = load(root);
+    require_review_rights(&reg, "review")?;
+    let only = flag(args, "--agent").map(|a| crate::core::identity::canonical(&a));
+    let as_json = args.iter().any(|a| a == "--json");
+    let notify = args.iter().any(|a| a == "--notify");
+    let ask_model = args.iter().any(|a| a == "--ask-model");
+
+    let tasks: Vec<crate::core::tech_lead::CommitTask> = reg
+        .tasks
+        .iter()
+        .map(|t| crate::core::tech_lead::CommitTask {
+            id: t.id.clone(),
+            agent: crate::core::identity::canonical(&t.agent),
+            status: t.status.label().to_string(),
+            commit_sha: t.commit_sha.clone(),
+            main_sha: t.main_sha.clone(),
+        })
+        .collect();
+    let mut branches: BTreeMap<String, String> = BTreeMap::new();
+    for a in reg.agents.iter() {
+        if let Some(b) = a.wt_branch.as_ref() {
+            branches.insert(a.name.clone(), b.clone());
+        }
+    }
+    let mut findings = crate::core::tech_lead::review_commits(root, &tasks, &branches);
+    if let Some(only) = only.as_ref() {
+        findings.retain(|f| &f.agent == only);
+    }
+
+    let mut declarations: Vec<(String, crate::core::tech_lead::ModelDeclaration)> = Vec::new();
+    for a in reg.agents.iter() {
+        if a.role.as_deref() == Some(ROLE_LEAD) {
+            continue;
+        }
+        if let Some(only) = only.as_ref() {
+            if &a.name != only {
+                continue;
+            }
+        }
+        let d = crate::core::tech_lead::model_declaration(&a.name, a.model.as_deref());
+        declarations.push((a.name.clone(), d));
+    }
+    let undeclared: Vec<String> = declarations
+        .iter()
+        .filter(|(_, d)| !d.is_confirmed())
+        .map(|(n, _)| n.clone())
+        .collect();
+
+    if as_json {
+        let items: Vec<serde_json::Value> = findings
+            .iter()
+            .map(|f| {
+                serde_json::json!({
+                    "task": f.task_id,
+                    "agent": f.agent,
+                    "sha": f.sha,
+                    "issue": f.issue.as_str(),
+                    "detail": f.detail,
+                })
+            })
+            .collect();
+        let decl: Vec<serde_json::Value> = declarations
+            .iter()
+            .map(|(n, d)| {
+                serde_json::json!({
+                    "agent": n,
+                    "status": d.as_str(),
+                    "model": match d {
+                        crate::core::tech_lead::ModelDeclaration::Declared { model } => Some(model.clone()),
+                        crate::core::tech_lead::ModelDeclaration::Mismatch { declared, .. } => Some(declared.clone()),
+                        crate::core::tech_lead::ModelDeclaration::Missing => None,
+                    },
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::json!({"findings": items, "declarations": decl})
+        );
+        return Ok(());
+    }
+
+    println!("ревью коммитов: находок {}", findings.len());
+    for f in findings.iter() {
+        println!("  {}", f.line());
+    }
+    if !declarations.is_empty() {
+        println!("декларации моделей:");
+        for (n, d) in declarations.iter() {
+            let extra = match d {
+                crate::core::tech_lead::ModelDeclaration::Declared { model } => format!(" ({model})"),
+                crate::core::tech_lead::ModelDeclaration::Mismatch { declared, registered } => {
+                    format!(" (декларация {declared} ≠ реестр {registered})")
+                }
+                crate::core::tech_lead::ModelDeclaration::Missing => String::new(),
+            };
+            println!("  {n} — {}{extra}", d.as_str());
+        }
+    }
+
+    if notify {
+        let mut by_agent: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for f in findings.iter() {
+            by_agent.entry(f.agent.clone()).or_default().push(f.line());
+        }
+        for (agent, lines) in by_agent.iter() {
+            let body = format!(
+                "1) сделано: tech-lead проверил твои коммиты (devh orch review).\n\
+                 2) как проверено: commit_sha существует / в ветке агента / в main.\n\
+                 3) доказательства: находки:\n{}\n\
+                 4) осталось/риски: поправь коммиты и проставь commit_sha/main_sha \
+                 (devh orch commit --path <пути>).",
+                lines.join("\n")
+            );
+            let _ = crate::shell::msg::run(&[
+                "send".to_string(),
+                "--to".to_string(),
+                agent.clone(),
+                "--subject".to_string(),
+                "tech-lead: ревью коммитов — находки".to_string(),
+                "--body".to_string(),
+                body,
+            ]);
+        }
+        println!("уведомлений отправлено: {}", by_agent.len());
+    }
+
+    if ask_model {
+        let mut asked = 0usize;
+        for agent in undeclared.iter() {
+            let body = "tech-lead уточняет идентификацию: объяви модель и рантайм.\n\
+                        Формат ответа: МОДЕЛЬ: <название модели>\nРАНТАЙМ: <рантайм>\n\
+                        После ответа lead зафиксирует модель в реестре \
+                        (devh orch identify --set)."
+                .to_string();
+            let _ = crate::shell::msg::run(&[
+                "send".to_string(),
+                "--to".to_string(),
+                agent.clone(),
+                "--subject".to_string(),
+                "Идентификация: какая у тебя модель?".to_string(),
+                "--body".to_string(),
+                body,
+            ]);
+            asked += 1;
+        }
+        println!("запрошено деклараций: {asked}");
+    }
+    Ok(())
+}
+
+/// `devh orch ceiling --agent X --c N [--reason R] | --clear | --list`.
+///
+/// Явный потолок сложности (C), который агент может взять. Право: ведущий
+/// или tech-lead. Значение имеет приоритет над потолком по модели.
+fn ceiling_cmd(root: &Path, args: &[String]) -> anyhow::Result<()> {
+    let reg = load(root);
+    require_review_rights(&reg, "ceiling")?;
+    if args.iter().any(|a| a == "--list") {
+        println!("потолки сложности (C):");
+        for a in reg.agents.iter() {
+            let base = match registry_model(&reg, &a.name) {
+                Some(m) => ceiling_for_model(&m, &model_records(&reg)),
+                None => crate::core::complexity::ModelCeiling::DEFAULT,
+            };
+            let eff = agent_ceiling(&reg, &a.name);
+            let explicit = a
+                .c_ceiling
+                .map(|c| format!("явный C{c}"))
+                .unwrap_or_else(|| "по модели".to_string());
+            println!(
+                "  {} — C{eff} ({explicit}; модель: {} [C{base}])",
+                a.name,
+                a.model.clone().unwrap_or_else(|| "неизвестна".to_string())
+            );
+        }
+        return Ok(());
+    }
+    let _lock = crate::shell::lock::OutputLock::try_acquire(root, &path(root), "devh orch ceiling")
+        .map_err(|e| anyhow!("devh orch ceiling: реестр занят ({e}) — повтори через секунду"))?;
+    let reg = load(root);
+    require_review_rights(&reg, "ceiling")?;
+    let raw_agent = flag(args, "--agent")
+        .ok_or_else(|| anyhow!("devh orch ceiling: нужен --agent"))?;
+    let agent = crate::core::identity::canonical(&raw_agent);
+    let clear = args.iter().any(|a| a == "--clear");
+    let c = match flag(args, "--c") {
+        Some(v) => Some(parse_c_level(&v)?),
+        None => None,
+    };
+    if !clear && c.is_none() {
+        return Err(anyhow!("devh orch ceiling: нужен --c N (0..C10) или --clear"));
+    }
+    if clear && c.is_some() {
+        return Err(anyhow!("devh orch ceiling: --c и --clear вместе нельзя"));
+    }
+    let mut reg = reg;
+    if agent_index(&reg, &agent).is_none() {
+        reg.agents.push(AgentState {
+            name: agent.clone(),
+            ..Default::default()
+        });
+    }
+    let idx = agent_index(&reg, &agent).unwrap_or_else(|| unreachable!());
+    let before = reg.agents.get(idx).and_then(|a| a.c_ceiling);
+    if let Some(a) = reg.agents.get_mut(idx) {
+        a.c_ceiling = if clear { None } else { c };
+    }
+    save(root, &reg)?;
+    let after = reg.agents.get(idx).and_then(|a| a.c_ceiling);
+    let reason = flag(args, "--reason").unwrap_or_default();
+    println!(
+        "devh orch ceiling: {agent} — C{} → C{}{}",
+        before
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "?".to_string()),
+        after
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "по модели".to_string()),
+        if reason.is_empty() {
+            String::new()
+        } else {
+            format!(" ({reason})")
+        }
     );
     Ok(())
 }
@@ -5374,5 +5683,40 @@ mod tests {
         assert_eq!(Status::Done.to_string(), "done");
         assert_eq!(Status::Failed.to_string(), "failed");
         assert_eq!(Status::Revoked.to_string(), "revoked");
+    }
+
+    #[test]
+    fn explicit_ceiling_overrides_model_ceiling() {
+        let mut reg = Registry::default();
+        reg.agents.push(AgentState {
+            name: "worker1".to_string(),
+            model: Some("some/model".to_string()),
+            c_ceiling: Some(5),
+            ..Default::default()
+        });
+        assert_eq!(agent_ceiling(&reg, "worker1"), 5);
+    }
+
+    #[test]
+    fn without_override_ceiling_comes_from_model() {
+        let mut reg = Registry::default();
+        reg.agents.push(AgentState {
+            name: "worker1".to_string(),
+            model: Some("some/model".to_string()),
+            ..Default::default()
+        });
+        let base = agent_ceiling(&reg, "worker1");
+        assert_eq!(base, crate::core::complexity::ModelCeiling::DEFAULT);
+        reg.agents[0].c_ceiling = Some(2);
+        assert_eq!(agent_ceiling(&reg, "worker1"), 2);
+    }
+
+    #[test]
+    fn tech_lead_role_is_recognized() {
+        assert_eq!(
+            crate::core::agent_state::AgentRole::parse("tech_lead"),
+            Some(crate::core::agent_state::AgentRole::TechLead)
+        );
+        assert_eq!(ROLE_TECH_LEAD, "tech_lead");
     }
 }

@@ -18,6 +18,10 @@ pub enum AgentRole {
     Lead,
     /// Ведомый: исполняет задачи в своём worktree.
     Worker,
+    /// Технический лид: ревью коммитов, уточнение моделей агентов и
+    /// управление их потолком сложности (C). Без прав ведущего:
+    /// без merge/push/mutate/passwd.
+    TechLead,
 }
 
 impl AgentRole {
@@ -25,6 +29,7 @@ impl AgentRole {
         match self {
             AgentRole::Lead => "lead",
             AgentRole::Worker => "worker",
+            AgentRole::TechLead => "tech_lead",
         }
     }
 
@@ -32,6 +37,7 @@ impl AgentRole {
         match s.trim().to_ascii_lowercase().as_str() {
             "lead" => Some(AgentRole::Lead),
             "worker" => Some(AgentRole::Worker),
+            "tech_lead" | "tech-lead" | "techlead" => Some(AgentRole::TechLead),
             _ => None,
         }
     }
@@ -180,6 +186,9 @@ mod tests {
         assert_eq!(AgentRole::parse("lead"), Some(AgentRole::Lead));
         assert_eq!(AgentRole::parse("worker"), Some(AgentRole::Worker));
         assert_eq!(AgentRole::parse("boss"), None);
+        assert_eq!(AgentRole::TechLead.as_str(), "tech_lead");
+        assert_eq!(AgentRole::parse("tech_lead"), Some(AgentRole::TechLead));
+        assert_eq!(AgentRole::parse("tech-lead"), Some(AgentRole::TechLead));
         assert_eq!(AgentRole::parse(" LEAD "), Some(AgentRole::Lead));
     }
 

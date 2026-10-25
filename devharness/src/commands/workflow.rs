@@ -22,7 +22,7 @@ pub const QUICKSTART: &str = r#"=== БЫСТРЫЙ СТАРТ (30 секунд) 
 ЧТО ЗАПУСТИТЬ (репо /home/user/project_uwa):
   cd /home/user/project_uwa
   ./target/debug/devh msg read      — твои задачи (consume-on-read), ПЕРВЫМ ДЕЛОМ в каждом ходе
-  ./target/debug/devh workflow      — канон (R1-R23, O1-O21, шкалы P/F/C, запреты)
+  ./target/debug/devh workflow      — канон (R1-R23, O1-O22, шкалы P/F/C, запреты)
   ./target/debug/devh orch board    — кто что делает, очереди, зоны
   новый агент: cd /home/user/project_uwa && ./target/debug/devh orch welcome
 
@@ -144,7 +144,12 @@ pub const ORCHESTRATION: &str = r#"=== ОРКЕСТРАЦИЯ (ведущий �
       а задачи: devh orch bug "<что сломалось>" --from <агент> --agent <исполнитель> --p P1; задача вставляется
       в начало реестра, поэтому её видят первыми на доске и в devh orch list. Баг важнее плановой работы.
   O20 РОЛИ lead/worker назначаются в реестре (devh orch role --agent X --role worker, devh orch lead --set ADDR) —
-      без хардкода имени ведущего; смена роли — только через реестр"#;
+      без хардкода имени ведущего; смена роли — только через реестр
+  O22 РОЛЬ tech_lead: технический лид (devh orch role --agent X --role tech_lead) — подмножество прав lead:
+      (1) ревью коммитов агентов (devh orch review [--agent X] [--notify] [--ask-model]);
+      (2) уточнение модели (devh orch identify --set, devh orch model --confirm; журнал core::identity_ledger);
+      (3) потолок сложности агента (devh orch ceiling --agent X --c N|--clear|--list; приоритет над потолком по модели).
+      Без прав lead: merge/push/mutate/passwd. Технический лид не берёт мелких задач (C<=3) — крупное и ревью"#;
 
 /// Шкалы сложности задач и уровня отказа (логарифмические).
 pub const SCALES: &str = r#"=== ШКАЛЫ (логарифмические) ===
@@ -271,6 +276,23 @@ pub const CONFIG: &str = r#"=== КЛЮЧИ (.harness/config; переопред�
   RED_MUTATE                отдельный контур RED-мутаций (пусто = выключен)
   RED_MIN_KILL / RED_EXPECT порог kill-rate и ожидаемая причина падения RED-теста"#;
 
+/// Семантика слияния ветки агента в main (merge_via_cherry_pick).
+pub const MERGE_SEMANTICS: &str = r#"=== МЕРДЖ-СЕМАНТИКА (merge_via_cherry_pick) ===
+  Слияние ветки агента в main происходит через cherry-pick коммитов, НЕ входящих
+  в main (git cherry). Worktree агента не трогается — агент продолжает работу.
+
+  Что НЕ переносится в main:
+  1. WIP-чекпоинты: коммиты с темой, начинающейся на "WIP(" или "WIP:" —
+     это сохранённая грязь (незакоммиченная работа), а не результат задачи.
+     Работа не теряется: она лежит в ветке `devh/wip-<агент>`.
+  2. Patch-дубли: коммиты, чей diff уже есть в main (git cherry показывает "-"),
+     не переносятся повторно. Это защита от двойной доставки, если агент
+     перебазировался на main и принёс копию уже смерженной работы.
+
+  Порядок переноса: от старых к новым (как при обычном cherry-pick).
+  Конфликт списка модулей (core/mod.rs) объединяется автоматически: ни одна
+  строка не теряется, дублей нет."#;
+
 /// Печать канона.
 pub fn workflow() {
     println!("{QUICKSTART}");
@@ -296,6 +318,8 @@ pub fn workflow() {
     println!("{SAFETY}");
     println!();
     println!("{CONFIG}");
+    println!();
+    println!("{MERGE_SEMANTICS}");
     println!();
     println!("{}", mutate::CANON);
 }
@@ -347,7 +371,7 @@ mod tests {
         assert!(ORCHESTRATION.contains("O10"), "{ORCHESTRATION}");
         // Шкалы и правила деградации — часть канона (O11-O14).
         for marker in [
-            "O11", "O12", "O13", "O14", "O15", "O16", "O17", "O18", "O19", "O20",
+            "O11", "O12", "O13", "O14", "O15", "O16", "O17", "O18", "O19", "O20", "O22",
         ] {
             assert!(ORCHESTRATION.contains(marker), "{ORCHESTRATION}");
         }
