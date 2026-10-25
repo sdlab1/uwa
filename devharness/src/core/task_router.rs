@@ -219,26 +219,33 @@ pub fn plan(reg: &Registry, lead: Option<&str>) -> RouterPlan {
 
     // Активные зоны (всех агентов) и текущая нагрузка.
     //
-    // `load` — задачи В РАБОТЕ (жёсткий потолок параллелизма: не больше
-    // MAX_ACTIVE_PER_AGENT активных задач на агента).
-    // `backlog` — размер очереди агента (мягкий tie-break: сначала тому, у
-    // кого очередь короче).
+    // `load` — занятость агента = активные + закреплённые в очереди. Это
+    // потолок параллелизма: у агента не может быть больше
+    // MAX_ACTIVE_PER_AGENT задач в работе. Буфер lead'а в нагрузку не входит
+    // (это резерв, а не занятость исполнителя).
+    //
+    // `active` — только задачи в работе: используется как tie-break, чтобы
+    // при равной занятости задачу брал тот, кто сейчас свободнее.
     let mut active_zones: Vec<String> = Vec::new();
     let mut load: BTreeMap<String, usize> = BTreeMap::new();
-    let mut backlog: BTreeMap<String, usize> = BTreeMap::new();
+    let mut active: BTreeMap<String, usize> = BTreeMap::new();
     for t in &reg.tasks {
         let owner = crate::core::identity::canonical(&t.agent);
         let is_lead_buf = lead
             .map(|l| owner == crate::core::identity::canonical(l))
             .unwrap_or(false);
-        if t.status == Status::Active {
-            active_zones.extend(t.zones.iter().cloned());
-            if !is_lead_buf {
-                *load.entry(owner.clone()).or_insert(0) += 1;
+        match t.status {
+            Status::Active => {
+                active_zones.extend(t.zones.iter().cloned());
+                if !is_lead_buf {
+                    *load.entry(owner.clone()).or_insert(0) += 1;
+                    *active.entry(owner).or_insert(0) += 1;
+                }
             }
-        }
-        if t.status == Status::Queued && !is_lead_buf {
-            *backlog.entry(owner).or_insert(0) += 1;
+            Status::Queued if !is_lead_buf => {
+                *load.entry(owner).or_insert(0) += 1;
+            }
+            _ => {}
         }
     }
 
@@ -314,18 +321,18 @@ pub fn plan(reg: &Registry, lead: Option<&str>) -> RouterPlan {
             }
             let busy = load.get(&canon).copied().unwrap_or(0);
             if busy >= MAX_ACTIVE_PER_AGENT {
-                rejects.push(format!("{canon}: уже {busy} активных задач"));
+                rejects.push(format!("{canon}: уже {busy} задач в работе/очереди"));
                 continue;
             }
-            let queued = backlog.get(&canon).copied().unwrap_or(0);
+            let active_now = active.get(&canon).copied().unwrap_or(0);
             let ceiling = ceiling_of(reg, &canon);
             let role = a.role.clone().unwrap_or_default();
-            let key = (canon.clone(), ceiling, queued, busy, role);
+            let key = (canon.clone(), ceiling, busy, active_now, role);
             let better = match &best {
                 None => true,
-                Some((_, bc, bq, bb, _)) => {
-                    (ceiling, queued, busy, canon.as_str())
-                        < (*bc, *bq, *bb, key.0.as_str())
+                Some((_, bc, bb, ba, _)) => {
+                    (ceiling, busy, active_now, canon.as_str())
+                        < (*bc, *bb, *ba, key.0.as_str())
                 }
             };
             if better {
@@ -334,12 +341,10 @@ pub fn plan(reg: &Registry, lead: Option<&str>) -> RouterPlan {
         }
 
         match best {
-            Some((agent, ceiling, queued, busy, role)) => {
-let reason = format!(
-                    "потолок C{ceiling}, активных {busy}, роль {role}",
-                    ceiling = ceiling,
-                    busy = busy,
-                    role = if role.is_empty() { "worker" } else { &role }
+            Some((agent, ceiling, busy, active_now, role)) => {
+                let reason = format!(
+                    "потолок C{ceiling}, занято {busy}, в работе {active_now}, роль {}{}",
+                    if role.is_empty() { "worker" } else { &role }
                 );
                 out.assignments.push(Assignment {
                     task_id: t.id.clone(),
@@ -347,8 +352,7 @@ let reason = format!(
                     c_level: c,
                     reason,
                 });
-                load.insert(agent.clone(), busy + 1);
-                *backlog.entry(agent.clone()).or_insert(0) += 1;
+                *load.entry(agent.clone()).or_insert(0) += 1;
                 reserved.entry(agent).or_default().extend(t.zones.iter().cloned());
             }
             None => {

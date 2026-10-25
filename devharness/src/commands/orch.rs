@@ -912,6 +912,9 @@ fn add(root: &Path, args: &[String]) -> anyhow::Result<()> {
     if !deps.is_empty() {
         reg.plan.deps.insert(id.clone(), deps.clone());
     }
+    // Автораздача: новая задача сразу закрепляется за подходящим исполнителем
+    // (приоритет, потолок C, роль, зоны) — lead не тратит внимание на раздачу.
+    crate::commands::autoassign::auto_trigger(root, &mut reg);
     save(root, &reg)?;
     println!(
         "devh orch: {id} добавлена в очередь {agent}: P{complexity} C{} prio{prio} — {title}",
@@ -5620,6 +5623,7 @@ mod tests {
                 wt_synced_at: 1000,
                 active_count: 1,
                 queued_count: 2,
+                unread_count: 0,
                 active: vec![TaskJson {
                     id: "T-1".to_string(),
                     status: "active".to_string(),
@@ -5747,6 +5751,7 @@ mod tests {
                 wt_synced_at: 0,
                 active_count: 1,
                 queued_count: 1,
+                unread_count: 0,
                 active: vec![TaskJson {
                     id: "T-1".to_string(),
                     status: "active".to_string(),
