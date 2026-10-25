@@ -106,6 +106,11 @@ fn parse_letter(block: &str) -> Option<Letter> {
 
 /// Письмо адресовано мне? («all» — всем; синонимы — через канон.)
 fn addressed_to(l: &Letter, me: &str) -> bool {
+    addressed_to_in(l, me, &crate::shell::msg::home())
+}
+
+/// Герметичная версия: читает алиасы из указанного home.
+fn addressed_to_in(l: &Letter, me: &str, home: &Path) -> bool {
     for raw in l.to.split(',') {
         let name = raw.trim();
         if name.is_empty() {
@@ -114,7 +119,7 @@ fn addressed_to(l: &Letter, me: &str) -> bool {
         if name.eq_ignore_ascii_case("all") {
             return true;
         }
-        if crate::core::identity::canonical(name) == me {
+        if crate::core::identity::canonical_in(home, name) == me {
             return true;
         }
     }
@@ -565,15 +570,30 @@ mod tests {
 
     #[test]
     fn addressed_to_matches_all_and_canonical() {
-        let l =
-            parse_letter(&block("beam", "all", "s", "b", &[])).unwrap_or_else(|| unreachable!());
-        assert!(addressed_to(&l, "minimax"), "all — всем");
-        let l2 = parse_letter(&block("beam", "minimax", "s", "b", &[]))
+        // Герметичность: используем временный каталог с пустыми алиасами,
+        // чтобы тест не зависел от живого /tmp/devh-msg/aliases.json.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path().to_path_buf();
+        crate::core::identity::set_alias_in(&home, "kilo", "minimax").expect("alias");
+        // "kilo" → "minimax": это НЕ адрес для "beam2".
+        let l_kilo_for_minimax =
+            parse_letter(&block("beam", "kilo", "s", "b", &[]))
             .unwrap_or_else(|| unreachable!());
-        assert!(addressed_to(&l2, "minimax"));
+        assert!(
+            addressed_to_in(&l_kilo_for_minimax, "minimax", &home),
+            "kilo (алиас minimax) — адресовано minimax"
+        );
         let l3 =
-            parse_letter(&block("beam", "kilo", "s", "b", &[])).unwrap_or_else(|| unreachable!());
-        assert!(!addressed_to(&l3, "minimax"), "чужое письмо — не моё");
+            parse_letter(&block("beam", "kilo", "s", "b", &[]))
+            .unwrap_or_else(|| unreachable!());
+        assert!(
+            !addressed_to_in(&l3, "beam2", &home),
+            "чужое письмо — не моё (kilo ≠ beam2)"
+        );
+        // "all" — всем.
+        let l = parse_letter(&block("beam", "all", "s", "b", &[]))
+            .unwrap_or_else(|| unreachable!());
+        assert!(addressed_to_in(&l, "minimax", &home), "all — всем");
     }
 
     #[test]
