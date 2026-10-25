@@ -8,6 +8,11 @@
 //!      атомарно, одной записью; при любом нарушении реестр остаётся
 //!      байт-в-байт прежним.
 //!
+//! `--buffer`: дочерние задачи попадают в БУФЕР ВЕДУЩЕГО (agent == lead,
+//! status=queued) — дальше их раздаёт autoassign по потолку C и нагрузке,
+//! либо агент берёт сам через `devh orch start <ID>`. Ручного назначения
+//! не требуется.
+//!
 //! Команда не выдаёт полномочий ведущего: дочерние задачи создаются
 //! queued для ВЕДОМОГО, без `started_by`, без роли lead. Повторный запуск с
 //! тем же proposal идемпотентен (отпечаток proposal запоминается в
@@ -221,6 +226,10 @@ pub fn run(root: &Path, args: &[String]) -> anyhow::Result<()> {
     let proposal_path = orch::flag(args, "--proposal")
         .ok_or_else(|| anyhow::anyhow!("devh orch decompose: нужен --proposal <файл.json>"))?;
     let apply = args.iter().any(|a| a == "--apply");
+    // --buffer: дочерние задачи кладутся в БУФЕР ВЕДУЩЕГО (agent == lead,
+    // status=queued) — раздача автоматическая (autoassign), либо агент берёт
+    // сам через `devh orch start <ID>`. Ручного назначения не требуется.
+    let buffer = args.iter().any(|a| a == "--buffer");
 
     let mut reg = orch::load(root);
     let parent = reg
@@ -262,17 +271,23 @@ pub fn run(root: &Path, args: &[String]) -> anyhow::Result<()> {
     let proposal = parse_proposal(&body)?;
 
     // Куда адресовать дочерние задачи: ведомый, никогда — ведущий.
-    let target_agent = match orch::flag(args, "--agent") {
-        Some(a) => crate::core::identity::canonical(&a),
-        None => parent.agent.clone(),
+    let target_agent = if buffer {
+        lead.clone().ok_or_else(|| {
+            anyhow::anyhow!("devh orch decompose: --buffer требует ведущего в реестре")
+        })?
+    } else {
+        match orch::flag(args, "--agent") {
+            Some(a) => crate::core::identity::canonical(&a),
+            None => parent.agent.clone(),
+        }
     };
-    if Some(target_agent.as_str()) == lead.as_deref() {
+    if !buffer && Some(target_agent.as_str()) == lead.as_deref() {
         return Err(crate::commands::DevhError::action(
             "devh orch decompose: дочерние задачи нельзя адресовать ведущему — укажи --agent <ведомый>",
         )
         .into());
     }
-    if target_agent == caller && !caller_is_lead {
+    if !buffer && target_agent == caller && !caller_is_lead {
         return Err(crate::commands::DevhError::action(format!(
             "devh orch decompose: агент {target_agent} не может раздавать задачи самому себе"
         ))
@@ -412,6 +427,7 @@ pub fn run(root: &Path, args: &[String]) -> anyhow::Result<()> {
             model_source: None,
             started_by: None,
             started_at: None,
+            started_key: None,
             status: Status::Queued,
             zones: vec![c.zone.clone()],
             fail_level: None,
@@ -438,6 +454,10 @@ pub fn run(root: &Path, args: &[String]) -> anyhow::Result<()> {
             name: target_agent.clone(),
             ..Default::default()
         });
+    }
+    // Буфер: раздача автоматическая (потолок C, очередь, лимит активных).
+    if buffer {
+        crate::commands::autoassign::auto_trigger(root, &mut reg);
     }
     orch::save(root, &reg)?;
 
@@ -526,6 +546,7 @@ mod tests {
             model_source: None,
             started_by: None,
             started_at: None,
+            started_key: None,
             status: Status::Queued,
             zones: vec!["devharness/src/core".to_string()],
             fail_level: None,

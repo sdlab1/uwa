@@ -272,6 +272,7 @@ mod tests {
             model_source: None,
             started_by: None,
             started_at: None,
+            started_key: None,
             status,
             zones: zones.iter().map(|s| s.to_string()).collect(),
             fail_level: None,

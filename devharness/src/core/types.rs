@@ -180,6 +180,29 @@ pub struct RunConfig {
     pub msg_deny: Option<String>,
     pub rules: Option<PathBuf>,
     pub rules_log: Option<PathBuf>,
+    /// Автотюн потолка сложности по эмпирике `cargo check` (core::autotune).
+    /// Включён по умолчанию; выключается `AUTOTUNE=0`.
+    pub autotune_enabled: bool,
+    /// Вес ошибок компиляции в штрафе потолка (по умолчанию 1.2).
+    pub autotune_error_weight: f64,
+    /// Вес предупреждений компиляции в штрафе потолка (по умолчанию 0.35).
+    pub autotune_warning_weight: f64,
+    /// Вклад доли успешных сборок в штраф (по умолчанию 1.0).
+    pub autotune_success_bonus: f64,
+    /// Минимум наблюдений, иначе эмпирика не доверена (по умолчанию 3).
+    pub autotune_min_samples: u32,
+    /// TTL идентификации модели: сколько живёт декларация (секунды, 3600).
+    pub identify_ttl_secs: u64,
+    /// Вес числа повторных прогонов `cargo check` в штрафе (по умолчанию 0.15).
+    pub autotune_runs_weight: f64,
+    /// Вес медленной починки ошибок в штрафе (по умолчанию 0.4).
+    pub autotune_fix_latency_weight: f64,
+    /// Референс времени починки (секунды, по умолчанию 300).
+    pub autotune_fix_latency_ref_secs: f64,
+    /// Бонус за фактически починенные ошибки (по умолчанию 0.5).
+    pub autotune_fix_bonus: f64,
+    /// Вес «грязных» сборок (успешных, но с предупреждениями, 0.2).
+    pub autotune_neatness_weight: f64,
 }
 
 impl Default for RunConfig {
@@ -220,6 +243,17 @@ impl Default for RunConfig {
             msg_deny: None,
             rules: None,
             rules_log: None,
+            autotune_enabled: true,
+            autotune_error_weight: 1.2,
+            autotune_warning_weight: 0.35,
+            autotune_success_bonus: 1.0,
+            autotune_min_samples: 3,
+            identify_ttl_secs: 3600,
+            autotune_runs_weight: 0.15,
+            autotune_fix_latency_weight: 0.4,
+            autotune_fix_latency_ref_secs: 300.0,
+            autotune_fix_bonus: 0.5,
+            autotune_neatness_weight: 0.2,
         }
     }
 }

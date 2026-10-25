@@ -145,7 +145,7 @@ pub fn classify_error(e: &anyhow::Error) -> ExitCode {
     ExitCode::ActionError
 }
 
-pub const CONFIG_KEYS: [&str; 44] = [
+pub const CONFIG_KEYS: [&str; 55] = [
     "VERIFY",
     "BOOTSTRAP",
     "AGENT",
@@ -190,6 +190,17 @@ pub const CONFIG_KEYS: [&str; 44] = [
     "REVIEW_DIFF_MAX",
     "AUTONOMY",
     "CORPUS_FRESH_DAYS",
+    "AUTOTUNE",
+    "AUTOTUNE_ERR_WEIGHT",
+    "AUTOTUNE_WARN_WEIGHT",
+    "AUTOTUNE_SUCCESS_BONUS",
+    "AUTOTUNE_MIN_SAMPLES",
+    "IDENTIFY_TTL_SECS",
+    "AUTOTUNE_RUNS_WEIGHT",
+    "AUTOTUNE_FIX_LATENCY_WEIGHT",
+    "AUTOTUNE_FIX_LATENCY_REF_SECS",
+    "AUTOTUNE_FIX_BONUS",
+    "AUTOTUNE_NEATNESS_WEIGHT",
 ];
 
 pub fn load_config(root: &Path) -> anyhow::Result<RunConfig> {
@@ -206,6 +217,13 @@ pub fn load_config(root: &Path) -> anyhow::Result<RunConfig> {
     }
     let g = |k: &str| kv.get(k).cloned();
     let u32v = |k: &str, d: u32| g(k).and_then(|v| v.trim().parse().ok()).unwrap_or(d);
+    let u64v = |k: &str, d: u64| g(k).and_then(|v| v.trim().parse().ok()).unwrap_or(d);
+    let f64v = |k: &str, d: f64| {
+        g(k)
+            .and_then(|v| v.trim().parse::<f64>().ok())
+            .filter(|v| v.is_finite())
+            .unwrap_or(d)
+    };
     let boolv = |k: &str, d: bool| {
         g(k).map(|v| matches!(v.trim(), "1" | "true" | "yes"))
             .unwrap_or(d)
@@ -353,6 +371,19 @@ pub fn load_config(root: &Path) -> anyhow::Result<RunConfig> {
         rules_log: g("RULES_LOG")
             .filter(|s| !s.trim().is_empty())
             .map(Into::into),
+        // Автотюн потолка C по эмпирике cargo check (core::autotune).
+        // AUTOTUNE=0 — выключить (по умолчанию включён).
+        autotune_enabled: boolv_on("AUTOTUNE", true),
+        autotune_error_weight: f64v("AUTOTUNE_ERR_WEIGHT", 1.2),
+        autotune_warning_weight: f64v("AUTOTUNE_WARN_WEIGHT", 0.35),
+        autotune_success_bonus: f64v("AUTOTUNE_SUCCESS_BONUS", 1.0),
+        autotune_min_samples: u32v("AUTOTUNE_MIN_SAMPLES", 3),
+        identify_ttl_secs: u64v("IDENTIFY_TTL_SECS", 3600),
+        autotune_runs_weight: f64v("AUTOTUNE_RUNS_WEIGHT", 0.15),
+        autotune_fix_latency_weight: f64v("AUTOTUNE_FIX_LATENCY_WEIGHT", 0.4),
+        autotune_fix_latency_ref_secs: f64v("AUTOTUNE_FIX_LATENCY_REF_SECS", 300.0),
+        autotune_fix_bonus: f64v("AUTOTUNE_FIX_BONUS", 0.5),
+        autotune_neatness_weight: f64v("AUTOTUNE_NEATNESS_WEIGHT", 0.2),
     })
 }
 

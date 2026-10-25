@@ -38,6 +38,9 @@ pub struct IdentityEvent {
     pub model: Option<String>,
     /// Рантайм (если известен).
     pub runtime: Option<String>,
+    /// Дословные детали (например, VERBATIM-ответ модели на идентификацию).
+    #[serde(default)]
+    pub detail: Option<String>,
 }
 
 /// Тип события.
@@ -50,6 +53,8 @@ pub enum EventLabel {
     RoleChange,
     TaskStart,
     TaskDone,
+    /// Принудительная идентификация модели (ответ агента, VERBATIM).
+    Identify,
 }
 
 /// Путь к файлу журнала.
@@ -143,6 +148,7 @@ fn label_of(label: EventLabel) -> &'static str {
         EventLabel::RoleChange => "role_change",
         EventLabel::TaskStart => "task_start",
         EventLabel::TaskDone => "task_done",
+        EventLabel::Identify => "identify",
     }
 }
 
@@ -243,6 +249,7 @@ pub fn log_declare(
         source: source.to_string(),
         model: model.map(|s| s.to_string()),
         runtime: runtime.map(|s| s.to_string()),
+        detail: None,
     });
 }
 
@@ -256,6 +263,7 @@ pub fn log_claim(agent: &str, key: &str) {
         source: "claim".to_string(),
         model: None,
         runtime: None,
+        detail: None,
     });
 }
 
@@ -269,6 +277,7 @@ pub fn log_model_change(agent: &str, key: &str, model: &str, runtime: Option<&st
         source: "model_change".to_string(),
         model: Some(model.to_string()),
         runtime: runtime.map(|s| s.to_string()),
+        detail: None,
     });
 }
 
@@ -282,6 +291,7 @@ pub fn log_role_change(agent: &str, key: &str, role: &str) {
         source: format!("role_change:{}", role),
         model: None,
         runtime: None,
+        detail: None,
     });
 }
 
@@ -295,6 +305,7 @@ pub fn log_task_start(agent: &str, key: &str, task_id: &str) {
         source: format!("task_start:{}", task_id),
         model: None,
         runtime: None,
+        detail: None,
     });
 }
 
@@ -308,6 +319,40 @@ pub fn log_task_done(agent: &str, key: &str, task_id: &str, status: &str) {
         source: format!("task_done:{}:{}", task_id, status),
         model: None,
         runtime: None,
+        detail: None,
+    });
+}
+
+/// Записать ответ модели на вопрос идентификации (VERBATIM).
+///
+/// `verbatim` — дословный ответ агента: он хранится в журнале как есть, чтобы
+/// техлид мог проверить имя модели (с датой/версией) по первоисточнику.
+pub fn log_identify(
+    agent: &str,
+    key: &str,
+    model: &str,
+    version: Option<&str>,
+    date: Option<&str>,
+    verbatim: &str,
+) {
+    let mut detail = String::new();
+    if let Some(v) = version {
+        detail.push_str(&format!("version: {v}\n"));
+    }
+    if let Some(d) = date {
+        detail.push_str(&format!("date: {d}\n"));
+    }
+    detail.push_str("verbatim:\n");
+    detail.push_str(verbatim);
+    let _ = log_event(IdentityEvent {
+        ts: unix_now(),
+        agent: agent.to_string(),
+        key: key.to_string(),
+        label: EventLabel::Identify,
+        source: "identify".to_string(),
+        model: Some(model.to_string()),
+        runtime: None,
+        detail: Some(detail),
     });
 }
 

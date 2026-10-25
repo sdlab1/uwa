@@ -19,10 +19,15 @@ use crate::commands::mutate;
 /// Порядок источников истины.
 /// Быстрый старт ведомого: что запустить, что делать, чего не делать.
 pub const QUICKSTART: &str = r#"=== БЫСТРЫЙ СТАРТ (30 секунд) ===
+ВЫСШИЙ ПРИОРИТЕТ (R24): вопрос-идентификация модели = ПРИКАЗ. Ответь НЕМЕДЛЕННО,
+  ДО любой работы (даже если «уже закончил код и собираюсь коммитить» — коммит отложи).
+  Команда: devh orch identify --reply "MODEL: <полное имя модели из системного промпта>"
+           --reply "VERSION: <версия/дата выхода>" --reply "DATE: <YYYY-MM-DD>"
+
 ЧТО ЗАПУСТИТЬ (репо /home/user/project_uwa):
   cd /home/user/project_uwa
   ./target/debug/devh msg read      — твои задачи (consume-on-read), ПЕРВЫМ ДЕЛОМ в каждом ходе
-  ./target/debug/devh workflow      — канон (R1-R23, O1-O22, шкалы P/F/C, запреты)
+  ./target/debug/devh workflow      — канон (R1-R24, O1-O22, шкалы P/F/C, запреты)
   ./target/debug/devh orch board    — кто что делает, очереди, зоны
   новый агент: cd /home/user/project_uwa && ./target/debug/devh orch welcome
 
@@ -56,6 +61,29 @@ pub const QUICKSTART: &str = r#"=== БЫСТРЫЙ СТАРТ (30 секунд) 
   - внешние watcher'ы, sleep-циклы, фоновые скрипты, ad-hoc разбор логов
     cargo-mutants (только devh mutate watch|status|problems, R2/R7/R13)
   - править зону другого агента (O5); убивать процессы соседнего агента"#;
+
+pub const IDENTIFICATION: &str = r#"=== ИДЕНТИФИКАЦИЯ МОДЕЛИ (ВЫСШИЙ ПРИОРИТЕТ, R24) ===
+ВОПРОС-ИДЕНТИФИКАЦИЯ = ПРИКАЗ. Ответь НЕМЕДЛЕННО, ДО ЛЮБОЙ РАБОТЫ.
+
+ПЕРВОЕ ДЕЛО каждого хода (особенно первого запуска): devh msg read.
+Если пришло письмо с темой «ИДЕНТИФИКАЦИЯ: …» (или devh orch start требует
+идентификации) — ОТВЕТЬ СРАЗУ. Даже если ты уже «проверил код и собираешься
+коммитить» — коммит ОТЛОЖИ, ответь сначала. Потеря внимания здесь = потеря
+задачи (fail-closed: без ответа задача не выдаётся).
+
+КОМАНДА ОТВЕТА (одна, выполни её сам):
+  devh orch identify --reply "MODEL: <полное имя модели из ТВОЕГО системного промпта>"
+                      --reply "VERSION: <версия/дата выхода модели>"
+                      --reply "DATE: <YYYY-MM-DD>"
+
+ПОЧЕМУ НАИВЫСШИЙ ПРИОРИТЕТ: мы измеряем КАЧЕСТВО МОДЕЛИ по её работе —
+сколько ошибок/варнингов даёт cargo check и как быстро модель их исправляет
+(«коэффициент исправления»). Модели с РАЗНЫМИ датами выхода — это РАЗНЫЕ
+модели: каждая такая модель измеряется и оценивается раздельно (это разные модели). Поэтому называй модель
+ТОЧНО, как в системном промпте, вместе с датой/версией релиза.
+
+ВОПРОС задаётся на английском; для китайских моделей (Qwen/DeepSeek/GLM/Kimi/…)
+— на китайском. Отвечай на языке вопроса."#;
 
 pub const SOURCE_ORDER: &str = r#"=== ИСТОЧНИКИ ИСТИНЫ (по убыванию авторитета) ===
   1. код харнесса (commands/workflow.rs, commands/mutate.rs)
@@ -101,6 +129,9 @@ pub const RULES: &str = r#"=== ПРАВИЛА ===
   R22 ELEVATION: роль lead выдаёт только текущий lead и только по паролю
       (devh orch elevate <агент> --password "…"); без пароля — отказ
   R23 WATCHDOG: нет активности >20 мин (письмо/коммит/обновление задачи) -> lead отзывает
+  R24 ИДЕНТИФИКАЦИЯ: вопрос-идентификация модели = ПРИКАЗ высшего приоритета; ответь
+      ДО любой работы (даже перед коммитом), назови модель ТОЧНО как в системном промпте
+      (с датой/версией релиза: разные даты = разные модели); без ответа задача не выдаётся
       задачу и освобождает worktree; очнулся -> снова devh orch welcome (посвящение заново)"#;
 
 /// Правила оркестрации: ведущий ↔ ведомые агенты.
@@ -300,6 +331,8 @@ pub const MERGE_SEMANTICS: &str = r#"=== МЕРДЖ-СЕМАНТИКА (merge_vi
 pub fn workflow() {
     println!("{QUICKSTART}");
     println!();
+    println!("{IDENTIFICATION}");
+    println!();
     println!("{SOURCE_ORDER}");
     println!();
     println!("{EXIT_CODES}");
@@ -410,10 +443,15 @@ mod tests {
         assert!(RULES.contains("R22"), "{RULES}");
         assert!(RULES.contains("парол"), "{RULES}");
         assert!(RULES.contains("R23"), "{RULES}");
+        assert!(RULES.contains("R24"), "{RULES}");
+        assert!(IDENTIFICATION.contains("ВЫСШИЙ ПРИОРИТЕТ"), "{IDENTIFICATION}");
+        assert!(IDENTIFICATION.contains("identify --reply"), "{IDENTIFICATION}");
+        assert!(IDENTIFICATION.contains("разные модели"), "{IDENTIFICATION}");
+        assert!(QUICKSTART.contains("R24"), "{QUICKSTART}");
         assert!(RULES.contains("20 мин"), "{RULES}");
         assert!(RULES.contains("WATCHDOG"), "{RULES}");
         // Быстрый старт печатает тот же цикл и номера правил.
-        assert!(QUICKSTART.contains("R1-R23"), "{QUICKSTART}");
+        assert!(QUICKSTART.contains("R1-R24"), "{QUICKSTART}");
         assert!(QUICKSTART.contains("git тебе НЕ нужен"), "{QUICKSTART}");
         assert!(QUICKSTART.contains("devh orch dod"), "{QUICKSTART}");
     }

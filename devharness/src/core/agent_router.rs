@@ -195,6 +195,7 @@ mod tests {
             model_source: None,
             started_by: None,
             started_at: None,
+            started_key: None,
             status: crate::commands::orch::Status::Queued,
             zones: vec!["core".into()],
             fail_level: None,

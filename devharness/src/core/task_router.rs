@@ -17,8 +17,13 @@
 //!    не выдаются двум разным исполнителям одновременно.
 //! 6. **Зависимости**: задача с незакрытыми зависимостями не выдаётся.
 //! 7. **Нагрузка**: не больше [`MAX_ACTIVE_PER_AGENT`] задач В РАБОТЕ на
-//!    агента (длинная очередь — не запрет, а tie-break: при равенстве
-//!    потолков берёт тот, у кого короче очередь, затем кто свободнее).
+//!    агента (длинная очередь — не запрет, а tie-break). Очередь — ПЕРВЫЙ
+//!    ключ выбора: задача идёт тому, у кого очередь короче (иначе агент с
+//!    самой низкой планкой забирает ВСЁ, а остальные простаивают). Потолок
+//!    модели — вторичный ключ: при равной загрузке берём послабее, оставляя
+//!    сильных модели под тяжёлое. Внутри одного плана агент получает не
+//!    больше [`MAX_ACTIVE_PER_AGENT`] задач — иначе выдача снова сливается
+//!    в одного исполнителя.
 //!
 //! Модуль чистый: работает со снимком реестра и ничего не пишет на диск.
 //! Запись и блокировки — в `commands::autoassign`.
@@ -102,36 +107,92 @@ fn table_ceiling(model: &str) -> u8 {
     1
 }
 
-/// Потолок C агента по реестру.
+/// Эмпирические потолки (автотюн по `cargo check`) — canon агента → C.
 ///
-/// Порядок источников: явный `c_ceiling` (решение lead'а/tech-lead'а) →
-/// потолок модели по истории сдачи → таблица моделей → **C1** (fail-closed).
-pub fn ceiling_of(reg: &Registry, agent: &str) -> u8 {
+/// Считаются вне роутера (`core::autotune`: ledger → штраф → C), потому что
+/// роутер чистый: он не ходит в файлы. Явный `c_ceiling` (решение
+/// lead'а/tech-lead'а) всегда выше эмпирики.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EmpiricalCeilings {
+    map: BTreeMap<String, u8>,
+}
+
+impl EmpiricalCeilings {
+    /// Потолок агента по эмпирике (None — данных нет).
+    pub fn get(&self, agent: &str) -> Option<u8> {
+        let canon = crate::core::identity::canonical(agent);
+        self.map.get(&canon).copied()
+    }
+
+    /// Записать потолок агента.
+    pub fn insert(&mut self, agent: &str, ceiling: u8) {
+        let canon = crate::core::identity::canonical(agent);
+        self.map.insert(canon, ceiling);
+    }
+
+    /// Эмпирика есть хоть для кого-то?
+    pub fn is_empty(&self) -> bool {
+        self.map.is_empty()
+    }
+
+    /// Сколько агентов имеют эмпирический потолок.
+    pub fn len(&self) -> usize {
+        self.map.len()
+    }
+}
+
+/// Базовый потолок агента по МОДЕЛИ (без явного override и без эмпирики):
+/// история сдачи → таблица моделей → **C1** (fail-closed).
+pub fn base_ceiling(reg: &Registry, agent: &str) -> u8 {
     let canon = crate::core::identity::canonical(agent);
-    // Дубликаты записей агента (следствие T-284) НЕ должны прятать потолок
-    // или модель: собираем значения из ВСЕХ записей с этим каноном.
-    let mut explicit: Option<u8> = None;
     let mut model: Option<String> = None;
     for a in reg
         .agents
         .iter()
         .filter(|a| crate::core::identity::canonical(&a.name) == canon)
     {
-        if explicit.is_none() {
-            explicit = a.c_ceiling;
-        }
         if model.is_none() {
             model = a.model.clone();
         }
     }
-    let base = match model {
-        Some(m) => match history_ceiling(reg, &m) {
-            Some(c) => c,
-            None => table_ceiling(&m),
-        },
+    match model {
+        Some(m) => history_ceiling(reg, &m).unwrap_or_else(|| table_ceiling(&m)),
         None => 1,
-    };
-    crate::core::tech_lead::effective_ceiling(explicit, base)
+    }
+}
+
+/// Потолок C агента по реестру (без эмпирики).
+///
+/// Порядок источников: явный `c_ceiling` (решение lead'а/tech-lead'а) →
+/// потолок модели по истории сдачи → таблица моделей → **C1** (fail-closed).
+pub fn ceiling_of(reg: &Registry, agent: &str) -> u8 {
+    ceiling_of_with(reg, agent, &EmpiricalCeilings::default())
+}
+
+/// Потолок C агента с учётом эмпирики (автотюн по `cargo check`).
+///
+/// Порядок: явный `c_ceiling` → эмпирика (autotune) → база по модели.
+pub fn ceiling_of_with(reg: &Registry, agent: &str, emp: &EmpiricalCeilings) -> u8 {
+    let canon = crate::core::identity::canonical(agent);
+    let explicit = explicit_ceiling_of(reg, &canon);
+    let empirical = emp.get(&canon);
+    let base = base_ceiling(reg, &canon);
+    crate::core::tech_lead::effective_ceiling(explicit, empirical.unwrap_or(base))
+}
+
+/// ЯВНЫЙ потолок C агента (решение lead'а/tech-lead'а), если он задан.
+///
+/// Нужен, чтобы отличать «агент заведомо слабее задачи» от «модель агента
+/// неизвестна» (fail-closed C1). Перераздавать чужую задачу можно только
+/// по ЯВНОМУ решению lead'а — иначе fail-closed C1 «украдёт» очередь у
+/// живых исполнителей (48 задач у 5 агентов в одном прогоне).
+pub fn explicit_ceiling_of(reg: &Registry, agent: &str) -> Option<u8> {
+    let canon = crate::core::identity::canonical(agent);
+    reg.agents
+        .iter()
+        .filter(|a| crate::core::identity::canonical(&a.name) == canon)
+        .filter_map(|a| a.c_ceiling)
+        .max()
 }
 
 /// Потолок модели по истории сданных задач (F0/F1 повышают потолок).
@@ -168,9 +229,15 @@ fn is_candidate(reg: &Registry, t: &Task, lead: Option<&str>) -> bool {
             return true;
         }
     }
-    // Задача выше потолка своего исполнителя — тоже кандидат на перераздачу.
+    // Задача выше потолка своего исполнителя — кандидат на перераздачу,
+    // но ТОЛЬКО если потолок ЯВНЫЙ (решение lead'а). Иначе неизвестная
+    // модель (fail-closed C1) выглядит как «слабый агент», и роутер
+    // молча забирал чужие очереди целиком.
     let c = t.c_level.unwrap_or(t.complexity);
-    c > ceiling_of(reg, &owner)
+    match explicit_ceiling_of(reg, &owner) {
+        Some(explicit) => c > explicit,
+        None => false,
+    }
 }
 
 /// Зависимости задачи закрыты?
@@ -209,7 +276,7 @@ fn role_of(reg: &Registry, agent: &str) -> String {
         .unwrap_or_default()
 }
 
-fn agent_accepts(reg: &Registry, agent: &str, c: u8) -> Option<String> {
+fn agent_accepts(reg: &Registry, emp: &EmpiricalCeilings, agent: &str, c: u8) -> Option<String> {
     let canon = crate::core::identity::canonical(agent);
     if EXCLUDED_AGENTS.iter().any(|e| canon == *e) {
         return Some("агент исключён решением lead'а".to_string());
@@ -226,7 +293,7 @@ fn agent_accepts(reg: &Registry, agent: &str, c: u8) -> Option<String> {
     if canon == "beam" && c > BEAM_MAX_C {
         return Some(format!("для beam потолок C{BEAM_MAX_C}, задача C{c}"));
     }
-    let ceiling = ceiling_of(reg, &canon);
+    let ceiling = ceiling_of_with(reg, &canon, emp);
     if c > ceiling {
         return Some(format!("C{c} выше потолка агента C{ceiling}"));
     }
@@ -235,6 +302,11 @@ fn agent_accepts(reg: &Registry, agent: &str, c: u8) -> Option<String> {
 
 /// Построить план раздачи задач по приоритету.
 pub fn plan(reg: &Registry, lead: Option<&str>) -> RouterPlan {
+    plan_with(reg, lead, &EmpiricalCeilings::default())
+}
+
+/// План раздачи с учётом эмпирических потолков (автотюн по `cargo check`).
+pub fn plan_with(reg: &Registry, lead: Option<&str>, emp: &EmpiricalCeilings) -> RouterPlan {
     let mut out = RouterPlan::default();
 
     // Активные зоны (всех агентов) и текущая нагрузка.
@@ -290,6 +362,9 @@ pub fn plan(reg: &Registry, lead: Option<&str>) -> RouterPlan {
 
     // Резервируемые зоны: задача не должна попасть к двум исполнителям.
     let mut reserved: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    // Сколько задач агенту уже выдано В ЭТОМ ПЛАНЕ: ограничиваем выдачу,
+    // чтобы план не сливал все задачи в одного исполнителя.
+    let mut assigned_now: BTreeMap<String, usize> = BTreeMap::new();
 
     for t in cands {
         let c = t.c_level.unwrap_or(t.complexity);
@@ -328,7 +403,7 @@ pub fn plan(reg: &Registry, lead: Option<&str>) -> RouterPlan {
         // Порядок выбора: минимальный достаточный потолок (простые задачи —
         // простым моделям, сильные остаются для тяжёлого), затем меньшая
         // очередь, затем меньше активных задач, затем имя (детерминизм).
-        let mut best: Option<(String, u8, usize, usize, String)> = None;
+        let mut best: Option<(String, usize, usize, u8, String)> = None;
         let mut rejects: Vec<String> = Vec::new();
         let mut seen: BTreeSet<String> = BTreeSet::new();
         for a in &reg.agents {
@@ -342,26 +417,34 @@ pub fn plan(reg: &Registry, lead: Option<&str>) -> RouterPlan {
                     continue;
                 }
             }
-            if let Some(reason) = agent_accepts(reg, &canon, c) {
+            if let Some(reason) = agent_accepts(reg, emp, &canon, c) {
                 rejects.push(format!("{canon}: {reason}"));
                 continue;
             }
-            // Жёсткий потолок — только по задачам В РАБОТЕ.
+            // Жёсткий потолок — по задачам В РАБОТЕ + уже выданным в этом
+            // плане: иначе план сливает всю выдачу в одного исполнителя.
             let active_now = active.get(&canon).copied().unwrap_or(0);
-            if active_now >= MAX_ACTIVE_PER_AGENT {
-                rejects.push(format!("{canon}: уже {active_now} задач в работе"));
+            let assigned_here = assigned_now.get(&canon).copied().unwrap_or(0);
+            if active_now + assigned_here >= MAX_ACTIVE_PER_AGENT {
+                rejects.push(format!(
+                    "{canon}: уже {active_now} задач в работе + {assigned_here} выдано в этом плане"
+                ));
                 continue;
             }
-            // Очередь — только tie-break: короче очередь → приоритет.
+            // Очередь — ПЕРВЫЙ ключ выбора: короче очередь → приоритет.
+            // (Раньше потолок модели стоял первым, и агент с самой низкой
+            // планкой забирал ВСЁ, пока у остальных копилась очередь.)
             let queued = queue.get(&canon).copied().unwrap_or(0);
+            let queue_total = queued + assigned_here;
+            let active_total = active_now + assigned_here;
             let ceiling = ceiling_of(reg, &canon);
             let role = role_of(reg, &canon);
-            let key = (canon.clone(), ceiling, queued, active_now, role);
+            let key = (canon.clone(), queue_total, active_total, ceiling, role);
             let better = match &best {
                 None => true,
-                Some((_, bc, bb, ba, _)) => {
-                    (ceiling, queued, active_now, canon.as_str())
-                        < (*bc, *bb, *ba, key.0.as_str())
+                Some((_, bq, ba, bc, _)) => {
+                    (queue_total, active_total, ceiling, canon.as_str())
+                        < (*bq, *ba, *bc, key.0.as_str())
                 }
             };
             if better {
@@ -370,12 +453,12 @@ pub fn plan(reg: &Registry, lead: Option<&str>) -> RouterPlan {
         }
 
         match best {
-            Some((agent, ceiling, queued, active_now, role)) => {
+            Some((agent, queue_total, active_total, ceiling, role)) => {
                 let reason = format!(
-                    "потолок C{ceiling}, в очереди {queued}, в работе {active_now}, роль {role}",
+                    "потолок C{ceiling}, в очереди {queue_total}, в работе {active_total}, роль {role}",
                     ceiling = ceiling,
-                    queued = queued,
-                    active_now = active_now,
+                    queue_total = queue_total,
+                    active_total = active_total,
                     role = if role.is_empty() { "worker" } else { &role }
                 );
                 out.assignments.push(Assignment {
@@ -384,13 +467,16 @@ pub fn plan(reg: &Registry, lead: Option<&str>) -> RouterPlan {
                     c_level: c,
                     reason,
                 });
-                // Задача уходит из очереди прежнего владельца и становится
-                // активной у нового исполнителя.
-let prev = crate::core::identity::canonical(&t.agent);
+                // Задача уходит из очереди прежнего владельца и встаёт в
+                // очередь нового (статус остаётся queued — агент ещё не
+                // начал). Счётчик выданного в этом плане не даёт выдать
+                // одному агенту больше MAX_ACTIVE_PER_AGENT задач.
+                let prev = crate::core::identity::canonical(&t.agent);
                 if let Some(q) = queue.get_mut(&prev) {
                     *q = q.saturating_sub(1);
                 }
-                *active.entry(agent.clone()).or_insert(0) += 1;
+                *queue.entry(agent.clone()).or_insert(0) += 1;
+                *assigned_now.entry(agent.clone()).or_insert(0) += 1;
                 reserved.entry(agent).or_default().extend(t.zones.iter().cloned());
             }
             None => {
@@ -433,6 +519,7 @@ mod tests {
             model_source: None,
             started_by: None,
             started_at: None,
+            started_key: None,
             status: Status::Queued,
             zones: zones.iter().map(|z| z.to_string()).collect(),
             fail_level: None,
@@ -704,11 +791,120 @@ mod tests {
     }
 
     #[test]
-    fn task_above_owner_ceiling_is_reassigned() {
+    fn plan_spreads_tasks_across_agents() {
+        // Три задачи из буфера lead'а и два исполнителя с одинаковым
+        // потолком: роутер НЕ должен слить всё в одного (иначе один агент
+        // копит очередь, а второй простаивает).
+        let r = reg(
+            vec![
+                agent("minimax", ROLE_LEAD, Some("kilo"), None),
+                agent("alpha", "worker", Some("kilo"), Some(2)),
+                agent("beta", "worker", Some("kilo"), Some(2)),
+            ],
+            vec![
+                task("T-001", "minimax", 1, &["src/a.rs"]),
+                task("T-002", "minimax", 1, &["src/b.rs"]),
+                task("T-003", "minimax", 1, &["src/c.rs"]),
+            ],
+        );
+        let p = plan(&r, Some("minimax"));
+        let mut per: BTreeMap<&str, usize> = BTreeMap::new();
+        for a in &p.assignments {
+            *per.entry(a.agent.as_str()).or_insert(0) += 1;
+        }
+        assert_eq!(p.assignments.len(), 3, "все три задачи должны быть выданы");
+        assert!(
+            per.get("alpha").copied().unwrap_or(0) >= 1
+                && per.get("beta").copied().unwrap_or(0) >= 1,
+            "задачи должны распределиться между обоими исполнителями: {:?}",
+            per
+        );
+        for (who, n) in &per {
+            assert!(
+                *n <= MAX_ACTIVE_PER_AGENT,
+                "{who}: слишком много задач в одном плане: {n}"
+            );
+        }
+    }
+
+    #[test]
+    fn shorter_queue_wins_over_lower_ceiling() {
+        // Агент с НИЗКИМ потолком, но длинной очередью не должен забирать
+        // новые задачи: очередь — первый ключ выбора.
+        let mut r = reg(
+            vec![
+                agent("minimax", ROLE_LEAD, Some("kilo"), None),
+                agent("alpha", "worker", Some("kilo"), Some(1)),
+                agent("beta", "worker", Some("kilo"), Some(3)),
+            ],
+            vec![task("T-001", "minimax", 1, &["src/a.rs"])],
+        );
+        for id in ["T-100", "T-101", "T-102"] {
+            let mut t = task(id, "alpha", 1, &["src/q.rs"]);
+            t.status = Status::Queued;
+            r.tasks.push(t);
+        }
+        let p = plan(&r, Some("minimax"));
+        assert_eq!(p.assignments.len(), 1);
+        assert_eq!(
+            p.assignments[0].agent, "beta",
+            "задачу должен взять агент с короткой очередью"
+        );
+    }
+
+    #[test]
+    fn per_plan_cap_limits_single_agent() {
+        // Один исполнитель и три задачи: за один план ему отдаётся не
+        // больше MAX_ACTIVE_PER_AGENT, лишние остаются в буфере (skipped).
+        let r = reg(
+            vec![
+                agent("minimax", ROLE_LEAD, Some("kilo"), None),
+                agent("alpha", "worker", Some("kilo"), Some(3)),
+            ],
+            vec![
+                task("T-001", "minimax", 1, &["src/a.rs"]),
+                task("T-002", "minimax", 1, &["src/b.rs"]),
+                task("T-003", "minimax", 1, &["src/c.rs"]),
+            ],
+        );
+        let p = plan(&r, Some("minimax"));
+        assert_eq!(p.assignments.len(), MAX_ACTIVE_PER_AGENT);
+        assert_eq!(p.skipped.len(), 1, "лишняя задача остаётся в буфере");
+        assert!(
+            p.skipped[0].reason.contains("уже"),
+            "причина пропуска должна называть потолок нагрузки: {}",
+            p.skipped[0].reason
+        );
+    }
+
+    #[test]
+    fn task_of_agent_without_explicit_ceiling_is_not_stolen() {
+        // У исполнителя НЕТ явного потолка (модель неизвестна → fail-closed
+        // C1). Его задачу нельзя перераздавать: иначе роутер молча забирает
+        // очередь у живых исполнителей (48 задач у 5 агентов за прогон).
         let r = reg(
             vec![
                 agent("minimax", ROLE_LEAD, Some("kilo"), None),
                 agent("worker1", "worker", None, None),
+                agent("step5", ROLE_TECH_LEAD, Some("gpt-4"), Some(5)),
+            ],
+            vec![task("T-001", "worker1", 4, &["src/a.rs"])],
+        );
+        let p = plan(&r, Some("minimax"));
+        assert!(
+            p.assignments.is_empty(),
+            "задачу без явного потолка перераздавать нельзя: {:?}",
+            p.assignments
+        );
+        assert_eq!(r.tasks[0].agent, "worker1", "владелец задачи не меняется");
+    }
+
+    #[test]
+    fn task_above_owner_ceiling_is_reassigned() {
+        let r = reg(
+            vec![
+                agent("minimax", ROLE_LEAD, Some("kilo"), None),
+                agent("worker1", "worker", Some("kilo"), Some(1)),
                 agent("step5", ROLE_TECH_LEAD, Some("gpt-4"), Some(5)),
             ],
             vec![task("T-001", "worker1", 4, &["src/a.rs"])],

@@ -248,6 +248,7 @@ mod tests {
             model_source: None,
             started_by: None,
             started_at: None,
+            started_key: None,
             status: Status::Active,
             zones: Vec::new(),
             fail_level: None,

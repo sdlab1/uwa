@@ -183,7 +183,23 @@ impl OutputLock {
                 key: None,
             });
         }
-        let dir = root.join(".harness").join("mutate").join("locks");
+        // Файл лока — рядом с САМИМ выходным файлом, если тот лежит в
+        // `.harness/` (общий реестр оркестратора). Раньше файл лока жил в
+        // `root/.harness/mutate/locks` (root = worktree агента) — ОДИНАКОВЫЙ
+        // ключ в РАЗНЫХ деревьях НЕ сериализовал запись общего реестра:
+        // flock брал разные файлы (lost update, T-284).
+        let out_abs = lock_key(root, output);
+        let shared = out_abs
+            .components()
+            .any(|c| c.as_os_str() == std::ffi::OsStr::new(".harness"));
+        let dir = if shared {
+            out_abs
+                .parent()
+                .map(|p| p.join(".locks"))
+                .unwrap_or_else(|| root.join(".harness").join("mutate").join("locks"))
+        } else {
+            root.join(".harness").join("mutate").join("locks")
+        };
         std::fs::create_dir_all(&dir).map_err(|e| format!("{e}"))?;
         let path = dir.join(format!("{key}.lock"));
         // Внутрипроцессный слот: поток того же процесса ЖДЁТ вместо отказа

@@ -104,6 +104,12 @@ pub struct Task {
     /// Unix-время взятия задачи в работу.
     #[serde(default)]
     pub started_at: Option<u64>,
+    /// Ключ сессии, которая взяла задачу (`proc:<pid>:<start>` | `session:<id>`).
+    /// Нужен, чтобы поймать «один процесс — два имени»: переименованный агент
+    /// числится в реестре под двумя записями (testname и kilo-2ba65640) и мог
+    /// брать одну и ту же задачу дважды (ЧП T-257 / T-267).
+    #[serde(default)]
+    pub started_key: Option<String>,
     /// Статус.
     pub status: Status,
     /// Зоны ответственности (пути) — для контроля пересечений.
@@ -190,6 +196,11 @@ pub struct AgentState {
     /// Ветка worktree агента.
     #[serde(default)]
     pub wt_branch: Option<String>,
+    /// Ключ сессии агента (`proc:<pid>:<start>` | `session:<id>`) — последний
+    /// зафиксированный при `orch start`. Две записи агента с ОДНИМ ключом =
+    /// один и тот же процесс под двумя именами (дубль личности).
+    #[serde(default)]
+    pub session_key: Option<String>,
     /// Unix-время последней синхронизации worktree с главным репо.
     #[serde(default)]
     pub wt_synced_at: Option<u64>,
@@ -202,6 +213,18 @@ pub struct AgentState {
     /// Unix-время последнего автослияния.
     #[serde(default)]
     pub merged_at: Option<u64>,
+    /// Версия/дата модели, названная агентом при идентификации.
+    #[serde(default)]
+    pub model_version: Option<String>,
+    /// Дата релиза модели, названная агентом (модели с разными датами — разные).
+    #[serde(default)]
+    pub model_date: Option<String>,
+    /// Unix-время последней принудительной идентификации (R24).
+    #[serde(default)]
+    pub last_identify_ts: Option<u64>,
+    /// Дословный (VERBATIM) ответ агента на вопрос идентификации.
+    #[serde(default)]
+    pub model_answer_verbatim: Option<String>,
 }
 
 /// План выдачи задач: приоритеты и зависимости (последовательность).
@@ -519,6 +542,43 @@ fn task_tree(root: &Path, reg: &Registry, task: &Task) -> PathBuf {
     root.to_path_buf()
 }
 
+/// Worktree исполнителя задачи — СТРОГО (для коммита).
+///
+/// Раньше при отсутствии worktree функция `task_tree` молча возвращала корень
+/// вызова — и `devh orch commit` коммитил прямо в общее дерево (минуя ветку
+/// агента). Коммит разрешён ТОЛЬКО в worktree исполнителя.
+fn task_tree_strict(root: &Path, reg: &Registry, task: &Task) -> anyhow::Result<PathBuf> {
+    let canon = crate::core::identity::canonical(&task.agent);
+    let wt = reg
+        .agents
+        .iter()
+        .find(|a| crate::core::identity::canonical(&a.name) == canon)
+        .and_then(|a| a.worktree.clone());
+    match wt {
+        Some(wt) => {
+            let p = PathBuf::from(wt);
+            if p.is_dir() {
+                Ok(p)
+            } else {
+                Err(anyhow!(
+                    "devh orch commit: worktree агента {} ({}) не найден — \
+                     коммит только в worktree исполнителя; выдай дерево: \
+                     devh orch wt assign {}",
+                    task.agent,
+                    p.display(),
+                    canon
+                ))
+            }
+        }
+        None => Err(anyhow!(
+            "devh orch commit: у агента {} нет worktree — коммит в общее дерево запрещён; \
+             выдай дерево: devh orch wt assign {}",
+            task.agent,
+            canon
+        )),
+    }
+}
+
 fn agent_sections<'a>(reg: &'a Registry, agent: &str) -> (Vec<&'a Task>, Vec<&'a Task>) {
     let mut active: Vec<&Task> = Vec::new();
     let mut queued: Vec<&Task> = Vec::new();
@@ -622,12 +682,14 @@ pub fn orch(root: &Path, sub: &str, args: &[String]) -> anyhow::Result<()> {
         "next" => next_cmd(root),
         "selfcheck" => selfcheck(root, args),
         "pulse" => pulse(root),
+        "estimate" => estimate(root, args),
         "add" => add(root, args),
         "autoassign" => crate::commands::autoassign::run(root, args),
         "start" => start(root, args),
         "done" => close(root, args, Status::Done),
         "fail" => close(root, args, Status::Failed),
         "revoke" => revoke(root, args),
+        "requeue" => requeue(root, args),
         "reassign" => reassign(root, args),
         "degrade" => degrade(root, args),
         "model" => model(root, args),
@@ -695,6 +757,9 @@ fn print_help() {
   onboard --agent NAME [--task T] [--p P1] [--zone Z] [--dod ...] [--check ...]
   fail <ID> --f N --reason R провалена
   revoke <ID> --reason R     отзыв задачи
+  requeue <ID> --reason R [--force]
+                          вернуть задачу в очередь (запрещено, если работа
+                          уже закоммичена: сначала слей ветку)
   reassign <ID> --agent X    переназначить
   degrade --agent X [--to P] [--reason R]  понизить P очереди
   model --agent X --model M [--runtime R]   смена модели/рантайма => подозрение
@@ -795,6 +860,167 @@ fn agent_ceiling(reg: &Registry, agent: &str) -> u8 {
         .find(|a| crate::core::identity::canonical(&a.name) == canon)
         .and_then(|a| a.c_ceiling);
     crate::core::tech_lead::effective_ceiling(explicit, base)
+}
+
+/// Потолок агента С УЧЁТОМ ЭМПИРИКИ (автотюн).
+///
+/// Эмпирика (ошибки/варнинги/повторные `cargo check`/качество работы) может
+/// ТОЛЬКО понизить потолок: `min(объявленный, эмпирический)`.
+fn agent_ceiling_with(root: &Path, reg: &Registry, agent: &str) -> u8 {
+    let declared = agent_ceiling(reg, agent);
+    let canon = crate::core::identity::canonical(agent);
+    let cfg = crate::commands::load_config(root).unwrap_or_default();
+    let at = crate::core::autotune::AutotuneConfig::from_run_config(&cfg);
+    match crate::core::autotune::agent_ceiling(root, &canon, declared, &at) {
+        Some(emp) => emp.min(declared),
+        None => declared,
+    }
+}
+
+/// Принудительная идентификация перед КАЖДОЙ выдачей (R24, fail-closed).
+///
+/// Ответ модели — one-shot: расходуется ровно одной выдачей (см. `consume`).
+/// Нет свежего ответа → вопрос задаётся (идемпотентно) и отправляется письмом,
+/// а задача НЕ выдаётся.
+fn require_identification(
+    root: &Path,
+    reg: &Registry,
+    caller: &str,
+) -> anyhow::Result<crate::core::reidentify::Answer> {
+    let cfg = crate::commands::load_config(root).unwrap_or_default();
+    if let Some(ans) = crate::core::reidentify::take_answer(root, caller, cfg.identify_ttl_secs) {
+        return Ok(ans);
+    }
+    let hint = registry_model(reg, caller);
+    let ch = crate::core::reidentify::issue(root, caller, hint.as_deref())?;
+    // Тесты не пишут в живой ящик (DEVH_NO_MAIL=1) — иначе прогон тестов
+    // рассылает агентам реальные письма с вопросом идентификации.
+    if std::env::var("DEVH_NO_MAIL").as_deref() != Ok("1") {
+        let _ = crate::shell::msg::run(&[
+            "send".to_string(),
+            "--to".to_string(),
+            caller.to_string(),
+            "--subject".to_string(),
+            format!("ИДЕНТИФИКАЦИЯ: {}", ch.nonce),
+            "--body".to_string(),
+            ch.question.clone(),
+        ]);
+    }
+    anyhow::bail!(
+        "devh orch start: {caller} — задача НЕ выдана (fail-closed, R24): сначала ответь на \
+         вопрос идентификации модели. Вопрос ушёл письмом (тема «ИДЕНТИФИКАЦИЯ: {}»).\n\
+         Ответь одной командой:\n  devh orch identify --reply \"MODEL: <полное имя модели из \
+         ТВОЕГО системного промпта, с датой/версией>\" --reply \"VERSION: <версия>\" \
+         --reply \"DATE: <YYYY-MM-DD>\"\n--- ВОПРОС ---\n{}",
+        ch.nonce,
+        ch.question
+    )
+}
+
+/// Применить ответ идентификации: реестр + журнал (VERBATIM) + авто-задача.
+fn apply_identification(
+    reg: &mut Registry,
+    agent: &str,
+    ans: &crate::core::reidentify::Answer,
+) -> Option<String> {
+    let ts = now();
+    let canon = crate::core::identity::canonical(agent);
+    match agent_index(reg, &canon) {
+        Some(i) => {
+            if let Some(a) = reg.agents.get_mut(i) {
+                a.model = Some(ans.model.clone());
+                a.model_version = ans.version.clone();
+                a.model_date = ans.date.clone();
+                a.last_identify_ts = Some(ts);
+                a.model_answer_verbatim = Some(ans.raw.clone());
+            }
+        }
+        None => reg.agents.push(AgentState {
+            name: canon.clone(),
+            model: Some(ans.model.clone()),
+            model_version: ans.version.clone(),
+            model_date: ans.date.clone(),
+            last_identify_ts: Some(ts),
+            model_answer_verbatim: Some(ans.raw.clone()),
+            ..Default::default()
+        }),
+    }
+    crate::core::identity_ledger::log_identify(
+        &canon,
+        &crate::core::identity::current().key,
+        &ans.model,
+        ans.version.as_deref(),
+        ans.date.as_deref(),
+        &ans.raw,
+    );
+    spawn_model_verification_task(reg, &canon, ans)
+}
+
+/// Авто-задача: техлид проверяет/уточняет названное моделью имя.
+///
+/// Простая задача (C2) с наивысшим приоритетом (P0): дословный ответ агента
+/// кладётся в заметку. Дедуп по заголовку — одна задача на агента, пока она
+/// не закрыта. Если техлида нет — задача уходит в буфер ведущего.
+fn spawn_model_verification_task(
+    reg: &mut Registry,
+    agent: &str,
+    ans: &crate::core::reidentify::Answer,
+) -> Option<String> {
+    let title = format!("Верифицировать имя модели агента {agent}");
+    let open = reg.tasks.iter().any(|t| {
+        t.title == title && t.status != Status::Done && t.status != Status::Revoked
+    });
+    if open {
+        return None;
+    }
+    let (lead, _) = lead_of(reg);
+    let reviewer = reg
+        .agents
+        .iter()
+        .find(|a| a.role.as_deref() == Some(ROLE_TECH_LEAD))
+        .map(|a| a.name.clone())
+        .or_else(|| lead.clone())?;
+    let ts = now();
+    reg.seq = reg.seq.saturating_add(1);
+    let id = format!("T-{:03}", reg.seq);
+    let note = format!(
+        "Ответ агента {agent} VERBATIM:\n{}\n---\nНазванная модель: {}\nВерсия: {}\nДата: {}\n         Проверить: точное ли имя модели (с датой/версией релиза; модели с разными датами —          РАЗНЫЕ модели и измеряются раздельно).",
+        ans.raw,
+        ans.model,
+        ans.version.clone().unwrap_or_else(|| "-".to_string()),
+        ans.date.clone().unwrap_or_else(|| "-".to_string()),
+    );
+    let dod = vec![
+        format!("Назвать точное имя модели агента {agent} (с датой/версией релиза)"),
+        "Подтвердить или опровергнуть ответ агента (devh orch identify --set <модель>)".to_string(),
+    ];
+    reg.tasks.push(Task {
+        id: id.clone(),
+        agent: reviewer.clone(),
+        title,
+        complexity: 0,
+        c_level: Some(2),
+        model: None,
+        model_source: None,
+        started_by: None,
+        started_at: None,
+        started_key: None,
+        status: Status::Queued,
+        zones: Vec::new(),
+        fail_level: None,
+        note,
+        created: ts,
+        updated: ts,
+        dod,
+        checks: Vec::new(),
+        acked: Vec::new(),
+        evidence: Vec::new(),
+        commit_sha: None,
+        main_sha: None,
+        override_reason: None,
+    });
+    reg.plan.prio.insert(id.clone(), 0);
+    Some(id)
 }
 
 /// Разбор C-уровня (C0..C10). Принимает и «4», и «C4».
@@ -959,6 +1185,11 @@ fn add(root: &Path, args: &[String]) -> anyhow::Result<()> {
             None
         },
         started_at: if lead_self { Some(ts) } else { None },
+        started_key: if lead_self {
+            Some(crate::core::identity::current().key.clone())
+        } else {
+            None
+        },
         status: if lead_self {
             Status::Active
         } else {
@@ -1110,7 +1341,7 @@ fn start(root: &Path, args: &[String]) -> anyhow::Result<()> {
     }
     // Потолок модели: задача выше потолка — не выдаётся.
     if let Some(c) = reg.tasks[idx].c_level {
-        let ceiling = agent_ceiling(&reg, &caller);
+        let ceiling = agent_ceiling_with(root, &reg, &caller);
         if c > ceiling {
             return Err(anyhow!(
                 "devh orch start: {id} — сложность C{c} выше потолка модели агента \
@@ -1124,6 +1355,73 @@ fn start(root: &Path, args: &[String]) -> anyhow::Result<()> {
              двойная работа запрещена",
             status.label()
         ));
+    }
+    // --- ЗАЩИТА ОТ ДВОЙНОЙ РАБОТЫ (ЧП T-257 / T-267, 2026-10-25) ----------
+    // Ключ сессии вызывающего: по нему видно, что «два агента» — один процесс.
+    let me_key = crate::core::identity::current().key.clone();
+    // (1) По задаче уже есть закоммиченная работа — переделывать нельзя.
+    {
+        let t = &reg.tasks[idx];
+        if let Some(sha) = t.commit_sha.as_ref().filter(|s| !s.trim().is_empty()) {
+            return Err(anyhow!(
+                "devh orch start: {id} уже имеет закоммиченную работу (commit_sha {sha}) — \
+                 не бери её заново: проверь свою ветку и слей её \
+                 (devh orch wt merge <agent>); если работа не нужна — \
+                 devh orch requeue {id} --force --reason \"...\"",
+            ));
+        }
+    }
+    // (2) Эту задачу уже брала ТА ЖЕ сессия (возможно, под другим именем).
+    {
+        let t = &reg.tasks[idx];
+        if let Some(prev) = t.started_key.as_ref().filter(|k| !k.trim().is_empty()) {
+            if *prev == me_key {
+                return Err(anyhow!(
+                    "devh orch start: {id} уже бралась ТОБОЙ ЖЕ сессией ({me_key}) — \
+                     работа уже в твоём worktree; слей её (devh orch wt merge <agent>) \
+                     или верни задачу в очередь явно: devh orch requeue {id} --reason \"...\"",
+                ));
+            }
+        }
+    }
+    // (3) Эта же сессия уже работает над ДРУГОЙ задачей — возможно, под другим
+    //     именем в реестре (testname и kilo-2ba65640 = один процесс).
+    {
+        let other = reg.tasks.iter().find(|t| {
+            t.id != id
+                && t.status == Status::Active
+                && t.started_key.as_ref().filter(|k| !k.trim().is_empty()) == Some(&me_key)
+                && crate::core::identity::canonical(&t.agent) != caller
+        });
+        if let Some(other) = other {
+            return Err(anyhow!(
+                "devh orch start: {id} — ты (сессия {me_key}) уже работаешь над {} \
+                 (в реестре: {}, взял {}) — одна сессия = одна задача в работе; \
+                 закончи её или отзови (devh orch revoke {} --reason \"...\")",
+                other.id,
+                other.agent,
+                other.started_by.as_deref().unwrap_or("-"),
+                other.id
+            ));
+        }
+    }
+    // (4) Жёсткий потолок активных задач на агента.
+    {
+        let active = reg
+            .tasks
+            .iter()
+            .filter(|t| {
+                t.status == Status::Active
+                    && crate::core::identity::canonical(&t.agent) == caller
+            })
+            .count();
+        if active >= crate::core::task_router::MAX_ACTIVE_PER_AGENT {
+            return Err(anyhow!(
+                "devh orch start: {id} — у тебя уже {active} активные задачи \
+                 (максимум {}) — закончи текущую, потом бери следующую",
+                crate::core::task_router::MAX_ACTIVE_PER_AGENT
+            ));
+        }
     }
     // O5: зоны задачи не пересекаются с зонами активных задач.
     // Тот же инвариант, что и в core::dispatch (автовыдача), — но и для ручного
@@ -1167,6 +1465,11 @@ fn start(root: &Path, args: &[String]) -> anyhow::Result<()> {
             ));
         }
     }
+    // R24: ПРИНУДИТЕЛЬНАЯ ИДЕНТИФИКАЦИЯ перед КАЖДОЙ выдачей (fail-closed).
+    // Проверка — последняя: до неё отказ даёт точную причину (зависимости,
+    // потолок, «task taken»), а не «сначала ответь на вопрос».
+    // Ответ — one-shot: расходуется ровно одной выдачей.
+    let ident = require_identification(root, &reg, &caller)?;
     let ts = now();
     let agent = if from_buffer {
         caller.clone()
@@ -1178,6 +1481,7 @@ fn start(root: &Path, args: &[String]) -> anyhow::Result<()> {
         t.status = Status::Active;
         t.started_by = Some(caller.clone());
         t.started_at = Some(ts);
+        t.started_key = Some(me_key.clone());
         t.updated = ts;
         if from_buffer {
             // Забрал из буфера — задача теперь моя.
@@ -1204,7 +1508,18 @@ fn start(root: &Path, args: &[String]) -> anyhow::Result<()> {
             None
         }
     };
+    // Ключ сессии агента — детект «один процесс — две личности» (selfcheck).
+    if let Some(i) = agent_index(&reg, &agent) {
+        if let Some(st) = reg.agents.get_mut(i) {
+            st.session_key = Some(me_key.clone());
+        }
+    }
+    // Ответ идентификации принят: пишем VERBATIM в реестр и журнал, заводим
+    // задачу техлиду на проверку имени модели.
+    let verify_task = apply_identification(&mut reg, &caller, &ident);
     save(root, &reg)?;
+    // Ответ израсходован: следующая выдача потребует нового ответа (R24).
+    let _ = crate::core::reidentify::consume(root, &caller);
     // Ledger: событие Started
     let ledger_path = dir(root).join("ledger.jsonl");
     let _ = log_event(&ledger_path, &LedgerEntry::new(&agent, LedgerEvent::Started, ts).with_task(&id));
@@ -1229,6 +1544,13 @@ fn start(root: &Path, args: &[String]) -> anyhow::Result<()> {
             }
         );
     }
+    println!(
+        "идентификация: модель {} — ответ принят (следующая выдача потребует нового ответа)",
+        ident.model
+    );
+    if let Some(t) = verify_task {
+        println!("задача {t}: техлид проверяет названное имя модели");
+    }
     Ok(())
 }
 
@@ -1246,6 +1568,28 @@ fn close(root: &Path, args: &[String], status: Status) -> anyhow::Result<()> {
     let reason = flag(args, "--reason").unwrap_or_default();
     let override_reason = flag(args, "--override");
     let mut reg = load(root);
+    // ИДЕМПОТЕНТНОСТЬ сдачи: повторный `done` по уже сданной задаче — no-op
+    // (без нового события ledger, без auto_trigger, без повторного слияния).
+    // Без этого «возврат в очередь → повторная сдача» давал 3 события done,
+    // 3 слияния и 3 одинаковых коммита в main (ЧП T-267, 2026-10-25).
+    {
+        let idx = find_task_index(&reg, &id)
+            .ok_or_else(|| anyhow!("devh orch: задача {id} не найдена"))?;
+        let cur = reg.tasks.get(idx).expect("индекс найден");
+        if cur.status == Status::Done {
+            if status == Status::Done {
+                println!(
+                    "devh orch: {id} уже сдана ({}) — повторная сдача проигнорирована (no-op)",
+                    cur.agent
+                );
+                return Ok(());
+            }
+            return Err(anyhow!(
+                "devh orch: {id} уже выполнена ({}) — провалить её нельзя",
+                cur.agent
+            ));
+        }
+    }
     if status == Status::Done {
         let idx = find_task_index(&reg, &id)
             .ok_or_else(|| anyhow!("devh orch: задача {id} не найдена"))?;
@@ -1875,9 +2219,39 @@ fn reassign(root: &Path, args: &[String]) -> anyhow::Result<()> {
     let mut reg = load(root);
     let idx =
         find_task_index(&reg, &id).ok_or_else(|| anyhow!("devh orch: задача {id} не найдена"))?;
+    // «task taken»: задачу, которую агент УЖЕ ВЗЯЛ в работу, переназначать
+    // нельзя — иначе два агента делают одну задачу (ЧП T-257 / T-267).
+    let prev_owner = {
+        let t = reg.tasks.get(idx).expect("индекс найден");
+        if t.status == Status::Active {
+            let taken = t.started_by.clone().unwrap_or_else(|| t.agent.clone());
+            return Err(anyhow!(
+                "devh orch reassign: {id} уже взята в работу ({taken}) — «task taken»: \
+                 двойная работа запрещена. Сначала: devh orch done {id} --f N \
+                 (или devh orch revoke), потом переназначай"
+            ));
+        }
+        if t.status == Status::Done {
+            return Err(anyhow!(
+                "devh orch reassign: {id} уже выполнена — переназначать нечего"
+            ));
+        }
+        if crate::core::identity::canonical(&t.agent) == crate::core::identity::canonical(&agent) {
+            println!(
+                "devh orch: {id} уже закреплена за {} — переназначение не нужно",
+                t.agent
+            );
+            return Ok(());
+        }
+        t.agent.clone()
+    };
     {
         let t = reg.tasks.get_mut(idx).unwrap_or_else(|| unreachable!());
         t.agent = agent.clone();
+        // Новый исполнитель начинает с чистого листа.
+        t.started_by = None;
+        t.started_at = None;
+        t.started_key = None;
         t.updated = now();
     }
     if agent_index(&reg, &agent).is_none() {
@@ -1887,7 +2261,117 @@ fn reassign(root: &Path, args: &[String]) -> anyhow::Result<()> {
         });
     }
     save(root, &reg)?;
-    println!("devh orch: {id} переназначена на {agent}");
+    // Ledger: событие Reassigned
+    let ledger_path = dir(root).join("ledger.jsonl");
+    let _ = log_event(
+        &ledger_path,
+        &LedgerEntry::new(&agent, LedgerEvent::Reassigned, now())
+            .with_task(&id)
+            .with_detail(&format!("{prev_owner} → {agent}")),
+    );
+    println!("devh orch: {id} переназначена: {prev_owner} → {agent}");
+    Ok(())
+}
+
+/// `devh orch requeue <ID> --reason R [--force]` — вернуть задачу в очередь.
+///
+/// Безопасный возврат: если по задаче уже есть закоммиченная работа, вернуть
+/// её в очередь НЕЛЬЗЯ — агент переделает её и получится дубль коммита
+/// (ровно ЧП T-267). Сначала влей ветку: `devh orch wt merge <agent>`.
+fn requeue(root: &Path, args: &[String]) -> anyhow::Result<()> {
+    let _lock = crate::shell::lock::OutputLock::try_acquire(root, &path(root), "devh orch")
+        .map_err(|e| anyhow!("devh orch: реестр занят ({e}) — повтори через секунду"))?;
+
+    let id = positional(args)
+        .first()
+        .cloned()
+        .ok_or_else(|| anyhow!("devh orch requeue: нужен ID задачи"))?;
+    let reason = flag(args, "--reason").unwrap_or_default();
+    let force = args.iter().any(|a| a == "--force");
+    let mut reg = load(root);
+    let idx =
+        find_task_index(&reg, &id).ok_or_else(|| anyhow!("devh orch: задача {id} не найдена"))?;
+    let (status, owner, commit_sha, main_sha) = {
+        let t = &reg.tasks[idx];
+        (
+            t.status,
+            t.agent.clone(),
+            t.commit_sha.clone(),
+            t.main_sha.clone(),
+        )
+    };
+    if status == Status::Done {
+        return Err(anyhow!("devh orch requeue: {id} уже выполнена — возвращать нечего"));
+    }
+    if let Some(sha) = main_sha.as_ref().filter(|s| !s.trim().is_empty()) {
+        return Err(anyhow!(
+            "devh orch requeue: {id} уже в main ({sha}) — это выполненная задача"
+        ));
+    }
+    if !force {
+        if let Some(sha) = commit_sha.as_ref().filter(|s| !s.trim().is_empty()) {
+            return Err(anyhow!(
+                "devh orch requeue: {id} уже имеет закоммиченную работу ({sha}) в ветке {owner} — \
+                 не возвращай в очередь (агент переделает её и получится дубль коммита). \
+                 Слей ветку: devh orch wt merge {owner}; если работа не нужна — повтори с --force"
+            ));
+        }
+        // Ветка агента опережает main — там коммиты работы.
+        let main_branch = crate::commands::load_config(root)
+            .map(|c| c.main_branch)
+            .unwrap_or_else(|_| "main".to_string());
+        if let Some(wt) = reg
+            .agents
+            .iter()
+            .find(|a| {
+                crate::core::identity::canonical(&a.name)
+                    == crate::core::identity::canonical(&owner)
+            })
+            .and_then(|a| a.worktree.clone())
+        {
+            let p = PathBuf::from(&wt);
+            if p.is_dir() {
+                let ahead = crate::shell::git::rev_list_count(&p, &main_branch).unwrap_or(0);
+                if ahead > 0 {
+                    return Err(anyhow!(
+                        "devh orch requeue: ветка {owner} опережает {main_branch} на {ahead} коммитов — \
+                         сначала влей её: devh orch wt merge {owner} (иначе работа пропадёт)"
+                    ));
+                }
+            }
+        }
+    }
+    {
+        let t = reg.tasks.get_mut(idx).unwrap_or_else(|| unreachable!());
+        t.status = Status::Queued;
+        t.started_by = None;
+        t.started_at = None;
+        t.started_key = None;
+        t.updated = now();
+        if force {
+            // Работа, которую решено выбросить, не должна блокировать новую.
+            t.commit_sha = None;
+        }
+        if !reason.trim().is_empty() {
+            t.note = format!(
+                "{} | [lead] ВОЗВРАЩЕНО В ОЧЕРЕДЬ: {}",
+                t.note,
+                reason.trim()
+            );
+        }
+    }
+    save(root, &reg)?;
+    let ledger_path = dir(root).join("ledger.jsonl");
+    let _ = log_event(
+        &ledger_path,
+        &LedgerEntry::new(&owner, LedgerEvent::Reassigned, now())
+            .with_task(&id)
+            .with_detail(&format!("requeue: {reason}")),
+    );
+    println!(
+        "devh orch: {id} возвращена в очередь (был {status}, исполнитель {owner})",
+        status = status.label()
+    );
     Ok(())
 }
 
@@ -2089,6 +2573,7 @@ fn bug(root: &Path, args: &[String]) -> anyhow::Result<()> {
         model_source: None,
         started_by: None,
         started_at: None,
+        started_key: None,
         status: Status::Queued,
         zones: zones.clone(),
         fail_level: None,
@@ -2126,7 +2611,7 @@ fn list(root: &Path, args: &[String]) -> anyhow::Result<()> {
     let reg = load(root);
     let only = flag(args, "--agent");
     let caller = crate::core::identity::canonical(&crate::core::identity::current().name);
-    let ceiling = agent_ceiling(&reg, &caller);
+    let ceiling = agent_ceiling_with(root, &reg, &caller);
     let mut hidden = 0usize;
     println!("ID      агент   P  C   pr  статус    F  зоны                     задача");
     let (lead, _) = lead_of(&reg);
@@ -2401,6 +2886,57 @@ fn selfcheck(root: &Path, args: &[String]) -> anyhow::Result<()> {
             warns.push(format!("{canon}: в очереди {n} задач (<2, O1) — выдать задачу"));
         }
     }
+    // 4b. ДОСТУПНОСТЬ задач: очередь есть, а взять нечего — все задачи
+    //     сложнее потолка агента (у модели без декларации потолок C1).
+    //     Тревога lead'у: такие задачи надо разложить на простые.
+    for a in crate::core::estimator::supply(&reg).agents.iter() {
+        if a.available == 0 && (a.queued > 0 || a.active == 0) {
+            warns.push(format!(
+                "{}: доступных задач 0 (в очереди {}, потолок C{}) — задачи слишком сложные, разложи",
+                a.agent, a.queued, a.ceiling
+            ));
+        }
+    }
+    // 4c. ДУБЛЬ ЛИЧНОСТИ: две записи агента с одним ключом сессии = один
+    //     процесс под двумя именами (ЧП T-257/T-267: testname и kilo-2ba65640).
+    {
+        let mut by_key: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for a in reg.agents.iter() {
+            if let Some(k) = a.session_key.as_ref().filter(|k| !k.trim().is_empty()) {
+                by_key
+                    .entry(k.clone())
+                    .or_default()
+                    .push(crate::core::identity::canonical(&a.name));
+            }
+        }
+        for (key, names) in by_key {
+            if names.len() > 1 {
+                warns.push(format!(
+                    "дубль личности: {} — один процесс ({key}) под несколькими именами; \
+                     объедини: devh msg alias <имя> --for <канон>",
+                    names.join(", ")
+                ));
+            }
+        }
+    }
+    // 4d. ПЕРЕГРУЗ: больше MAX_ACTIVE_PER_AGENT активных задач у агента.
+    for a in reg.agents.iter() {
+        let canon = crate::core::identity::canonical(&a.name);
+        let n = reg
+            .tasks
+            .iter()
+            .filter(|t| {
+                t.status == Status::Active
+                    && crate::core::identity::canonical(&t.agent) == canon
+            })
+            .count();
+        if n > crate::core::task_router::MAX_ACTIVE_PER_AGENT {
+            warns.push(format!(
+                "{canon}: {n} активных задач (максимум {}) — перегруз: раздай работу другому",
+                crate::core::task_router::MAX_ACTIVE_PER_AGENT
+            ));
+        }
+    }
     // 5. Закрытые задачи без слияния — работа не дошла до главной ветки.
     for a in reg.agents.iter() {
         let canon = crate::core::identity::canonical(&a.name);
@@ -2661,6 +3197,29 @@ fn models(root: &Path) -> anyhow::Result<()> {
                 crate::core::complexity::ModelCeiling::DEFAULT,
                 a.name
             );
+            continue;
+        }
+        let declared = agent_ceiling(&reg, &a.name);
+        let empirical = agent_ceiling_with(root, &reg, &a.name);
+        if empirical < declared {
+            println!(
+                "⚠ агент {} — эмпирика понизила потолок C{declared} → C{empirical} \
+                 (ошибки/варнинги/прогоны cargo check + качество работы): devh orch models",
+                a.name
+            );
+        }
+        if let Some(ts) = a.last_identify_ts {
+            let age = now().saturating_sub(ts);
+            println!(
+                "  {} — идентифицирован {} сек. назад: {}{}",
+                a.name,
+                age,
+                a.model.clone().unwrap_or_else(|| "-".to_string()),
+                a.model_date
+                    .clone()
+                    .map(|d| format!(" (дата {d})"))
+                    .unwrap_or_default()
+            );
         }
     }
     Ok(())
@@ -2674,14 +3233,36 @@ fn identify(root: &Path, args: &[String]) -> anyhow::Result<()> {
                 anyhow!("devh orch identify: реестр занят ({e}) — повтори через секунду")
             })?;
     let pos = positional(args);
-    let agent = pos
-        .first()
-        .cloned()
-        .ok_or_else(|| anyhow!("devh orch identify: нужен агент"))?;
+    // Агент не указан -> отвечает вызывающий (команда из вопроса идентификации
+    // должна работать дословно: `devh orch identify --reply "MODEL: ..."`).
+    let agent = pos.first().cloned().unwrap_or_else(|| {
+        crate::core::identity::canonical(&crate::core::identity::current().name)
+    });
     let canon = crate::core::identity::canonical(&agent);
     let reg = load(root);
     let (lead, _) = lead_of(&reg);
     let caller = crate::core::identity::canonical(&crate::core::identity::current().name);
+    // Ответ модели на вопрос идентификации (VERBATIM).
+    let replies = flags_all(args, "--reply");
+    if !replies.is_empty() {
+        let raw = replies.join("\n");
+        let ans = crate::core::reidentify::record_answer(root, &canon, &raw)?;
+        let mut reg = reg;
+        let task = apply_identification(&mut reg, &canon, &ans);
+        save(root, &reg)?;
+        println!(
+            "devh orch identify: {canon} — ответ принят VERBATIM (модель: {}{})",
+            ans.model,
+            ans.date
+                .clone()
+                .map(|d| format!(", дата: {d}"))
+                .unwrap_or_default()
+        );
+        if let Some(t) = task {
+            println!("devh orch identify: создана задача {t} — техлид проверяет имя модели");
+        }
+        return Ok(());
+    }
     if let Some(m) = flag(args, "--set") {
         let is_lead = lead.as_deref() == Some(caller.as_str());
         if !is_lead && !caller_has_review_rights(&reg) {
@@ -3980,16 +4561,22 @@ pub fn verify_cmd(root: &Path, args: &[String]) -> anyhow::Result<()> {
     let log_path = log_dir.join(format!("{id}-{ts}.log"));
     let mut all_ok = true;
     let mut log = String::new();
+    let mut combined_all = String::new();
+    let checks_count = checks.len() as u32;
+    let started_total = std::time::Instant::now();
     for check in checks {
         let before = zone_digest(&tree, &reg.tasks.get(idx).expect("индекс найден").zones);
+        let started = std::time::Instant::now();
         let output = std::process::Command::new("timeout")
             .args(["1800", "bash", "-lc", &check])
             .current_dir(&tree)
             .output();
+        let duration = started.elapsed().as_secs_f64();
         let (ok, detail, code) = match output {
             Ok(out) => {
                 let mut combined = String::from_utf8_lossy(&out.stdout).to_string();
                 combined.push_str(&String::from_utf8_lossy(&out.stderr));
+                combined_all.push_str(&combined);
                 (
                     out.status.success(),
                     output_tail(&combined),
@@ -4031,12 +4618,121 @@ pub fn verify_cmd(root: &Path, args: &[String]) -> anyhow::Result<()> {
         }
     }
     fs::write(&log_path, &log)?;
+    // --- ТЕЛЕМЕТРИЯ: ошибки/варнинги/прогоны → автотюн потолка C ----------
+    // Качество кода и процесса (комментарии, обдумывание, круги переделки) —
+    // в quality.jsonl; коэффициенты — в model_coeffs.jsonl (сырые float'ы).
+    {
+        let duration_total = started_total.elapsed().as_secs_f64();
+        let task = reg.tasks.get(idx).expect("индекс найден");
+        let agent = task.agent.clone();
+        let c_level = task.c_level.unwrap_or(task.complexity);
+        let model = registry_model(&reg, &agent).unwrap_or_default();
+        let canon = crate::core::identity::canonical(&agent);
+        let version = reg
+            .agents
+            .iter()
+            .find(|a| crate::core::identity::canonical(&a.name) == canon)
+            .and_then(|a| a.model_version.clone());
+        let stats = crate::core::check_telemetry::CheckStats::from_output(&combined_all, "");
+        let _ = crate::core::autotune::record_output_timed(
+            root,
+            &agent,
+            &model,
+            version.as_deref(),
+            Some(&id),
+            c_level,
+            &combined_all,
+            "",
+            Some(duration_total),
+        );
+        let diff = quality_diff_text(&tree);
+        let (added, comments, code_lines) = crate::core::quality::diff_metrics(&diff);
+        let actions = crate::core::quality::deliberation_actions(&agent_log_text(&reg, &agent));
+        let identified = reg
+            .agents
+            .iter()
+            .find(|a| crate::core::identity::canonical(&a.name) == canon)
+            .map(|a| a.last_identify_ts.is_some())
+            .unwrap_or(false);
+        let sample = crate::core::quality::QualitySample {
+            ts: now(),
+            agent: canon.clone(),
+            model: model.clone(),
+            task_id: Some(id.clone()),
+            c_level,
+            added_lines: added,
+            comment_lines: comments,
+            code_lines,
+            check_runs: checks_count,
+            errors_final: stats.errors,
+            warnings_final: stats.warnings,
+            build_ok: all_ok,
+            duration_secs: Some(duration_total),
+            deliberation_actions: actions,
+            rework_rounds: 0,
+            identified,
+        };
+        let _ = crate::core::quality::append_sample(root, &sample);
+    }
     save(root, &reg)?;
     println!("devh orch: лог проверок: {}", log_path.display());
     if !all_ok {
         return Err(anyhow!("devh orch verify: есть красные проверки"));
     }
     Ok(())
+}
+
+/// Текст диффа дерева задачи — для метрик качества кода (комментарии/код).
+fn quality_diff_text(tree: &Path) -> String {
+    let variants: [&[&str]; 2] = [&["diff", "--unified=0", "HEAD"], &["show", "--format=", "--unified=0", "HEAD"]];
+    for args in variants.iter() {
+        let o = std::process::Command::new("git")
+            .args(*args)
+            .current_dir(tree)
+            .output();
+        if let Ok(outp) = o {
+            let text = String::from_utf8_lossy(&outp.stdout).to_string();
+            if !text.trim().is_empty() {
+                return text;
+            }
+        }
+    }
+    String::new()
+}
+
+/// Последний лог сессии агента — эвристика «обдумывания» (виды действий).
+fn agent_log_text(reg: &Registry, agent: &str) -> String {
+    let canon = crate::core::identity::canonical(agent);
+    let wt = reg
+        .agents
+        .iter()
+        .find(|a| crate::core::identity::canonical(&a.name) == canon)
+        .and_then(|a| a.worktree.clone());
+    let Some(wt) = wt else {
+        return String::new();
+    };
+    let logs = std::path::Path::new(&wt).join(".harness").join("logs");
+    let Ok(rd) = fs::read_dir(&logs) else {
+        return String::new();
+    };
+    let mut best: Option<(std::time::SystemTime, std::path::PathBuf)> = None;
+    for e in rd.flatten() {
+        let path = e.path();
+        let name = path
+            .file_name()
+            .map(|x| x.to_string_lossy().to_string())
+            .unwrap_or_default();
+        if !name.ends_with("-agent.log") {
+            continue;
+        }
+        let modified = e.metadata().and_then(|m| m.modified()).ok();
+        let Some(m) = modified else { continue };
+        if best.as_ref().map(|(bm, _)| m > *bm).unwrap_or(true) {
+            best = Some((m, path));
+        }
+    }
+    best.and_then(|(_, p)| fs::read_to_string(p).ok())
+        .unwrap_or_default()
 }
 
 fn git_output(root: &Path, args: &[&str]) -> anyhow::Result<String> {
@@ -4152,6 +4848,139 @@ fn validate_commit_sha(tree: &Path, sha: &str, agent: &str, reg: &Registry) -> a
     Ok(())
 }
 
+/// `devh orch estimate [--json] [--notify]` — оценка запаса задач.
+///
+/// Отвечает на вопрос lead'а «агенты сидят без работы — почему?»:
+/// сколько задач агент реально может взять (C ≤ его потолка), на сколько
+/// часов хватит его очереди (по его же скорости) и сколько задач надо
+/// приготовить заранее. С `--notify` шлёт тревогу ведущему и техлиду.
+fn estimate(root: &Path, args: &[String]) -> anyhow::Result<()> {
+    let as_json = args.iter().any(|a| a == "--json");
+    let notify = args.iter().any(|a| a == "--notify");
+    let reg = load(root);
+    let rep = crate::core::estimator::supply(&reg);
+
+    if as_json {
+        let agents: Vec<serde_json::Value> = rep
+            .agents
+            .iter()
+            .map(|a| {
+                serde_json::json!({
+                    "agent": a.agent,
+                    "ceiling": a.ceiling,
+                    "queued": a.queued,
+                    "available": a.available,
+                    "active": a.active,
+                    "done": a.done,
+                    "hours_per_task": a.hours_per_task,
+                    "backlog_hours": a.backlog_hours,
+                    "need_more": a.need_more,
+                    "too_hard": a.too_hard,
+                    "note": a.note,
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::json!({
+                "agents": agents,
+                "lead_buffer": rep.lead_buffer,
+                "buffer_too_hard": rep.buffer_too_hard,
+                "weakest_ceiling": rep.weakest_ceiling,
+                "need_more_total": rep.total_need(),
+            })
+        );
+        return Ok(());
+    }
+
+    let h = |v: Option<f64>| match v {
+        Some(x) => format!("{x:.1}"),
+        None => "—".to_string(),
+    };
+    println!("=== ОЦЕНКА ЗАПАСА ЗАДАЧ (потолок C, очередь, скорость) ===");
+    for a in &rep.agents {
+        println!(
+            "{:<22} C{:<2} очередь {:<3} доступно {:<3} в работе {:<2} ч/задача {:<5} запас {:<6} ч нужно ещё {:<3} — {}",
+            a.agent,
+            a.ceiling,
+            a.queued,
+            a.available,
+            a.active,
+            h(a.hours_per_task),
+            h(a.backlog_hours),
+            a.need_more,
+            a.note
+        );
+    }
+    println!(
+        "буфер ведущего: {} задач; из них {} сложнее потолка самого слабого (C{}) — разложить",
+        rep.lead_buffer, rep.buffer_too_hard, rep.weakest_ceiling
+    );
+    let alerts = rep.alerts();
+    if alerts.is_empty() {
+        println!("тревог нет: у всех исполнителей есть доступные задачи");
+    } else {
+        println!("ТРЕВОГА ({} исполнителей без запаса):", alerts.len());
+        for a in &alerts {
+            println!(
+                "  ⚠ {}: доступно {} (в очереди {}, потолок C{}) — приготовить ещё {} задач",
+                a.agent, a.available, a.queued, a.ceiling, a.need_more
+            );
+        }
+    }
+
+    if notify {
+        let mut body = String::new();
+        body.push_str(&format!(
+            "Оценка запаса задач: буфер ведущего {} задач (из них {} сложнее C{} — разложить).\n",
+            rep.lead_buffer, rep.buffer_too_hard, rep.weakest_ceiling
+        ));
+        for a in &alerts {
+            body.push_str(&format!(
+                "⚠ {}: доступно {} задач (в очереди {}, потолок C{}) — приготовить ещё {}\n",
+                a.agent, a.available, a.queued, a.ceiling, a.need_more
+            ));
+        }
+        if alerts.is_empty() {
+            body.push_str("Тревог нет: у всех исполнителей есть доступные задачи.\n");
+        }
+        body.push_str(&format!(
+            "Всего приготовить заранее: {} задач.\n",
+            rep.total_need()
+        ));
+        let subject = format!(
+            "ЗАПАС ЗАДАЧ: {} без работы, готовить ещё {}",
+            alerts.len(),
+            rep.total_need()
+        );
+        let mut targets: Vec<String> = Vec::new();
+        let (lead, _) = lead_of(&reg);
+        if let Some(lead) = lead {
+            targets.push(lead);
+        }
+        for a in &reg.agents {
+            if a.role.as_deref() == Some(crate::core::task_router::ROLE_TECH_LEAD) {
+                targets.push(crate::core::identity::canonical(&a.name));
+            }
+        }
+        for t in targets {
+            let rc = crate::shell::msg::run(&[
+                "send".to_string(),
+                "--to".to_string(),
+                t.clone(),
+                "--subject".to_string(),
+                subject.clone(),
+                "--body".to_string(),
+                body.clone(),
+            ]);
+            if rc != 0 {
+                println!("devh orch estimate: ⚠ письмо {t} не отправлено (rc={rc})");
+            }
+        }
+    }
+    Ok(())
+}
+
 /// `devh orch commit <ID>` — коммит только после зелёного DoD.
 pub fn commit_cmd(root: &Path, args: &[String]) -> anyhow::Result<()> {
     let _lock = crate::shell::lock::OutputLock::try_acquire(root, &path(root), "devh orch")
@@ -4166,7 +4995,7 @@ pub fn commit_cmd(root: &Path, args: &[String]) -> anyhow::Result<()> {
         .ok_or_else(|| anyhow!("devh orch commit: задача {id} не найдена"))?;
     let task = reg.tasks.get(idx).expect("индекс найден");
     // Коммит — в worktree исполнителя задачи (его ветка), а не в дереве вызова.
-    let tree = task_tree(root, &reg, task);
+    let tree = task_tree_strict(root, &reg, task)?;
     let state = dod_state(&tree, task);
     if !state.complete {
         return Err(anyhow!(
@@ -5089,6 +5918,7 @@ fn onboard_register(root: &Path, args: &[String]) -> anyhow::Result<Onboarded> {
         model_source: None,
         started_by: None,
         started_at: None,
+        started_key: None,
         status: Status::Queued,
         zones,
         fail_level: None,
@@ -5216,6 +6046,140 @@ mod tests {
         reg.tasks.last().map(|t| t.id.clone()).unwrap_or_default()
     }
 
+    /// Ответ на принудительный вопрос идентификации (one-shot на выдачу).
+    ///
+    /// R24: перед КАЖДОЙ выдачей задачи агент обязан ответить на вопрос
+    /// «какая ты модель». Ответ хранится VERBATIM.
+    fn identify_now(root: &Path) {
+        std::env::set_var("DEVH_NO_MAIL", "1");
+        run(
+            root,
+            "identify",
+            &[me().as_str(), "--reply", "MODEL: test-model-2026-01-01"],
+        )
+        .expect("идентификация");
+    }
+
+    /// R24: без ответа на вопрос идентификации задача НЕ выдаётся (fail-closed).
+    #[test]
+    fn start_without_identification_is_refused() {
+        let tmp = tempdir().expect("tmp");
+        let root = tmp.path();
+        let id = add_task(root, &me(), "P1", "без идентификации");
+        let err = run(root, "start", &[id.as_str()]).expect_err("без ответа — отказ");
+        assert!(err.to_string().contains("идентификац"), "{err}");
+        let reg = load(root);
+        assert_eq!(reg.tasks.first().map(|t| t.status), Some(Status::Queued));
+    }
+
+    /// Ответ на вопрос — one-shot: расходуется ровно одной выдачей.
+    #[test]
+    fn identification_answer_is_consumed_by_one_issuance() {
+        let tmp = tempdir().expect("tmp");
+        let root = tmp.path();
+        let id1 = add_task(root, &me(), "P1", "первая выдача");
+        identify_now(root);
+        run(root, "start", &[id1.as_str()]).expect("start");
+        let id2 = add_task(root, &me(), "P1", "вторая выдача");
+        let err = run(root, "start", &[id2.as_str()]).expect_err("вторая выдача требует ответа");
+        assert!(err.to_string().contains("идентификац"), "{err}");
+    }
+
+    /// Ответ сохраняется VERBATIM и заводит задачу техлиду (дедуп по заголовку).
+    #[test]
+    fn identify_reply_stores_verbatim_and_creates_verification_task() {
+        let tmp = tempdir().expect("tmp");
+        let root = tmp.path();
+        let mut reg = load(root);
+        reg.agents.push(AgentState {
+            name: "step5".into(),
+            role: Some(ROLE_TECH_LEAD.into()),
+            ..Default::default()
+        });
+        save(root, &reg).expect("save");
+        run(
+            root,
+            "identify",
+            &[
+                me().as_str(),
+                "--reply",
+                "MODEL: deepseek-4.1-2026-03-01",
+                "--reply",
+                "DATE: 2026-03-01",
+            ],
+        )
+        .expect("identify");
+        let reg = load(root);
+        let a = reg
+            .agents
+            .iter()
+            .find(|a| a.name == me())
+            .expect("агент в реестре");
+        assert_eq!(a.model.as_deref(), Some("deepseek-4.1-2026-03-01"));
+        assert_eq!(a.model_date.as_deref(), Some("2026-03-01"));
+        let raw = a.model_answer_verbatim.clone().unwrap_or_default();
+        assert!(raw.contains("deepseek-4.1-2026-03-01"), "VERBATIM: {raw}");
+        let vtasks: Vec<&Task> = reg
+            .tasks
+            .iter()
+            .filter(|t| t.title.contains("Верифицировать имя модели"))
+            .collect();
+        assert_eq!(vtasks.len(), 1, "задача верификации создана: {vtasks:?}");
+        assert_eq!(vtasks.first().map(|t| t.agent.as_str()), Some("step5"));
+        assert_eq!(vtasks.first().map(|t| t.c_level), Some(Some(2)));
+        assert_eq!(vtasks.first().map(|t| t.complexity), Some(0), "P0 — высший приоритет");
+        // Повторный ответ — дедуп: вторая задача не создаётся.
+        run(
+            root,
+            "identify",
+            &[me().as_str(), "--reply", "MODEL: deepseek-4.1-2026-03-01"],
+        )
+        .expect("identify 2");
+        let reg = load(root);
+        assert_eq!(
+            reg.tasks
+                .iter()
+                .filter(|t| t.title.contains("Верифицировать имя модели"))
+                .count(),
+            1,
+            "дедуп: задача верификации одна"
+        );
+    }
+
+    /// Эмпирика (ошибки/повторные cargo check) понижает потолок агента.
+    #[test]
+    fn empirical_ceiling_lowers_declared_ceiling() {
+        let tmp = tempdir().expect("tmp");
+        let root = tmp.path();
+        let mut reg = load(root);
+        reg.agents.push(AgentState {
+            name: me(),
+            model: Some("mimo-2".into()),
+            c_ceiling: Some(5),
+            ..Default::default()
+        });
+        save(root, &reg).expect("save");
+        assert_eq!(agent_ceiling_with(root, &reg, &me()), 5, "без эмпирики — база");
+        for i in 0..3u64 {
+            let sample = crate::core::autotune::CheckSample {
+                ts: 1000 + i,
+                agent: me(),
+                model: "mimo-2".into(),
+                model_version: None,
+                task_id: Some(format!("T-{}", i + 1)),
+                c_level: 0,
+                runs: 5,
+                errors: 20,
+                warnings: 10,
+                build_ok: false,
+                duration_secs: Some(300.0),
+            };
+            crate::core::autotune::append_sample(root, &sample).expect("sample");
+        }
+        let emp = agent_ceiling_with(root, &reg, &me());
+        assert!(emp < 5, "эмпирика понизила потолок: {emp}");
+    }
+
     /// Зелёный DoD: критерий подтверждён + машинная проверка пройдена.
     fn complete_dod(root: &Path, id: &str) {
         run(root, "dod", &[id, "--ack", "1"]).expect("dod ack");
@@ -5258,9 +6222,20 @@ mod tests {
     /// получить commit_sha, иначе DoD-гейт её никогда не закроет.
     #[test]
     fn commit_binds_task_to_head_when_nothing_to_commit() {
-        let (_d, root) = git_repo_fixture();
+        let (_d, root, wt) = agent_wt_fixture();
         let id = add_task(&root, &me(), "P2", "уже в истории");
-        run(&root, "start", &[id.as_str()]).expect("start");
+        // Коммит — только в worktree исполнителя (в общее дерево нельзя).
+        let mut reg = load(&root);
+        let wt_s = wt.to_string_lossy().to_string();
+        match reg.agents.iter_mut().find(|a| a.name == me()) {
+            Some(a) => a.worktree = Some(wt_s),
+            None => reg.agents.push(AgentState {
+                name: me(),
+                worktree: Some(wt_s),
+                ..Default::default()
+            }),
+        }
+        save(&root, &reg).expect("save");
         run(&root, "dod", &[id.as_str(), "--zone", "a.txt"]).expect("dod zone");
         run(&root, "dod", &[id.as_str(), "--ack", "критерий приёмки"]).expect("ack");
         run(&root, "verify", &[id.as_str()]).expect("verify");
@@ -5272,6 +6247,80 @@ mod tests {
         run(&root, "done", &[id.as_str(), "--f", "F1"]).expect("done");
     }
 
+    /// Повторная сдача задачи — no-op: без новых событий ledger и без
+    /// повторного слияния (ЧП T-267: 3 done + 3 merged + 3 коммита в main).
+    #[test]
+    fn done_twice_is_noop() {
+        let tmp = tempdir().expect("tmp");
+        let root = tmp.path();
+        let id = add_task(root, &me(), "P1", "сдать дважды");
+        identify_now(root);
+        run(root, "start", &[id.as_str()]).expect("start");
+        complete_dod(root, &id);
+        run(root, "done", &[id.as_str(), "--f", "F0"]).expect("done");
+        run(root, "done", &[id.as_str(), "--f", "F0"]).expect("повторная сдача — no-op");
+        let ledger = std::fs::read_to_string(dir(root).join("ledger.jsonl")).unwrap_or_default();
+        let done_events = ledger
+            .lines()
+            .filter(|l| l.contains("\"event\":\"done\"") && l.contains(id.as_str()))
+            .count();
+        assert_eq!(done_events, 1, "событие done ровно одно: {ledger}");
+    }
+
+    /// Взятую в работу задачу переназначать нельзя — «task taken».
+    #[test]
+    fn reassign_active_task_is_rejected() {
+        let tmp = tempdir().expect("tmp");
+        let root = tmp.path();
+        let id = add_task(root, &me(), "P1", "в работе");
+        identify_now(root);
+        run(root, "start", &[id.as_str()]).expect("start");
+        let err = run(root, "reassign", &[id.as_str(), "--agent", "other-agent"])
+            .expect_err("взятую задачу переназначать нельзя");
+        assert!(err.to_string().contains("task taken"), "{err}");
+    }
+
+    /// Задачу с уже закоммиченной работой заново не берут (ЧП T-267).
+    #[test]
+    fn start_refuses_task_with_committed_work() {
+        let tmp = tempdir().expect("tmp");
+        let root = tmp.path();
+        let id = add_task(root, &me(), "P1", "уже с коммитом");
+        let mut reg = load(root);
+        reg.tasks[0].commit_sha = Some("deadbeef".to_string());
+        save(root, &reg).expect("save");
+        let err = run(root, "start", &[id.as_str()]).expect_err("заново брать нельзя");
+        assert!(err.to_string().contains("закоммиченную работу"), "{err}");
+    }
+
+    /// Возврат в очередь задачи с закоммиченной работой — запрещён:
+    /// агент переделает её и получится дубль коммита.
+    #[test]
+    fn requeue_refuses_task_with_committed_work() {
+        let tmp = tempdir().expect("tmp");
+        let root = tmp.path();
+        let id = add_task(root, &me(), "P1", "с коммитом");
+        let mut reg = load(root);
+        reg.tasks[0].commit_sha = Some("deadbeef".to_string());
+        save(root, &reg).expect("save");
+        let err = run(root, "requeue", &[id.as_str(), "--reason", "ещё раз"])
+            .expect_err("возврат в очередь с коммитом запрещён");
+        assert!(err.to_string().contains("закоммиченную работу"), "{err}");
+    }
+
+    /// Коммит без worktree исполнителя — запрещён (иначе коммит уходит в main).
+    #[test]
+    fn commit_without_agent_worktree_is_rejected() {
+        let (_d, root) = git_repo_fixture();
+        let id = add_task(&root, &me(), "P2", "коммит без дерева");
+        run(&root, "dod", &[id.as_str(), "--zone", "a.txt"]).expect("dod zone");
+        run(&root, "dod", &[id.as_str(), "--ack", "критерий приёмки"]).expect("ack");
+        run(&root, "verify", &[id.as_str()]).expect("verify");
+        let err = run(&root, "commit", &[id.as_str(), "--path", "a.txt"])
+            .expect_err("коммит без worktree запрещён");
+        assert!(err.to_string().contains("worktree"), "{err}");
+    }
+
     #[test]
     fn add_start_done_flow_records_levels() {
         let tmp = tempdir().expect("tmp");
@@ -5281,6 +6330,7 @@ mod tests {
         assert_eq!(reg.tasks.len(), 1);
         assert_eq!(id, "T-001");
         assert_eq!(reg.tasks.first().map(|t| t.complexity), Some(2));
+        identify_now(root);
         run(root, "start", &[id.as_str()]).expect("start");
         complete_dod(root, &id);
         run(root, "done", &[id.as_str(), "--f", "F1"]).expect("done");
@@ -5359,6 +6409,7 @@ mod tests {
         let tmp = tempdir().expect("tmp");
         let root = tmp.path();
         let id = add_task(root, &me(), "P1", "взять");
+        identify_now(root);
         run(root, "start", &[id.as_str()]).expect("first start");
         let err = run(root, "start", &[id.as_str()]).expect_err("second take must fail");
         assert!(err.to_string().contains("уже взята"), "{err}");
@@ -5422,6 +6473,7 @@ mod tests {
             });
         }
         save(root, &reg).expect("save lead");
+        identify_now(root);
         run(root, "start", &[id.as_str()]).expect("start из буфера");
         let reg = load(root);
         let task = reg.tasks.first().expect("задача");
@@ -5675,6 +6727,7 @@ mod tests {
         let tmp = tempdir().expect("tmp");
         let root = tmp.path();
         let id = add_task(root, &me(), "P1", "взять");
+        identify_now(root);
         run(root, "start", &[id.as_str()]).expect("start");
         let reg = load(root);
         let (active, queued) = agent_sections(&reg, &me());
@@ -5691,12 +6744,17 @@ mod tests {
         let tmp = tempdir().expect("tmp");
         let root = tmp.path().to_path_buf();
         let id = add_task(root.as_path(), &me(), "P1", "гонка");
+        // Ответ на вопрос идентификации — one-shot: ровно один поток его получит.
+        identify_now(root.as_path());
         let mut handles = Vec::new();
         for _ in 0..2 {
             let r = root.clone();
             let i = id.clone();
             handles.push(std::thread::spawn(move || {
-                run(r.as_path(), "start", &[i.as_str()]).is_ok()
+                run(r.as_path(), "start", &[i.as_str()]).map(|_| true).unwrap_or_else(|e| {
+                    println!("start отказ: {e}");
+                    false
+                })
             }));
         }
         let wins = handles
@@ -5743,6 +6801,7 @@ mod tests {
         // Закрываем зависимость — задача выдаётся.
         complete_dod(root, &base);
         run(root, "done", &[base.as_str(), "--f", "0"]).expect("done");
+        identify_now(root);
         run(root, "start", &[dep_id.as_str()]).expect("start после закрытия зависимости");
     }
 
@@ -5789,6 +6848,7 @@ mod tests {
         let root = d.path();
         let agent = me();
         let id = add_task(root, &agent, "1", "без worktree");
+        identify_now(root);
         run(root, "start", &[id.as_str()]).expect("start");
         let err = run(root, "selfcheck", &[]).expect_err("selfcheck должен ругаться");
         assert!(err.to_string().contains("selfcheck"), "{err}");
@@ -5884,6 +6944,7 @@ mod tests {
     fn start_writes_ledger_event() {
         let (_d, root) = git_repo_fixture();
         let id = add_task(&root, &me(), "P2", "событие started");
+        identify_now(&root);
         run(&root, "start", &[id.as_str()]).expect("start");
         let text = std::fs::read_to_string(dir(&root).join("ledger.jsonl")).expect("ledger.jsonl");
         let entries = crate::core::ledger::tail(&text, 10);
@@ -5900,6 +6961,7 @@ mod tests {
     fn done_writes_ledger_event() {
         let (_d, root) = git_repo_fixture();
         let id = add_task(&root, &me(), "P2", "событие done");
+        identify_now(&root);
         run(&root, "start", &[id.as_str()]).expect("start");
         complete_dod(&root, &id);
         run(&root, "done", &[id.as_str(), "--f", "F0"]).expect("done");
@@ -6006,6 +7068,7 @@ mod tests {
             model_source: None,
             started_by: None,
             started_at: None,
+            started_key: None,
             status: Status::Done,
             zones: vec![],
             fail_level: Some(0),
@@ -6038,6 +7101,7 @@ mod tests {
             model_source: None,
             started_by: None,
             started_at: None,
+            started_key: None,
             status: Status::Done,
             zones: vec![],
             fail_level: Some(0),
@@ -6076,6 +7140,7 @@ mod tests {
                 model_source: None,
                 started_by: None,
                 started_at: None,
+                started_key: None,
                 status: Status::Done,
                 zones: vec![],
                 fail_level: Some(0),
