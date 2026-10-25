@@ -1064,6 +1064,14 @@ fn start(root: &Path, args: &[String]) -> anyhow::Result<()> {
         find_task_index(&reg, &id).ok_or_else(|| anyhow!("devh orch: задача {id} не найдена"))?;
     let caller = crate::core::identity::canonical(&crate::core::identity::current().name);
     let (lead, _) = lead_of(&reg);
+    // Fail-closed: агент должен быть зарегистрирован в реестре (roster).
+    // Незарегистрированный агент (например, имя из тестовой фикстуры)
+    // не имеет права брать задачи — иначе задача уходит в никуда.
+    if !reg.agents.iter().any(|a| crate::core::identity::canonical(&a.name) == caller) {
+        return Err(anyhow!(
+            "devh orch start: агент «{caller}» не зарегистрирован в реестре —              сначала пройди онбординг (devh orch welcome) или зарегистрируйся              (devh orch onboard --agent {caller} ...). Задача не выдана."
+        ));
+    }
     if lead.as_deref() == Some(caller.as_str()) {
         return Err(anyhow!(
             "devh orch start: ведущий не берёт задачи из очереди — очередь для ведомых. \
@@ -5378,6 +5386,16 @@ mod tests {
         let tmp = tempdir().expect("tmp");
         let root = tmp.path();
         let id = add_task(root, "other-agent", "P1", "чужая");
+        // Регистрируем caller как агента.
+        let mut reg = load(root);
+        if !reg.agents.iter().any(|a| a.name == me()) {
+            reg.agents.push(crate::commands::orch::AgentState {
+                name: me(),
+                role: Some("worker".to_string()),
+                ..Default::default()
+            });
+        }
+        save(root, &reg).expect("save");
         let err = run(root, "start", &[id.as_str()]).expect_err("foreign task must fail");
         assert!(err.to_string().contains("закреплена за"), "{err}");
     }
@@ -5395,6 +5413,14 @@ mod tests {
         let id = add_task(root, lead, "P1", "из буфера");
         let mut reg = load(root);
         reg.lead = Some(lead.to_string());
+        // Регистрируем caller как агента (onboard).
+        if !reg.agents.iter().any(|a| a.name == me()) {
+            reg.agents.push(crate::commands::orch::AgentState {
+                name: me(),
+                role: Some("worker".to_string()),
+                ..Default::default()
+            });
+        }
         save(root, &reg).expect("save lead");
         run(root, "start", &[id.as_str()]).expect("start из буфера");
         let reg = load(root);
