@@ -2418,7 +2418,7 @@ fn identify(root: &Path, args: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `devh orch retune <ID> [--c C --p P --title T --check CMD --zone PATH --dod TEXT]`
+/// `devh orch retune <ID> [--c C --p P --title T --check CMD --zone PATH --dod TEXT --dep ID]`
 /// — починка существующей задачи без revoke/recreate (только ведущий).
 fn retune(root: &Path, args: &[String]) -> anyhow::Result<()> {
     let _lock = crate::shell::lock::OutputLock::try_acquire(root, &path(root), "devh orch")
@@ -2458,6 +2458,7 @@ fn retune(root: &Path, args: &[String]) -> anyhow::Result<()> {
     let checks = list_flag(args, "--check")?;
     let zones = list_flag(args, "--zone")?;
     let dod = list_flag(args, "--dod")?;
+    let deps = list_flag(args, "--dep")?;
     if let Some(raw) = flag(args, "--c") {
         let c = parse_c_level(&raw)?;
         if let Some(t) = reg.tasks.get_mut(idx) {
@@ -2499,9 +2500,23 @@ fn retune(root: &Path, args: &[String]) -> anyhow::Result<()> {
         }
         changed.push(format!("критерии ×{}", vals.len()));
     }
+    if let Some(vals) = deps {
+        // Зависимости задачи: порядок реализации (например, слой -> очередь
+        // слияния -> флашер). Значение ЗАМЕНЯЕТ список зависимостей.
+        for d in &vals {
+            if find_task_index(&reg, d).is_none() {
+                anyhow::bail!("devh orch retune: зависимость {d} не найдена в реестре");
+            }
+            if d == &id {
+                anyhow::bail!("devh orch retune: задача не может зависеть от самой себя");
+            }
+        }
+        reg.plan.deps.insert(id.clone(), vals.clone());
+        changed.push(format!("зависимости ×{}", vals.len()));
+    }
     if changed.is_empty() {
         anyhow::bail!(
-            "devh orch retune: ничего не менял — укажи --c/--p/--title/--check/--zone/--dod"
+            "devh orch retune: ничего не менял — укажи --c/--p/--title/--check/--zone/--dod/--dep"
         );
     }
     if let Some(t) = reg.tasks.get_mut(idx) {
@@ -5107,6 +5122,29 @@ mod tests {
         );
         assert!(t.acked.is_empty(), "подтверждения сброшены");
         assert!(t.evidence.is_empty(), "доказательства сброшены");
+    }
+
+    /// Зависимости задачи задаются починкой (`--dep`): порядок реализации
+    /// не должен требовать revoke/recreate.
+    #[test]
+    fn retune_sets_task_dependencies() {
+        let tmp = tempdir().expect("tmp");
+        let root = tmp.path();
+        let first = add_task(root, &me(), "P1", "первый");
+        let second = add_task(root, &me(), "P1", "второй");
+        let mut reg = load(root);
+        reg.lead = Some(me());
+        save(root, &reg).expect("save");
+        run(root, "retune", &[second.as_str(), "--dep", first.as_str()]).expect("retune");
+        let reg = load(root);
+        assert_eq!(
+            reg.plan.deps.get(&second).cloned(),
+            Some(vec![first.clone()]),
+            "зависимость записана"
+        );
+        // Зависимость на несуществующую задачу — отказ (fail-closed).
+        let err = run(root, "retune", &[second.as_str(), "--dep", "T-999"]).expect_err("нет такой");
+        assert!(err.to_string().contains("не найдена"), "{err}");
     }
 
     /// Смена модели/рантайма: без подтверждения — подозрение и штраф очереди;
