@@ -148,7 +148,11 @@ impl DecompositionGuard {
                 }
             }
         }
-        decompose(&self.input.parent, &self.input.constraints, &self.input.proposal)?;
+        decompose(
+            &self.input.parent,
+            &self.input.constraints,
+            &self.input.proposal,
+        )?;
         Ok(())
     }
 }
@@ -297,7 +301,9 @@ mod tests {
         let mut second = input.proposal[0].clone();
         second.id = "T-102".to_string();
         input.proposal.push(second.clone());
-        let v = DecompositionGuard::new(input.clone()).validate().unwrap_err();
+        let v = DecompositionGuard::new(input.clone())
+            .validate()
+            .unwrap_err();
         assert_eq!(v.field, "title");
 
         second.title = "часть 2".to_string();

@@ -13,9 +13,17 @@ use super::{Guard, GuardContext, GuardVerdict};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModListIssue {
     /// Строка похожа на объявление модуля, но синтаксически битая.
-    Malformed { line: usize, text: String, why: String },
+    Malformed {
+        line: usize,
+        text: String,
+        why: String,
+    },
     /// Один модуль объявлен дважды.
-    Duplicate { name: String, first: usize, second: usize },
+    Duplicate {
+        name: String,
+        first: usize,
+        second: usize,
+    },
     /// Объявлен модуль, для которого нет файла.
     MissingFile { name: String, line: usize },
 }
@@ -30,7 +38,10 @@ impl fmt::Display for ModListIssue {
                 name,
                 first,
                 second,
-            } => write!(f, "модуль {name} объявлен дважды (строки {first} и {second})"),
+            } => write!(
+                f,
+                "модуль {name} объявлен дважды (строки {first} и {second})"
+            ),
             ModListIssue::MissingFile { name, line } => {
                 write!(f, "модуль {name} (строка {line}) без файла {name}.rs")
             }
@@ -159,10 +170,7 @@ impl Guard for ModuleListGuard {
                     .collect::<Vec<_>>()
                     .join("; "),
             ),
-            Err(e) => GuardVerdict::Problem(format!(
-                "не прочитать {}: {e}",
-                self.mod_rs.display()
-            )),
+            Err(e) => GuardVerdict::Problem(format!("не прочитать {}: {e}", self.mod_rs.display())),
         }
     }
 }
@@ -256,8 +264,7 @@ mod tests {
     fn nested_module_dir_counts_as_present() {
         let d = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
         fs::create_dir_all(d.path().join("nested")).unwrap_or_else(|_| unreachable!());
-        fs::write(d.path().join("nested/mod.rs"), "//! stub\n")
-            .unwrap_or_else(|_| unreachable!());
+        fs::write(d.path().join("nested/mod.rs"), "//! stub\n").unwrap_or_else(|_| unreachable!());
         assert!(validate(d.path(), "pub mod nested;\n").is_empty());
     }
 

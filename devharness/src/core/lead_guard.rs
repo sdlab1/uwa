@@ -50,10 +50,7 @@ pub enum LeadReason {
 }
 
 /// Может ли caller выдать роль lead другому агенту?
-pub fn can_elevate_to_lead(
-    current_caller_is_lead: bool,
-    ctx: &LeadContext,
-) -> LeadDecision {
+pub fn can_elevate_to_lead(current_caller_is_lead: bool, ctx: &LeadContext) -> LeadDecision {
     if !current_caller_is_lead {
         return LeadDecision::Deny(LeadReason::NotCurrentLead);
     }
@@ -144,7 +141,10 @@ mod tests {
             provided_secret: Some("x".to_string()),
             expected_secret: Some("x".to_string()),
         };
-        assert_eq!(can_transfer_lead(true, &ctx), LeadDecision::Deny(LeadReason::NoLead));
+        assert_eq!(
+            can_transfer_lead(true, &ctx),
+            LeadDecision::Deny(LeadReason::NoLead)
+        );
     }
 
     #[test]
@@ -155,7 +155,10 @@ mod tests {
             provided_secret: Some("x".to_string()),
             expected_secret: Some("x".to_string()),
         };
-        assert_eq!(can_change_password(true, &ctx), LeadDecision::Deny(LeadReason::NoPasswordSet));
+        assert_eq!(
+            can_change_password(true, &ctx),
+            LeadDecision::Deny(LeadReason::NoPasswordSet)
+        );
     }
 
     #[test]
@@ -166,7 +169,10 @@ mod tests {
             provided_secret: None,
             expected_secret: Some("x".to_string()),
         };
-        assert_eq!(can_elevate_to_lead(true, &ctx), LeadDecision::Deny(LeadReason::NoSecretProvided));
+        assert_eq!(
+            can_elevate_to_lead(true, &ctx),
+            LeadDecision::Deny(LeadReason::NoSecretProvided)
+        );
     }
 
     #[test]
@@ -177,12 +183,18 @@ mod tests {
             provided_secret: Some("bad".to_string()),
             expected_secret: Some("good".to_string()),
         };
-        assert_eq!(can_transfer_lead(true, &ctx), LeadDecision::Deny(LeadReason::SecretMismatch));
+        assert_eq!(
+            can_transfer_lead(true, &ctx),
+            LeadDecision::Deny(LeadReason::SecretMismatch)
+        );
     }
 
     #[test]
     fn require_lead_works() {
         assert_eq!(require_lead(true), LeadDecision::Allow);
-        assert_eq!(require_lead(false), LeadDecision::Deny(LeadReason::RequiresLead));
+        assert_eq!(
+            require_lead(false),
+            LeadDecision::Deny(LeadReason::RequiresLead)
+        );
     }
 }

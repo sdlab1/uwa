@@ -34,7 +34,12 @@ pub struct StubFinding {
 
 impl StubFinding {
     pub fn new(file: String, line: usize, rule: &'static str, evidence: String) -> Self {
-        Self { file, line, rule, evidence }
+        Self {
+            file,
+            line,
+            rule,
+            evidence,
+        }
     }
 }
 
@@ -63,7 +68,7 @@ pub fn scan_diff(diff: &str) -> Vec<StubFinding> {
         if line.starts_with("@@ ") {
             if let Some(idx) = line.find("+") {
                 if let Some(space) = line[idx..].find(' ') {
-                    let new_part = &line[idx+1..idx+space];
+                    let new_part = &line[idx + 1..idx + space];
                     if let Some(comma) = new_part.find(',') {
                         line_no = new_part[..comma].parse().unwrap_or(1);
                     } else {
@@ -84,7 +89,11 @@ pub fn scan_diff(diff: &str) -> Vec<StubFinding> {
             line_no += 1;
         }
 
-        let code = if line.starts_with('+') { &line[1..] } else { line };
+        let code = if line.starts_with('+') {
+            &line[1..]
+        } else {
+            line
+        };
         let trimmed = code.trim();
 
         if trimmed.is_empty() || trimmed.starts_with("//") || trimmed.starts_with("/*") {
@@ -96,15 +105,23 @@ pub fn scan_diff(diff: &str) -> Vec<StubFinding> {
         // Но не срабатываем на `false` в составе выражения (if/else/return)
         // И не срабатываем на Ok(()) в функциях с ? оператором (нормальная обработка ошибок)
         let has_question_mark = prev_line.contains('?') || trimmed.contains('?');
-        let is_trivial_return = trimmed == "()" 
+        let is_trivial_return = trimmed == "()"
             || trimmed.starts_with("Default::default()")
-            || (trimmed == "true" && !prev_line.contains("return") && !prev_line.contains("if ") && !prev_line.contains("else"))
-            || (trimmed == "false" && !prev_line.contains("return") && !prev_line.contains("if ") && !prev_line.contains("else"));
-        
-        let is_ok_literal = trimmed.contains("Ok(())") || trimmed.contains("Ok(true)") || trimmed.contains("Ok(false)");
-        
+            || (trimmed == "true"
+                && !prev_line.contains("return")
+                && !prev_line.contains("if ")
+                && !prev_line.contains("else"))
+            || (trimmed == "false"
+                && !prev_line.contains("return")
+                && !prev_line.contains("if ")
+                && !prev_line.contains("else"));
+
+        let is_ok_literal = trimmed.contains("Ok(())")
+            || trimmed.contains("Ok(true)")
+            || trimmed.contains("Ok(false)");
+
         let is_r1 = is_trivial_return || (!has_question_mark && is_ok_literal);
-        
+
         if is_r1 {
             findings.push(StubFinding::new(
                 current_file.clone().unwrap_or_default(),
@@ -117,11 +134,16 @@ pub fn scan_diff(diff: &str) -> Vec<StubFinding> {
         }
 
         // R2: path.exists() / path.is_file() / path.is_dir()
-        if trimmed.contains(".exists()") || trimmed.contains(".is_file()") || trimmed.contains(".is_dir()") {
+        if trimmed.contains(".exists()")
+            || trimmed.contains(".is_file()")
+            || trimmed.contains(".is_dir()")
+        {
             // Исключаем случаи с ветвлением: if path.exists() { ... }
             // Проверяем текущую и предыдущую строку на наличие if/match
-            let has_branch = trimmed.contains("if ") || trimmed.contains("match ") 
-                || prev_line.contains("if ") || prev_line.contains("match ");
+            let has_branch = trimmed.contains("if ")
+                || trimmed.contains("match ")
+                || prev_line.contains("if ")
+                || prev_line.contains("match ");
             if !has_branch {
                 findings.push(StubFinding::new(
                     current_file.clone().unwrap_or_default(),
@@ -135,10 +157,20 @@ pub fn scan_diff(diff: &str) -> Vec<StubFinding> {
         }
 
         // R3: !s.is_empty() / s.len() == 0 / s.is_empty() / сравнение длин .len() > .len() / .len() < .len()
-        if trimmed.contains(".is_empty()") || trimmed.contains(".len() == 0") || trimmed.contains(".len()==0")
-            || trimmed.contains(".len() >") || trimmed.contains(".len() <") || trimmed.contains(".len()>") || trimmed.contains(".len()<") {
-            let has_branch = trimmed.contains("if ") || trimmed.contains("match ") || trimmed.contains("while ")
-                || prev_line.contains("if ") || prev_line.contains("match ") || prev_line.contains("while ");
+        if trimmed.contains(".is_empty()")
+            || trimmed.contains(".len() == 0")
+            || trimmed.contains(".len()==0")
+            || trimmed.contains(".len() >")
+            || trimmed.contains(".len() <")
+            || trimmed.contains(".len()>")
+            || trimmed.contains(".len()<")
+        {
+            let has_branch = trimmed.contains("if ")
+                || trimmed.contains("match ")
+                || trimmed.contains("while ")
+                || prev_line.contains("if ")
+                || prev_line.contains("match ")
+                || prev_line.contains("while ");
             if !has_branch {
                 findings.push(StubFinding::new(
                     current_file.clone().unwrap_or_default(),
@@ -154,7 +186,8 @@ pub fn scan_diff(diff: &str) -> Vec<StubFinding> {
         // R4: Идентичность — возвращается аргумент без изменений: `x` / `|x| x` / `move |x| x` / bare identifier
         if trimmed == "x" || trimmed == "|x| x" || trimmed == "move |x| x" || trimmed == "let f = |x| x;" || trimmed.ends_with("|x| x;")
             // bare identifier (вероятно переменная) - heuristic: single word, not keyword
-            || (trimmed.chars().all(|c| c.is_alphanumeric() || c == '_') && !is_keyword(trimmed) && trimmed.len() > 1) {
+            || (trimmed.chars().all(|c| c.is_alphanumeric() || c == '_') && !is_keyword(trimmed) && trimmed.len() > 1)
+        {
             findings.push(StubFinding::new(
                 current_file.clone().unwrap_or_default(),
                 line_no,
@@ -167,9 +200,11 @@ pub fn scan_diff(diff: &str) -> Vec<StubFinding> {
 
         // R5: format! / to_string() без логики — просто эхо входа.
         // Эвристика: format!("{}", var) или var.to_string() где var - это просто переменная
-        if (trimmed.starts_with("format!") || trimmed.ends_with(".to_string()")) && !trimmed.contains("//") {
+        if (trimmed.starts_with("format!") || trimmed.ends_with(".to_string()"))
+            && !trimmed.contains("//")
+        {
             // Эхо: format!("{}", var) или var.to_string() без доп. логики
-            let is_echo = trimmed.contains("{}") && trimmed.matches(',').count() <= 1 
+            let is_echo = trimmed.contains("{}") && trimmed.matches(',').count() <= 1
                 || trimmed.ends_with(".to_string()") && !trimmed.contains("+");
             if is_echo {
                 findings.push(StubFinding::new(
@@ -195,11 +230,44 @@ pub fn scan_diff(diff: &str) -> Vec<StubFinding> {
 }
 
 fn is_keyword(s: &str) -> bool {
-    matches!(s, 
-        "true" | "false" | "let" | "mut" | "const" | "static" | "fn" | "struct" | "enum" 
-        | "impl" | "trait" | "type" | "mod" | "use" | "pub" | "crate" | "super" | "self"
-        | "if" | "else" | "match" | "loop" | "while" | "for" | "break" | "continue" | "return"
-        | "async" | "await" | "move" | "ref" | "box" | "dyn" | "unsafe" | "extern" | "macro"
+    matches!(
+        s,
+        "true"
+            | "false"
+            | "let"
+            | "mut"
+            | "const"
+            | "static"
+            | "fn"
+            | "struct"
+            | "enum"
+            | "impl"
+            | "trait"
+            | "type"
+            | "mod"
+            | "use"
+            | "pub"
+            | "crate"
+            | "super"
+            | "self"
+            | "if"
+            | "else"
+            | "match"
+            | "loop"
+            | "while"
+            | "for"
+            | "break"
+            | "continue"
+            | "return"
+            | "async"
+            | "await"
+            | "move"
+            | "ref"
+            | "box"
+            | "dyn"
+            | "unsafe"
+            | "extern"
+            | "macro"
     )
 }
 
@@ -675,7 +743,12 @@ mod tests {
 +    reg.tasks.iter().filter(|t| t.status == Status::Done).count()
 +}"#;
         let f = scan(diff);
-        assert_eq!(f.len(), 0, "registry_invariants.rs: false positives: {:?}", f);
+        assert_eq!(
+            f.len(),
+            0,
+            "registry_invariants.rs: false positives: {:?}",
+            f
+        );
     }
 
     #[test]

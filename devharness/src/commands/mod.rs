@@ -601,37 +601,157 @@ pub fn die(code: ExitCode) -> ! {
 /// Used by unit tests to verify the contract.
 pub fn command_exit_code_table() -> Vec<(&'static str, ExitCode, &'static str)> {
     vec![
-        ("devh (success)", ExitCode::Success, "command succeeds without error"),
-        ("devh msg send (missing recipient)", ExitCode::ActionError, "actionable: no recipients specified"),
+        (
+            "devh (success)",
+            ExitCode::Success,
+            "command succeeds without error",
+        ),
+        (
+            "devh msg send (missing recipient)",
+            ExitCode::ActionError,
+            "actionable: no recipients specified",
+        ),
         ("devh msg read", ExitCode::Success, "prints unread messages"),
-        ("devh msg alias <bad> (invalid alias name)", ExitCode::ActionError, "actionable: malformed alias"),
-        ("devh init (already initialized)", ExitCode::ActionError, "actionable: config already exists"),
-        ("devh init (no .harness dir writable)", ExitCode::EnvError, "environment: cannot create .harness/config"),
-        ("devh orch add (missing --agent)", ExitCode::ActionError, "actionable: required flag missing"),
-        ("devh orch start (no such task)", ExitCode::ActionError, "actionable: task not found"),
-        ("devh orch (unknown subcommand)", ExitCode::ActionError, "actionable: unknown subcommand"),
-        ("devh next (no config)", ExitCode::EnvError, "environment: .harness/config missing"),
-        ("devh test (suite not found)", ExitCode::EnvError, "environment: test suite file missing"),
-        ("devh test (CPU load high)", ExitCode::EnvError, "environment: load exceeds threshold"),
-        ("devh test (tests fail)", ExitCode::ActionError, "actionable: test failures to investigate"),
-        ("devh test --bg (already running)", ExitCode::EnvError, "environment: background test already running"),
-        ("devh mutate start (not lead)", ExitCode::EnvError, "environment: permission gate — only lead may start mutation"),
-        ("devh mutate start (CPU load high)", ExitCode::EnvError, "environment: load exceeds threshold"),
-        ("devh mutate start (audit in progress)", ExitCode::EnvError, "environment: mutation audit already running"),
-        ("devh mutate start (missing args)", ExitCode::ActionError, "actionable: no mutation tool args provided"),
-        ("devh run (item not active)", ExitCode::ActionError, "actionable: item not in active state"),
-        ("devh run (worktree not created)", ExitCode::ActionError, "actionable: run first creates worktree"),
-        ("devh commit (no summary)", ExitCode::ActionError, "actionable: summary file missing"),
-        ("devh commit (lock held)", ExitCode::ActionError, "actionable: concurrent operation holds lock"),
-        ("devh merge (not lead)", ExitCode::ActionError, "actionable: only lead may merge"),
-        ("devh merge (worktree dirty)", ExitCode::ActionError, "actionable: uncommitted changes in worktree"),
-        ("devh bg auto (missing --from)", ExitCode::ActionError, "actionable: directory argument required"),
-        ("devh gitfacade (path traversal)", ExitCode::ActionError, "actionable: --path contains '..'"),
-        ("devh gitfacade merge (not lead)", ExitCode::ActionError, "actionable: merge requires lead role"),
-        ("devh gitfacade push (remote not set)", ExitCode::ActionError, "actionable: REMOTE not configured"),
-        ("devh rate start (CPU high)", ExitCode::EnvError, "environment: system load above threshold"),
-        ("devh doctor (no issues)", ExitCode::Success, "all checks pass"),
-        ("devh doctor (issues found)", ExitCode::ActionError, "actionable: doctor found problems to fix"),
+        (
+            "devh msg alias <bad> (invalid alias name)",
+            ExitCode::ActionError,
+            "actionable: malformed alias",
+        ),
+        (
+            "devh init (already initialized)",
+            ExitCode::ActionError,
+            "actionable: config already exists",
+        ),
+        (
+            "devh init (no .harness dir writable)",
+            ExitCode::EnvError,
+            "environment: cannot create .harness/config",
+        ),
+        (
+            "devh orch add (missing --agent)",
+            ExitCode::ActionError,
+            "actionable: required flag missing",
+        ),
+        (
+            "devh orch start (no such task)",
+            ExitCode::ActionError,
+            "actionable: task not found",
+        ),
+        (
+            "devh orch (unknown subcommand)",
+            ExitCode::ActionError,
+            "actionable: unknown subcommand",
+        ),
+        (
+            "devh next (no config)",
+            ExitCode::EnvError,
+            "environment: .harness/config missing",
+        ),
+        (
+            "devh test (suite not found)",
+            ExitCode::EnvError,
+            "environment: test suite file missing",
+        ),
+        (
+            "devh test (CPU load high)",
+            ExitCode::EnvError,
+            "environment: load exceeds threshold",
+        ),
+        (
+            "devh test (tests fail)",
+            ExitCode::ActionError,
+            "actionable: test failures to investigate",
+        ),
+        (
+            "devh test --bg (already running)",
+            ExitCode::EnvError,
+            "environment: background test already running",
+        ),
+        (
+            "devh mutate start (not lead)",
+            ExitCode::EnvError,
+            "environment: permission gate — only lead may start mutation",
+        ),
+        (
+            "devh mutate start (CPU load high)",
+            ExitCode::EnvError,
+            "environment: load exceeds threshold",
+        ),
+        (
+            "devh mutate start (audit in progress)",
+            ExitCode::EnvError,
+            "environment: mutation audit already running",
+        ),
+        (
+            "devh mutate start (missing args)",
+            ExitCode::ActionError,
+            "actionable: no mutation tool args provided",
+        ),
+        (
+            "devh run (item not active)",
+            ExitCode::ActionError,
+            "actionable: item not in active state",
+        ),
+        (
+            "devh run (worktree not created)",
+            ExitCode::ActionError,
+            "actionable: run first creates worktree",
+        ),
+        (
+            "devh commit (no summary)",
+            ExitCode::ActionError,
+            "actionable: summary file missing",
+        ),
+        (
+            "devh commit (lock held)",
+            ExitCode::ActionError,
+            "actionable: concurrent operation holds lock",
+        ),
+        (
+            "devh merge (not lead)",
+            ExitCode::ActionError,
+            "actionable: only lead may merge",
+        ),
+        (
+            "devh merge (worktree dirty)",
+            ExitCode::ActionError,
+            "actionable: uncommitted changes in worktree",
+        ),
+        (
+            "devh bg auto (missing --from)",
+            ExitCode::ActionError,
+            "actionable: directory argument required",
+        ),
+        (
+            "devh gitfacade (path traversal)",
+            ExitCode::ActionError,
+            "actionable: --path contains '..'",
+        ),
+        (
+            "devh gitfacade merge (not lead)",
+            ExitCode::ActionError,
+            "actionable: merge requires lead role",
+        ),
+        (
+            "devh gitfacade push (remote not set)",
+            ExitCode::ActionError,
+            "actionable: REMOTE not configured",
+        ),
+        (
+            "devh rate start (CPU high)",
+            ExitCode::EnvError,
+            "environment: system load above threshold",
+        ),
+        (
+            "devh doctor (no issues)",
+            ExitCode::Success,
+            "all checks pass",
+        ),
+        (
+            "devh doctor (issues found)",
+            ExitCode::ActionError,
+            "actionable: doctor found problems to fix",
+        ),
     ]
 }
 
@@ -641,15 +761,47 @@ pub fn command_exit_code_table() -> Vec<(&'static str, ExitCode, &'static str)> 
 /// actionable error (user can fix by providing the argument), code 1.
 pub fn msg_exit_code_table() -> Vec<(&'static str, ExitCode, &'static str)> {
     vec![
-        ("devh msg send (success)", ExitCode::Success, "message delivered"),
-        ("devh msg send (no recipients)", ExitCode::ActionError, "no recipients — fix by specifying --to"),
+        (
+            "devh msg send (success)",
+            ExitCode::Success,
+            "message delivered",
+        ),
+        (
+            "devh msg send (no recipients)",
+            ExitCode::ActionError,
+            "no recipients — fix by specifying --to",
+        ),
         ("devh msg read", ExitCode::Success, "read consumed"),
-        ("devh msg thread (missing id)", ExitCode::ActionError, "thread ID required — was 2, now 1"),
-        ("devh msg alias (missing alias name)", ExitCode::ActionError, "alias name required — was 2, now 1"),
-        ("devh msg claim (missing name)", ExitCode::ActionError, "name required — was 2, now 1"),
-        ("devh msg close (missing thread id)", ExitCode::ActionError, "thread ID required — was 2, now 1"),
-        ("devh msg find (missing needle)", ExitCode::ActionError, "search term required — was 2, now 1"),
-        ("devh msg (unknown subcommand)", ExitCode::ActionError, "no subcommand — was 2, now 1"),
+        (
+            "devh msg thread (missing id)",
+            ExitCode::ActionError,
+            "thread ID required — was 2, now 1",
+        ),
+        (
+            "devh msg alias (missing alias name)",
+            ExitCode::ActionError,
+            "alias name required — was 2, now 1",
+        ),
+        (
+            "devh msg claim (missing name)",
+            ExitCode::ActionError,
+            "name required — was 2, now 1",
+        ),
+        (
+            "devh msg close (missing thread id)",
+            ExitCode::ActionError,
+            "thread ID required — was 2, now 1",
+        ),
+        (
+            "devh msg find (missing needle)",
+            ExitCode::ActionError,
+            "search term required — was 2, now 1",
+        ),
+        (
+            "devh msg (unknown subcommand)",
+            ExitCode::ActionError,
+            "no subcommand — was 2, now 1",
+        ),
         ("devh msg threads", ExitCode::Success, "list printed"),
         ("devh msg whoami", ExitCode::Success, "identity shown"),
         ("devh msg acks", ExitCode::Success, "acks listed"),
@@ -823,9 +975,15 @@ mod tests {
     fn msg_exit_code_table_uses_1_for_missing_args() {
         let table = msg_exit_code_table();
         for (desc, code, _) in &table {
-            if desc.contains("missing") || desc.contains("unknown subcommand") || desc.contains("no recipients") {
-                assert_eq!(*code, ExitCode::ActionError,
-                    "{desc}: missing-argument cases must be ActionError (1), not EnvError (2)");
+            if desc.contains("missing")
+                || desc.contains("unknown subcommand")
+                || desc.contains("no recipients")
+            {
+                assert_eq!(
+                    *code,
+                    ExitCode::ActionError,
+                    "{desc}: missing-argument cases must be ActionError (1), not EnvError (2)"
+                );
             }
         }
     }

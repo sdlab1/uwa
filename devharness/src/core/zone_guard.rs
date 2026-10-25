@@ -172,9 +172,18 @@ mod tests {
 
     #[test]
     fn glob_star_and_doublestar() {
-        assert!(glob_match("devharness/src/core/*.rs", "devharness/src/core/a.rs"));
-        assert!(!glob_match("devharness/src/core/*.rs", "devharness/src/core/sub/a.rs"));
-        assert!(glob_match("devharness/**/*.rs", "devharness/src/core/sub/a.rs"));
+        assert!(glob_match(
+            "devharness/src/core/*.rs",
+            "devharness/src/core/a.rs"
+        ));
+        assert!(!glob_match(
+            "devharness/src/core/*.rs",
+            "devharness/src/core/sub/a.rs"
+        ));
+        assert!(glob_match(
+            "devharness/**/*.rs",
+            "devharness/src/core/sub/a.rs"
+        ));
         assert!(glob_match("devharness/**", "devharness/a/b/c.rs"));
     }
 

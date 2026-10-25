@@ -21,8 +21,10 @@ pub fn next_task(reg: &Registry, caller: &str) -> Option<String> {
             continue;
         }
         let owner = t.agent.clone();
-        let own = crate::core::identity::canonical(&owner) == crate::core::identity::canonical(caller);
-        let from_buffer = lead.as_deref() == Some(crate::core::identity::canonical(&owner).as_str()) && !own;
+        let own =
+            crate::core::identity::canonical(&owner) == crate::core::identity::canonical(caller);
+        let from_buffer =
+            lead.as_deref() == Some(crate::core::identity::canonical(&owner).as_str()) && !own;
         if !own && !from_buffer {
             continue;
         }
@@ -35,8 +37,20 @@ pub fn next_task(reg: &Registry, caller: &str) -> Option<String> {
     candidates.sort_by(|a, b| {
         let pa = reg.plan.prio.get(&a.id).copied().unwrap_or(0);
         let pb = reg.plan.prio.get(&b.id).copied().unwrap_or(0);
-        let oa = if crate::core::identity::canonical(&a.agent) == crate::core::identity::canonical(caller) { 0 } else { 1 };
-        let ob = if crate::core::identity::canonical(&b.agent) == crate::core::identity::canonical(caller) { 0 } else { 1 };
+        let oa = if crate::core::identity::canonical(&a.agent)
+            == crate::core::identity::canonical(caller)
+        {
+            0
+        } else {
+            1
+        };
+        let ob = if crate::core::identity::canonical(&b.agent)
+            == crate::core::identity::canonical(caller)
+        {
+            0
+        } else {
+            1
+        };
         oa.cmp(&ob)
             .then(pa.cmp(&pb))
             .then(a.complexity.cmp(&b.complexity))
@@ -76,7 +90,8 @@ fn deps_satisfied(reg: &Registry, t: &crate::commands::orch::Task) -> bool {
 pub fn validate_report(text: &str) -> bool {
     let t = text.to_lowercase();
     let has_points = t.contains("1)") && t.contains("2)") && t.contains("3)") && t.contains("4)");
-    let has_result = t.contains("commit") || t.contains("тест") || t.contains("cargo test") || has_hex_sha(text);
+    let has_result =
+        t.contains("commit") || t.contains("тест") || t.contains("cargo test") || has_hex_sha(text);
     has_points && has_result
 }
 
@@ -121,10 +136,17 @@ pub fn check_report(text: &str, next_cmd: Option<&str>) -> ReportVerdict {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::orch::{Plan, Registry, Task, Status};
+    use crate::commands::orch::{Plan, Registry, Status, Task};
     use std::collections::BTreeMap;
 
-    fn mk_task(id: &str, agent: &str, prio: u8, complexity: u8, created: u64, status: Status) -> Task {
+    fn mk_task(
+        id: &str,
+        agent: &str,
+        prio: u8,
+        complexity: u8,
+        created: u64,
+        status: Status,
+    ) -> Task {
         Task {
             id: id.to_string(),
             agent: agent.to_string(),
@@ -159,8 +181,10 @@ mod tests {
         reg.lead = Some("lead".to_string());
         reg.plan.prio.insert("T-1".into(), 5);
         reg.plan.prio.insert("T-2".into(), 1);
-        reg.tasks.push(mk_task("T-1", "worker", 5, 1, 1, Status::Queued));
-        reg.tasks.push(mk_task("T-2", "worker", 1, 1, 2, Status::Queued));
+        reg.tasks
+            .push(mk_task("T-1", "worker", 5, 1, 1, Status::Queued));
+        reg.tasks
+            .push(mk_task("T-2", "worker", 1, 1, 2, Status::Queued));
         let id = next_task(&reg, "worker").unwrap();
         assert_eq!(id, "T-2");
     }
@@ -170,8 +194,10 @@ mod tests {
         let mut reg = Registry::default();
         reg.lead = Some("lead".to_string());
         reg.plan.deps.insert("T-2".into(), vec!["T-1".into()]);
-        reg.tasks.push(mk_task("T-1", "worker", 1, 1, 1, Status::Queued));
-        reg.tasks.push(mk_task("T-2", "worker", 1, 1, 2, Status::Queued));
+        reg.tasks
+            .push(mk_task("T-1", "worker", 1, 1, 1, Status::Queued));
+        reg.tasks
+            .push(mk_task("T-2", "worker", 1, 1, 2, Status::Queued));
         // T-2 blocked by T-1 not done
         let id = next_task(&reg, "worker").unwrap();
         assert_eq!(id, "T-1");
@@ -202,7 +228,10 @@ mod tests {
 
     #[test]
     fn check_report_returns_next_command_on_reject() {
-        let v = check_report("не жду. работаю. не останавливаюсь.", Some("devh orch start T-9"));
+        let v = check_report(
+            "не жду. работаю. не останавливаюсь.",
+            Some("devh orch start T-9"),
+        );
         assert!(!v.ok);
         assert_eq!(v.next_command.as_deref(), Some("devh orch start T-9"));
     }
@@ -211,7 +240,11 @@ mod tests {
     fn next_command_formats() {
         let mut reg = Registry::default();
         reg.lead = Some("lead".to_string());
-        reg.tasks.push(mk_task("T-7", "worker", 1, 1, 1, Status::Queued));
-        assert_eq!(next_command(&reg, "worker").as_deref(), Some("devh orch start T-7"));
+        reg.tasks
+            .push(mk_task("T-7", "worker", 1, 1, 1, Status::Queued));
+        assert_eq!(
+            next_command(&reg, "worker").as_deref(),
+            Some("devh orch start T-7")
+        );
     }
 }

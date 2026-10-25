@@ -75,12 +75,7 @@ fn presence_activity(agent: &str) -> Option<u64> {
 }
 
 /// Собрать картину активности по одному агенту.
-pub fn activity_of(
-    reg: &Registry,
-    agent: &AgentState,
-    now: u64,
-    idle_limit_secs: u64,
-) -> Activity {
+pub fn activity_of(reg: &Registry, agent: &AgentState, now: u64, idle_limit_secs: u64) -> Activity {
     let canon = crate::core::identity::canonical(&agent.name);
     let mut last: Option<u64> = None;
     let mut source: &'static str = "нет сигналов";
@@ -122,7 +117,10 @@ pub fn activity_of(
 pub fn run(root: &Path, args: &[String]) -> anyhow::Result<()> {
     let reg = crate::commands::orch::load(root);
     let me = crate::core::identity::canonical(&crate::core::identity::current().name);
-    let lead = reg.lead.as_ref().map(|l| crate::core::identity::canonical(l));
+    let lead = reg
+        .lead
+        .as_ref()
+        .map(|l| crate::core::identity::canonical(l));
     if lead.as_deref() != Some(me.as_str()) {
         return Err(anyhow::anyhow!(
             "devh orch watchdog: сторож запускает только ведущий (текущий: {})",
@@ -150,7 +148,11 @@ pub fn run(root: &Path, args: &[String]) -> anyhow::Result<()> {
         }
         let act = activity_of(&reg, a, now, limit);
         let idle_min = act.idle_secs / 60;
-        let verdict = if act.stale { "ПРОСТОЙ" } else { "жив" };
+        let verdict = if act.stale {
+            "ПРОСТОЙ"
+        } else {
+            "жив"
+        };
         println!(
             "{:<10} простой {:>4} мин  {:<8}  ({})",
             act.agent, idle_min, verdict, act.source

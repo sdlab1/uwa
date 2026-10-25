@@ -8,8 +8,8 @@ use std::process::Command;
 
 use crate::commands::wtman::{transfer_commits, MergeAction};
 use crate::core::identity::canonical;
-use crate::shell::msg::{safe_name, SEP};
 use crate::shell::git::short_head;
+use crate::shell::msg::{safe_name, SEP};
 
 /// Информация о перенесённом коммите.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,14 +65,8 @@ impl MergeReportDetail {
             return out;
         }
 
-        out.push_str(&format!(
-            "Перенесено коммитов: {}\n",
-            self.total_commits
-        ));
-        out.push_str(&format!(
-            "Изменено файлов: {}\n\n",
-            self.total_files
-        ));
+        out.push_str(&format!("Перенесено коммитов: {}\n", self.total_commits));
+        out.push_str(&format!("Изменено файлов: {}\n\n", self.total_files));
 
         out.push_str("Детали по коммитам:\n");
         for commit in &self.commits {
@@ -82,11 +76,7 @@ impl MergeReportDetail {
                 commit.subject
             ));
             for file in &commit.files {
-                out.push_str(&format!(
-                    "    {}  {}\n",
-                    file.change_type,
-                    file.path
-                ));
+                out.push_str(&format!("    {}  {}\n", file.change_type, file.path));
             }
         }
 
@@ -170,10 +160,18 @@ pub fn build_merge_report(
     }
 
     let (action, message, head_sha) = if commits_sha.is_empty() {
-        (MergeAction::Nothing, format!("на {branch} нет коммитов сверх {main_branch} — вливать нечего"), None)
+        (
+            MergeAction::Nothing,
+            format!("на {branch} нет коммитов сверх {main_branch} — вливать нечего"),
+            None,
+        )
     } else {
         let sha = short_head(main_root);
-        (MergeAction::Merged, format!("{branch} будет влит в {main_branch}"), Some(sha))
+        (
+            MergeAction::Merged,
+            format!("{branch} будет влит в {main_branch}"),
+            Some(sha),
+        )
     };
 
     Ok(MergeReportDetail {
@@ -212,7 +210,10 @@ pub fn send_merge_report(
 
     let from = "devh-merge";
     let to = vec![canon.clone()];
-    let id = format!("merge-report-{}", uuid::Uuid::new_v4().simple().to_string()[..8].to_string());
+    let id = format!(
+        "merge-report-{}",
+        uuid::Uuid::new_v4().simple().to_string()[..8].to_string()
+    );
     let stamp = chrono::Local::now().format("%H:%M").to_string();
 
     let block = format!(
@@ -220,7 +221,9 @@ pub fn send_merge_report(
         to.join(", ")
     );
 
-    let inbox_path = home.join("inbox").join(format!("{}.log", safe_name(&canon)));
+    let inbox_path = home
+        .join("inbox")
+        .join(format!("{}.log", safe_name(&canon)));
     if let Some(parent) = inbox_path.parent() {
         std::fs::create_dir_all(parent).ok();
     }
@@ -244,11 +247,27 @@ mod tests {
     use tempfile::tempdir;
 
     fn init_git_repo(dir: &Path) {
-        Command::new("git").args(["init", "-q"]).current_dir(dir).output().unwrap();
-        Command::new("git").args(["config", "user.email", "test@test"]).current_dir(dir).output().unwrap();
-        Command::new("git").args(["config", "user.name", "Test"]).current_dir(dir).output().unwrap();
+        Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@test"])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(dir)
+            .output()
+            .unwrap();
         // Создаём initial commit на ветке main
-        Command::new("git").args(["checkout", "-b", "main"]).current_dir(dir).output().unwrap();
+        Command::new("git")
+            .args(["checkout", "-b", "main"])
+            .current_dir(dir)
+            .output()
+            .unwrap();
     }
 
     #[test]
@@ -257,11 +276,23 @@ mod tests {
         let root = dir.path();
         init_git_repo(root);
         fs::write(root.join("README.md"), "init\n").unwrap();
-        Command::new("git").args(["add", "-A"]).current_dir(root).output().unwrap();
-        Command::new("git").args(["commit", "-qm", "init"]).current_dir(root).output().unwrap();
+        Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-qm", "init"])
+            .current_dir(root)
+            .output()
+            .unwrap();
 
         // Создаём ветку агента без коммитов
-        Command::new("git").args(["branch", "devh/agent-test"]).current_dir(root).output().unwrap();
+        Command::new("git")
+            .args(["branch", "devh/agent-test"])
+            .current_dir(root)
+            .output()
+            .unwrap();
 
         let report = build_merge_report(root, "main", "devh/agent-test", "test").unwrap();
         assert_eq!(report.action, MergeAction::Nothing);
@@ -275,17 +306,45 @@ mod tests {
         let root = dir.path();
         init_git_repo(root);
         fs::write(root.join("a.txt"), "1\n").unwrap();
-        Command::new("git").args(["add", "-A"]).current_dir(root).output().unwrap();
-        Command::new("git").args(["commit", "-qm", "base"]).current_dir(root).output().unwrap();
+        Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-qm", "base"])
+            .current_dir(root)
+            .output()
+            .unwrap();
 
         // Ветка агента с коммитом - создаём её и переключаемся
-        Command::new("git").args(["branch", "devh/agent-test"]).current_dir(root).output().unwrap();
-        Command::new("git").args(["checkout", "devh/agent-test"]).current_dir(root).output().unwrap();
+        Command::new("git")
+            .args(["branch", "devh/agent-test"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["checkout", "devh/agent-test"])
+            .current_dir(root)
+            .output()
+            .unwrap();
         fs::write(root.join("b.txt"), "2\n").unwrap();
-        Command::new("git").args(["add", "-A"]).current_dir(root).output().unwrap();
-        Command::new("git").args(["commit", "-qm", "agent work"]).current_dir(root).output().unwrap();
+        Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-qm", "agent work"])
+            .current_dir(root)
+            .output()
+            .unwrap();
         // Вернуться на main
-        Command::new("git").args(["checkout", "main"]).current_dir(root).output().unwrap();
+        Command::new("git")
+            .args(["checkout", "main"])
+            .current_dir(root)
+            .output()
+            .unwrap();
 
         let report = build_merge_report(root, "main", "devh/agent-test", "test").unwrap();
         assert_eq!(report.action, MergeAction::Merged);
@@ -300,14 +359,42 @@ mod tests {
         let root = dir.path();
         init_git_repo(root);
         fs::write(root.join("a.txt"), "1\n").unwrap();
-        Command::new("git").args(["add", "-A"]).current_dir(root).output().unwrap();
-        Command::new("git").args(["commit", "-qm", "base"]).current_dir(root).output().unwrap();
-        Command::new("git").args(["branch", "devh/agent-test"]).current_dir(root).output().unwrap();
-        Command::new("git").args(["checkout", "devh/agent-test"]).current_dir(root).output().unwrap();
+        Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-qm", "base"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["branch", "devh/agent-test"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["checkout", "devh/agent-test"])
+            .current_dir(root)
+            .output()
+            .unwrap();
         fs::write(root.join("b.txt"), "2\n").unwrap();
-        Command::new("git").args(["add", "-A"]).current_dir(root).output().unwrap();
-        Command::new("git").args(["commit", "-qm", "agent work"]).current_dir(root).output().unwrap();
-        Command::new("git").args(["checkout", "main"]).current_dir(root).output().unwrap();
+        Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-qm", "agent work"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["checkout", "main"])
+            .current_dir(root)
+            .output()
+            .unwrap();
 
         let report = build_merge_report(root, "main", "devh/agent-test", "test").unwrap();
         let letter = report.to_letter("test");

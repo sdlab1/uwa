@@ -38,8 +38,12 @@ pub fn apply_to(
 /// Выполнить раздачу. Возвращает план (для вывода и тестов).
 pub fn assign(root: &Path, dry_run: bool) -> anyhow::Result<RouterPlan> {
     // Лок на реестр — тот же, что у остальных команд `devh orch`.
-    let _lock = OutputLock::try_acquire(root, &crate::commands::orch::path(root), "devh orch autoassign")
-        .map_err(|e| anyhow::anyhow!("devh orch autoassign: {e}"))?;
+    let _lock = OutputLock::try_acquire(
+        root,
+        &crate::commands::orch::path(root),
+        "devh orch autoassign",
+    )
+    .map_err(|e| anyhow::anyhow!("devh orch autoassign: {e}"))?;
 
     let mut reg = crate::commands::orch::load(root);
     let (lead, _) = crate::commands::orch::lead_of(&reg);
@@ -158,7 +162,10 @@ pub fn run(root: &Path, args: &[String]) -> anyhow::Result<()> {
             if dry_run { " (план)" } else { "" }
         );
         for a in &plan.assignments {
-            println!("  {} → {} (C{}) — {}", a.task_id, a.agent, a.c_level, a.reason);
+            println!(
+                "  {} → {} (C{}) — {}",
+                a.task_id, a.agent, a.c_level, a.reason
+            );
         }
     }
     if !plan.skipped.is_empty() {
@@ -188,7 +195,10 @@ pub fn run(root: &Path, args: &[String]) -> anyhow::Result<()> {
                 body,
             ]);
             if rc != 0 {
-                println!("devh orch autoassign: ⚠ письмо {} не отправлено (rc={rc})", a.agent);
+                println!(
+                    "devh orch autoassign: ⚠ письмо {} не отправлено (rc={rc})",
+                    a.agent
+                );
             }
         }
     }

@@ -49,12 +49,18 @@ mod tests {
 
     #[test]
     fn three_autonomous_is_autonomous() {
-        assert_eq!(check_autonomy(&[true, true, true]), AutonomyResult::Autonomous);
+        assert_eq!(
+            check_autonomy(&[true, true, true]),
+            AutonomyResult::Autonomous
+        );
     }
 
     #[test]
     fn two_autonomous_one_not() {
-        assert_eq!(check_autonomy(&[true, true, false]), AutonomyResult::NotAutonomous);
+        assert_eq!(
+            check_autonomy(&[true, true, false]),
+            AutonomyResult::NotAutonomous
+        );
     }
 
     #[test]

@@ -173,8 +173,7 @@ pub fn check_registry(tasks: &[RegistryTask]) -> Vec<Violation> {
                 });
             }
         }
-        if t.status == TaskStatus::Active
-            && t.started_by.as_deref().unwrap_or("").trim().is_empty()
+        if t.status == TaskStatus::Active && t.started_by.as_deref().unwrap_or("").trim().is_empty()
         {
             out.push(Violation {
                 task: t.id.clone(),

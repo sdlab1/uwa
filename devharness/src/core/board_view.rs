@@ -167,7 +167,9 @@ mod tests {
     fn sample_queue(agent: &str, count: usize) -> AgentQueue {
         AgentQueue {
             agent: agent.to_string(),
-            tasks: (0..count).map(|i| sample_task(&format!("T-{}", i), agent, TaskStatus::Queued)).collect(),
+            tasks: (0..count)
+                .map(|i| sample_task(&format!("T-{}", i), agent, TaskStatus::Queued))
+                .collect(),
             unread_count: 0,
         }
     }
@@ -176,7 +178,9 @@ mod tests {
     fn lead_buffer_ok() {
         let mut board = BoardView::default();
         for i in 0..10 {
-            board.leader_buffer.push(sample_task(&format!("T-{}", i), "lead", TaskStatus::Queued));
+            board
+                .leader_buffer
+                .push(sample_task(&format!("T-{}", i), "lead", TaskStatus::Queued));
         }
         let warnings = check_lead_buffer(&board);
         assert!(warnings.is_empty());
@@ -186,7 +190,9 @@ mod tests {
     fn lead_buffer_warning() {
         let mut board = BoardView::default();
         for i in 0..5 {
-            board.leader_buffer.push(sample_task(&format!("T-{}", i), "lead", TaskStatus::Queued));
+            board
+                .leader_buffer
+                .push(sample_task(&format!("T-{}", i), "lead", TaskStatus::Queued));
         }
         let warnings = check_lead_buffer(&board);
         assert_eq!(warnings.len(), 1);
@@ -198,8 +204,12 @@ mod tests {
         let mut board = BoardView::default();
         let mut queue = AgentQueue::default();
         queue.agent = "beam2".to_string();
-        queue.tasks.push(sample_task("T-001", "beam2", TaskStatus::Queued));
-        queue.tasks.push(sample_task("T-002", "beam2", TaskStatus::Queued));
+        queue
+            .tasks
+            .push(sample_task("T-001", "beam2", TaskStatus::Queued));
+        queue
+            .tasks
+            .push(sample_task("T-002", "beam2", TaskStatus::Queued));
         board.agent_queues.insert("beam2".to_string(), queue);
         let warnings = check_agent_queues(&board);
         assert!(warnings.is_empty());
@@ -210,7 +220,9 @@ mod tests {
         let mut board = BoardView::default();
         let mut queue = AgentQueue::default();
         queue.agent = "beam2".to_string();
-        queue.tasks.push(sample_task("T-001", "beam2", TaskStatus::Queued));
+        queue
+            .tasks
+            .push(sample_task("T-001", "beam2", TaskStatus::Queued));
         board.agent_queues.insert("beam2".to_string(), queue);
         let warnings = check_agent_queues(&board);
         assert_eq!(warnings.len(), 1);
@@ -263,7 +275,10 @@ mod tests {
         t.override_reason = Some("manual merge".into());
         board.in_progress.push(t);
         let warnings = check_done_tasks_have_main_sha(&board);
-        assert!(warnings.is_empty(), "override_reason подавляет warning: {warnings:?}");
+        assert!(
+            warnings.is_empty(),
+            "override_reason подавляет warning: {warnings:?}"
+        );
     }
 
     #[test]
@@ -272,7 +287,10 @@ mod tests {
         let t = sample_task("T-001", "beam", TaskStatus::Queued);
         board.in_progress.push(t);
         let warnings = check_done_tasks_have_main_sha(&board);
-        assert!(warnings.is_empty(), "non-Done task не должен давать warning");
+        assert!(
+            warnings.is_empty(),
+            "non-Done task не должен давать warning"
+        );
     }
 
     #[test]
@@ -313,10 +331,9 @@ mod tests {
     #[test]
     fn fill_unread_counts_populates_field() {
         let mut board = BoardView::default();
-        board.agent_queues.insert(
-            "beam".to_string(),
-            sample_queue("beam", 1),
-        );
+        board
+            .agent_queues
+            .insert("beam".to_string(), sample_queue("beam", 1));
         board.fill_unread_counts();
         let q = board.agent_queues.get("beam").expect("queue");
         // unread_count должен быть usize (0 если нет новых писем).

@@ -143,7 +143,10 @@ mod tests {
         let issues = check_backlog(14, 15, &[], 2);
         assert_eq!(issues[0].severity, Severity::Warn);
         assert!(issues[0].hint.contains('1'), "{issues:?}");
-        assert!(!issues[0].hint.contains("10"), "не путать 1 и 10: {issues:?}");
+        assert!(
+            !issues[0].hint.contains("10"),
+            "не путать 1 и 10: {issues:?}"
+        );
     }
 
     #[test]

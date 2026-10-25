@@ -75,9 +75,7 @@ pub fn check_transition(from: TaskStatus, to: TaskStatus) -> Result<(), String> 
     if can_transition(from, to) {
         Ok(())
     } else {
-        Err(format!(
-            "недопустимый переход статуса: {from} → {to}"
-        ))
+        Err(format!("недопустимый переход статуса: {from} → {to}"))
     }
 }
 

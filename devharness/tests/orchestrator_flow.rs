@@ -22,7 +22,10 @@ fn setup_repo() -> (PathBuf, PathBuf, tempfile::TempDir) {
     let bare = dir.path().join("bare.git");
     run_git(None, &["init", "-q", "--bare", &bare.to_string_lossy()]);
     run_git(Some(&repo), &["init", "-q"]);
-    run_git(Some(&repo), &["remote", "add", "origin", &bare.to_string_lossy()]);
+    run_git(
+        Some(&repo),
+        &["remote", "add", "origin", &bare.to_string_lossy()],
+    );
     run_git(Some(&repo), &["config", "user.email", "t@e.com"]);
     run_git(Some(&repo), &["config", "user.name", "Test"]);
     fs::write(repo.join("README.md"), "# test\n").unwrap();
@@ -92,19 +95,39 @@ fn scenario_dod_ack_cycle() {
 
     // Добавляем задачу.
     let (ok, _out) = devh(
-        &home, &repo,
-        &["orch", "add", "--agent", "ag-t1", "--p", "P2", "--dod",
-            "unit тесты в модуле", "--check", "true", "--title", "Test task"],
+        &home,
+        &repo,
+        &[
+            "orch",
+            "add",
+            "--agent",
+            "ag-t1",
+            "--p",
+            "P2",
+            "--dod",
+            "unit тесты в модуле",
+            "--check",
+            "true",
+            "--title",
+            "Test task",
+        ],
     );
     assert!(ok, "orch add failed");
 
     // DoD до подтверждения: 0/1.
     let (ok, out) = devh(&home, &repo, &["orch", "dod", "T-001"]);
     assert!(ok);
-    assert!(out.contains("0/1") || out.contains("критерии 0/1"), "dod should show 0/1: {out}");
+    assert!(
+        out.contains("0/1") || out.contains("критерии 0/1"),
+        "dod should show 0/1: {out}"
+    );
 
     // Подтверждаем критерий.
-    let (ok, out) = devh(&home, &repo, &["orch", "dod", "T-001", "--ack", "unit тесты в модуле"]);
+    let (ok, out) = devh(
+        &home,
+        &repo,
+        &["orch", "dod", "T-001", "--ack", "unit тесты в модуле"],
+    );
     assert!(ok, "orch dod --ack failed: {out}");
     assert!(out.contains("1/1"), "dod should show 1/1: {out}");
 }
@@ -117,18 +140,38 @@ fn scenario_verify_runs_check() {
     assert!(ok, "devh init failed");
 
     let (ok, _out) = devh(
-        &home, &repo,
-        &["orch", "add", "--agent", "ag-t2", "--p", "P2", "--dod",
-            "проверка пройдена", "--check", "echo verify-ok", "--title", "Verify test"],
+        &home,
+        &repo,
+        &[
+            "orch",
+            "add",
+            "--agent",
+            "ag-t2",
+            "--p",
+            "P2",
+            "--dod",
+            "проверка пройдена",
+            "--check",
+            "echo verify-ok",
+            "--title",
+            "Verify test",
+        ],
     );
     assert!(ok, "orch add failed");
 
     // Подтвердим DoD.
-    let (ok, _out) = devh(&home, &repo, &["orch", "dod", "T-001", "--ack", "проверка пройдена"]);
+    let (ok, _out) = devh(
+        &home,
+        &repo,
+        &["orch", "dod", "T-001", "--ack", "проверка пройдена"],
+    );
     assert!(ok);
 
     // Verify.
     let (ok, out) = devh(&home, &repo, &["orch", "verify", "T-001"]);
     assert!(ok, "orch verify failed: {out}");
-    assert!(out.contains("verify-ok") || out.contains("✓"), "verify should show check passed: {out}");
+    assert!(
+        out.contains("verify-ok") || out.contains("✓"),
+        "verify should show check passed: {out}"
+    );
 }

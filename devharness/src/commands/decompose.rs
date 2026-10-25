@@ -8,11 +8,6 @@
 //!      атомарно, одной записью; при любом нарушении реестр остаётся
 //!      байт-в-байт прежним.
 //!
-//! `--buffer`: дочерние задачи попадают в БУФЕР ВЕДУЩЕГО (agent == lead,
-//! status=queued) — дальше их раздаёт autoassign по потолку C и нагрузке,
-//! либо агент берёт сам через `devh orch start <ID>`. Ручного назначения
-//! не требуется.
-//!
 //! Команда не выдаёт полномочий ведущего: дочерние задачи создаются
 //! queued для ВЕДОМОГО, без `started_by`, без роли lead. Повторный запуск с
 //! тем же proposal идемпотентен (отпечаток proposal запоминается в
@@ -139,15 +134,16 @@ pub fn parse_proposal(body: &str) -> anyhow::Result<Vec<ProposalChild>> {
         serde_json::Value::Array(a) => a,
         serde_json::Value::Object(mut o) => match o.remove("children") {
             Some(serde_json::Value::Array(a)) => a,
-            _ => anyhow::bail!("devh orch decompose: в proposal ожидался массив или {{\"children\": [...]}}"),
+            _ => anyhow::bail!(
+                "devh orch decompose: в proposal ожидался массив или {{\"children\": [...]}}"
+            ),
         },
         _ => anyhow::bail!("devh orch decompose: proposal должен быть массивом задач"),
     };
     let mut out = Vec::new();
     for (i, v) in arr.iter().enumerate() {
-        let child: ProposalChild = serde_json::from_value(v.clone()).map_err(|e| {
-            anyhow::anyhow!("devh orch decompose: proposal[{i}] не разобран: {e}")
-        })?;
+        let child: ProposalChild = serde_json::from_value(v.clone())
+            .map_err(|e| anyhow::anyhow!("devh orch decompose: proposal[{i}] не разобран: {e}"))?;
         out.push(child);
     }
     if out.is_empty() {
@@ -200,7 +196,8 @@ pub fn prepare(
             title: c.title.trim().to_string(),
             zone: c.zone.trim().to_string(),
             p: c.p,
-            c: c.c.unwrap_or_else(|| crate::core::complexity::Complexity::from_p_level(c.p).0),
+            c: c.c
+                .unwrap_or_else(|| crate::core::complexity::Complexity::from_p_level(c.p).0),
             dod: c.dod.clone(),
             check: c.check.trim().to_string(),
             deps,
@@ -226,10 +223,6 @@ pub fn run(root: &Path, args: &[String]) -> anyhow::Result<()> {
     let proposal_path = orch::flag(args, "--proposal")
         .ok_or_else(|| anyhow::anyhow!("devh orch decompose: нужен --proposal <файл.json>"))?;
     let apply = args.iter().any(|a| a == "--apply");
-    // --buffer: дочерние задачи кладутся в БУФЕР ВЕДУЩЕГО (agent == lead,
-    // status=queued) — раздача автоматическая (autoassign), либо агент берёт
-    // сам через `devh orch start <ID>`. Ручного назначения не требуется.
-    let buffer = args.iter().any(|a| a == "--buffer");
 
     let mut reg = orch::load(root);
     let parent = reg
@@ -240,7 +233,10 @@ pub fn run(root: &Path, args: &[String]) -> anyhow::Result<()> {
         .ok_or_else(|| {
             anyhow::anyhow!("devh orch decompose: задача {parent_id} не найдена в реестре")
         })?;
-    if matches!(parent.status, Status::Done | Status::Revoked | Status::Failed) {
+    if matches!(
+        parent.status,
+        Status::Done | Status::Revoked | Status::Failed
+    ) {
         return Err(crate::commands::DevhError::action(format!(
             "devh orch decompose: задача {parent_id} закрыта ({}) — декомпозировать нечего",
             parent.status.label()
@@ -257,10 +253,11 @@ pub fn run(root: &Path, args: &[String]) -> anyhow::Result<()> {
     let (lead, _) = orch::lead_of(&reg);
     let caller = crate::core::identity::canonical(&crate::core::identity::current().name);
     let caller_is_lead = lead.as_deref() == Some(caller.as_str());
-    if !caller_is_lead && parent.agent != caller {
+    let parent_agent_canon = crate::core::identity::canonical(&parent.agent);
+    if !caller_is_lead && parent_agent_canon != caller {
         return Err(crate::commands::DevhError::action(format!(
             "devh orch decompose: декомпозировать может ведущий или владелец задачи (родитель: {})",
-            parent.agent
+            parent_agent_canon
         ))
         .into());
     }
@@ -271,23 +268,18 @@ pub fn run(root: &Path, args: &[String]) -> anyhow::Result<()> {
     let proposal = parse_proposal(&body)?;
 
     // Куда адресовать дочерние задачи: ведомый, никогда — ведущий.
-    let target_agent = if buffer {
-        lead.clone().ok_or_else(|| {
-            anyhow::anyhow!("devh orch decompose: --buffer требует ведущего в реестре")
-        })?
-    } else {
-        match orch::flag(args, "--agent") {
-            Some(a) => crate::core::identity::canonical(&a),
-            None => parent.agent.clone(),
-        }
+    let target_agent = match orch::flag(args, "--agent") {
+        Some(a) => crate::core::identity::canonical(&a),
+        None => parent_agent_canon.clone(),
     };
-    if !buffer && Some(target_agent.as_str()) == lead.as_deref() {
+    let lead_canon = lead.as_ref().map(|l| crate::core::identity::canonical(l));
+    if lead_canon.as_deref() == Some(target_agent.as_str()) {
         return Err(crate::commands::DevhError::action(
             "devh orch decompose: дочерние задачи нельзя адресовать ведущему — укажи --agent <ведомый>",
         )
         .into());
     }
-    if !buffer && target_agent == caller && !caller_is_lead {
+    if crate::core::identity::canonical(&target_agent) == caller && !caller_is_lead {
         return Err(crate::commands::DevhError::action(format!(
             "devh orch decompose: агент {target_agent} не может раздавать задачи самому себе"
         ))
@@ -370,7 +362,10 @@ pub fn run(root: &Path, args: &[String]) -> anyhow::Result<()> {
             );
         }
         if c.p > 9 || c.c > 10 {
-            anyhow::bail!("devh orch decompose: некорректная сложность подзадачи {}", c.id);
+            anyhow::bail!(
+                "devh orch decompose: некорректная сложность подзадачи {}",
+                c.id
+            );
         }
     }
     // Приоритет: из proposal'а, иначе — как у родителя.
@@ -379,7 +374,10 @@ pub fn run(root: &Path, args: &[String]) -> anyhow::Result<()> {
     for (i, c) in proposal.iter().enumerate() {
         let prio = c.prio.unwrap_or(parent_prio);
         if prio > 9 {
-            anyhow::bail!("devh orch decompose: prio должен быть 0..=9 (подзадача #{})", i);
+            anyhow::bail!(
+                "devh orch decompose: prio должен быть 0..=9 (подзадача #{})",
+                i
+            );
         }
         prios.push(prio);
     }
@@ -427,7 +425,6 @@ pub fn run(root: &Path, args: &[String]) -> anyhow::Result<()> {
             model_source: None,
             started_by: None,
             started_at: None,
-            started_key: None,
             status: Status::Queued,
             zones: vec![c.zone.clone()],
             fail_level: None,
@@ -454,10 +451,6 @@ pub fn run(root: &Path, args: &[String]) -> anyhow::Result<()> {
             name: target_agent.clone(),
             ..Default::default()
         });
-    }
-    // Буфер: раздача автоматическая (потолок C, очередь, лимит активных).
-    if buffer {
-        crate::commands::autoassign::auto_trigger(root, &mut reg);
     }
     orch::save(root, &reg)?;
 
@@ -511,8 +504,14 @@ mod tests {
 
     #[test]
     fn fingerprint_is_stable_and_order_insensitive() {
-        let a = vec![child("один", "devharness/src/core/a.rs"), child("два", "devharness/src/core/b.rs")];
-        let mut b = vec![child("два", "devharness/src/core/b.rs"), child("один", "devharness/src/core/a.rs")];
+        let a = vec![
+            child("один", "devharness/src/core/a.rs"),
+            child("два", "devharness/src/core/b.rs"),
+        ];
+        let mut b = vec![
+            child("два", "devharness/src/core/b.rs"),
+            child("один", "devharness/src/core/a.rs"),
+        ];
         b[0].id = String::new();
         assert_eq!(fingerprint("T-1", &a), fingerprint("T-1", &b));
         assert_ne!(fingerprint("T-1", &a), fingerprint("T-2", &a));
@@ -546,7 +545,6 @@ mod tests {
             model_source: None,
             started_by: None,
             started_at: None,
-            started_key: None,
             status: Status::Queued,
             zones: vec!["devharness/src/core".to_string()],
             fail_level: None,

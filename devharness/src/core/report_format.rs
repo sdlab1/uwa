@@ -57,7 +57,12 @@ pub fn validate(text: &str) -> Result<Report, Vec<String>> {
     let r = parse(text);
 
     if r.is_none() {
-        for prefix in ["1) сделано:", "2) как проверено:", "3) доказательства:", "4) осталось/риски:"] {
+        for prefix in [
+            "1) сделано:",
+            "2) как проверено:",
+            "3) доказательства:",
+            "4) осталось/риски:",
+        ] {
             if !text.contains(prefix) {
                 issues.push(format!("отсутствует пункт: {prefix}"));
             }
@@ -100,7 +105,11 @@ pub fn validate(text: &str) -> Result<Report, Vec<String>> {
 }
 
 pub fn exit_code_for(f: u8) -> ExitCode {
-    if f == 0 { ExitCode::Success } else { ExitCode::ActionError }
+    if f == 0 {
+        ExitCode::Success
+    } else {
+        ExitCode::ActionError
+    }
 }
 
 #[cfg(test)]

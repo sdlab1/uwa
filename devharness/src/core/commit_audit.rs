@@ -226,7 +226,9 @@ mod tests {
             .current_dir(dir.path())
             .output()
             .unwrap();
-        let second_sha = String::from_utf8_lossy(&second_sha.stdout).trim().to_string();
+        let second_sha = String::from_utf8_lossy(&second_sha.stdout)
+            .trim()
+            .to_string();
         assert!(!is_commit_in_branch(dir.path(), &second_sha, &other));
     }
 
@@ -264,7 +266,9 @@ mod tests {
             .current_dir(dir.path())
             .output()
             .unwrap();
-        let second_sha = String::from_utf8_lossy(&second_sha.stdout).trim().to_string();
+        let second_sha = String::from_utf8_lossy(&second_sha.stdout)
+            .trim()
+            .to_string();
 
         let n = COUNTER.fetch_add(1, Ordering::SeqCst);
         let other = format!("devh/agent-other-{n}");

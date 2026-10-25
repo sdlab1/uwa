@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use crate::core::complexity::{Complexity, ModelCeiling, filter_by_complexity};
+use crate::core::complexity::{filter_by_complexity, Complexity, ModelCeiling};
 use crate::core::modelrank::TaskRecord;
 
 /// Задача в очереди (минимум полей для фильтрации).
@@ -62,7 +62,11 @@ fn ceiling_for_model(model: &str, records: &[TaskRecord]) -> Option<u8> {
     use crate::core::modelrank::aggregate;
     let stats = aggregate(records);
     for st in stats {
-        if st.model == model.to_lowercase().replace(|c: char| !c.is_alphanumeric(), "-") {
+        if st.model
+            == model
+                .to_lowercase()
+                .replace(|c: char| !c.is_alphanumeric(), "-")
+        {
             return Some(st.ceiling);
         }
     }
@@ -102,7 +106,11 @@ pub fn prepare_display_tasks(
                 None => false,
             };
             let hide_reason = if hidden {
-                Some(format!("C{} > потолка модели C{}", t.c_level.unwrap(), ceiling.effective()))
+                Some(format!(
+                    "C{} > потолка модели C{}",
+                    t.c_level.unwrap(),
+                    ceiling.effective()
+                ))
             } else {
                 None
             };
@@ -147,8 +155,16 @@ mod tests {
     fn filter_allows_tasks_under_ceiling() {
         let history = mock_history();
         let tasks = vec![
-            QueuedTask { id: "T-1".into(), c_level: Some(5), title: "easy".into() },
-            QueuedTask { id: "T-2".into(), c_level: Some(7), title: "medium".into() },
+            QueuedTask {
+                id: "T-1".into(),
+                c_level: Some(5),
+                title: "easy".into(),
+            },
+            QueuedTask {
+                id: "T-2".into(),
+                c_level: Some(7),
+                title: "medium".into(),
+            },
         ];
         let (vis, hid) = filter_tasks_by_model_ceiling(&tasks, "nemotron 3 ultra", &history);
         // ceiling для nemotron с F0/F1 на C5/C7 = 7 (если C5 F0, C7 F1 -> растёт)
@@ -165,7 +181,10 @@ mod tests {
             title: "epic".into(),
         }];
         let (vis, hid) = filter_tasks_by_model_ceiling(&tasks, "unknown-model", &[]);
-        assert!(vis.is_empty(), "задача C10 должна быть скрыта при ceiling=5");
+        assert!(
+            vis.is_empty(),
+            "задача C10 должна быть скрыта при ceiling=5"
+        );
         assert_eq!(hid.len(), 1);
         assert!(hid[0].reason.is_some());
     }

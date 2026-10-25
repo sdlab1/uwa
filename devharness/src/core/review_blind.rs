@@ -250,7 +250,12 @@ mod tests {
     fn multiple_zones_preserve_order() {
         let mut rb = ReviewBlind::new();
         rb.add(BlindZone::new(BlindZoneKind::CoverageGap, "a.rs", 1, "x"));
-        rb.add(BlindZone::new(BlindZoneKind::MutantSurvived, "b.rs", 2, "y"));
+        rb.add(BlindZone::new(
+            BlindZoneKind::MutantSurvived,
+            "b.rs",
+            2,
+            "y",
+        ));
         rb.add(BlindZone::new(BlindZoneKind::UncoveredLine, "c.rs", 3, "z"));
         assert_eq!(rb.zones.len(), 3);
         assert_eq!(rb.zones[0].file, "a.rs");

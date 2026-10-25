@@ -164,11 +164,7 @@ pub fn deficit(min_size: usize, current_size: usize) -> BufferDeficit {
 
 /// Детерминированная сортировка кандидатов: сначала приоритет (убывание), затем id.
 pub fn sort_candidates(candidates: &mut [&BufferCandidate]) {
-    candidates.sort_by(|a, b| {
-        b.prio
-            .cmp(&a.prio)
-            .then_with(|| a.id.cmp(&b.id))
-    });
+    candidates.sort_by(|a, b| b.prio.cmp(&a.prio).then_with(|| a.id.cmp(&b.id)));
 }
 
 /// Фильтр готовых кандидатов с дедупом зон.
@@ -193,7 +189,11 @@ pub fn prepare_buffer<'a>(
 }
 
 /// Рассчитать состояние буфера по готовым кандидатам (минимум 15, норма 15–20).
-pub fn buffer_state_from_ready(min_size: usize, normal_max: usize, ready_count: usize) -> BufferState {
+pub fn buffer_state_from_ready(
+    min_size: usize,
+    normal_max: usize,
+    ready_count: usize,
+) -> BufferState {
     BufferState::calculate(min_size, normal_max, ready_count)
 }
 
@@ -297,7 +297,10 @@ mod tests {
         occ.insert("devharness/src/core".into());
         // занята директория без слэша — кандидат-файл внутри должен быть заблокирован
         assert!(!zones_free(&["devharness/src/core/x.rs".into()], &occ));
-        assert!(!zones_free(&["devharness/src/core".into()], &["devharness/src/core/x.rs".into()].into_iter().collect()));
+        assert!(!zones_free(
+            &["devharness/src/core".into()],
+            &["devharness/src/core/x.rs".into()].into_iter().collect()
+        ));
     }
 
     #[test]

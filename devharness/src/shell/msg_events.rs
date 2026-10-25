@@ -612,22 +612,20 @@ mod tests {
         crate::core::identity::set_alias_in(&home, "kilo", "minimax").expect("alias");
         // "kilo" → "minimax": это НЕ адрес для "beam2".
         let l_kilo_for_minimax =
-            parse_letter(&block("beam", "kilo", "s", "b", &[]))
-            .unwrap_or_else(|| unreachable!());
+            parse_letter(&block("beam", "kilo", "s", "b", &[])).unwrap_or_else(|| unreachable!());
         assert!(
             addressed_to_in(&l_kilo_for_minimax, "minimax", &home),
             "kilo (алиас minimax) — адресовано minimax"
         );
         let l3 =
-            parse_letter(&block("beam", "kilo", "s", "b", &[]))
-            .unwrap_or_else(|| unreachable!());
+            parse_letter(&block("beam", "kilo", "s", "b", &[])).unwrap_or_else(|| unreachable!());
         assert!(
             !addressed_to_in(&l3, "beam2", &home),
             "чужое письмо — не моё (kilo ≠ beam2)"
         );
         // "all" — всем.
-        let l = parse_letter(&block("beam", "all", "s", "b", &[]))
-            .unwrap_or_else(|| unreachable!());
+        let l =
+            parse_letter(&block("beam", "all", "s", "b", &[])).unwrap_or_else(|| unreachable!());
         assert!(addressed_to_in(&l, "minimax", &home), "all — всем");
     }
 
@@ -658,7 +656,10 @@ mod tests {
         let l = parse_letter(&block("minimax", "kilo", "s", "b", &[]))
             .unwrap_or_else(|| unreachable!());
         let body = ack_body("kilo", &l);
-        assert!(ack_is_safe(&body), "auto-ack не содержит запрещённых слов: {body}");
+        assert!(
+            ack_is_safe(&body),
+            "auto-ack не содержит запрещённых слов: {body}"
+        );
         assert!(!body.to_lowercase().contains("решено"));
         assert!(!body.to_lowercase().contains("выдаю"));
         assert!(!body.to_lowercase().contains("бери задачу"));
@@ -693,9 +694,15 @@ mod tests {
         let body = ack_body("minimax", &letter);
 
         // Должен содержать факты
-        assert!(body.contains("Письмо test123 от beam получено"), "факт получения: {body}");
+        assert!(
+            body.contains("Письмо test123 от beam получено"),
+            "факт получения: {body}"
+        );
         assert!(body.contains("Тред: thr-test"), "факт треда: {body}");
         // Должен НЕ содержать запрещённых слов
-        assert!(ack_is_safe(&body), "авто-ответ содержит запрещённые слова: {body}");
+        assert!(
+            ack_is_safe(&body),
+            "авто-ответ содержит запрещённые слова: {body}"
+        );
     }
 }

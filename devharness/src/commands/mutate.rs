@@ -396,13 +396,18 @@ pub fn mutate_start_gate(
             .any(|a| !a.starts_with("-") && std::path::Path::new(a).exists());
     if !has_explicit_scope {
         return Err(
-            "нужен явный охват непроверенной зоны: укажите файлы или --in-diff <дифф>"
-                .to_string(),
+            "нужен явный охват непроверенной зоны: укажите файлы или --in-diff <дифф>".to_string(),
         );
     }
     // Cadence & load.
     let policy = rate::RatePolicy::default();
-    let decision = rate::decide(RateKind::Mutation, now_secs, last_run_secs, load_pct, &policy);
+    let decision = rate::decide(
+        RateKind::Mutation,
+        now_secs,
+        last_run_secs,
+        load_pct,
+        &policy,
+    );
     match decision {
         rate::Decision::Allowed => Ok(()),
         rate::Decision::TooSoon { retry_in_secs } => Err(format!(
@@ -443,7 +448,9 @@ fn start(root: &Path, args: &[String]) -> anyhow::Result<()> {
             None
         }
     };
-    let load_pct = crate::core::load::load_average().map(|l| l as u32).unwrap_or(0);
+    let load_pct = crate::core::load::load_average()
+        .map(|l| l as u32)
+        .unwrap_or(0);
     match mutate_start_gate(
         &caller,
         lead.as_deref(),
@@ -2230,7 +2237,9 @@ mod tests {
         let args = vec!["src/main.rs".to_string()];
         let res = mutate_start_gate("worker", Some("lead"), &args, None, 1_000_000, 50);
         assert!(res.is_err());
-        assert!(res.unwrap_err().contains("мутационный аудит запускает только ведущий"));
+        assert!(res
+            .unwrap_err()
+            .contains("мутационный аудит запускает только ведущий"));
     }
 
     #[test]

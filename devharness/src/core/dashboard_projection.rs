@@ -164,9 +164,7 @@ pub fn project(reg: &Registry) -> DashboardProjection {
             .tasks
             .iter()
             .filter(|t| {
-                t.readiness == Readiness::Ready
-                    && t.c_level <= *ceiling
-                    && t.agent == *agent
+                t.readiness == Readiness::Ready && t.c_level <= *ceiling && t.agent == *agent
             })
             .map(|t| t.id.clone())
             .collect();
@@ -203,7 +201,10 @@ pub fn project(reg: &Registry) -> DashboardProjection {
     }
 
     // Буфер ведущего.
-    let lead = reg.lead.as_ref().map(|l| crate::core::identity::canonical(l));
+    let lead = reg
+        .lead
+        .as_ref()
+        .map(|l| crate::core::identity::canonical(l));
     if let Some(lead_name) = &lead {
         proj.lead_buffer = reg
             .tasks
@@ -265,7 +266,11 @@ mod tests {
         let reg = make_registry(json);
         let proj = project(&reg);
         let task = proj.tasks.iter().find(|t| t.id == "T-1").unwrap();
-        assert_eq!(task.readiness, Readiness::AboveCeiling, "C8 > потолок C3 → AboveCeiling");
+        assert_eq!(
+            task.readiness,
+            Readiness::AboveCeiling,
+            "C8 > потолок C3 → AboveCeiling"
+        );
     }
 
     #[test]
@@ -318,7 +323,10 @@ mod tests {
 }"#;
         let reg = make_registry(json);
         let proj = project(&reg);
-        assert!(proj.lead_buffer.contains(&"T-1".to_string()), "буфер lead содержит T-1");
+        assert!(
+            proj.lead_buffer.contains(&"T-1".to_string()),
+            "буфер lead содержит T-1"
+        );
     }
 
     #[test]
@@ -335,7 +343,11 @@ mod tests {
         let reg = make_registry(json);
         let proj = project(&reg);
         let ids: Vec<&str> = proj.tasks.iter().map(|t| t.id.as_str()).collect();
-        assert_eq!(ids.len(), ids.iter().collect::<std::collections::BTreeSet<_>>().len(), "нет дублей");
+        assert_eq!(
+            ids.len(),
+            ids.iter().collect::<std::collections::BTreeSet<_>>().len(),
+            "нет дублей"
+        );
     }
 
     #[test]
@@ -352,6 +364,9 @@ mod tests {
         let reg = make_registry(json);
         let proj1 = project(&reg);
         let proj2 = project(&reg);
-        assert_eq!(proj1, proj2, "повторный вызов даёт тот же результат (read-only)");
+        assert_eq!(
+            proj1, proj2,
+            "повторный вызов даёт тот же результат (read-only)"
+        );
     }
 }

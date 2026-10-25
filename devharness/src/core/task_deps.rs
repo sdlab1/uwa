@@ -254,7 +254,10 @@ mod tests {
             status: DepStatus::Queued,
             depends_on: vec!["T1".into()],
         }];
-        assert!(matches!(can_start("T2", &tasks), Err(DepError::Blocked { .. })));
+        assert!(matches!(
+            can_start("T2", &tasks),
+            Err(DepError::Blocked { .. })
+        ));
     }
 
     #[test]

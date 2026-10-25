@@ -53,10 +53,7 @@ pub fn default_policy() -> FacadePolicy {
 
 /// Проверить доступ: достаточно ли роли для действия.
 pub fn check_access(policy: &FacadePolicy, action: GitAction, role: Role) -> bool {
-    policy
-        .get(&action)
-        .map(|r| *r <= role)
-        .unwrap_or(false)
+    policy.get(&action).map(|r| *r <= role).unwrap_or(false)
 }
 
 /// Разобрать подкоманду git в GitAction.

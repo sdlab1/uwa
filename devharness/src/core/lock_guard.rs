@@ -50,9 +50,7 @@ pub fn open_lock_file(path: &Path, create_if_missing: bool) -> std::io::Result<F
         flags |= libc::O_NOFOLLOW;
 
         let mode: i32 = 0o600; // rw-------: только владелец
-        let fd = unsafe {
-            libc::open(cpath.as_ptr(), flags, mode)
-        };
+        let fd = unsafe { libc::open(cpath.as_ptr(), flags, mode) };
         if fd < 0 {
             let err = std::io::Error::last_os_error();
             if create_if_missing && err.raw_os_error() == Some(libc::EEXIST) {
@@ -88,7 +86,10 @@ pub fn assert_not_symlink(path: &Path) -> std::io::Result<()> {
     if meta.file_type().is_symlink() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            format!("lock file {} is a symlink — refused (TOCTOU fix)", path.display()),
+            format!(
+                "lock file {} is a symlink — refused (TOCTOU fix)",
+                path.display()
+            ),
         ));
     }
     Ok(())
@@ -103,7 +104,11 @@ pub fn assert_lock_permissions(path: &Path) -> std::io::Result<()> {
     if mode != 0o600 {
         return Err(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
-            format!("lock file {} has mode {:#o}, expected 0600", path.display(), mode),
+            format!(
+                "lock file {} has mode {:#o}, expected 0600",
+                path.display(),
+                mode
+            ),
         ));
     }
     Ok(())
@@ -183,7 +188,10 @@ mod tests {
         drop(f1);
         // Второй acquire — файл существует, должен открыть, а не падать EEXIST.
         let f2 = open_lock_file(&p, true);
-        assert!(f2.is_ok(), "retry acquisition must succeed on existing file");
+        assert!(
+            f2.is_ok(),
+            "retry acquisition must succeed on existing file"
+        );
     }
 
     #[test]

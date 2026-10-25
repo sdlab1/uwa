@@ -254,10 +254,7 @@ mod tests {
         s.is_git = false;
         s.branch = None;
         let issues = check_worktree(&s);
-        assert!(matches!(
-            issues.as_slice(),
-            [WorktreeIssue::NotGitRepo(_)]
-        ));
+        assert!(matches!(issues.as_slice(), [WorktreeIssue::NotGitRepo(_)]));
         assert!(issues[0].is_blocking());
     }
 

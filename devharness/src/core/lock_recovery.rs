@@ -138,7 +138,9 @@ pub fn check_staleness(path: &Path, max_age: Duration) -> Staleness {
     // Но тип Staleness не имеет варианта для «не stale».
     // Используем Expired с нулевой持续ностью как «не stale».
     // Лучше: вернём Staleness с age=0 и pid — caller decides.
-    Staleness::Expired { age: Duration::ZERO }
+    Staleness::Expired {
+        age: Duration::ZERO,
+    }
 }
 
 /// Проверить, удерживается ли лок другим процессом через flock.
@@ -199,7 +201,10 @@ pub fn recover_lock(path: &Path, max_age: Duration) -> Recovery {
                 let holder = content.lines().next().unwrap_or("unknown").to_string();
                 return Recovery::Held { pid, holder };
             }
-            return Recovery::Held { pid: 0, holder: "unknown".into() };
+            return Recovery::Held {
+                pid: 0,
+                holder: "unknown".into(),
+            };
         }
     }
 
@@ -217,7 +222,10 @@ pub fn recover_lock(path: &Path, max_age: Duration) -> Recovery {
             let holder = content.lines().next().unwrap_or("unknown").to_string();
             Recovery::Held { pid, holder }
         } else {
-            Recovery::Held { pid: 0, holder: "unknown".into() }
+            Recovery::Held {
+                pid: 0,
+                holder: "unknown".into(),
+            }
         }
     }
 }
@@ -304,7 +312,12 @@ mod tests {
         std::fs::write(&p, format!("pid {} (test)", std::process::id())).unwrap();
         let result = check_staleness(&p, DEFAULT_MAX_AGE);
         // Должен вернуть Expired { age: ZERO } — сигнал «не stale».
-        assert_eq!(result, Staleness::Expired { age: Duration::ZERO });
+        assert_eq!(
+            result,
+            Staleness::Expired {
+                age: Duration::ZERO
+            }
+        );
     }
 
     #[test]
@@ -322,7 +335,9 @@ mod tests {
         std::fs::write(&p, "pid 999999 (dead)").unwrap();
         assert!(p.exists());
         let r = recover_lock(&p, DEFAULT_MAX_AGE);
-        assert!(matches!(r, Recovery::Recovered { staleness: Staleness::DeadProcess { pid } } if pid == 999999));
+        assert!(
+            matches!(r, Recovery::Recovered { staleness: Staleness::DeadProcess { pid } } if pid == 999999)
+        );
         assert!(!p.exists(), "stale lock file must be removed");
     }
 
@@ -342,7 +357,12 @@ mod tests {
         let p = dir.path().join("bad.lock");
         std::fs::write(&p, "garbage").unwrap();
         let r = recover_lock(&p, DEFAULT_MAX_AGE);
-        assert!(matches!(r, Recovery::Recovered { staleness: Staleness::Malformed }));
+        assert!(matches!(
+            r,
+            Recovery::Recovered {
+                staleness: Staleness::Malformed
+            }
+        ));
         assert!(!p.exists(), "malformed lock file must be removed");
     }
 
@@ -356,7 +376,12 @@ mod tests {
         let f = std::fs::File::open(&p).unwrap();
         f.set_modified(old).unwrap();
         let r = recover_lock(&p, DEFAULT_MAX_AGE);
-        assert!(matches!(r, Recovery::Recovered { staleness: Staleness::Expired { .. } }));
+        assert!(matches!(
+            r,
+            Recovery::Recovered {
+                staleness: Staleness::Expired { .. }
+            }
+        ));
         assert!(!p.exists(), "expired-by-mtime lock must be removed");
     }
 

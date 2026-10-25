@@ -116,21 +116,30 @@ mod tests {
     fn nonexistent_agent_rejected() {
         let mut r = ok_req();
         r.to_agent_exists = false;
-        assert_eq!(validate(&r), HandoffResult::Err(HandoffError::AgentNotFound));
+        assert_eq!(
+            validate(&r),
+            HandoffResult::Err(HandoffError::AgentNotFound)
+        );
     }
 
     #[test]
     fn dirty_worktree_rejected() {
         let mut r = ok_req();
         r.from_worktree_dirty = true;
-        assert_eq!(validate(&r), HandoffResult::Err(HandoffError::WorktreeDirty));
+        assert_eq!(
+            validate(&r),
+            HandoffResult::Err(HandoffError::WorktreeDirty)
+        );
     }
 
     #[test]
     fn task_not_active_rejected() {
         let mut r = ok_req();
         r.task_active = false;
-        assert_eq!(validate(&r), HandoffResult::Err(HandoffError::TaskNotActive));
+        assert_eq!(
+            validate(&r),
+            HandoffResult::Err(HandoffError::TaskNotActive)
+        );
     }
 
     #[test]

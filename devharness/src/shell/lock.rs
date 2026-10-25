@@ -308,7 +308,9 @@ fn lock_diag(path: &Path, own_fd: Option<std::os::unix::io::RawFd>) -> String {
                     continue;
                 }
                 let Some(pid) = parts.get(4) else { continue };
-                let Some(file_id) = parts.get(5) else { continue };
+                let Some(file_id) = parts.get(5) else {
+                    continue;
+                };
                 let Some((dev_hex, ino_str)) = file_id.split_once(':') else {
                     continue;
                 };
@@ -491,7 +493,8 @@ mod tests {
         );
         drop(outer);
         let got = waiter.join().unwrap_or_else(|_| unreachable!());
-        let held = got.unwrap_or_else(|e| unreachable!("после drop внешнего guard лок свободен: {e}"));
+        let held =
+            got.unwrap_or_else(|e| unreachable!("после drop внешнего guard лок свободен: {e}"));
         drop(held);
     }
 }

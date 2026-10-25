@@ -23,10 +23,11 @@ impl ZoneIndex {
 
     /// Добавить задачу в индекс.
     pub fn add(&mut self, task_id: String, zone: String, agent: String) {
-        self.zones
-            .entry(zone)
-            .or_default()
-            .push(ZoneEntry { task_id, zone: String::new(), agent });
+        self.zones.entry(zone).or_default().push(ZoneEntry {
+            task_id,
+            zone: String::new(),
+            agent,
+        });
     }
 
     /// Удалить задачу из индекса (при сдаче/отзыве).
@@ -42,9 +43,9 @@ impl ZoneIndex {
     /// Проверить конфликт: есть ли активная задача в той же зоне.
     /// Возвращает Some(конфликтующая задача) если есть конфликт.
     pub fn check_conflict(&self, zone: &str, current_agent: &str) -> Option<&ZoneEntry> {
-        self.zones.get(zone).and_then(|entries| {
-            entries.iter().find(|e| e.agent != current_agent)
-        })
+        self.zones
+            .get(zone)
+            .and_then(|entries| entries.iter().find(|e| e.agent != current_agent))
     }
 
     /// Получить все задачи в зоне.
@@ -60,8 +61,11 @@ impl ZoneIndex {
 pub fn normalize_zone(zone: &str) -> String {
     let mut z = zone.trim();
     while z.starts_with("/") || z.starts_with(".") {
-        if z.starts_with("/") { z = &z[1..]; }
-        else if z.starts_with(".") { z = &z[1..]; }
+        if z.starts_with("/") {
+            z = &z[1..];
+        } else if z.starts_with(".") {
+            z = &z[1..];
+        }
     }
     if z.is_empty() {
         return "root".to_string();
@@ -82,7 +86,11 @@ mod tests {
     #[test]
     fn conflict_same_zone_different_agent() {
         let mut idx = ZoneIndex::new();
-        idx.add("T-001".to_string(), "core/msg".to_string(), "beam".to_string());
+        idx.add(
+            "T-001".to_string(),
+            "core/msg".to_string(),
+            "beam".to_string(),
+        );
         let conflict = idx.check_conflict("core/msg", "beam2");
         assert!(conflict.is_some());
         assert_eq!(conflict.unwrap().task_id, "T-001");
@@ -91,7 +99,11 @@ mod tests {
     #[test]
     fn no_conflict_same_agent() {
         let mut idx = ZoneIndex::new();
-        idx.add("T-001".to_string(), "core/msg".to_string(), "beam2".to_string());
+        idx.add(
+            "T-001".to_string(),
+            "core/msg".to_string(),
+            "beam2".to_string(),
+        );
         let conflict = idx.check_conflict("core/msg", "beam2");
         assert!(conflict.is_none());
     }
@@ -99,7 +111,11 @@ mod tests {
     #[test]
     fn remove_task() {
         let mut idx = ZoneIndex::new();
-        idx.add("T-001".to_string(), "core/msg".to_string(), "beam".to_string());
+        idx.add(
+            "T-001".to_string(),
+            "core/msg".to_string(),
+            "beam".to_string(),
+        );
         idx.remove("T-001", "core/msg");
         assert!(idx.check_conflict("core/msg", "beam2").is_none());
     }

@@ -164,7 +164,10 @@ fn lead_assigns_tech_lead_role() {
     let env = Env::new();
     env.write_registry(reg_with_tech_lead());
 
-    let (out, err, code) = env.run("lead", &["role", "--agent", "worker1", "--role", "tech_lead"]);
+    let (out, err, code) = env.run(
+        "lead",
+        &["role", "--agent", "worker1", "--role", "tech_lead"],
+    );
     assert_eq!(code, 0, "ведущий выдаёт роль tech-lead: {err}\n{out}");
     assert!(
         env.registry().contains("\"role\": \"tech_lead\""),
@@ -280,7 +283,10 @@ fn tech_lead_own_task_requires_c4() {
         ],
     );
     assert_eq!(code, 0, "крупная задача себе — можно: {err}\n{out}");
-    assert!(out.contains("БУФЕР TECH-LEAD"), "отчёт о буфере техлида:\n{out}");
+    assert!(
+        out.contains("БУФЕР TECH-LEAD"),
+        "отчёт о буфере техлида:\n{out}"
+    );
 }
 
 #[test]
@@ -318,14 +324,8 @@ fn worker_cannot_create_board_task() {
         ],
     );
     assert_ne!(code, 0, "ведомый не наполняет доску");
-    assert!(
-        err.contains("tech-lead"),
-        "внятная причина отказа: {err}"
-    );
-    assert!(
-        err.contains("orch bug"),
-        "указано, куда докладывать: {err}"
-    );
+    assert!(err.contains("tech-lead"), "внятная причина отказа: {err}");
+    assert!(err.contains("orch bug"), "указано, куда докладывать: {err}");
 }
 
 #[test]
@@ -342,7 +342,14 @@ fn tech_lead_fixes_model_only_with_confirm() {
 
     let (out, err, code) = env.run(
         "techlead",
-        &["model", "--agent", "worker1", "--model", "new/model", "--confirm"],
+        &[
+            "model",
+            "--agent",
+            "worker1",
+            "--model",
+            "new/model",
+            "--confirm",
+        ],
     );
     assert_eq!(code, 0, "tech-lead подтверждает декларацию: {err}\n{out}");
     assert!(

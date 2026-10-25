@@ -171,9 +171,8 @@ pub fn format_selfcheck_json(report: &SelfcheckReport) -> String {
         serde_json::Value::String(if r.problems.is_empty() { "ok" } else { "fail" }.to_string()),
     );
 
-    serde_json::to_string_pretty(&serde_json::Value::Object(map)).unwrap_or_else(|_| {
-        r#"{"check":"orch_selfcheck","status":"error"}"#.to_string()
-    })
+    serde_json::to_string_pretty(&serde_json::Value::Object(map))
+        .unwrap_or_else(|_| r#"{"check":"orch_selfcheck","status":"error"}"#.to_string())
 }
 
 /// Сериализовать selfcheck-отчёт в человеческочитаемый текст.
@@ -240,15 +239,7 @@ mod tests {
 
     #[test]
     fn empty_fields() {
-        let r = format_report(
-            "T-001",
-            &[],
-            &[],
-            &[],
-            &[],
-            0,
-            0,
-        );
+        let r = format_report("T-001", &[], &[], &[], &[], 0, 0);
         assert!(r.contains("1) сделано:"));
         assert!(r.contains("P/F: P0/F0"));
     }
@@ -272,23 +263,30 @@ mod tests {
 
     #[test]
     fn json_output_is_deterministic() {
-        let r1 = format_selfcheck_json(&SelfcheckReport::with_check("orch_selfcheck")
-            .add_problem("problem-b".to_string())
-            .add_problem("problem-a".to_string())
-            .add_warn("warn-2".to_string())
-            .add_warn("warn-1".to_string()));
-        let r2 = format_selfcheck_json(&SelfcheckReport::with_check("orch_selfcheck")
-            .add_problem("problem-a".to_string())
-            .add_problem("problem-b".to_string())
-            .add_warn("warn-1".to_string())
-            .add_warn("warn-2".to_string()));
-        assert_eq!(r1, r2, "JSON output must be deterministic regardless of input order");
+        let r1 = format_selfcheck_json(
+            &SelfcheckReport::with_check("orch_selfcheck")
+                .add_problem("problem-b".to_string())
+                .add_problem("problem-a".to_string())
+                .add_warn("warn-2".to_string())
+                .add_warn("warn-1".to_string()),
+        );
+        let r2 = format_selfcheck_json(
+            &SelfcheckReport::with_check("orch_selfcheck")
+                .add_problem("problem-a".to_string())
+                .add_problem("problem-b".to_string())
+                .add_warn("warn-1".to_string())
+                .add_warn("warn-2".to_string()),
+        );
+        assert_eq!(
+            r1, r2,
+            "JSON output must be deterministic regardless of input order"
+        );
     }
 
     #[test]
     fn json_ok_status_when_no_problems() {
-        let report = SelfcheckReport::with_check("orch_selfcheck")
-            .add_warn("some warning".to_string());
+        let report =
+            SelfcheckReport::with_check("orch_selfcheck").add_warn("some warning".to_string());
 
         let json = format_selfcheck_json(&report);
         let val: serde_json::Value = serde_json::from_str(&json).unwrap();

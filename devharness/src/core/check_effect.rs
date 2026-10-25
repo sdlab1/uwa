@@ -39,7 +39,9 @@ pub enum TestStatus {
 impl TestSuiteResult {
     /// Сколько тестов реально выполнилось (не считая ignored/filtered).
     pub fn executed(&self) -> u32 {
-        self.passed.saturating_add(self.failed).saturating_add(self.measured)
+        self.passed
+            .saturating_add(self.failed)
+            .saturating_add(self.measured)
     }
 
     /// true, если был какой-либо реальный прогон (≥1 executed).
@@ -68,7 +70,9 @@ impl CheckEffect {
 
     /// Есть ли провалы?
     pub fn has_failures(&self) -> bool {
-        self.suites.iter().any(|s| s.failed > 0 || s.status == TestStatus::Failed)
+        self.suites
+            .iter()
+            .any(|s| s.failed > 0 || s.status == TestStatus::Failed)
     }
 }
 
@@ -120,10 +124,7 @@ pub fn parse_test_result_line(line: &str) -> Option<TestSuiteResult> {
 /// Разобрать полный вывод cargo test (stdout или stderr) и собрать все
 /// `test result:` строки.
 pub fn parse_cargo_test_output(output: &str) -> CheckEffect {
-    let suites: Vec<TestSuiteResult> = output
-        .lines()
-        .filter_map(parse_test_result_line)
-        .collect();
+    let suites: Vec<TestSuiteResult> = output.lines().filter_map(parse_test_result_line).collect();
     CheckEffect { suites }
 }
 
@@ -156,7 +157,11 @@ pub fn parse_nextest_summary_line(line: &str) -> Option<TestSuiteResult> {
         ignored: 0,
         measured: total,
         filtered_out: 0,
-        status: if failed > 0 { TestStatus::Failed } else { TestStatus::Ok },
+        status: if failed > 0 {
+            TestStatus::Failed
+        } else {
+            TestStatus::Ok
+        },
     })
 }
 
@@ -229,8 +234,7 @@ pub fn is_path_in_worktree(p: &Path, worktree: &Path) -> bool {
         cwd.join(p)
     };
     let canonical_p = std::fs::canonicalize(&resolved_p).unwrap_or(resolved_p);
-    let canonical_wt = std::fs::canonicalize(worktree)
-        .unwrap_or_else(|_| worktree.to_path_buf());
+    let canonical_wt = std::fs::canonicalize(worktree).unwrap_or_else(|_| worktree.to_path_buf());
     canonical_p.starts_with(&canonical_wt)
 }
 
@@ -315,7 +319,10 @@ test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
     #[test]
     fn check_had_effect_rejects_zero_tests() {
         let output = "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
-        assert!(!check_had_effect(output), "0 tests must be detected as no-effect");
+        assert!(
+            !check_had_effect(output),
+            "0 tests must be detected as no-effect"
+        );
     }
 
     #[test]
@@ -341,7 +348,8 @@ test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 
     #[test]
     fn evaluate_check_failed_when_tests_fail() {
-        let output = "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out";
+        let output =
+            "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out";
         let verdict = evaluate_check(101, output);
         assert_eq!(verdict, CheckVerdict::CommandFailed);
     }
@@ -350,7 +358,8 @@ test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
     fn evaluate_check_pass_when_tests_fail_but_exit0() {
         // Некоторые test harness'ы могут вернуть exit 0 даже при failed.
         // Мы всё равно считаем провалом по failed > 0.
-        let output = "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out";
+        let output =
+            "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out";
         let verdict = evaluate_check(101, output);
         assert_eq!(verdict, CheckVerdict::CommandFailed);
     }

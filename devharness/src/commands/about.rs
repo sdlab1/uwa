@@ -135,7 +135,9 @@ pub fn collect(root: &Path) -> About {
                 a.model = Some(m.clone());
                 a.model_source = format!(
                     "env рантайма (GOOSE_MODEL), provider={}",
-                    env.get("GOOSE_PROVIDER").cloned().unwrap_or_else(|| "?".into())
+                    env.get("GOOSE_PROVIDER")
+                        .cloned()
+                        .unwrap_or_else(|| "?".into())
                 );
             }
         }
@@ -162,8 +164,9 @@ pub fn collect(root: &Path) -> About {
         a.unknowns
             .push("модель: нет ни журнала сессии, ни GOOSE_MODEL, ни записи в реестре".into());
     }
-    a.unknowns
-        .push("встроенный system prompt goose наружу не отдаётся — показана сводка источников".into());
+    a.unknowns.push(
+        "встроенный system prompt goose наружу не отдаётся — показана сводка источников".into(),
+    );
     a
 }
 
@@ -209,7 +212,9 @@ pub fn render(a: &About) -> String {
     }
     s.push_str("--- system prompt (сводка) ---\n");
     if a.prompt_parts.is_empty() {
-        s.push_str("источники не найдены: ни env-переопределений, ни AGENTS.md, ни данных сессии\n");
+        s.push_str(
+            "источники не найдены: ни env-переопределений, ни AGENTS.md, ни данных сессии\n",
+        );
     } else {
         for p in &a.prompt_parts {
             s.push_str(&format!("• {}: {}\n", p.source, p.excerpt));
@@ -227,8 +232,14 @@ pub fn render(a: &About) -> String {
 
 /// Короткая сводка (2-3 строки) — для ответа «кто я» без простыни.
 pub fn short(a: &About) -> String {
-    let model = a.model.clone().unwrap_or_else(|| "модель неизвестна".into());
-    let lead = a.lead.clone().unwrap_or_else(|| "ведущий не назначен".into());
+    let model = a
+        .model
+        .clone()
+        .unwrap_or_else(|| "модель неизвестна".into());
+    let lead = a
+        .lead
+        .clone()
+        .unwrap_or_else(|| "ведущий не назначен".into());
     let role = a.role.clone().unwrap_or_else(|| "роль не назначена".into());
     format!(
         "я {}{} · модель {model} · рантайм {} · роль {role} · ведущий {lead}",
@@ -423,7 +434,12 @@ pub fn runtime_version(bin: &str) -> Option<String> {
 pub fn registry_info(
     path: &Path,
     name: &str,
-) -> (Option<String>, Option<String>, Option<String>, Option<String>) {
+) -> (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+) {
     let mut model = None;
     let mut runtime = None;
     let mut role = None;

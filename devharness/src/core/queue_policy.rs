@@ -4,7 +4,7 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::commands::orch::{Registry, Task, Status};
+use crate::commands::orch::{Registry, Status, Task};
 
 /// Порог голода (в секундах): задача, ждущая дольше, поднимается в приоритете.
 const STARVATION_THRESHOLD_SECS: u64 = 30 * 60;
@@ -139,11 +139,7 @@ pub fn order_for_caller<'a>(registry: &'a Registry, caller: &str) -> Vec<&'a Tas
 }
 
 /// Герметичная версия `order_for_caller` с явным `now`.
-pub fn order_for_caller_at<'a>(
-    registry: &'a Registry,
-    caller: &str,
-    now: u64,
-) -> Vec<&'a Task> {
+pub fn order_for_caller_at<'a>(registry: &'a Registry, caller: &str, now: u64) -> Vec<&'a Task> {
     let mut out: Vec<&Task> = registry
         .tasks
         .iter()
@@ -179,17 +175,16 @@ pub fn order_for_caller_at<'a>(
 ///
 /// Агент не может взять задачу P2, если у него в очереди есть P1.
 pub fn is_blocked_by_priority(registry: &Registry, agent: &str, task: &QueuedTask) -> bool {
-    registry.tasks.iter().any(|t| {
-        t.status == Status::Queued
-            && t.agent == agent
-            && t.complexity < task.complexity
-    })
+    registry
+        .tasks
+        .iter()
+        .any(|t| t.status == Status::Queued && t.agent == agent && t.complexity < task.complexity)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::orch::{Registry, Task, Status};
+    use crate::commands::orch::{Registry, Status, Task};
 
     fn make_registry() -> Registry {
         let mut reg = Registry::default();
@@ -329,7 +324,11 @@ mod tests {
         let reg = make_registry();
         let result = select_next_task(&reg);
         assert!(result.selected.is_some());
-        assert_eq!(result.selected.unwrap().id, "T-001", "P1 выбирается раньше P2");
+        assert_eq!(
+            result.selected.unwrap().id,
+            "T-001",
+            "P1 выбирается раньше P2"
+        );
     }
 
     #[test]
@@ -346,7 +345,10 @@ mod tests {
     fn active_tasks_not_in_queue() {
         let reg = make_registry();
         let sorted = queued_tasks_sorted(&reg);
-        assert!(!sorted.iter().any(|t| t.id == "T-005"), "Active задачи не в очереди");
+        assert!(
+            !sorted.iter().any(|t| t.id == "T-005"),
+            "Active задачи не в очереди"
+        );
     }
 
     #[test]
@@ -355,7 +357,10 @@ mod tests {
         let sorted = queued_tasks_sorted(&reg);
         // T-004 (beam2, P1, created=base+50) vs T-001 (beam, P1, created=base)
         let first = &sorted[0];
-        assert_eq!(first.id, "T-001", "T-001 раньше по created (base < base+50)");
+        assert_eq!(
+            first.id, "T-001",
+            "T-001 раньше по created (base < base+50)"
+        );
     }
 
     #[test]
@@ -376,7 +381,10 @@ mod tests {
             created: 1_000_100,
             title: "P2".into(),
         };
-        assert!(is_blocked_by_priority(&reg, "beam", &task), "P1 в очереди блокирует P2");
+        assert!(
+            is_blocked_by_priority(&reg, "beam", &task),
+            "P1 в очереди блокирует P2"
+        );
     }
 
     #[test]
@@ -389,7 +397,10 @@ mod tests {
             created: 1_000_050,
             title: "P1".into(),
         };
-        assert!(!is_blocked_by_priority(&reg, "beam", &task), "другой агент не блокирует");
+        assert!(
+            !is_blocked_by_priority(&reg, "beam", &task),
+            "другой агент не блокирует"
+        );
     }
 
     #[test]
@@ -402,7 +413,10 @@ mod tests {
             created: 1_000_000,
             title: "P1".into(),
         };
-        assert!(!is_blocked_by_priority(&reg, "beam", &task), "нет ниже P -> не блокирует");
+        assert!(
+            !is_blocked_by_priority(&reg, "beam", &task),
+            "нет ниже P -> не блокирует"
+        );
     }
 
     fn task(id: &str, agent: &str, complexity: u8, created: u64) -> Task {
@@ -436,10 +450,7 @@ mod tests {
     #[test]
     fn order_own_before_buffer() {
         let mut reg = Registry::default();
-        reg.tasks = vec![
-            task("T-1", "lead", 1, 10),
-            task("T-2", "worker", 1, 20),
-        ];
+        reg.tasks = vec![task("T-1", "lead", 1, 10), task("T-2", "worker", 1, 20)];
         let ids: Vec<String> = order_for_caller(&reg, "worker")
             .iter()
             .map(|t| t.id.clone())
@@ -492,7 +503,12 @@ mod tests {
         // T-new: P2, свежая; T-old: P2, голодавшая (created = now - threshold - 1).
         reg.tasks = vec![
             task("T-new", "worker", 2, now),
-            task("T-old", "worker", 2, now.saturating_sub(STARVATION_THRESHOLD_SECS + 1)),
+            task(
+                "T-old",
+                "worker",
+                2,
+                now.saturating_sub(STARVATION_THRESHOLD_SECS + 1),
+            ),
         ];
         let ids: Vec<String> = order_for_caller_at(&reg, "worker", now)
             .iter()
@@ -517,7 +533,12 @@ mod tests {
         reg.plan.prio.insert("T-starved".into(), 9);
         reg.tasks = vec![
             task("T-fresh-p1", "worker", 1, now),
-            task("T-starved", "worker", 2, now.saturating_sub(STARVATION_THRESHOLD_SECS + 1)),
+            task(
+                "T-starved",
+                "worker",
+                2,
+                now.saturating_sub(STARVATION_THRESHOLD_SECS + 1),
+            ),
         ];
         let ids: Vec<String> = order_for_caller_at(&reg, "worker", now)
             .iter()
@@ -549,5 +570,4 @@ mod tests {
             "свежие задачи — по FIFO (created)"
         );
     }
-
 }

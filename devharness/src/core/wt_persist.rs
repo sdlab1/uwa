@@ -30,7 +30,10 @@ pub fn persistent_wt_root() -> PathBuf {
     let home = std::env::var("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("/var/lib/devh/worktrees"));
-    home.join(".local").join("share").join("devh").join("worktrees")
+    home.join(".local")
+        .join("share")
+        .join("devh")
+        .join("worktrees")
 }
 
 /// true, если путь находится в `/tmp` (или сам `/tmp`).
@@ -65,11 +68,7 @@ pub struct MigrationPlan {
 /// Спланить миграцию: вычислить old → new путь.
 ///
 /// `slug` — случайный идентификатор (из имени worktree, например `909045283`).
-pub fn plan_migration(
-    old_path: &Path,
-    slug: &str,
-    agent: &str,
-) -> MigrationPlan {
+pub fn plan_migration(old_path: &Path, slug: &str, agent: &str) -> MigrationPlan {
     let new_root = persistent_wt_root();
     let new_path = persistent_path_for(&new_root, slug, agent);
     let branch = format!("devh/agent-{agent}");
@@ -98,16 +97,24 @@ pub fn validate_migration_plan(plan: &MigrationPlan) -> bool {
 
 impl MigrationPlan {
     pub fn slug(&self) -> String {
-        let name = self.new_path.file_name()
+        let name = self
+            .new_path
+            .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("");
         // Формат: devh-{slug}-{agent} → извлекаем slug.
-        let parts: Vec<&str> = name.strip_prefix("devh-").unwrap_or(name).splitn(2, '-').collect();
+        let parts: Vec<&str> = name
+            .strip_prefix("devh-")
+            .unwrap_or(name)
+            .splitn(2, '-')
+            .collect();
         parts.first().unwrap_or(&"").to_string()
     }
 
     pub fn agent(&self) -> String {
-        let name = self.new_path.file_name()
+        let name = self
+            .new_path
+            .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("");
         let stripped = name.strip_prefix("devh-").unwrap_or(name);
@@ -261,10 +268,7 @@ pub fn migrate_all_in_tmp() -> Vec<MigrationResult> {
     let scanned = scan_tmp_worktrees();
     let mut results = Vec::new();
     for sw in scanned {
-        let name = sw.path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("");
+        let name = sw.path.file_name().and_then(|n| n.to_str()).unwrap_or("");
         // Формат: devh-{slug}-{agent} → достаем slug и agent.
         let stripped = name.strip_prefix("devh-").unwrap_or(name);
         let mut parts = stripped.split('-');
@@ -331,7 +335,11 @@ mod tests {
     #[test]
     fn persistent_wt_root_not_in_tmp() {
         let root = persistent_wt_root();
-        assert!(!is_under_tmp(&root), "persistent root must not be in /tmp: {}", root.display());
+        assert!(
+            !is_under_tmp(&root),
+            "persistent root must not be in /tmp: {}",
+            root.display()
+        );
     }
 
     #[test]
@@ -345,7 +353,9 @@ mod tests {
     #[test]
     fn needs_migration_true_for_tmp() {
         assert!(needs_migration(Path::new("/tmp/devh-123")));
-        assert!(!needs_migration(Path::new("/var/lib/devh/worktrees/devh-123")));
+        assert!(!needs_migration(Path::new(
+            "/var/lib/devh/worktrees/devh-123"
+        )));
     }
 
     #[test]
@@ -362,7 +372,10 @@ mod tests {
             "909045283",
             "kilo-2ba65640",
         );
-        assert!(plan.new_path.to_string_lossy().contains("devh-909045283-kilo-2ba65640"));
+        assert!(plan
+            .new_path
+            .to_string_lossy()
+            .contains("devh-909045283-kilo-2ba65640"));
         assert!(!is_under_tmp(&plan.new_path));
         assert_eq!(plan.branch, "devh/agent-kilo-2ba65640");
     }
@@ -385,7 +398,10 @@ mod tests {
             new_path: new_root.join("devh-123-agent1"),
             branch: "devh/agent-agent1".into(),
         };
-        assert!(!validate_migration_plan(&plan), "non-/tmp old path is not migratable");
+        assert!(
+            !validate_migration_plan(&plan),
+            "non-/tmp old path is not migratable"
+        );
     }
 
     #[test]
@@ -417,12 +433,27 @@ mod tests {
         std::fs::write(old.join("test.txt"), "content").unwrap();
 
         // Инициализируем как git репо.
-        let _ = Command::new("git").args(["init"]).current_dir(&old).output();
-        let _ = Command::new("git").args(["config", "user.email", "t@t.com"]).current_dir(&old).output();
-        let _ = Command::new("git").args(["config", "user.name", "T"]).current_dir(&old).output();
+        let _ = Command::new("git")
+            .args(["init"])
+            .current_dir(&old)
+            .output();
+        let _ = Command::new("git")
+            .args(["config", "user.email", "t@t.com"])
+            .current_dir(&old)
+            .output();
+        let _ = Command::new("git")
+            .args(["config", "user.name", "T"])
+            .current_dir(&old)
+            .output();
         std::fs::write(old.join("file.txt"), "hello\n").unwrap();
-        let _ = Command::new("git").args(["add", "."]).current_dir(&old).output();
-        let _ = Command::new("git").args(["commit", "-m", "init"]).current_dir(&old).output();
+        let _ = Command::new("git")
+            .args(["add", "."])
+            .current_dir(&old)
+            .output();
+        let _ = Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(&old)
+            .output();
 
         let new_root = dir.path().join("persistent/worktrees");
         let new_path = persistent_path_for(&new_root, "slug1", "test-agent");
@@ -474,12 +505,27 @@ mod tests {
         let dir = tempdir().unwrap();
         let repo = dir.path().join("repo");
         fs::create_dir_all(&repo).unwrap();
-        let _ = Command::new("git").args(["init", "-q"]).current_dir(&repo).output();
-        let _ = Command::new("git").args(["config", "user.email", "t@t.com"]).current_dir(&repo).output();
-        let _ = Command::new("git").args(["config", "user.name", "T"]).current_dir(&repo).output();
+        let _ = Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&repo)
+            .output();
+        let _ = Command::new("git")
+            .args(["config", "user.email", "t@t.com"])
+            .current_dir(&repo)
+            .output();
+        let _ = Command::new("git")
+            .args(["config", "user.name", "T"])
+            .current_dir(&repo)
+            .output();
         std::fs::write(repo.join("file.txt"), "hello\n").unwrap();
-        let _ = Command::new("git").args(["add", "."]).current_dir(&repo).output();
-        let _ = Command::new("git").args(["commit", "-m", "init"]).current_dir(&repo).output();
+        let _ = Command::new("git")
+            .args(["add", "."])
+            .current_dir(&repo)
+            .output();
+        let _ = Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(&repo)
+            .output();
         let branch = git_branch(&repo);
         assert!(branch.is_some(), "git repo must have a branch");
         let b = branch.unwrap();
@@ -491,7 +537,10 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("not_a_repo");
         fs::create_dir_all(&path).unwrap();
-        assert!(git_branch(&path).is_none(), "non-git dir should return None");
+        assert!(
+            git_branch(&path).is_none(),
+            "non-git dir should return None"
+        );
     }
 
     #[test]
@@ -501,7 +550,11 @@ mod tests {
         let result = scan_tmp_worktrees();
         for sw in &result {
             assert!(
-                sw.path.file_name().unwrap().to_string_lossy().starts_with("devh-"),
+                sw.path
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("devh-"),
                 "scan should only return devh-* dirs: {:?}",
                 sw.path
             );
@@ -518,12 +571,27 @@ mod tests {
         let dir = tempdir().unwrap();
         let old = dir.path().join("devh-999-agent1");
         fs::create_dir_all(&old).unwrap();
-        let _ = Command::new("git").args(["init", "-q"]).current_dir(&old).output();
-        let _ = Command::new("git").args(["config", "user.email", "t@t.com"]).current_dir(&old).output();
-        let _ = Command::new("git").args(["config", "user.name", "T"]).current_dir(&old).output();
+        let _ = Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&old)
+            .output();
+        let _ = Command::new("git")
+            .args(["config", "user.email", "t@t.com"])
+            .current_dir(&old)
+            .output();
+        let _ = Command::new("git")
+            .args(["config", "user.name", "T"])
+            .current_dir(&old)
+            .output();
         std::fs::write(old.join("file.txt"), "hello\n").unwrap();
-        let _ = Command::new("git").args(["add", "."]).current_dir(&old).output();
-        let _ = Command::new("git").args(["commit", "-m", "init"]).current_dir(&old).output();
+        let _ = Command::new("git")
+            .args(["add", "."])
+            .current_dir(&old)
+            .output();
+        let _ = Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(&old)
+            .output();
         let branch = git_branch(&old).unwrap_or_default();
 
         let new_root = dir.path().join("persistent/worktrees");

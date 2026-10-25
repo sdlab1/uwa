@@ -20,11 +20,7 @@ pub enum BenchVerdict {
 ///
 /// Арифметика — в `u128`: значения замеров приходят из наносекунд, и
 /// `diff * 100` в `u64` переполняется (в debug — паника).
-pub fn judge_bench(
-    baseline_ns: u64,
-    current_ns: u64,
-    tolerance_pct: u64,
-) -> BenchVerdict {
+pub fn judge_bench(baseline_ns: u64, current_ns: u64, tolerance_pct: u64) -> BenchVerdict {
     if baseline_ns == 0 {
         // Нет baseline — сравнивать не с чем: решение не принимаем.
         return BenchVerdict::Same;
@@ -93,7 +89,10 @@ mod tests {
     /// регрессия, а не «без изменений».
     #[test]
     fn sub_percent_regression_is_not_swallowed() {
-        assert_eq!(judge_bench(1_000_000, 1_000_001, 0), BenchVerdict::Regressed);
+        assert_eq!(
+            judge_bench(1_000_000, 1_000_001, 0),
+            BenchVerdict::Regressed
+        );
         assert_eq!(judge_bench(1_000_000, 1_000_001, 1), BenchVerdict::Same);
     }
 

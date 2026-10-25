@@ -45,11 +45,7 @@ pub struct TransitionError {
 
 impl fmt::Display for TransitionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "недопустимый переход: {} --{}-->",
-            self.from, self.event
-        )
+        write!(f, "недопустимый переход: {} --{}-->", self.from, self.event)
     }
 }
 
@@ -78,9 +74,7 @@ pub fn allowed_transitions(from: TaskStatus) -> Vec<TaskStatus> {
         TaskStatus::Failed,
         TaskStatus::Revoked,
     ];
-    all.into_iter()
-        .filter(|to| can_reach(from, *to))
-        .collect()
+    all.into_iter().filter(|to| can_reach(from, *to)).collect()
 }
 
 fn can_reach(from: TaskStatus, to: TaskStatus) -> bool {
@@ -101,13 +95,22 @@ mod tests {
 
     #[test]
     fn start_moves_queued_to_active() {
-        assert_eq!(apply(TaskStatus::Queued, TaskEvent::Start), Ok(TaskStatus::Active));
+        assert_eq!(
+            apply(TaskStatus::Queued, TaskEvent::Start),
+            Ok(TaskStatus::Active)
+        );
     }
 
     #[test]
     fn active_done_and_fail() {
-        assert_eq!(apply(TaskStatus::Active, TaskEvent::Done), Ok(TaskStatus::Done));
-        assert_eq!(apply(TaskStatus::Active, TaskEvent::Fail), Ok(TaskStatus::Failed));
+        assert_eq!(
+            apply(TaskStatus::Active, TaskEvent::Done),
+            Ok(TaskStatus::Done)
+        );
+        assert_eq!(
+            apply(TaskStatus::Active, TaskEvent::Fail),
+            Ok(TaskStatus::Failed)
+        );
     }
 
     #[test]

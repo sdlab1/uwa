@@ -97,7 +97,11 @@ pub fn aggregate(observations: &[Observation]) -> Vec<Observation> {
         entry.seen += obs.seen;
     }
     let mut aggregated: Vec<Observation> = seen_map.into_values().collect();
-    aggregated.sort_by(|a, b| b.seen.cmp(&a.seen).then_with(|| a.file_line.cmp(&b.file_line)));
+    aggregated.sort_by(|a, b| {
+        b.seen
+            .cmp(&a.seen)
+            .then_with(|| a.file_line.cmp(&b.file_line))
+    });
     aggregated.truncate(3);
     aggregated
 }
@@ -148,10 +152,34 @@ mod tests {
     #[test]
     fn aggregate_truncates_to_three() {
         let observations = vec![
-            Observation { file_line: "a.rs:1".into(), mutation: "m1".into(), genre: "G1".into(), red_idea: "r1".into(), seen: 5 },
-            Observation { file_line: "b.rs:2".into(), mutation: "m2".into(), genre: "G2".into(), red_idea: "r2".into(), seen: 3 },
-            Observation { file_line: "c.rs:3".into(), mutation: "m3".into(), genre: "G3".into(), red_idea: "r3".into(), seen: 10 },
-            Observation { file_line: "d.rs:4".into(), mutation: "m4".into(), genre: "G4".into(), red_idea: "r4".into(), seen: 1 },
+            Observation {
+                file_line: "a.rs:1".into(),
+                mutation: "m1".into(),
+                genre: "G1".into(),
+                red_idea: "r1".into(),
+                seen: 5,
+            },
+            Observation {
+                file_line: "b.rs:2".into(),
+                mutation: "m2".into(),
+                genre: "G2".into(),
+                red_idea: "r2".into(),
+                seen: 3,
+            },
+            Observation {
+                file_line: "c.rs:3".into(),
+                mutation: "m3".into(),
+                genre: "G3".into(),
+                red_idea: "r3".into(),
+                seen: 10,
+            },
+            Observation {
+                file_line: "d.rs:4".into(),
+                mutation: "m4".into(),
+                genre: "G4".into(),
+                red_idea: "r4".into(),
+                seen: 1,
+            },
         ];
         let agg = aggregate(&observations);
         assert_eq!(agg.len(), 3, ">3 — обрезать до 3");
@@ -165,8 +193,20 @@ mod tests {
     #[test]
     fn aggregate_dedup_by_file_line_and_genre() {
         let observations = vec![
-            Observation { file_line: "dup.rs:1".into(), mutation: "m".into(), genre: "G".into(), red_idea: "r".into(), seen: 1 },
-            Observation { file_line: "dup.rs:1".into(), mutation: "m2".into(), genre: "G".into(), red_idea: "r2".into(), seen: 1 },
+            Observation {
+                file_line: "dup.rs:1".into(),
+                mutation: "m".into(),
+                genre: "G".into(),
+                red_idea: "r".into(),
+                seen: 1,
+            },
+            Observation {
+                file_line: "dup.rs:1".into(),
+                mutation: "m2".into(),
+                genre: "G".into(),
+                red_idea: "r2".into(),
+                seen: 1,
+            },
         ];
         let agg = aggregate(&observations);
         assert_eq!(agg.len(), 1, "один ключ — один результат после дедупа");
@@ -177,7 +217,8 @@ mod tests {
     #[test]
     fn observations_integrate_with_killmap() {
         // Проверка: строка наблюдения содержит `survivor:` и не содержит `|`.
-        let line = "core/killmap.rs:42 / survivor: missed_mutant [Unknown] / red-тест: прямой ассерт";
+        let line =
+            "core/killmap.rs:42 / survivor: missed_mutant [Unknown] / red-тест: прямой ассерт";
         let obs = parse_line(line).expect("строка наблюдения должна парситься");
         assert!(obs.file_line.contains("killmap"));
         assert!(obs.mutation.contains("missed"));

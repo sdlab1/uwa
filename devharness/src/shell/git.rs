@@ -46,8 +46,11 @@ pub fn root_from_cwd() -> anyhow::Result<PathBuf> {
 /// дереве. Общий реестр/доска — обязательны, поэтому нужен общий корень:
 /// `--git-common-dir` указывает на `.git` главного checkout'а.
 pub fn main_root_from_cwd(wt: &Path) -> anyhow::Result<PathBuf> {
-    let raw = git(wt, &["rev-parse", "--path-format=absolute", "--git-common-dir"])
-        .or_else(|_| git(wt, &["rev-parse", "--git-common-dir"]))?;
+    let raw = git(
+        wt,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    )
+    .or_else(|_| git(wt, &["rev-parse", "--git-common-dir"]))?;
     let raw = raw.trim();
     anyhow::ensure!(!raw.is_empty(), "devh: git-common-dir пуст");
     let p = PathBuf::from(raw);
@@ -56,7 +59,10 @@ pub fn main_root_from_cwd(wt: &Path) -> anyhow::Result<PathBuf> {
     match p.file_name().and_then(|n| n.to_str()) {
         // `.git` главного checkout'а → его корень; linked worktree лежит
         // в `.git/worktrees/<имя>` — там главного дерева нет.
-        Some(".git") => Ok(p.parent().map(Path::to_path_buf).unwrap_or_else(|| wt.to_path_buf())),
+        Some(".git") => Ok(p
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| wt.to_path_buf())),
         _ => Ok(wt.to_path_buf()),
     }
 }

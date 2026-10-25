@@ -76,9 +76,7 @@ fn parse_message_block(block: &str) -> Option<(String, String)> {
 
 /// Подсчитать количество писем в файле inbox (по количеству блоков с ТЕМА:).
 fn count_messages(text: &str) -> usize {
-    text.lines()
-        .filter(|l| l.starts_with("ТЕМА: "))
-        .count()
+    text.lines().filter(|l| l.starts_with("ТЕМА: ")).count()
 }
 
 /// Возраст файла в минутах.
@@ -118,10 +116,7 @@ pub fn stale_messages_in(home: &Path, agent: &str, threshold_min: u64) -> Vec<St
 
     // Делим на блоки: каждый блок начинается с "[ЧЧ:ММ]" или содержит "ТЕМА:".
     let sep = "\n---\n";
-    let blocks: Vec<&str> = text
-        .split(sep)
-        .filter(|s| !s.trim().is_empty())
-        .collect();
+    let blocks: Vec<&str> = text.split(sep).filter(|s| !s.trim().is_empty()).collect();
 
     for block in blocks {
         if let Some((sender, subject)) = parse_message_block(block) {
@@ -208,8 +203,7 @@ mod tests {
                 .as_secs()
                 - (age_min * 60);
             let old_time = UNIX_EPOCH + std::time::Duration::from_secs(old);
-            filetime::set_file_mtime(&path, filetime::FileTime::from_system_time(old_time))
-                .ok();
+            filetime::set_file_mtime(&path, filetime::FileTime::from_system_time(old_time)).ok();
         }
     }
 

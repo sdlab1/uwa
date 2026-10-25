@@ -20,6 +20,8 @@
 //!   devh orch model --agent X --model M [--runtime R]     — смена модели/рантайма
 //!   devh orch zones                 — кто какие зоны держит
 
+use crate::core::agent_state::{degrade_p, AgentState as CoreAgentState};
+use crate::core::ledger::{log_event, LedgerEntry, LedgerEvent};
 use anyhow::anyhow;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -27,8 +29,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
-use crate::core::ledger::{LedgerEntry, LedgerEvent, log_event};
-use crate::core::agent_state::{AgentState as CoreAgentState, degrade_p};
 
 use crate::core::guards::zone_guard::{OwnedTask, ZoneGuard};
 use crate::core::guards::{Guard, GuardContext, GuardVerdict};
@@ -1094,7 +1094,11 @@ fn add(root: &Path, args: &[String]) -> anyhow::Result<()> {
     };
     let deps: Vec<String> = flags_all(args, "--dep")
         .into_iter()
-        .flat_map(|raw| raw.split(',').map(|s| s.trim().to_string()).collect::<Vec<String>>())
+        .flat_map(|raw| {
+            raw.split(',')
+                .map(|s| s.trim().to_string())
+                .collect::<Vec<String>>()
+        })
         .filter(|s| !s.is_empty())
         .collect();
     let dod: Vec<String> = flags_all(args, "--dod")
@@ -1464,12 +1468,7 @@ fn start(root: &Path, args: &[String]) -> anyhow::Result<()> {
                 }
             }
             if !pairs.is_empty() {
-                conflicts.push(format!(
-                    "{} ({}) — {}",
-                    t.id,
-                    t.agent,
-                    pairs.join(", ")
-                ));
+                conflicts.push(format!("{} ({}) — {}", t.id, t.agent, pairs.join(", ")));
             }
         }
         if !conflicts.is_empty() {
@@ -1595,7 +1594,10 @@ fn start(root: &Path, args: &[String]) -> anyhow::Result<()> {
     }
     // Ledger: событие Started
     let ledger_path = dir(root).join("ledger.jsonl");
-    let _ = log_event(&ledger_path, &LedgerEntry::new(&agent, LedgerEvent::Started, ts).with_task(&id));
+    let _ = log_event(
+        &ledger_path,
+        &LedgerEntry::new(&agent, LedgerEvent::Started, ts).with_task(&id),
+    );
     println!(
         "devh orch: {id} взята в работу ({agent}, P{p} C{}){}",
         reg.tasks[idx].c_level.unwrap_or(0),
@@ -1719,9 +1721,16 @@ fn close(root: &Path, args: &[String], status: Status) -> anyhow::Result<()> {
     crate::commands::autoassign::auto_trigger(root, &mut reg);
     save(root, &reg)?;
     // Ledger: событие Done или Failed
-    let event = if status == Status::Done { LedgerEvent::Done } else { LedgerEvent::Failed };
+    let event = if status == Status::Done {
+        LedgerEvent::Done
+    } else {
+        LedgerEvent::Failed
+    };
     let ledger_path = dir(root).join("ledger.jsonl");
-    let _ = log_event(&ledger_path, &LedgerEntry::new(&agent, event, now()).with_task(&id));
+    let _ = log_event(
+        &ledger_path,
+        &LedgerEntry::new(&agent, event, now()).with_task(&id),
+    );
     println!(
         "devh orch: {id} {} ({agent}, F{f}, модель {})",
         if status == Status::Done {
@@ -1755,7 +1764,10 @@ fn close(root: &Path, args: &[String], status: Status) -> anyhow::Result<()> {
                 mark_main_sha(&mut merged, &tid, out.sha.as_deref());
             }
             let _ = save(root, &merged);
-            println!("devh orch: автослияние {agent}: {} — {}", out.state, out.detail);
+            println!(
+                "devh orch: автослияние {agent}: {} — {}",
+                out.state, out.detail
+            );
             notify_merge(&agent, &id, &out);
         }
         // Работа, сделанная прямо в main (ведущий), не имеет слияния ветки —
@@ -1785,7 +1797,12 @@ struct MergeOutcome {
 /// Merge не должен быть вопросом агенту («нужен devh orch wt merge X»):
 /// если worktree чистый и главное дерево чистое — вливаем сами, пишем
 /// состояние в реестр и уведомляем агента («действовать не нужно»).
-fn auto_merge_agent(root: &Path, reg: &Registry, agent: &str, task_id: &str) -> Option<MergeOutcome> {
+fn auto_merge_agent(
+    root: &Path,
+    reg: &Registry,
+    agent: &str,
+    task_id: &str,
+) -> Option<MergeOutcome> {
     let canon = crate::core::identity::canonical(agent);
     let a = reg
         .agents
@@ -1805,10 +1822,12 @@ fn auto_merge_agent(root: &Path, reg: &Registry, agent: &str, task_id: &str) -> 
     let mut wip_note = String::new();
     if crate::shell::git::tree_dirty(&path) {
         match crate::commands::wtman::checkpoint_at(&path, &canon) {
-            Ok(sha) => wip_note = format!(
-                "; WIP сохранён в {} ({sha})",
-                crate::commands::wtman::wip_branch(&canon)
-            ),
+            Ok(sha) => {
+                wip_note = format!(
+                    "; WIP сохранён в {} ({sha})",
+                    crate::commands::wtman::wip_branch(&canon)
+                )
+            }
             Err(e) => wip_note = format!("; WIP-чекпоинт не удался: {e}"),
         }
     }
@@ -1845,8 +1864,7 @@ fn auto_merge_agent(root: &Path, reg: &Registry, agent: &str, task_id: &str) -> 
     }
     // Перенос коммитов агента на главную — во временном worktree: его
     // (грязный) worktree остаётся нетронутым, rebase не нужен.
-    match crate::commands::wtman::merge_via_cherry_pick(&main_root, &main_branch, &branch, &canon)
-    {
+    match crate::commands::wtman::merge_via_cherry_pick(&main_root, &main_branch, &branch, &canon) {
         Ok(result) => {
             // Ledger: событие Merged (здесь есть root — в record_merge его нет,
             // поэтому событие пишется на месте успешного слияния).
@@ -1860,7 +1878,10 @@ fn auto_merge_agent(root: &Path, reg: &Registry, agent: &str, task_id: &str) -> 
             // Отправить отчёт о слиянии агенту (файлы + SHA).
             if std::env::var("DEVH_NO_MAIL").as_deref() != Ok("1") {
                 if let Ok(report) = crate::core::merge_report::build_merge_report(
-                    &main_root, &main_branch, &branch, &canon
+                    &main_root,
+                    &main_branch,
+                    &branch,
+                    &canon,
                 ) {
                     let _ = crate::core::merge_report::send_merge_report(
                         &crate::shell::msg::home(),
@@ -1963,8 +1984,7 @@ fn retry_pending_merges(root: &Path, reg: &mut Registry) -> Vec<String> {
             .tasks
             .iter()
             .filter(|t| {
-                t.status == Status::Done
-                    && crate::core::identity::canonical(&t.agent) == canon
+                t.status == Status::Done && crate::core::identity::canonical(&t.agent) == canon
             })
             .map(|t| t.id.clone())
             .next_back()
@@ -2005,7 +2025,9 @@ fn retry_pending_merges(root: &Path, reg: &mut Registry) -> Vec<String> {
 /// `main_sha` — это SHA коммита в `main`, куда попала работа задачи. Без него
 /// нельзя отличить «работа агента» от «работа, которая реально в main».
 fn mark_main_sha(reg: &mut Registry, task_id: &str, sha: Option<&str>) {
-    let Some(sha) = sha else { return; };
+    let Some(sha) = sha else {
+        return;
+    };
     if let Some(idx) = find_task_index(reg, task_id) {
         if let Some(t) = reg.tasks.get_mut(idx) {
             t.main_sha = Some(sha.to_string());
@@ -2057,7 +2079,11 @@ fn patch_id_of(root: &Path, sha: &str) -> Option<String> {
         root.display(),
         sha
     );
-    let out = std::process::Command::new("sh").arg("-c").arg(script).output().ok()?;
+    let out = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(script)
+        .output()
+        .ok()?;
     let text = String::from_utf8_lossy(&out.stdout);
     text.split_whitespace()
         .next()
@@ -2072,13 +2098,18 @@ fn main_patch_index(root: &Path) -> std::collections::BTreeMap<String, String> {
         "git -C '{}' log --format=%H -p --no-merges --no-ext-diff main | git patch-id --stable",
         root.display()
     );
-    if let Ok(out) = std::process::Command::new("sh").arg("-c").arg(script).output() {
+    if let Ok(out) = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(script)
+        .output()
+    {
         for line in String::from_utf8_lossy(&out.stdout).lines() {
             let mut it = line.split_whitespace();
             let (Some(pid), Some(commit)) = (it.next(), it.next()) else {
                 continue;
             };
-            map.entry(pid.to_string()).or_insert_with(|| commit.to_string());
+            map.entry(pid.to_string())
+                .or_insert_with(|| commit.to_string());
         }
     }
     map
@@ -2146,7 +2177,11 @@ fn last_touching_commit(root: &Path, paths: &[String]) -> Option<String> {
         root.display(),
         joined
     );
-    let out = std::process::Command::new("sh").arg("-c").arg(script).output().ok()?;
+    let out = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(script)
+        .output()
+        .ok()?;
     let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
     if text.is_empty() {
         None
@@ -2280,7 +2315,12 @@ fn revoke(root: &Path, args: &[String]) -> anyhow::Result<()> {
     save(root, &reg)?;
     // Ledger: событие Revoked
     let ledger_path = dir(root).join("ledger.jsonl");
-    let _ = log_event(&ledger_path, &LedgerEntry::new(&agent, LedgerEvent::Revoked, now()).with_task(&id).with_detail(&reason));
+    let _ = log_event(
+        &ledger_path,
+        &LedgerEntry::new(&agent, LedgerEvent::Revoked, now())
+            .with_task(&id)
+            .with_detail(&reason),
+    );
     println!("devh orch: {id} отозвана ({reason})");
     Ok(())
 }
@@ -2706,8 +2746,8 @@ fn list(root: &Path, args: &[String]) -> anyhow::Result<()> {
             // чужие зоны и служебные секции панели ему не нужны.
             let mine = crate::core::identity::canonical(&t.agent) == caller;
             let t_agent = crate::core::identity::canonical(&t.agent);
-            let from_buffer = lead.as_deref() == Some(t_agent.as_str())
-                && t.status == Status::Queued;
+            let from_buffer =
+                lead.as_deref() == Some(t_agent.as_str()) && t.status == Status::Queued;
             if !mine && !from_buffer {
                 continue;
             }
@@ -2810,7 +2850,14 @@ fn next_cmd(root: &Path) -> anyhow::Result<()> {
     if ready.is_empty() {
         println!("devh orch next: доступных задач нет");
         if !blocked.is_empty() {
-            println!("заблокированы зависимостями: {}", blocked.iter().map(|t| t.id.as_str()).collect::<Vec<_>>().join(", "));
+            println!(
+                "заблокированы зависимостями: {}",
+                blocked
+                    .iter()
+                    .map(|t| t.id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
         }
         println!("следующий шаг: devh msg read → взять задачу → dod/verify/commit/done");
         return Ok(());
@@ -2826,7 +2873,10 @@ fn next_cmd(root: &Path) -> anyhow::Result<()> {
             c = t.c_level.unwrap_or(0),
             title = t.title
         );
-        println!("выдать ведомому: devh orch reassign {id} --agent <ведомый>", id = t.id);
+        println!(
+            "выдать ведомому: devh orch reassign {id} --agent <ведомый>",
+            id = t.id
+        );
     } else if own {
         println!(
             "devh orch next: {id} (P{p} C{c} prio{prio}) — {title}",
@@ -2862,10 +2912,9 @@ fn selfcheck(root: &Path, args: &[String]) -> anyhow::Result<()> {
 
     // 1. Активная задача → живой worktree.
     for t in reg.tasks.iter().filter(|t| t.status == Status::Active) {
-        let st = reg
-            .agents
-            .iter()
-            .find(|a| crate::core::identity::canonical(&a.name) == crate::core::identity::canonical(&t.agent));
+        let st = reg.agents.iter().find(|a| {
+            crate::core::identity::canonical(&a.name) == crate::core::identity::canonical(&t.agent)
+        });
         match st.and_then(|a| a.worktree.clone()) {
             Some(w) if Path::new(&w).is_dir() => {
                 if w.starts_with("/tmp/") {
@@ -2875,7 +2924,10 @@ fn selfcheck(root: &Path, args: &[String]) -> anyhow::Result<()> {
                     ));
                 }
             }
-            Some(w) => problems.push(format!("{} ({}): worktree {w} не существует", t.id, t.agent)),
+            Some(w) => problems.push(format!(
+                "{} ({}): worktree {w} не существует",
+                t.id, t.agent
+            )),
             None => problems.push(format!("{} ({}): worktree не выдан", t.id, t.agent)),
         }
     }
@@ -2891,12 +2943,18 @@ fn selfcheck(root: &Path, args: &[String]) -> anyhow::Result<()> {
         }
     }
     // 3. Пересечение зон: две активные задачи разных агентов в одной зоне.
-    let active: Vec<&Task> = reg.tasks.iter().filter(|t| t.status == Status::Active).collect();
+    let active: Vec<&Task> = reg
+        .tasks
+        .iter()
+        .filter(|t| t.status == Status::Active)
+        .collect();
     for i in 0..active.len() {
         for j in (i + 1)..active.len() {
             let a = active[i];
             let b = active[j];
-            if crate::core::identity::canonical(&a.agent) == crate::core::identity::canonical(&b.agent) {
+            if crate::core::identity::canonical(&a.agent)
+                == crate::core::identity::canonical(&b.agent)
+            {
                 continue;
             }
             for za in &a.zones {
@@ -2920,8 +2978,7 @@ fn selfcheck(root: &Path, args: &[String]) -> anyhow::Result<()> {
             .tasks
             .iter()
             .filter(|t| {
-                t.status == Status::Active
-                    && crate::core::identity::canonical(&t.agent) == canon
+                t.status == Status::Active && crate::core::identity::canonical(&t.agent) == canon
             })
             .map(|t| OwnedTask {
                 id: t.id.clone(),
@@ -2946,7 +3003,9 @@ fn selfcheck(root: &Path, args: &[String]) -> anyhow::Result<()> {
         })
         .count();
     if buffer_n < 15 {
-        warns.push(format!("буфер ведущего: {buffer_n} задач (<15, O1) — наполни"));
+        warns.push(format!(
+            "буфер ведущего: {buffer_n} задач (<15, O1) — наполни"
+        ));
     }
     for a in reg.agents.iter() {
         if a.role.as_deref() == Some(ROLE_LEAD) {
@@ -2963,7 +3022,9 @@ fn selfcheck(root: &Path, args: &[String]) -> anyhow::Result<()> {
             })
             .count();
         if n < 2 {
-            warns.push(format!("{canon}: в очереди {n} задач (<2, O1) — выдать задачу"));
+            warns.push(format!(
+                "{canon}: в очереди {n} задач (<2, O1) — выдать задачу"
+            ));
         }
     }
     // 4b. ДОСТУПНОСТЬ задач: очередь есть, а взять нечего — все задачи
@@ -3056,15 +3117,15 @@ fn selfcheck(root: &Path, args: &[String]) -> anyhow::Result<()> {
     let conflicting: Vec<&Task> = reg
         .tasks
         .iter()
-        .filter(|t| {
-            t.status == Status::Queued || t.status == Status::Active
-        })
+        .filter(|t| t.status == Status::Queued || t.status == Status::Active)
         .collect();
     for i in 0..conflicting.len() {
         for j in (i + 1)..conflicting.len() {
             let a = conflicting[i];
             let b = conflicting[j];
-            if crate::core::identity::canonical(&a.agent) == crate::core::identity::canonical(&b.agent) {
+            if crate::core::identity::canonical(&a.agent)
+                == crate::core::identity::canonical(&b.agent)
+            {
                 continue;
             }
             for za in &a.zones {
@@ -3072,7 +3133,10 @@ fn selfcheck(root: &Path, args: &[String]) -> anyhow::Result<()> {
                     if zones_overlap(za, zb) {
                         warns.push(format!(
                             "пересечение зон {za}: {} ({}) и {} ({}) — возможна двойная работа",
-                            a.id, a.status.label(), b.id, b.status.label()
+                            a.id,
+                            a.status.label(),
+                            b.id,
+                            b.status.label()
                         ));
                     }
                 }
@@ -3130,16 +3194,25 @@ fn selfcheck(root: &Path, args: &[String]) -> anyhow::Result<()> {
     }
 
     if as_json {
-        println!("{}", crate::core::report_fmt::format_selfcheck_json(&report));
+        println!(
+            "{}",
+            crate::core::report_fmt::format_selfcheck_json(&report)
+        );
     } else {
-        print!("{}", crate::core::report_fmt::format_selfcheck_text(&report));
+        print!(
+            "{}",
+            crate::core::report_fmt::format_selfcheck_text(&report)
+        );
         println!(
             "итого: проблем {} · предупреждений {}",
             report.problem_count, report.warn_count
         );
     }
     if !problems.is_empty() {
-        anyhow::bail!("selfcheck: {} критических проблем оркестрации", problems.len());
+        anyhow::bail!(
+            "selfcheck: {} критических проблем оркестрации",
+            problems.len()
+        );
     }
     Ok(())
 }
@@ -3194,12 +3267,16 @@ fn pulse(root: &Path) -> anyhow::Result<()> {
         let active = reg
             .tasks
             .iter()
-            .filter(|t| t.status == Status::Active && crate::core::identity::canonical(&t.agent) == canon)
+            .filter(|t| {
+                t.status == Status::Active && crate::core::identity::canonical(&t.agent) == canon
+            })
             .count();
         let queued = reg
             .tasks
             .iter()
-            .filter(|t| t.status == Status::Queued && crate::core::identity::canonical(&t.agent) == canon)
+            .filter(|t| {
+                t.status == Status::Queued && crate::core::identity::canonical(&t.agent) == canon
+            })
             .count();
         let unread = crate::shell::msg::unread_count(&canon);
         let age = crate::shell::msg::presence_age_secs(&canon);
@@ -3226,7 +3303,10 @@ fn pulse(root: &Path) -> anyhow::Result<()> {
             }
         }
         if a.merge_state.as_deref().is_some_and(|s| s != "влито") {
-            attention.push(format!("{canon}: слияние не закрыто ({})", a.merge_state.as_deref().unwrap_or("—")));
+            attention.push(format!(
+                "{canon}: слияние не закрыто ({})",
+                a.merge_state.as_deref().unwrap_or("—")
+            ));
         }
     }
     if !attention.is_empty() {
@@ -3379,7 +3459,11 @@ fn identify(root: &Path, args: &[String]) -> anyhow::Result<()> {
             &m,
             None,
         );
-        let who = if is_lead { "ведущим" } else { "tech-lead" };
+        let who = if is_lead {
+            "ведущим"
+        } else {
+            "tech-lead"
+        };
         println!("devh orch identify: {canon} — модель {m} (записано {who})");
         return Ok(());
     }
@@ -3839,7 +3923,9 @@ fn board_worker_json(reg: &Registry, lead: Option<&str>, caller: &str) -> String
     let susp = state.and_then(|s| s.suspicion.clone()).unwrap_or_default();
     let worktree = state.and_then(|s| s.worktree.clone()).unwrap_or_default();
     let wt_synced_at = state.and_then(|s| s.wt_synced_at).unwrap_or(0);
-    let merge_state = state.and_then(|s| s.merge_state.clone()).unwrap_or_default();
+    let merge_state = state
+        .and_then(|s| s.merge_state.clone())
+        .unwrap_or_default();
     let merged_sha = state.and_then(|s| s.merged_sha.clone()).unwrap_or_default();
 
     let to_task = |t: &Task| TaskJson {
@@ -3905,22 +3991,28 @@ fn board(root: &Path, args: &[String]) -> anyhow::Result<()> {
             let susp = state.and_then(|s| s.suspicion.clone());
             let worktree = state.and_then(|s| s.worktree.clone());
             let wt_synced_at = state.and_then(|s| s.wt_synced_at);
-            let active_tasks: Vec<_> = active.iter().map(|t| TaskJson {
-                id: t.id.clone(),
-                status: t.status.label().to_string(),
-                complexity: t.complexity,
-                c_level: t.c_level.unwrap_or(0),
-                zones: t.zones.clone(),
-                title: t.title.clone(),
-            }).collect();
-            let queued_tasks: Vec<_> = queued.iter().map(|t| TaskJson {
-                id: t.id.clone(),
-                status: t.status.label().to_string(),
-                complexity: t.complexity,
-                c_level: t.c_level.unwrap_or(0),
-                zones: t.zones.clone(),
-                title: t.title.clone(),
-            }).collect();
+            let active_tasks: Vec<_> = active
+                .iter()
+                .map(|t| TaskJson {
+                    id: t.id.clone(),
+                    status: t.status.label().to_string(),
+                    complexity: t.complexity,
+                    c_level: t.c_level.unwrap_or(0),
+                    zones: t.zones.clone(),
+                    title: t.title.clone(),
+                })
+                .collect();
+            let queued_tasks: Vec<_> = queued
+                .iter()
+                .map(|t| TaskJson {
+                    id: t.id.clone(),
+                    status: t.status.label().to_string(),
+                    complexity: t.complexity,
+                    c_level: t.c_level.unwrap_or(0),
+                    zones: t.zones.clone(),
+                    title: t.title.clone(),
+                })
+                .collect();
             let queued_len = queued.len();
             let has_suspicion = susp.is_some();
             let unread_count = if board_lead.as_deref() == Some(name.as_str()) {
@@ -3930,7 +4022,9 @@ fn board(root: &Path, args: &[String]) -> anyhow::Result<()> {
             };
             agents_json.push(AgentJson {
                 name: name.clone(),
-                role: state.and_then(|s| s.role.clone()).unwrap_or_else(|| "—".to_string()),
+                role: state
+                    .and_then(|s| s.role.clone())
+                    .unwrap_or_else(|| "—".to_string()),
                 model,
                 last_fail: last_f,
                 suspicion: susp.unwrap_or_default(),
@@ -3982,14 +4076,17 @@ fn board(root: &Path, args: &[String]) -> anyhow::Result<()> {
         }
 
         let buffer = buffer_tasks(&reg, board_lead.as_deref());
-        let buffer_tasks_json: Vec<_> = buffer.iter().map(|t| TaskJson {
-            id: t.id.clone(),
-            status: t.status.label().to_string(),
-            complexity: t.complexity,
-            c_level: t.c_level.unwrap_or(0),
-            zones: t.zones.clone(),
-            title: t.title.clone(),
-        }).collect();
+        let buffer_tasks_json: Vec<_> = buffer
+            .iter()
+            .map(|t| TaskJson {
+                id: t.id.clone(),
+                status: t.status.label().to_string(),
+                complexity: t.complexity,
+                c_level: t.c_level.unwrap_or(0),
+                zones: t.zones.clone(),
+                title: t.title.clone(),
+            })
+            .collect();
         if buffer.len() < BUFFER_MIN {
             warns.push(format!(
                 "буфер ведущего: {} задач (<{BUFFER_MIN}) — наполни доску: devh orch add --agent <lead> --buffer --dod ... --check ...",
@@ -3997,11 +4094,31 @@ fn board(root: &Path, args: &[String]) -> anyhow::Result<()> {
             ));
         }
 
-        let queued_total = reg.tasks.iter().filter(|t| t.status == Status::Queued).count();
-        let active_total = reg.tasks.iter().filter(|t| t.status == Status::Active).count();
-        let done_total = reg.tasks.iter().filter(|t| t.status == Status::Done).count();
-        let failed_total = reg.tasks.iter().filter(|t| t.status == Status::Failed).count();
-        let revoked_total = reg.tasks.iter().filter(|t| t.status == Status::Revoked).count();
+        let queued_total = reg
+            .tasks
+            .iter()
+            .filter(|t| t.status == Status::Queued)
+            .count();
+        let active_total = reg
+            .tasks
+            .iter()
+            .filter(|t| t.status == Status::Active)
+            .count();
+        let done_total = reg
+            .tasks
+            .iter()
+            .filter(|t| t.status == Status::Done)
+            .count();
+        let failed_total = reg
+            .tasks
+            .iter()
+            .filter(|t| t.status == Status::Failed)
+            .count();
+        let revoked_total = reg
+            .tasks
+            .iter()
+            .filter(|t| t.status == Status::Revoked)
+            .count();
 
         let board_json = BoardJson {
             lead: board_lead,
@@ -4020,7 +4137,9 @@ fn board(root: &Path, args: &[String]) -> anyhow::Result<()> {
         };
 
         let mut serializer = serde_json::Serializer::new(std::io::stdout());
-        board_json.serialize(&mut serializer).map_err(|e| anyhow!("json serialize: {e}"))?;
+        board_json
+            .serialize(&mut serializer)
+            .map_err(|e| anyhow!("json serialize: {e}"))?;
         println!();
         return Ok(());
     }
@@ -4162,8 +4281,8 @@ fn board(root: &Path, args: &[String]) -> anyhow::Result<()> {
             if Some(a.name.as_str()) == board_lead.as_deref() {
                 continue;
             }
-            let model = registry_model(&reg, &a.name)
-                .unwrap_or_else(|| "модель неизвестна".to_string());
+            let model =
+                registry_model(&reg, &a.name).unwrap_or_else(|| "модель неизвестна".to_string());
             let ceiling = stats
                 .iter()
                 .find(|s| s.model == model)
@@ -4334,10 +4453,16 @@ fn board(root: &Path, args: &[String]) -> anyhow::Result<()> {
 /// Ведущий видит всю панель (все агенты, буфер, пересечения зон, предупреждения).
 /// Ведомому достаются: его модель/состояние, его worktree, его задачи (в работе
 /// и в очереди) и свободные задачи буфера ведущего — их можно взять самому.
-fn board_worker(reg: &Registry, lead: Option<&str>, caller: &str, as_json: bool) -> anyhow::Result<()> {
-    let state = reg.agents.iter().find(|a| {
-        crate::core::identity::canonical(&a.name) == caller
-    });
+fn board_worker(
+    reg: &Registry,
+    lead: Option<&str>,
+    caller: &str,
+    as_json: bool,
+) -> anyhow::Result<()> {
+    let state = reg
+        .agents
+        .iter()
+        .find(|a| crate::core::identity::canonical(&a.name) == caller);
     let (active, queued) = agent_sections(reg, caller);
     let model = state
         .and_then(|s| s.model.clone())
@@ -4351,31 +4476,40 @@ fn board_worker(reg: &Registry, lead: Option<&str>, caller: &str, as_json: bool)
     let wt_synced_at = state.and_then(|s| s.wt_synced_at);
     let merge_state = state.and_then(|s| s.merge_state.clone());
     let merged_sha = state.and_then(|s| s.merged_sha.clone());
-    let active_tasks: Vec<_> = active.iter().map(|t| TaskJson {
-        id: t.id.clone(),
-        status: t.status.label().to_string(),
-        complexity: t.complexity,
-        c_level: t.c_level.unwrap_or(0),
-        zones: t.zones.clone(),
-        title: t.title.clone(),
-    }).collect();
-    let queued_tasks: Vec<_> = queued.iter().map(|t| TaskJson {
-        id: t.id.clone(),
-        status: t.status.label().to_string(),
-        complexity: t.complexity,
-        c_level: t.c_level.unwrap_or(0),
-        zones: t.zones.clone(),
-        title: t.title.clone(),
-    }).collect();
+    let active_tasks: Vec<_> = active
+        .iter()
+        .map(|t| TaskJson {
+            id: t.id.clone(),
+            status: t.status.label().to_string(),
+            complexity: t.complexity,
+            c_level: t.c_level.unwrap_or(0),
+            zones: t.zones.clone(),
+            title: t.title.clone(),
+        })
+        .collect();
+    let queued_tasks: Vec<_> = queued
+        .iter()
+        .map(|t| TaskJson {
+            id: t.id.clone(),
+            status: t.status.label().to_string(),
+            complexity: t.complexity,
+            c_level: t.c_level.unwrap_or(0),
+            zones: t.zones.clone(),
+            title: t.title.clone(),
+        })
+        .collect();
     let buffer = buffer_tasks(reg, lead);
-    let buffer_tasks_json: Vec<_> = buffer.iter().map(|t| TaskJson {
-        id: t.id.clone(),
-        status: t.status.label().to_string(),
-        complexity: t.complexity,
-        c_level: t.c_level.unwrap_or(0),
-        zones: t.zones.clone(),
-        title: t.title.clone(),
-    }).collect();
+    let buffer_tasks_json: Vec<_> = buffer
+        .iter()
+        .map(|t| TaskJson {
+            id: t.id.clone(),
+            status: t.status.label().to_string(),
+            complexity: t.complexity,
+            c_level: t.c_level.unwrap_or(0),
+            zones: t.zones.clone(),
+            title: t.title.clone(),
+        })
+        .collect();
 
     if as_json {
         let worker_json = WorkerBoardJson {
@@ -4393,7 +4527,9 @@ fn board_worker(reg: &Registry, lead: Option<&str>, caller: &str, as_json: bool)
             buffer: buffer_tasks_json,
         };
         let mut serializer = serde_json::Serializer::new(std::io::stdout());
-        worker_json.serialize(&mut serializer).map_err(|e| anyhow!("json serialize: {e}"))?;
+        worker_json
+            .serialize(&mut serializer)
+            .map_err(|e| anyhow!("json serialize: {e}"))?;
         println!();
         return Ok(());
     }
@@ -4936,7 +5072,10 @@ fn validate_commit_sha(tree: &Path, sha: &str, agent: &str, reg: &Registry) -> a
             ));
         }
         Err(e) => {
-            return Err(anyhow::anyhow!("не удалось запустить git merge-base: {}", e));
+            return Err(anyhow::anyhow!(
+                "не удалось запустить git merge-base: {}",
+                e
+            ));
         }
     }
     Ok(())
@@ -5539,8 +5678,13 @@ fn review_cmd(root: &Path, args: &[String]) -> anyhow::Result<()> {
         println!("декларации моделей:");
         for (n, d) in declarations.iter() {
             let extra = match d {
-                crate::core::tech_lead::ModelDeclaration::Declared { model } => format!(" ({model})"),
-                crate::core::tech_lead::ModelDeclaration::Mismatch { declared, registered } => {
+                crate::core::tech_lead::ModelDeclaration::Declared { model } => {
+                    format!(" ({model})")
+                }
+                crate::core::tech_lead::ModelDeclaration::Mismatch {
+                    declared,
+                    registered,
+                } => {
                     format!(" (декларация {declared} ≠ реестр {registered})")
                 }
                 crate::core::tech_lead::ModelDeclaration::Missing => String::new(),
@@ -5631,8 +5775,8 @@ fn ceiling_cmd(root: &Path, args: &[String]) -> anyhow::Result<()> {
         .map_err(|e| anyhow!("devh orch ceiling: реестр занят ({e}) — повтори через секунду"))?;
     let reg = load(root);
     require_review_rights(&reg, "ceiling")?;
-    let raw_agent = flag(args, "--agent")
-        .ok_or_else(|| anyhow!("devh orch ceiling: нужен --agent"))?;
+    let raw_agent =
+        flag(args, "--agent").ok_or_else(|| anyhow!("devh orch ceiling: нужен --agent"))?;
     let agent = crate::core::identity::canonical(&raw_agent);
     let clear = args.iter().any(|a| a == "--clear");
     let c = match flag(args, "--c") {
@@ -5640,7 +5784,9 @@ fn ceiling_cmd(root: &Path, args: &[String]) -> anyhow::Result<()> {
         None => None,
     };
     if !clear && c.is_none() {
-        return Err(anyhow!("devh orch ceiling: нужен --c N (0..C10) или --clear"));
+        return Err(anyhow!(
+            "devh orch ceiling: нужен --c N (0..C10) или --clear"
+        ));
     }
     if clear && c.is_some() {
         return Err(anyhow!("devh orch ceiling: --c и --clear вместе нельзя"));
@@ -6665,7 +6811,11 @@ mod tests {
         run(root, "start", &[id.as_str()]).expect("start из буфера");
         let reg = load(root);
         let task = reg.tasks.first().expect("задача");
-        assert_eq!(task.agent, me(), "задача должна быть назначена caller, а не openc-0a0e0cfc");
+        assert_eq!(
+            task.agent,
+            me(),
+            "задача должна быть назначена caller, а не openc-0a0e0cfc"
+        );
         assert_eq!(task.started_by.as_deref(), Some(me().as_str()));
     }
 
@@ -7016,7 +7166,7 @@ mod tests {
                 prio.into(),
             ];
             let refs: Vec<&str> = owned.iter().map(String::as_str).collect();
-        run(root, "add", &refs).expect("add");
+            run(root, "add", &refs).expect("add");
             let reg = load(root);
             ids.push(reg.tasks.last().map(|t| t.id.clone()).unwrap_or_default());
         }
@@ -7089,8 +7239,13 @@ mod tests {
     fn commit_sha_must_exist_in_git() {
         let (_d, root, wt) = agent_wt_fixture();
         let reg = reg_with_branch("beam", &wt, "devh/agent-beam");
-        let err = validate_commit_sha(&wt, "0000000000000000000000000000000000000000", "beam", &reg)
-            .expect_err("несуществующий SHA должен быть отвергнут");
+        let err = validate_commit_sha(
+            &wt,
+            "0000000000000000000000000000000000000000",
+            "beam",
+            &reg,
+        )
+        .expect_err("несуществующий SHA должен быть отвергнут");
         assert!(
             err.to_string().contains("не существует в git"),
             "внятная причина отказа: {err}"
@@ -7139,7 +7294,8 @@ mod tests {
         assert!(
             entries
                 .iter()
-                .any(|e| e.task_id.as_deref() == Some(id.as_str()) && e.event == crate::core::ledger::LedgerEvent::Started),
+                .any(|e| e.task_id.as_deref() == Some(id.as_str())
+                    && e.event == crate::core::ledger::LedgerEvent::Started),
             "событие started записано: {text}"
         );
     }
@@ -7158,7 +7314,8 @@ mod tests {
         assert!(
             entries
                 .iter()
-                .any(|e| e.task_id.as_deref() == Some(id.as_str()) && e.event == crate::core::ledger::LedgerEvent::Done),
+                .any(|e| e.task_id.as_deref() == Some(id.as_str())
+                    && e.event == crate::core::ledger::LedgerEvent::Done),
             "событие done записано: {text}"
         );
     }

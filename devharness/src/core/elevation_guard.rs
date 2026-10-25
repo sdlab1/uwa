@@ -97,10 +97,7 @@ pub fn hash_of(salt: &str, password: &str) -> String {
     h.update(salt.as_bytes());
     h.update(b":");
     h.update(password.as_bytes());
-    h.finalize()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+    h.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Проверить права по битам mode (маска 0o777).

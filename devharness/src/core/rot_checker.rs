@@ -66,7 +66,10 @@ pub fn extract_mentioned_symbols(text: &str) -> Vec<String> {
         }
         // module::symbol
         for (a, _) in trimmed.match_indices("::") {
-            let before: String = trimmed[..a].trim_end().split_whitespace().last()
+            let before: String = trimmed[..a]
+                .trim_end()
+                .split_whitespace()
+                .last()
                 .map(|s| s.to_string())
                 .unwrap_or_default();
             if !before.is_empty() {
@@ -83,7 +86,12 @@ pub fn extract_mentioned_symbols(text: &str) -> Vec<String> {
                 continue;
             }
             if word.ends_with("()") && !stripped.is_empty() {
-                if stripped.chars().next().map(|c| c.is_alphabetic()).unwrap_or(false) {
+                if stripped
+                    .chars()
+                    .next()
+                    .map(|c| c.is_alphabetic())
+                    .unwrap_or(false)
+                {
                     symbols.insert(stripped.to_string());
                 }
             }
@@ -96,7 +104,12 @@ fn extract_after_keyword<'a>(line: &'a str, keywords: &[&str]) -> Option<&'a str
     for kw in keywords {
         if line.starts_with(*kw) {
             let after = &line[kw.len()..];
-            if after.chars().next().map(|c| c.is_whitespace()).unwrap_or(false) {
+            if after
+                .chars()
+                .next()
+                .map(|c| c.is_whitespace())
+                .unwrap_or(false)
+            {
                 return Some(after.trim_start());
             }
         }
@@ -214,7 +227,9 @@ mod tests {
         // Установить mtime в прошлом (100 секунд назад).
         let times = fs::FileTimes::new()
             .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(100));
-        if let Ok(f) = fs::File::open(path) { let _ = f.set_times(times); }
+        if let Ok(f) = fs::File::open(path) {
+            let _ = f.set_times(times);
+        }
     }
 
     #[test]
@@ -239,15 +254,24 @@ mod tests {
         // Документ новее кода → не протух.
         touch_older(&code);
         let result = check_file_freshness(&doc, &code);
-        assert!(result.is_none(), "новый документ не должен давать протухлость");
+        assert!(
+            result.is_none(),
+            "новый документ не должен давать протухлость"
+        );
     }
 
     #[test]
     fn extract_symbols_finds_fn_and_struct() {
         let text = "fn foo_bar() {}\nstruct MyStruct {}";
         let syms = extract_mentioned_symbols(text);
-        assert!(syms.contains(&"foo_bar".to_string()), "fn foo_bar: {syms:?}");
-        assert!(syms.contains(&"MyStruct".to_string()), "struct MyStruct: {syms:?}");
+        assert!(
+            syms.contains(&"foo_bar".to_string()),
+            "fn foo_bar: {syms:?}"
+        );
+        assert!(
+            syms.contains(&"MyStruct".to_string()),
+            "struct MyStruct: {syms:?}"
+        );
     }
 
     #[test]
@@ -271,8 +295,14 @@ mod tests {
         // Символ foo_bar отсутствует в code.rs → symbol_not_found.
         let result = check_staleness(&doc, &code);
         let reasons: Vec<_> = result.iter().map(|s| s.reason.as_str()).collect();
-        assert!(reasons.contains(&"doc_older_than_code"), "должна быть протухлость по времени: {reasons:?}");
-        assert!(reasons.contains(&"symbol_not_found"), "должна быть протухлость по символу: {reasons:?}");
+        assert!(
+            reasons.contains(&"doc_older_than_code"),
+            "должна быть протухлость по времени: {reasons:?}"
+        );
+        assert!(
+            reasons.contains(&"symbol_not_found"),
+            "должна быть протухлость по символу: {reasons:?}"
+        );
     }
 
     #[test]
@@ -281,7 +311,10 @@ mod tests {
         let doc = write_file(&d, "api.md", "Вызовите fn nonexistent_fn()");
         let code = write_file(&d, "lib.rs", "fn real_fn() {}");
         let result = check_doc_symbols(&doc, &code);
-        assert!(!result.is_empty(), "пропущенный символ должен дать StalePlace");
+        assert!(
+            !result.is_empty(),
+            "пропущенный символ должен дать StalePlace"
+        );
         assert!(result.iter().any(|s| s.reason == "symbol_not_found"));
         assert!(result.iter().any(|s| s.detail == "nonexistent_fn"));
     }

@@ -140,7 +140,11 @@ pub fn tail(text: &str, n: usize) -> Vec<LedgerEntry> {
 
 /// Отформатировать запись как читаемую строку: `когда who что [task_id] детали`.
 pub fn format_entry(entry: &LedgerEntry) -> String {
-    let mut parts = vec![entry.when.to_string(), entry.who.clone(), entry.event.as_str().to_string()];
+    let mut parts = vec![
+        entry.when.to_string(),
+        entry.who.clone(),
+        entry.event.as_str().to_string(),
+    ];
     if let Some(tid) = &entry.task_id {
         parts.push(tid.clone());
     }
@@ -149,7 +153,6 @@ pub fn format_entry(entry: &LedgerEntry) -> String {
     }
     parts.join(" ")
 }
-
 
 /// Записать событие в JSONL-журнал (append-only).
 ///

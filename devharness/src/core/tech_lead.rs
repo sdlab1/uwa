@@ -103,8 +103,7 @@ pub fn review_commits(
         if t.status != "done" {
             continue;
         }
-        if t
-            .main_sha
+        if t.main_sha
             .as_deref()
             .map(|s| !s.trim().is_empty())
             .unwrap_or(false)
@@ -245,7 +244,9 @@ pub fn model_declaration(agent: &str, registered: Option<&str>) -> ModelDeclarat
     };
     match registered {
         None => ModelDeclaration::Declared { model: declared },
-        Some(reg) if reg.trim() == declared.trim() => ModelDeclaration::Declared { model: declared },
+        Some(reg) if reg.trim() == declared.trim() => {
+            ModelDeclaration::Declared { model: declared }
+        }
         Some(reg) => ModelDeclaration::Mismatch {
             declared,
             registered: reg.to_string(),

@@ -101,7 +101,11 @@ mod tests {
 
     #[test]
     fn valid_chain_is_clean() {
-        let tasks = vec![task("T-1", &[]), task("T-2", &["T-1"]), task("T-3", &["T-2"])];
+        let tasks = vec![
+            task("T-1", &[]),
+            task("T-2", &["T-1"]),
+            task("T-3", &["T-2"]),
+        ];
         assert!(check_deps(&tasks).is_empty());
     }
 
@@ -128,7 +132,10 @@ mod tests {
     fn two_node_cycle_is_reported() {
         let tasks = vec![task("T-1", &["T-2"]), task("T-2", &["T-1"])];
         let issues = check_deps(&tasks);
-        assert!(matches!(issues.as_slice(), [DepIssue::Cycle(_)]), "{issues:?}");
+        assert!(
+            matches!(issues.as_slice(), [DepIssue::Cycle(_)]),
+            "{issues:?}"
+        );
         let text = issues[0].to_string();
         assert!(text.contains("T-1") && text.contains("T-2"), "{text}");
     }
@@ -137,7 +144,10 @@ mod tests {
     fn self_cycle_is_reported() {
         let tasks = vec![task("T-1", &["T-1"])];
         let issues = check_deps(&tasks);
-        assert!(matches!(issues.as_slice(), [DepIssue::Cycle(_)]), "{issues:?}");
+        assert!(
+            matches!(issues.as_slice(), [DepIssue::Cycle(_)]),
+            "{issues:?}"
+        );
     }
 
     #[test]

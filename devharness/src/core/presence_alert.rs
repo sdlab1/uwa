@@ -6,7 +6,7 @@
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::commands::orch::{load, Registry, AgentState};
+use crate::commands::orch::{load, AgentState, Registry};
 
 /// Результат проверки простоя (для алерта).
 #[derive(Debug, Clone)]
@@ -22,15 +22,15 @@ pub struct IdleReport {
 /// Проверить всех агентов на простой (кроме lead).
 ///
 /// Возвращает список агентов, чей `idle_seconds >= threshold_seconds`.
-pub fn check_idle_agents(
-    registry: &Registry,
-    threshold_seconds: u64,
-) -> Vec<IdleReport> {
+pub fn check_idle_agents(registry: &Registry, threshold_seconds: u64) -> Vec<IdleReport> {
     let now = now_secs();
     let mut reports = Vec::new();
 
     // Lead: определяем из реестра.
-    let lead = registry.lead.as_ref().map(|l| crate::core::identity::canonical(l));
+    let lead = registry
+        .lead
+        .as_ref()
+        .map(|l| crate::core::identity::canonical(l));
 
     for agent in &registry.agents {
         let canon = crate::core::identity::canonical(&agent.name);
@@ -59,27 +59,34 @@ pub fn check_agent_idle(
     threshold_seconds: u64,
 ) -> Option<IdleReport> {
     let now = now_secs();
-    let lead = registry.lead.as_ref().map(|l| crate::core::identity::canonical(l));
+    let lead = registry
+        .lead
+        .as_ref()
+        .map(|l| crate::core::identity::canonical(l));
 
-    registry.agents.iter().find(|a| a.name == agent_name).and_then(|agent| {
-        let canon = crate::core::identity::canonical(&agent.name);
-        if lead.as_deref() == Some(canon.as_str()) {
-            return None;
-        }
-        let activity = activity_of(registry, agent, now, threshold_seconds);
-        if activity.stale {
-            Some(IdleReport {
-                agent: activity.agent,
-                idle_seconds: activity.idle_secs,
-                idle_minutes: activity.idle_secs / 60,
-                threshold_seconds,
-                is_lead: false,
-                source: activity.source.to_string(),
-            })
-        } else {
-            None
-        }
-    })
+    registry
+        .agents
+        .iter()
+        .find(|a| a.name == agent_name)
+        .and_then(|agent| {
+            let canon = crate::core::identity::canonical(&agent.name);
+            if lead.as_deref() == Some(canon.as_str()) {
+                return None;
+            }
+            let activity = activity_of(registry, agent, now, threshold_seconds);
+            if activity.stale {
+                Some(IdleReport {
+                    agent: activity.agent,
+                    idle_seconds: activity.idle_secs,
+                    idle_minutes: activity.idle_secs / 60,
+                    threshold_seconds,
+                    is_lead: false,
+                    source: activity.source.to_string(),
+                })
+            } else {
+                None
+            }
+        })
 }
 
 /// Получить активность агента (копия логики watchdog::activity_of, без private).
@@ -175,7 +182,7 @@ fn now_secs() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::orch::{Registry, AgentState, Status, Task};
+    use crate::commands::orch::{AgentState, Registry, Status, Task};
 
     fn make_registry() -> Registry {
         let mut reg = Registry::default();
@@ -213,7 +220,10 @@ mod tests {
     fn lead_excluded_from_alerts() {
         let reg = make_registry();
         let alerts = check_idle_agents(&reg, 1800);
-        assert!(!alerts.iter().any(|a| a.agent == "lead-agent"), "lead исключен");
+        assert!(
+            !alerts.iter().any(|a| a.agent == "lead-agent"),
+            "lead исключен"
+        );
     }
 
     #[test]
@@ -262,8 +272,15 @@ mod tests {
             main_sha: None,
             override_reason: None,
         });
-        reg.agents.iter_mut().find(|a| a.name == "worker-1").unwrap().worktree = Some("/tmp/wt-1".into());
+        reg.agents
+            .iter_mut()
+            .find(|a| a.name == "worker-1")
+            .unwrap()
+            .worktree = Some("/tmp/wt-1".into());
         let alerts = check_idle_agents(&reg, 1800);
-        assert!(!alerts.iter().any(|a| a.agent == "worker-1"), "ровно 1800 = НЕ алерт (строго >)");
+        assert!(
+            !alerts.iter().any(|a| a.agent == "worker-1"),
+            "ровно 1800 = НЕ алерт (строго >)"
+        );
     }
 }

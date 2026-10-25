@@ -107,7 +107,10 @@ pub fn init(root: &Path) -> anyhow::Result<()> {
     let max_fix = env_num_or("MAX_FIX", 3);
     let max_active = env_num_or("MAX_ACTIVE", 3);
     let remote = env_or("REMOTE", "origin");
-    let wt_root = env_or("WT_ROOT", &crate::core::types::default_wt_root().display().to_string());
+    let wt_root = env_or(
+        "WT_ROOT",
+        &crate::core::types::default_wt_root().display().to_string(),
+    );
     let log_days = env_num_or("LOG_DAYS", 30);
     let min_kill = env_num_or("MIN_KILL", 90);
     let mut_blind = env_or("MUT_BLIND", "warn");

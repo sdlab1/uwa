@@ -76,10 +76,8 @@ pub fn zones_overlap(a: &str, b: &str) -> bool {
         return false;
     }
     a == b
-        || a.strip_prefix(&b)
-            .is_some_and(|rest| rest.starts_with('/'))
-        || b.strip_prefix(&a)
-            .is_some_and(|rest| rest.starts_with('/'))
+        || a.strip_prefix(&b).is_some_and(|rest| rest.starts_with('/'))
+        || b.strip_prefix(&a).is_some_and(|rest| rest.starts_with('/'))
 }
 
 /// Все пары активных задач разных агентов с пересекающимися зонами.

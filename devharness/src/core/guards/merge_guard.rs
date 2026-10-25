@@ -212,9 +212,7 @@ mod tests {
         let issues = check_merge(&record(Some("влито"), None), &facts(true));
         assert_eq!(
             issues,
-            vec![MergeIssue::MergedWithoutSha {
-                task: "T-1".into()
-            }]
+            vec![MergeIssue::MergedWithoutSha { task: "T-1".into() }]
         );
     }
 

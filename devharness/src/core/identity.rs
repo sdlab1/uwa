@@ -1045,7 +1045,12 @@ fn claim_takeover_with_home(
         .ok_or_else(|| format!("имя «{name}» не закреплено; используйте claim"))?;
     if existing_key == key {
         // Уже закреплено этой же сессией — идемпотентно.
-        return Ok(finish(name.to_string(), Source::Stored, key.to_string(), false));
+        return Ok(finish(
+            name.to_string(),
+            Source::Stored,
+            key.to_string(),
+            false,
+        ));
     }
     if !existing_binding.claimed {
         return Err(format!("имя «{name}» не закреплено; используйте claim"));
@@ -1076,12 +1081,18 @@ fn claim_takeover_with_home(
     remember_slot_in(home, name, true);
     auto_register_alias(name);
 
-    Ok(finish(name.to_string(), Source::Stored, key.to_string(), false))
+    Ok(finish(
+        name.to_string(),
+        Source::Stored,
+        key.to_string(),
+        false,
+    ))
 }
 
 /// Путь к файлу авторизации takeover'а.
 fn takeover_auth_path(home: &Path, name: &str) -> PathBuf {
-    home.join("takeover").join(format!("{}.auth", safe_name(name)))
+    home.join("takeover")
+        .join(format!("{}.auth", safe_name(name)))
 }
 
 /// Проверить авторизацию takeover'а ведущим.
@@ -1099,10 +1110,17 @@ fn check_takeover_authorization(home: &Path, name: &str, for_key: &str) -> Resul
         return Ok(false);
     }
     let text = fs::read_to_string(&path).map_err(|e| format!("не прочитать авторизацию: {e}"))?;
-    let value: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("не разобрать авторизацию: {e}"))?;
+    let value: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| format!("не разобрать авторизацию: {e}"))?;
     let auth_for_key = value.get("for_key").and_then(|v| v.as_str()).unwrap_or("");
-    let authorized_by = value.get("authorized_by").and_then(|v| v.as_str()).unwrap_or("");
-    let authorized_at = value.get("authorized_at").and_then(|v| v.as_u64()).unwrap_or(0);
+    let authorized_by = value
+        .get("authorized_by")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let authorized_at = value
+        .get("authorized_at")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
     // Проверяем, что авторизация для нашего ключа.
     if auth_for_key != for_key {
         return Ok(false);
@@ -1145,7 +1163,8 @@ pub fn authorize_takeover(name: &str, for_key: &str) -> Result<(), String> {
     fs::write(
         &tmp,
         serde_json::to_string_pretty(&body).unwrap_or_default(),
-    ).map_err(|e| format!("не записать авторизацию: {e}"))?;
+    )
+    .map_err(|e| format!("не записать авторизацию: {e}"))?;
     fs::rename(&tmp, &path).map_err(|e| format!("не переименовать авторизацию: {e}"))?;
     Ok(())
 }
@@ -1508,7 +1527,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
         let home = dir.path();
         let result = claim_takeover_with_home_test(home, "minimax", "proc:9:9");
-        assert!(result.is_err(), "takeover незакрепленного имени должен падать");
+        assert!(
+            result.is_err(),
+            "takeover незакрепленного имени должен падать"
+        );
         assert!(result.unwrap_err().contains("не закреплено"));
     }
 
@@ -1518,7 +1540,8 @@ mod tests {
         let home = dir.path();
         // Смоделируем: имя закреплено в другом слоте (не нашем).
         let fake_slot = "slot:fake:0:other";
-        write_binding_in(home, fake_slot, "minimax", "slot", true).unwrap_or_else(|_| unreachable!());
+        write_binding_in(home, fake_slot, "minimax", "slot", true)
+            .unwrap_or_else(|_| unreachable!());
         // Текущий слот не имеет binding для minimax → takeover падает.
         let result = claim_takeover_with_home_test(home, "minimax", "session:new");
         assert!(result.is_err(), "takeover из другого слота должен падать");
@@ -1534,7 +1557,8 @@ mod tests {
         claim_with_home(home, "minimax", key).unwrap_or_else(|_| unreachable!());
         // Запишем тот же ключ в слот (как делает claim через remember_slot).
         if let Some(slot) = slot_key() {
-            write_binding_in(home, &slot, "minimax", "slot", true).unwrap_or_else(|_| unreachable!());
+            write_binding_in(home, &slot, "minimax", "slot", true)
+                .unwrap_or_else(|_| unreachable!());
         }
         // Takeover тем же ключом — идемпотентно.
         let result = claim_takeover_with_home_test(home, "minimax", key);

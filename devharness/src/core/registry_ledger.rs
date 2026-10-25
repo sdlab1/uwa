@@ -53,7 +53,9 @@ pub fn read_all(path: &Path) -> Vec<LedgerEntry> {
 
 /// Проверить дубликат по (event, id, ts).
 pub fn is_duplicate(entries: &[LedgerEntry], e: &LedgerEntry) -> bool {
-    entries.iter().any(|x| x.event == e.event && x.id == e.id && x.ts == e.ts)
+    entries
+        .iter()
+        .any(|x| x.event == e.event && x.id == e.id && x.ts == e.ts)
 }
 
 /// Добавить запись, если не дубликат. Возвращает true если добавлено.
@@ -66,7 +68,8 @@ pub fn append(path: &Path, entry: &LedgerEntry) -> std::io::Result<bool> {
         return Ok(false);
     }
     let mut f = OpenOptions::new().create(true).append(true).open(path)?;
-    let line = serde_json::to_string(entry).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    let line = serde_json::to_string(entry)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
     writeln!(f, "{}", line)?;
     Ok(true)
 }
@@ -84,7 +87,8 @@ pub fn rotate(path: &Path, max_bytes: u64, keep_lines: usize) -> std::io::Result
     let tail = &entries[start..];
     let mut f = OpenOptions::new().write(true).truncate(true).open(path)?;
     for e in tail {
-        let line = serde_json::to_string(e).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        let line = serde_json::to_string(e)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
         writeln!(f, "{}", line)?;
     }
     Ok(())
@@ -99,7 +103,12 @@ mod tests {
     fn append_and_read() {
         let d = tempdir().unwrap_or_else(|_| unreachable!());
         let p = d.path().join("ledger.jsonl");
-        let e = LedgerEntry { event: "start".into(), id: "T-1".into(), ts: 10, detail: "x".into() };
+        let e = LedgerEntry {
+            event: "start".into(),
+            id: "T-1".into(),
+            ts: 10,
+            detail: "x".into(),
+        };
         assert!(append(&p, &e).unwrap());
         let r = read_all(&p);
         assert_eq!(r.len(), 1);
@@ -110,7 +119,12 @@ mod tests {
     fn dedup_skips_duplicate() {
         let d = tempdir().unwrap_or_else(|_| unreachable!());
         let p = d.path().join("ledger.jsonl");
-        let e = LedgerEntry { event: "start".into(), id: "T-1".into(), ts: 10, detail: "".into() };
+        let e = LedgerEntry {
+            event: "start".into(),
+            id: "T-1".into(),
+            ts: 10,
+            detail: "".into(),
+        };
         assert!(append(&p, &e).unwrap());
         assert!(!append(&p, &e).unwrap());
         assert_eq!(read_all(&p).len(), 1);
@@ -120,8 +134,18 @@ mod tests {
     fn distinct_ts_both_kept() {
         let d = tempdir().unwrap_or_else(|_| unreachable!());
         let p = d.path().join("ledger.jsonl");
-        let e1 = LedgerEntry { event: "start".into(), id: "T-1".into(), ts: 10, detail: "".into() };
-        let e2 = LedgerEntry { event: "start".into(), id: "T-1".into(), ts: 11, detail: "".into() };
+        let e1 = LedgerEntry {
+            event: "start".into(),
+            id: "T-1".into(),
+            ts: 10,
+            detail: "".into(),
+        };
+        let e2 = LedgerEntry {
+            event: "start".into(),
+            id: "T-1".into(),
+            ts: 11,
+            detail: "".into(),
+        };
         assert!(append(&p, &e1).unwrap());
         assert!(append(&p, &e2).unwrap());
         assert_eq!(read_all(&p).len(), 2);
@@ -131,7 +155,11 @@ mod tests {
     fn bad_lines_skipped() {
         let d = tempdir().unwrap_or_else(|_| unreachable!());
         let p = d.path().join("ledger.jsonl");
-        std::fs::write(&p, "not json\n{\"event\":\"done\",\"id\":\"T-2\",\"ts\":5}\n").unwrap();
+        std::fs::write(
+            &p,
+            "not json\n{\"event\":\"done\",\"id\":\"T-2\",\"ts\":5}\n",
+        )
+        .unwrap();
         let r = read_all(&p);
         assert_eq!(r.len(), 1);
         assert_eq!(r[0].id, "T-2");
@@ -149,7 +177,12 @@ mod tests {
         let d = tempdir().unwrap_or_else(|_| unreachable!());
         let p = d.path().join("ledger.jsonl");
         for i in 0..5 {
-            let e = LedgerEntry { event: "e".into(), id: format!("T-{}", i), ts: i as u64, detail: "".into() };
+            let e = LedgerEntry {
+                event: "e".into(),
+                id: format!("T-{}", i),
+                ts: i as u64,
+                detail: "".into(),
+            };
             append(&p, &e).unwrap();
         }
         // force rotate with small max_bytes

@@ -12,7 +12,13 @@ pub struct LogEntry {
 }
 
 impl LogEntry {
-    pub fn new(file: impl Into<String>, line: usize, rule: impl Into<String>, code: i32, message: impl Into<String>) -> Self {
+    pub fn new(
+        file: impl Into<String>,
+        line: usize,
+        rule: impl Into<String>,
+        code: i32,
+        message: impl Into<String>,
+    ) -> Self {
         Self {
             file: file.into(),
             line,
@@ -25,7 +31,10 @@ impl LogEntry {
 
 /// Формат: `path:line | rule | code=N | message`
 pub fn format_entry(e: &LogEntry) -> String {
-    format!("{}:{} | {} | code={} | {}", e.file, e.line, e.rule, e.code, e.message)
+    format!(
+        "{}:{} | {} | code={} | {}",
+        e.file, e.line, e.rule, e.code, e.message
+    )
 }
 
 pub fn parse_entry(s: &str) -> Option<LogEntry> {
@@ -63,7 +72,10 @@ mod tests {
     #[test]
     fn golden_format() {
         let e = LogEntry::new("devharness/src/core/x.rs", 42, "R1", 1, "stub found");
-        assert_eq!(format_entry(&e), "devharness/src/core/x.rs:42 | R1 | code=1 | stub found");
+        assert_eq!(
+            format_entry(&e),
+            "devharness/src/core/x.rs:42 | R1 | code=1 | stub found"
+        );
     }
 
     #[test]

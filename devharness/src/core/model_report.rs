@@ -70,7 +70,10 @@ pub fn compute_ratings(tasks: &[TaskRecord]) -> Vec<ModelRating> {
             ceiling: None,
         });
         entry.done += 1;
-        let f = entry.fail_distribution.entry(t.fail_level.code()).or_insert(0);
+        let f = entry
+            .fail_distribution
+            .entry(t.fail_level.code())
+            .or_insert(0);
         *f += 1;
         if let Some(ceiling) = entry.ceiling {
             if t.complexity > ceiling {
@@ -144,7 +147,14 @@ fn check_recent_degradation(history: &[&TaskRecord]) -> Option<String> {
 mod tests {
     use super::*;
 
-    fn make_rec(id: &str, agent: &str, model: &str, runtime: &str, c: u8, f: FailLevel) -> TaskRecord {
+    fn make_rec(
+        id: &str,
+        agent: &str,
+        model: &str,
+        runtime: &str,
+        c: u8,
+        f: FailLevel,
+    ) -> TaskRecord {
         TaskRecord {
             id: id.to_string(),
             agent: agent.to_string(),

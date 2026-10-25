@@ -6,7 +6,11 @@ pub struct SecretRef {
     pub line: usize,
 }
 
-pub const SECRET_KEYS: &[&str] = &["DEVH_LEAD_PASSWORD", "DEVH_AGENT_API_KEY", "DEVH_REMOTE_TOKEN"];
+pub const SECRET_KEYS: &[&str] = &[
+    "DEVH_LEAD_PASSWORD",
+    "DEVH_AGENT_API_KEY",
+    "DEVH_REMOTE_TOKEN",
+];
 
 pub fn mask_value(value: &str) -> String {
     if value.len() <= 2 {
@@ -69,7 +73,10 @@ mod tests {
     #[test]
     fn mask_value_hides_secret() {
         let m = mask_value("supersecret123");
-        assert!(!m.contains("supersecret123"), "секрет не должен остаться в маске: {m}");
+        assert!(
+            !m.contains("supersecret123"),
+            "секрет не должен остаться в маске: {m}"
+        );
     }
 
     #[test]

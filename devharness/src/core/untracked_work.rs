@@ -90,27 +90,27 @@ fn git(root: &Path, args: &[&str]) -> Option<String> {
 fn registered_commit_shas(root: &Path) -> std::collections::HashSet<String> {
     let mut set = std::collections::HashSet::new();
     let reg = crate::commands::orch::load(root);
-        for t in &reg.tasks {
-            if let Some(sha) = &t.commit_sha {
-                let s = sha.trim();
-                if !s.is_empty() {
-                    set.insert(s.to_string());
-                    // хранят иногда короткий sha — добавим префикс-форму не нужно;
-                    // сравниваем по полному/началу ниже.
-                }
+    for t in &reg.tasks {
+        if let Some(sha) = &t.commit_sha {
+            let s = sha.trim();
+            if !s.is_empty() {
+                set.insert(s.to_string());
+                // хранят иногда короткий sha — добавим префикс-форму не нужно;
+                // сравниваем по полному/началу ниже.
             }
         }
+    }
     set
 }
 
 fn registered_worktrees(root: &Path) -> std::collections::HashSet<String> {
     let mut set = std::collections::HashSet::new();
     let reg = crate::commands::orch::load(root);
-        for a in &reg.agents {
-            if let Some(wt) = &a.worktree {
-                set.insert(wt.clone());
-            }
+    for a in &reg.agents {
+        if let Some(wt) = &a.worktree {
+            set.insert(wt.clone());
         }
+    }
     set
 }
 
@@ -118,20 +118,29 @@ fn detect_untracked_commits(root: &Path) -> Vec<Finding> {
     let mut out = Vec::new();
     let registered = registered_commit_shas(root);
     // Список веток devh/agent-*.
-    let branches = git(root, &["for-each-ref", "--format=%(refname:short)", "refs/heads/devh/agent-*"])
-        .unwrap_or_default();
+    let branches = git(
+        root,
+        &[
+            "for-each-ref",
+            "--format=%(refname:short)",
+            "refs/heads/devh/agent-*",
+        ],
+    )
+    .unwrap_or_default();
     for branch in branches.lines().map(str::trim).filter(|s| !s.is_empty()) {
         // коммиты в ветке, которых нет в main (если main есть)
         let range = format!("main..{branch}");
         let shas = git(root, &["rev-list", &range]).unwrap_or_default();
         for sha in shas.lines().map(str::trim).filter(|s| !s.is_empty()) {
             // sha совпадает с зарегистрированным? сравниваем по префиксу (полный/короткий)
-            let known = registered.iter().any(|r| r == sha || r.starts_with(sha) || sha.starts_with(r));
+            let known = registered
+                .iter()
+                .any(|r| r == sha || r.starts_with(sha) || sha.starts_with(r));
             if known {
                 continue;
             }
-            let when = git(root, &["log", "-1", "--format=%ct", sha])
-                .and_then(|s| s.parse::<u64>().ok());
+            let when =
+                git(root, &["log", "-1", "--format=%ct", sha]).and_then(|s| s.parse::<u64>().ok());
             let agent = branch.trim_start_matches("devh/agent-").to_string();
             out.push(Finding {
                 kind: FindingKind::UntrackedCommit,
@@ -174,7 +183,10 @@ fn detect_unregistered_worktrees(root: &Path) -> Vec<Finding> {
         if !branch.starts_with("devh/agent-") {
             continue;
         }
-        if registered.iter().any(|r| r == &cand.to_string_lossy().to_string()) {
+        if registered
+            .iter()
+            .any(|r| r == &cand.to_string_lossy().to_string())
+        {
             continue;
         }
         // mtime
@@ -243,23 +255,52 @@ mod tests {
         // не git-репозиторий -> git status пуст/None -> нет находок по main
         let res = detect(d.path());
         // unregistered worktrees scanning /tmp не зависит от root; допускаем 0+
-        assert!(res.iter().all(|f| f.kind != FindingKind::UncommittedMainChanges));
+        assert!(res
+            .iter()
+            .all(|f| f.kind != FindingKind::UncommittedMainChanges));
     }
 
     #[test]
     fn detect_finds_uncommitted_main_changes() {
         let d = tempdir().unwrap_or_else(|_| unreachable!());
         // git init
-        assert!(Command::new("git").args(["init", "-q"]).current_dir(d.path()).status().unwrap().success());
-        assert!(Command::new("git").args(["config", "user.email", "t@t"]).current_dir(d.path()).status().unwrap().success());
-        assert!(Command::new("git").args(["config", "user.name", "t"]).current_dir(d.path()).status().unwrap().success());
+        assert!(Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(d.path())
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .args(["config", "user.email", "t@t"])
+            .current_dir(d.path())
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .args(["config", "user.name", "t"])
+            .current_dir(d.path())
+            .status()
+            .unwrap()
+            .success());
         fs::write(d.path().join("f.txt"), "x").unwrap();
-        assert!(Command::new("git").args(["add", "f.txt"]).current_dir(d.path()).status().unwrap().success());
-        assert!(Command::new("git").args(["commit", "-q", "-m", "base"]).current_dir(d.path()).status().unwrap().success());
+        assert!(Command::new("git")
+            .args(["add", "f.txt"])
+            .current_dir(d.path())
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .args(["commit", "-q", "-m", "base"])
+            .current_dir(d.path())
+            .status()
+            .unwrap()
+            .success());
         // незакоммиченная правка
         fs::write(d.path().join("g.txt"), "y").unwrap();
         let res = detect(d.path());
-        assert!(res.iter().any(|f| f.kind == FindingKind::UncommittedMainChanges));
+        assert!(res
+            .iter()
+            .any(|f| f.kind == FindingKind::UncommittedMainChanges));
     }
 
     #[test]
@@ -271,13 +312,21 @@ mod tests {
 
     #[test]
     fn kind_as_str_stable() {
-        assert_eq!(FindingKind::UnregisteredWorktree.as_str(), "unregistered-worktree");
+        assert_eq!(
+            FindingKind::UnregisteredWorktree.as_str(),
+            "unregistered-worktree"
+        );
     }
 
     #[test]
     fn detect_does_not_modify_repository() {
         let d = tempdir().unwrap_or_else(|_| unreachable!());
-        assert!(Command::new("git").args(["init", "-q"]).current_dir(d.path()).status().unwrap().success());
+        assert!(Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(d.path())
+            .status()
+            .unwrap()
+            .success());
         let before = fs::read_dir(d.path()).unwrap().count();
         let _ = detect(d.path());
         let after = fs::read_dir(d.path()).unwrap().count();

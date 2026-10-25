@@ -32,7 +32,12 @@ impl Chan {
         }
     }
 
-    fn run(&self, args: &[&str], session: Option<&str>, agent_env: Option<&str>) -> (i32, String, String) {
+    fn run(
+        &self,
+        args: &[&str],
+        session: Option<&str>,
+        agent_env: Option<&str>,
+    ) -> (i32, String, String) {
         let mut cmd = Command::new(devh_bin());
         cmd.args(args)
             .current_dir(&self.cwd)
@@ -110,7 +115,12 @@ fn alias_to_auto_name_is_rejected() {
 fn runtime_synonym_is_canonicalized() {
     let c = Chan::new();
     assert_eq!(
-        c.run(&["msg", "alias", "opencode", "--for", "deepseek"], None, None).0,
+        c.run(
+            &["msg", "alias", "opencode", "--for", "deepseek"],
+            None,
+            None
+        )
+        .0,
         0
     );
     assert_eq!(c.whoami_name(None, Some("opencode")), "deepseek");
@@ -172,7 +182,10 @@ fn slot_binding_does_not_intercept_new_session_key() {
     assert_eq!(name_a, "minimax", "session-A должна видеть свой claim");
     // session-B НЕ должна перехватывать через host_alias
     let name_b = c.whoami_name(Some("session-B"), None);
-    assert_ne!(name_b, "minimax", "session-B не должна перехватывать чужой claim через алиас");
+    assert_ne!(
+        name_b, "minimax",
+        "session-B не должна перехватывать чужой claim через алиас"
+    );
     // session-B должна получить своё авто-имя
     assert!(
         name_b.starts_with("ag-"),

@@ -48,7 +48,11 @@ pub fn model_ceiling(model: &str) -> Option<u8> {
 }
 
 /// Чистая функция выбора.
-pub fn select(candidates: &[TaskCandidate], ceiling: Option<u8>, active_zones: &[String]) -> DispatchResult {
+pub fn select(
+    candidates: &[TaskCandidate],
+    ceiling: Option<u8>,
+    active_zones: &[String],
+) -> DispatchResult {
     let mut rejected = Vec::new();
     let mut ok: Vec<&TaskCandidate> = Vec::new();
     for c in candidates {
@@ -86,7 +90,10 @@ pub fn select(candidates: &[TaskCandidate], ceiling: Option<u8>, active_zones: &
             }
         }
         // зоны пересекаются с активными?
-        let overlap = c.zones.iter().any(|z| active_zones.iter().any(|a| zones_overlap(z, a)));
+        let overlap = c
+            .zones
+            .iter()
+            .any(|z| active_zones.iter().any(|a| zones_overlap(z, a)));
         if overlap {
             rejected.push(Rejection {
                 task_id: c.id.clone(),
@@ -116,8 +123,13 @@ fn zones_overlap(a: &str, b: &str) -> bool {
 /// Dispatch по реестру: единый пул (свои + буфер lead).
 pub fn dispatch_registry(reg: &Registry, caller: &str) -> DispatchResult {
     let caller_canon = crate::core::identity::canonical(caller);
-    let agent_state = reg.agents.iter().find(|a| crate::core::identity::canonical(&a.name) == caller_canon);
-    let ceiling = agent_state.and_then(|a| a.model.as_deref()).and_then(model_ceiling);
+    let agent_state = reg
+        .agents
+        .iter()
+        .find(|a| crate::core::identity::canonical(&a.name) == caller_canon);
+    let ceiling = agent_state
+        .and_then(|a| a.model.as_deref())
+        .and_then(model_ceiling);
     // active zones: все активные задачи
     let mut active_zones: Vec<String> = Vec::new();
     for t in &reg.tasks {
@@ -195,7 +207,15 @@ pub fn select_for(root: &Path, caller: &str) -> DispatchResult {
 mod tests {
     use super::*;
 
-    fn c(id: &str, prio: u8, complexity: u8, created: u64, c_level: Option<u8>, zones: &[&str], deps_done: bool) -> TaskCandidate {
+    fn c(
+        id: &str,
+        prio: u8,
+        complexity: u8,
+        created: u64,
+        c_level: Option<u8>,
+        zones: &[&str],
+        deps_done: bool,
+    ) -> TaskCandidate {
         TaskCandidate {
             id: id.to_string(),
             agent: "w".to_string(),

@@ -870,21 +870,49 @@ mod tests {
         let d = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
         let root = d.path().join("repo");
         std::fs::create_dir_all(root.join(".harness/items")).unwrap_or_else(|_| unreachable!());
-        std::fs::write(root.join(".harness/config"), "VERIFY=\n").unwrap_or_else(|_| unreachable!());
+        std::fs::write(root.join(".harness/config"), "VERIFY=\n")
+            .unwrap_or_else(|_| unreachable!());
         // git init чтобы orch_root резолвился в root, а не в родительский репо
-        let _ = std::process::Command::new("git").arg("init").arg("-q").current_dir(&root).status();
-        let _ = std::process::Command::new("git").arg("config").arg("user.email").arg("t@t").current_dir(&root).status();
-        let _ = std::process::Command::new("git").arg("config").arg("user.name").arg("t").current_dir(&root).status();
+        let _ = std::process::Command::new("git")
+            .arg("init")
+            .arg("-q")
+            .current_dir(&root)
+            .status();
+        let _ = std::process::Command::new("git")
+            .arg("config")
+            .arg("user.email")
+            .arg("t@t")
+            .current_dir(&root)
+            .status();
+        let _ = std::process::Command::new("git")
+            .arg("config")
+            .arg("user.name")
+            .arg("t")
+            .current_dir(&root)
+            .status();
         std::fs::write(root.join("f.txt"), "x").unwrap_or_else(|_| unreachable!());
-        let _ = std::process::Command::new("git").arg("add").arg("f.txt").current_dir(&root).status();
-        let _ = std::process::Command::new("git").arg("commit").arg("-q").arg("-m").arg("base").current_dir(&root).status();
+        let _ = std::process::Command::new("git")
+            .arg("add")
+            .arg("f.txt")
+            .current_dir(&root)
+            .status();
+        let _ = std::process::Command::new("git")
+            .arg("commit")
+            .arg("-q")
+            .arg("-m")
+            .arg("base")
+            .current_dir(&root)
+            .status();
         let n = decide(
             &root,
             &crate::core::types::RunConfig::default(),
             &Store::new(&root),
         );
         // Без тасков, без items, без specs — оракул говорит "готово".
-        assert_eq!(n.command, "готово: активных item'ов нет, спек нет — работа завершена");
+        assert_eq!(
+            n.command,
+            "готово: активных item'ов нет, спек нет — работа завершена"
+        );
     }
 
     #[test]
@@ -894,16 +922,42 @@ mod tests {
         let d = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
         let root = d.path().join("repo");
         std::fs::create_dir_all(root.join(".harness/orch")).unwrap_or_else(|_| unreachable!());
-        std::fs::write(root.join(".harness/config"), "VERIFY=\n").unwrap_or_else(|_| unreachable!());
+        std::fs::write(root.join(".harness/config"), "VERIFY=\n")
+            .unwrap_or_else(|_| unreachable!());
 
         let agent = crate::core::identity::canonical(&crate::core::identity::current().name);
-        std::fs::write(root.join(".harness/config"), "VERIFY=\n").unwrap_or_else(|_| unreachable!());
-        let _ = std::process::Command::new("git").arg("init").arg("-q").current_dir(&root).status();
-        let _ = std::process::Command::new("git").arg("config").arg("user.email").arg("t@t").current_dir(&root).status();
-        let _ = std::process::Command::new("git").arg("config").arg("user.name").arg("t").current_dir(&root).status();
+        std::fs::write(root.join(".harness/config"), "VERIFY=\n")
+            .unwrap_or_else(|_| unreachable!());
+        let _ = std::process::Command::new("git")
+            .arg("init")
+            .arg("-q")
+            .current_dir(&root)
+            .status();
+        let _ = std::process::Command::new("git")
+            .arg("config")
+            .arg("user.email")
+            .arg("t@t")
+            .current_dir(&root)
+            .status();
+        let _ = std::process::Command::new("git")
+            .arg("config")
+            .arg("user.name")
+            .arg("t")
+            .current_dir(&root)
+            .status();
         std::fs::write(root.join("f.txt"), "x").unwrap_or_else(|_| unreachable!());
-        let _ = std::process::Command::new("git").arg("add").arg("f.txt").current_dir(&root).status();
-        let _ = std::process::Command::new("git").arg("commit").arg("-q").arg("-m").arg("base").current_dir(&root).status();
+        let _ = std::process::Command::new("git")
+            .arg("add")
+            .arg("f.txt")
+            .current_dir(&root)
+            .status();
+        let _ = std::process::Command::new("git")
+            .arg("commit")
+            .arg("-q")
+            .arg("-m")
+            .arg("base")
+            .current_dir(&root)
+            .status();
 
         let reg = crate::commands::orch::Registry {
             seq: 2,
@@ -972,7 +1026,10 @@ mod tests {
 
         let n = orch_task_next(&root);
         let n = n.unwrap_or_else(|| unreachable!());
-        assert_eq!(n.command, "devh orch start T-002", "меньший prio выдаётся первым");
+        assert_eq!(
+            n.command, "devh orch start T-002",
+            "меньший prio выдаётся первым"
+        );
         assert!(n.why.contains("T-002"));
     }
 
@@ -982,16 +1039,42 @@ mod tests {
         let d = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
         let root = d.path().join("repo");
         std::fs::create_dir_all(root.join(".harness/orch")).unwrap_or_else(|_| unreachable!());
-        std::fs::write(root.join(".harness/config"), "VERIFY=\n").unwrap_or_else(|_| unreachable!());
+        std::fs::write(root.join(".harness/config"), "VERIFY=\n")
+            .unwrap_or_else(|_| unreachable!());
 
         let agent = crate::core::identity::canonical(&crate::core::identity::current().name);
-        std::fs::write(root.join(".harness/config"), "VERIFY=\n").unwrap_or_else(|_| unreachable!());
-        let _ = std::process::Command::new("git").arg("init").arg("-q").current_dir(&root).status();
-        let _ = std::process::Command::new("git").arg("config").arg("user.email").arg("t@t").current_dir(&root).status();
-        let _ = std::process::Command::new("git").arg("config").arg("user.name").arg("t").current_dir(&root).status();
+        std::fs::write(root.join(".harness/config"), "VERIFY=\n")
+            .unwrap_or_else(|_| unreachable!());
+        let _ = std::process::Command::new("git")
+            .arg("init")
+            .arg("-q")
+            .current_dir(&root)
+            .status();
+        let _ = std::process::Command::new("git")
+            .arg("config")
+            .arg("user.email")
+            .arg("t@t")
+            .current_dir(&root)
+            .status();
+        let _ = std::process::Command::new("git")
+            .arg("config")
+            .arg("user.name")
+            .arg("t")
+            .current_dir(&root)
+            .status();
         std::fs::write(root.join("f.txt"), "x").unwrap_or_else(|_| unreachable!());
-        let _ = std::process::Command::new("git").arg("add").arg("f.txt").current_dir(&root).status();
-        let _ = std::process::Command::new("git").arg("commit").arg("-q").arg("-m").arg("base").current_dir(&root).status();
+        let _ = std::process::Command::new("git")
+            .arg("add")
+            .arg("f.txt")
+            .current_dir(&root)
+            .status();
+        let _ = std::process::Command::new("git")
+            .arg("commit")
+            .arg("-q")
+            .arg("-m")
+            .arg("base")
+            .current_dir(&root)
+            .status();
 
         let reg = crate::commands::orch::Registry {
             seq: 2,
@@ -1051,7 +1134,9 @@ mod tests {
             lead: None,
             plan: crate::commands::orch::Plan {
                 prio: Default::default(),
-                deps: [("T-002".to_string(), vec!["T-001".to_string()])].into_iter().collect(),
+                deps: [("T-002".to_string(), vec!["T-001".to_string()])]
+                    .into_iter()
+                    .collect(),
             },
         };
         crate::commands::orch::save(&root, &reg).unwrap_or_else(|_| unreachable!());
@@ -1063,7 +1148,11 @@ mod tests {
         // Если T-001 готова (deps satisfied), она выдаётся; если нет — None.
         // Главное: T-002 НЕ выдаётся, т.к. её deps не выполнены.
         if let Some(n) = &n {
-            assert!(!n.command.contains("T-002"), "заблокированная задача не должна выдаваться: {}", n.command);
+            assert!(
+                !n.command.contains("T-002"),
+                "заблокированная задача не должна выдаваться: {}",
+                n.command
+            );
         }
     }
 
@@ -1072,13 +1161,38 @@ mod tests {
         let d = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
         let root = d.path().join("repo");
         std::fs::create_dir_all(root.join(".harness/orch")).unwrap_or_else(|_| unreachable!());
-        std::fs::write(root.join(".harness/config"), "VERIFY=\n").unwrap_or_else(|_| unreachable!());
-        let _ = std::process::Command::new("git").arg("init").arg("-q").current_dir(&root).status();
-        let _ = std::process::Command::new("git").arg("config").arg("user.email").arg("t@t").current_dir(&root).status();
-        let _ = std::process::Command::new("git").arg("config").arg("user.name").arg("t").current_dir(&root).status();
+        std::fs::write(root.join(".harness/config"), "VERIFY=\n")
+            .unwrap_or_else(|_| unreachable!());
+        let _ = std::process::Command::new("git")
+            .arg("init")
+            .arg("-q")
+            .current_dir(&root)
+            .status();
+        let _ = std::process::Command::new("git")
+            .arg("config")
+            .arg("user.email")
+            .arg("t@t")
+            .current_dir(&root)
+            .status();
+        let _ = std::process::Command::new("git")
+            .arg("config")
+            .arg("user.name")
+            .arg("t")
+            .current_dir(&root)
+            .status();
         std::fs::write(root.join("f.txt"), "x").unwrap_or_else(|_| unreachable!());
-        let _ = std::process::Command::new("git").arg("add").arg("f.txt").current_dir(&root).status();
-        let _ = std::process::Command::new("git").arg("commit").arg("-q").arg("-m").arg("base").current_dir(&root).status();
+        let _ = std::process::Command::new("git")
+            .arg("add")
+            .arg("f.txt")
+            .current_dir(&root)
+            .status();
+        let _ = std::process::Command::new("git")
+            .arg("commit")
+            .arg("-q")
+            .arg("-m")
+            .arg("base")
+            .current_dir(&root)
+            .status();
 
         let agent = crate::core::identity::canonical(&crate::core::identity::current().name);
         let reg = crate::commands::orch::Registry {

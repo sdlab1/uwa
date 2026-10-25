@@ -3,8 +3,8 @@
 //! Цель: централизованный список функций/условий, которые проверяет `cargo kani`.
 //! Используется для генерации harness-файлов и отслеживания покрытия.
 
-use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// Тип проверки (категория свойства).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -72,10 +72,7 @@ impl KaniRegistry {
 
     /// Все цели заданного типа.
     pub fn by_kind(&self, kind: CheckKind) -> Vec<&KaniTarget> {
-        self.targets
-            .values()
-            .filter(|t| t.kind == kind)
-            .collect()
+        self.targets.values().filter(|t| t.kind == kind).collect()
     }
 
     /// Генерация списка для `cargo kani` (функции с атрибутами).
@@ -86,11 +83,7 @@ impl KaniRegistry {
         self.targets
             .values()
             .map(|t| {
-                let fn_name = t
-                    .function
-                    .split("::")
-                    .last()
-                    .unwrap_or("unknown");
+                let fn_name = t.function.split("::").last().unwrap_or("unknown");
                 let attr = if t.attributes.is_empty() {
                     String::new()
                 } else {
@@ -164,14 +157,16 @@ pub fn builtin_registry() -> KaniRegistry {
     reg.add(KaniTarget {
         function: "crate::core::chaos_state::check_invariants".into(),
         kind: CheckKind::Invariant,
-        description: "status в {open,active,done}; fold(events) == status; нет .tmp; нет маркеров".into(),
+        description: "status в {open,active,done}; fold(events) == status; нет .tmp; нет маркеров"
+            .into(),
         attributes: vec!["#[kani::unwind(15)]".into()],
         expected_pass: true,
     });
     reg.add(KaniTarget {
         function: "crate::core::chaos_state::recover_state".into(),
         kind: CheckKind::Postcondition,
-        description: "После recover: status=open, нет .tmp, нет маркеров, events содержит aborted".into(),
+        description: "После recover: status=open, нет .tmp, нет маркеров, events содержит aborted"
+            .into(),
         attributes: vec![],
         expected_pass: true,
     });
@@ -292,16 +287,24 @@ mod tests {
         let reg = builtin_registry();
         assert!(!reg.targets.is_empty(), "встроенный реестр не пуст");
         // Проверяем наличие ключевых функций
-        assert!(reg.get("crate::core::complexity::Complexity::from_metrics").is_some());
+        assert!(reg
+            .get("crate::core::complexity::Complexity::from_metrics")
+            .is_some());
         assert!(reg.get("crate::commands::rate::rate_check").is_some());
-        assert!(reg.get("crate::core::chaos_state::check_invariants").is_some());
+        assert!(reg
+            .get("crate::core::chaos_state::check_invariants")
+            .is_some());
     }
 
     #[test]
     fn all_builtin_targets_have_description() {
         let reg = builtin_registry();
         for t in reg.targets.values() {
-            assert!(!t.description.is_empty(), "функция {} без описания", t.function);
+            assert!(
+                !t.description.is_empty(),
+                "функция {} без описания",
+                t.function
+            );
         }
     }
 
@@ -309,7 +312,10 @@ mod tests {
     fn all_builtin_targets_have_valid_function_path() {
         let reg = builtin_registry();
         for t in reg.targets.values() {
-            assert!(t.function.starts_with("crate::"), "путь должен начинаться с crate::");
+            assert!(
+                t.function.starts_with("crate::"),
+                "путь должен начинаться с crate::"
+            );
         }
     }
 }

@@ -34,10 +34,7 @@ pub fn safe_agent(agent: &str) -> String {
 
 /// Имя безопасно как один сегмент пути (не пустое, без `..`, `/`, `\`, NUL).
 pub fn is_safe(agent: &str) -> bool {
-    !agent.is_empty()
-        && agent != "."
-        && agent != ".."
-        && !agent.contains(['/', '\\', '\0'])
+    !agent.is_empty() && agent != "." && agent != ".." && !agent.contains(['/', '\\', '\0'])
 }
 
 /// Путь письма: `dir/<safe_agent><ext>` — гарантированно внутри `dir`.
@@ -101,7 +98,10 @@ mod tests {
         let dir = Path::new("/tmp/mail/inbox");
         let path = mail_path(dir, "../evil", ".log");
         assert_eq!(path.parent(), Some(dir), "путь не должен выходить из dir");
-        assert_eq!(path.file_name().and_then(|s| s.to_str()), Some(".._evil.log"));
+        assert_eq!(
+            path.file_name().and_then(|s| s.to_str()),
+            Some(".._evil.log")
+        );
     }
 
     #[test]

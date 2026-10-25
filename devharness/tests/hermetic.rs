@@ -30,7 +30,11 @@ impl HermeticEnv {
             .map(|s| s.success())
             .unwrap_or(false);
         assert!(ok, "git init в чистом окружении");
-        HermeticEnv { _dir: dir, home, repo }
+        HermeticEnv {
+            _dir: dir,
+            home,
+            repo,
+        }
     }
 
     /// Запустить `devh test` в чистом окружении (пустой HOME, без .harness/config).
@@ -56,7 +60,10 @@ fn devh_test_without_config_exits_env_error() {
     let env = HermeticEnv::new();
     let (stdout, stderr, code) = env.run_devh_test();
     // EnvError = 2 (среда не готова).
-    assert_eq!(code, 2, "без .harness/config: код 2 (EnvError), а не {code}. stdout={stdout}, stderr={stderr}");
+    assert_eq!(
+        code, 2,
+        "без .harness/config: код 2 (EnvError), а не {code}. stdout={stdout}, stderr={stderr}"
+    );
     // Ошибка должна быть понятной, а не «пустой реестр».
     let combined = format!("{stdout}\n{stderr}");
     assert!(

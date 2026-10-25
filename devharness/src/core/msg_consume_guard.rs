@@ -128,15 +128,21 @@ mod tests {
         let d = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
         let p = d.path().join("inbox.log");
         fs::write(&p, "x").unwrap_or_else(|_| unreachable!());
-        assert!(consume_text(&p).unwrap_or_else(|_| unreachable!()).is_some());
-        assert!(consume_text(&p).unwrap_or_else(|_| unreachable!()).is_none());
+        assert!(consume_text(&p)
+            .unwrap_or_else(|_| unreachable!())
+            .is_some());
+        assert!(consume_text(&p)
+            .unwrap_or_else(|_| unreachable!())
+            .is_none());
     }
 
     #[test]
     fn missing_file_is_none_not_error() {
         let d = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
         let p = d.path().join("absent.log");
-        assert!(consume_bytes(&p).unwrap_or_else(|_| unreachable!()).is_none());
+        assert!(consume_bytes(&p)
+            .unwrap_or_else(|_| unreachable!())
+            .is_none());
     }
 
     #[test]

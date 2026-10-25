@@ -49,19 +49,54 @@ pub type ChildTask = ChildProposal;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DecompositionError {
     EmptyProposal,
-    TooManyChildren { limit: usize, got: usize },
-    EmptyId { index: usize },
-    EmptyTitle { index: usize },
-    DuplicateId { id: String },
-    DuplicateTitle { title: String },
-    EmptyZone { index: usize },
-    ZoneEscape { index: usize, zone: String, parent_zones: Vec<String> },
-    EmptyDod { index: usize },
-    EmptyCheck { index: usize },
-    ComplexityRaised { index: usize, field: &'static str, child: u8, parent: u8 },
-    CeilingExceeded { index: usize, c: u8, ceiling: u8 },
-    UnknownDep { index: usize, dep: String },
-    Cycle { path: Vec<String> },
+    TooManyChildren {
+        limit: usize,
+        got: usize,
+    },
+    EmptyId {
+        index: usize,
+    },
+    EmptyTitle {
+        index: usize,
+    },
+    DuplicateId {
+        id: String,
+    },
+    DuplicateTitle {
+        title: String,
+    },
+    EmptyZone {
+        index: usize,
+    },
+    ZoneEscape {
+        index: usize,
+        zone: String,
+        parent_zones: Vec<String>,
+    },
+    EmptyDod {
+        index: usize,
+    },
+    EmptyCheck {
+        index: usize,
+    },
+    ComplexityRaised {
+        index: usize,
+        field: &'static str,
+        child: u8,
+        parent: u8,
+    },
+    CeilingExceeded {
+        index: usize,
+        c: u8,
+        ceiling: u8,
+    },
+    UnknownDep {
+        index: usize,
+        dep: String,
+    },
+    Cycle {
+        path: Vec<String>,
+    },
 }
 
 impl DecompositionError {
@@ -143,10 +178,9 @@ impl fmt::Display for DecompositionError {
                 f,
                 "подзадача #{index}: {field}={child} выше родительского {parent}"
             ),
-            DecompositionError::CeilingExceeded { index, c, ceiling } => write!(
-                f,
-                "подзадача #{index}: C={c} выше потолка модели {ceiling}"
-            ),
+            DecompositionError::CeilingExceeded { index, c, ceiling } => {
+                write!(f, "подзадача #{index}: C={c} выше потолка модели {ceiling}")
+            }
             DecompositionError::UnknownDep { index, dep } => {
                 write!(f, "подзадача #{index}: неизвестная зависимость {dep}")
             }
@@ -263,9 +297,7 @@ pub fn decompose(
             return Err(DecompositionError::EmptyId { index });
         }
         if constraints.existing_ids.iter().any(|e| e == id) || !ids.insert(id) {
-            return Err(DecompositionError::DuplicateId {
-                id: id.to_string(),
-            });
+            return Err(DecompositionError::DuplicateId { id: id.to_string() });
         }
         let title = child.title.trim();
         if title.is_empty() {
@@ -505,10 +537,10 @@ mod tests {
     #[test]
     fn decomposition_is_deterministic() {
         let proposal = vec![child("T-101", "a"), child("T-102", "b")];
-        let first = decompose(&parent(), &constraints(), &proposal)
-            .unwrap_or_else(|e| panic!("{e}"));
-        let second = decompose(&parent(), &constraints(), &proposal)
-            .unwrap_or_else(|e| panic!("{e}"));
+        let first =
+            decompose(&parent(), &constraints(), &proposal).unwrap_or_else(|e| panic!("{e}"));
+        let second =
+            decompose(&parent(), &constraints(), &proposal).unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(first, second);
         assert_eq!(first, proposal);
     }

@@ -108,14 +108,22 @@ pub fn check_invariants(item_dir: &Path, worktree: &Path) -> InvariantReport {
 
     // 3. нет .harness/**/*.tmp — осиротевшие атомарные записи.
     // Ищем в .harness/ (store root) рекурсивно, как в chaos.sh.
-    let harness_root = item_dir.parent().and_then(|p| p.parent()).unwrap_or(item_dir);
+    let harness_root = item_dir
+        .parent()
+        .and_then(|p| p.parent())
+        .unwrap_or(item_dir);
     fn find_tmp_files(dir: &Path, out: &mut Vec<PathBuf>) {
         if let Ok(entries) = fs::read_dir(dir) {
             for e in entries.flatten() {
                 let path = e.path();
                 if path.is_dir() {
                     find_tmp_files(&path, out);
-                } else if path.file_name().and_then(|s| s.to_str()).map(|s| s.ends_with(".tmp")).unwrap_or(false) {
+                } else if path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s.ends_with(".tmp"))
+                    .unwrap_or(false)
+                {
                     out.push(path);
                 }
             }
@@ -124,10 +132,7 @@ pub fn check_invariants(item_dir: &Path, worktree: &Path) -> InvariantReport {
     let mut tmp_files = Vec::new();
     find_tmp_files(harness_root, &mut tmp_files);
     for path in tmp_files {
-        report.add_violation(format!(
-            "осиротевшее атомарное запись: {}",
-            path.display()
-        ));
+        report.add_violation(format!("осиротевшее атомарное запись: {}", path.display()));
     }
 
     // 4. в worktree нет мутационных маркеров — урок ae9f619.
@@ -153,7 +158,9 @@ pub fn check_invariants(item_dir: &Path, worktree: &Path) -> InvariantReport {
                 // Проверить, жив ли процесс (kill(pid, 0)).
                 let alive = unsafe { libc::kill(pid, 0) == 0 };
                 if !alive {
-                    report.add_warning(format!("stale run.pid {pid} — процесс мёртв (находка для doctor)"));
+                    report.add_warning(format!(
+                        "stale run.pid {pid} — процесс мёртв (находка для doctor)"
+                    ));
                 }
             } else {
                 report.add_warning(format!("run.pid содержит не-число: {pid_str}"));
@@ -179,12 +186,14 @@ fn fold_events_log(events_path: &Path) -> Option<String> {
             _ => {}
         }
     }
-    Some(match state {
-        2 => "done",
-        1 => "active",
-        _ => "open",
-    }
-    .to_string())
+    Some(
+        match state {
+            2 => "done",
+            1 => "active",
+            _ => "open",
+        }
+        .to_string(),
+    )
 }
 
 /// Инъецировать повреждение в item_dir/worktree по виду.
@@ -231,14 +240,22 @@ pub fn inject_corruption(
 /// Удаляет мусорные файлы, чистит маркеры, сбрасывает status в open.
 pub fn recover_state(item_dir: &Path, worktree: &Path) -> anyhow::Result<()> {
     // Удалить .tmp файлы в .harness/ (рекурсивно) и в item_dir.
-    let harness_root = item_dir.parent().and_then(|p| p.parent()).unwrap_or(item_dir);
+    let harness_root = item_dir
+        .parent()
+        .and_then(|p| p.parent())
+        .unwrap_or(item_dir);
     fn remove_tmp_files(dir: &Path) {
         if let Ok(entries) = fs::read_dir(dir) {
             for e in entries.flatten() {
                 let path = e.path();
                 if path.is_dir() {
                     remove_tmp_files(&path);
-                } else if path.file_name().and_then(|s| s.to_str()).map(|s| s.ends_with(".tmp")).unwrap_or(false) {
+                } else if path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s.ends_with(".tmp"))
+                    .unwrap_or(false)
+                {
                     let _ = fs::remove_file(&path);
                 }
             }
@@ -273,7 +290,10 @@ pub fn recover_state(item_dir: &Path, worktree: &Path) -> anyhow::Result<()> {
     let events_path = item_dir.join("events.log");
     use std::fs::OpenOptions;
     use std::io::Write;
-    let mut file = OpenOptions::new().create(true).append(true).open(&events_path)?;
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&events_path)?;
     writeln!(file, "aborted")?;
     // Удалить stale run.pid.
     let pid_path = item_dir.join("run.pid");
@@ -342,7 +362,10 @@ mod tests {
         inject_corruption(&item_dir, &worktree, CorruptionKind::MutateMarkerInWorktree).unwrap();
         let report = check_invariants(&item_dir, &worktree);
         assert!(!report.ok);
-        assert!(report.violations.iter().any(|v| v.contains("мутационный маркер")));
+        assert!(report
+            .violations
+            .iter()
+            .any(|v| v.contains("мутационный маркер")));
     }
 
     #[test]
@@ -370,7 +393,11 @@ mod tests {
 
         // Проверить, что всё чисто.
         let report = check_invariants(&item_dir, &worktree);
-        assert!(report.ok, "after recovery: violations={:?}", report.violations);
+        assert!(
+            report.ok,
+            "after recovery: violations={:?}",
+            report.violations
+        );
         assert!(report.warnings.is_empty());
         // status должен быть open.
         let status = fs::read_to_string(item_dir.join("status")).unwrap();
@@ -384,19 +411,35 @@ mod tests {
     fn fold_events_log_correctly_replays() {
         let (_tmp, item_dir, _worktree) = setup_item_dir();
         // claimed -> active
-        assert_eq!(fold_events_log(&item_dir.join("events.log")).unwrap(), "active");
+        assert_eq!(
+            fold_events_log(&item_dir.join("events.log")).unwrap(),
+            "active"
+        );
 
         // claimed, merged -> done
         fs::write(item_dir.join("events.log"), "claimed\nmerged\n").unwrap();
-        assert_eq!(fold_events_log(&item_dir.join("events.log")).unwrap(), "done");
+        assert_eq!(
+            fold_events_log(&item_dir.join("events.log")).unwrap(),
+            "done"
+        );
 
         // claimed, aborted -> open
         fs::write(item_dir.join("events.log"), "claimed\naborted\n").unwrap();
-        assert_eq!(fold_events_log(&item_dir.join("events.log")).unwrap(), "open");
+        assert_eq!(
+            fold_events_log(&item_dir.join("events.log")).unwrap(),
+            "open"
+        );
 
         // мусорные строки игнорируются; aborted в состоянии done не срабатывает (как в bash awk)
-        fs::write(item_dir.join("events.log"), "claimed\nmerged\nnot|valid\naborted\n").unwrap();
-        assert_eq!(fold_events_log(&item_dir.join("events.log")).unwrap(), "done");
+        fs::write(
+            item_dir.join("events.log"),
+            "claimed\nmerged\nnot|valid\naborted\n",
+        )
+        .unwrap();
+        assert_eq!(
+            fold_events_log(&item_dir.join("events.log")).unwrap(),
+            "done"
+        );
     }
 
     #[test]

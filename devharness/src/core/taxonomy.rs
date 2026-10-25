@@ -4,8 +4,8 @@
 //!
 //! Базовый набор из 6 классов (расширяется при дистилляции человеком).
 
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use serde::{Serialize, Deserialize};
 
 /// Класс слепоты тестов.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -113,7 +113,10 @@ pub fn group_survivors_by_class(
     let mut groups: HashMap<BlindClass, Vec<(String, MutantGenre)>> = HashMap::new();
     for (location, genre) in survivors {
         let class = genre_to_class(*genre);
-        groups.entry(class).or_default().push((location.clone(), *genre));
+        groups
+            .entry(class)
+            .or_default()
+            .push((location.clone(), *genre));
     }
     groups
 }
@@ -129,13 +132,22 @@ mod tests {
 
     #[test]
     fn genre_binary_operator_maps_to_boundary() {
-        assert_eq!(genre_to_class(MutantGenre::BinaryOperator), BlindClass::Boundary);
-        assert_eq!(genre_to_class(MutantGenre::ComparisonOperator), BlindClass::Boundary);
+        assert_eq!(
+            genre_to_class(MutantGenre::BinaryOperator),
+            BlindClass::Boundary
+        );
+        assert_eq!(
+            genre_to_class(MutantGenre::ComparisonOperator),
+            BlindClass::Boundary
+        );
     }
 
     #[test]
     fn genre_match_arms_map_to_match_arms() {
-        assert_eq!(genre_to_class(MutantGenre::MatchArmGuard), BlindClass::MatchArms);
+        assert_eq!(
+            genre_to_class(MutantGenre::MatchArmGuard),
+            BlindClass::MatchArms
+        );
         assert_eq!(genre_to_class(MutantGenre::MatchArm), BlindClass::MatchArms);
     }
 

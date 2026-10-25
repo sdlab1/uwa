@@ -1731,7 +1731,11 @@ pub fn send(args: &[String]) -> i32 {
             }
             match crate::core::identity::authorize_takeover(&raw, &for_key.as_ref().unwrap()) {
                 Ok(_) => {
-                    println!("takeover авторизован для {} (ключ: {})", raw, for_key.as_ref().unwrap());
+                    println!(
+                        "takeover авторизован для {} (ключ: {})",
+                        raw,
+                        for_key.as_ref().unwrap()
+                    );
                     0
                 }
                 Err(e) => {
@@ -2162,10 +2166,7 @@ mod tests {
     /// иначе счёт `pending` пухнет от писем самому себе (R-8).
     #[test]
     fn addressed_only_to_self_detects_self_letters() {
-        let home = std::env::temp_dir().join(format!(
-            "devh-test-self-{}",
-            std::process::id()
-        ));
+        let home = std::env::temp_dir().join(format!("devh-test-self-{}", std::process::id()));
         std::fs::create_dir_all(&home).unwrap_or_default();
         std::fs::write(
             home.join("aliases.json"),

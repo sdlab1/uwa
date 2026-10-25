@@ -203,7 +203,8 @@ mod tests {
     fn old_registry_touch_counts_as_idle() {
         let mut reg = Registry::default();
         let now = 1_000_000u64;
-        reg.tasks.push(make_task("sleeper", now - 5_000, Status::Active));
+        reg.tasks
+            .push(make_task("sleeper", now - 5_000, Status::Active));
         let a = make_agent("sleeper", None, None);
         let act = compute_activity(&reg, &a, now, 1_200);
         assert!(act.stale, "20+ минут тишины = простой");
@@ -215,7 +216,8 @@ mod tests {
     fn wt_sync_takes_priority_over_stale_registry() {
         let mut reg = Registry::default();
         let now = 1_000_000u64;
-        reg.tasks.push(make_task("active", now - 1_500, Status::Active));
+        reg.tasks
+            .push(make_task("active", now - 1_500, Status::Active));
         let a = make_agent("active", Some("/tmp/wt"), Some(now - 300));
         let act = compute_activity(&reg, &a, now, 1_200);
         assert!(!act.stale, "wt-sync свежее реестра — не простой");
@@ -226,7 +228,8 @@ mod tests {
     fn all_signals_stale_triggers_revocation() {
         let mut reg = Registry::default();
         let now = 1_000_000u64;
-        reg.tasks.push(make_task("dead", now - 3_000, Status::Active));
+        reg.tasks
+            .push(make_task("dead", now - 3_000, Status::Active));
         let a = make_agent("dead", Some("/tmp/wt"), Some(now - 3_000));
         let act = compute_activity(&reg, &a, now, 1_200);
         assert!(act.stale, "все сигналы старше порога — простой");

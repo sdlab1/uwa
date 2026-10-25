@@ -34,9 +34,7 @@ fn each_optional_field_has_serde_default() {
         // JSON без конкретного поля -> должно десериализоваться с None.
         let json = base_json("", r#""T-1": 0"#);
         let reg: Registry = serde_json::from_str(&json).unwrap_or_else(|e| {
-            panic!(
-                "поле {field_name} без #[serde(default)] падает при отсутствии в JSON: {e}"
-            )
+            panic!("поле {field_name} без #[serde(default)] падает при отсутствии в JSON: {e}")
         });
         let t = &reg.tasks[0];
         // Проверяем, что поле действительно None (а не муссия).
@@ -128,7 +126,10 @@ fn task_optional_fields_roundtrip() {
     assert_eq!(reg2.tasks[0].fail_level, Some(3));
     assert_eq!(reg2.tasks[0].commit_sha.as_deref(), Some("abc123"));
     assert_eq!(reg2.tasks[0].main_sha.as_deref(), Some("def456"));
-    assert_eq!(reg2.tasks[0].override_reason.as_deref(), Some("test reason"));
+    assert_eq!(
+        reg2.tasks[0].override_reason.as_deref(),
+        Some("test reason")
+    );
 }
 
 #[test]
@@ -196,5 +197,9 @@ fn main_sha_roundtrip_regression_guard() {
     assert_eq!(t.main_sha.as_deref(), Some("e7e9542"));
     let serialized = serde_json::to_string(&reg).unwrap();
     let reg2: Registry = serde_json::from_str(&serialized).unwrap();
-    assert_eq!(reg2.tasks[0].main_sha.as_deref(), Some("e7e9542"), "main_sha must survive roundtrip");
+    assert_eq!(
+        reg2.tasks[0].main_sha.as_deref(),
+        Some("e7e9542"),
+        "main_sha must survive roundtrip"
+    );
 }

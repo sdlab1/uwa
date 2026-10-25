@@ -449,7 +449,10 @@ mod tests {
     #[test]
     fn parse_command_preserves_flags() {
         let v = parse_command("cargo test -p devh --lib core::agent_state").unwrap();
-        assert_eq!(v, vec!["cargo", "test", "-p", "devh", "--lib", "core::agent_state"]);
+        assert_eq!(
+            v,
+            vec!["cargo", "test", "-p", "devh", "--lib", "core::agent_state"]
+        );
     }
 
     #[test]

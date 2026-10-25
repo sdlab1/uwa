@@ -85,10 +85,7 @@ pub fn record_run(
     let line = serde_json::to_string(&rec).unwrap_or_default();
     use std::fs::OpenOptions;
     use std::io::Write;
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)?;
+    let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
     writeln!(file, "{}", line)?;
     Ok(())
 }
@@ -169,7 +166,10 @@ fn load_stats(store: &Store) -> RateStats {
 
 fn print_stats(stats: &RateStats, cfg: &RunConfig) {
     println!("=== devh rate status ===");
-    println!("История: {}", history_path(&Store::new(Path::new("."))).display());
+    println!(
+        "История: {}",
+        history_path(&Store::new(Path::new("."))).display()
+    );
     println!(
         "Запусков за час: {} (build: {}, mutate: {})",
         stats.runs_last_hour, stats.builds_last_hour, stats.mutates_last_hour
@@ -186,8 +186,16 @@ fn print_stats(stats: &RateStats, cfg: &RunConfig) {
     let max_cpu = cfg.rate.as_ref().map(|r| r.cpu_max_pct).unwrap_or(80);
 
     println!("\nЛимиты:");
-    println!("  build:  {} мин (лимит {} мин)", max_build / 60, max_build / 60);
-    println!("  mutate: {} мин (лимит {} мин)", max_mutate / 60, max_mutate / 60);
+    println!(
+        "  build:  {} мин (лимит {} мин)",
+        max_build / 60,
+        max_build / 60
+    );
+    println!(
+        "  mutate: {} мин (лимит {} мин)",
+        max_mutate / 60,
+        max_mutate / 60
+    );
     println!("  CPU:    {}% (лимит {}%)", stats.cpu_avg_recent, max_cpu);
 
     if let Some(last) = stats.last_run_ts {
@@ -229,10 +237,7 @@ fn rate_check(root: &Path, cfg: &RunConfig) -> anyhow::Result<()> {
     if let Some(last) = stats.last_run_ts {
         let gap = now.saturating_sub(last);
         if gap < min_gap {
-            issues.push(format!(
-                "последний запуск {} сек назад (< 15 мин)",
-                gap
-            ));
+            issues.push(format!("последний запуск {} сек назад (< 15 мин)", gap));
         }
     }
     if stats.builds_last_hour >= 3 {
@@ -264,8 +269,16 @@ fn rate_limit(root: &Path, args: &[String]) -> anyhow::Result<()> {
         let max_cpu = cfg.rate.as_ref().map(|r| r.cpu_max_pct).unwrap_or(80);
         let history_days = cfg.rate.as_ref().map(|r| r.history_days).unwrap_or(7);
         println!("Текущие лимиты:");
-        println!("  RATE_BUILD_MAX_DURATION={} ({} мин)", max_build, max_build / 60);
-        println!("  RATE_MUTATE_MAX_DURATION={} ({} мин)", max_mutate, max_mutate / 60);
+        println!(
+            "  RATE_BUILD_MAX_DURATION={} ({} мин)",
+            max_build,
+            max_build / 60
+        );
+        println!(
+            "  RATE_MUTATE_MAX_DURATION={} ({} мин)",
+            max_mutate,
+            max_mutate / 60
+        );
         println!("  RATE_CPU_MAX_PCT={}", max_cpu);
         println!("  RATE_HISTORY_DAYS={}", history_days);
         Ok(())

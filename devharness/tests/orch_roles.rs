@@ -89,7 +89,10 @@ fn worker_sees_only_own_tasks_and_lead_buffer() {
     assert_eq!(code, 0, "board ведомого: {err}");
     assert!(out.contains("worker1"), "своё имя:\n{out}");
     assert!(out.contains("T-1"), "своя задача:\n{out}");
-    assert!(out.contains("T-3"), "задача буфера ведущего доступна:\n{out}");
+    assert!(
+        out.contains("T-3"),
+        "задача буфера ведущего доступна:\n{out}"
+    );
     assert!(!out.contains("T-2"), "чужая задача не показывается:\n{out}");
 }
 
@@ -120,11 +123,11 @@ fn worker_cannot_set_complexity_c() {
             "true",
         ],
     );
-    assert_ne!(code, 0, "ведомый не создаёт задачи для доски и не назначает C");
-    assert!(
-        err.contains("tech-lead"),
-        "внятная причина отказа: {err}"
+    assert_ne!(
+        code, 0,
+        "ведомый не создаёт задачи для доски и не назначает C"
     );
+    assert!(err.contains("tech-lead"), "внятная причина отказа: {err}");
 }
 
 #[test]
@@ -135,7 +138,10 @@ fn lead_cannot_take_task_from_own_queue() {
     // Ведущий не берёт задачи из очереди — очередь для ведомых (O19).
     let (_out, err, code) = env.run("lead", &["start", "T-3"]);
     assert_ne!(code, 0, "ведущий не берёт задачу из своей очереди");
-    assert!(err.contains("ведущий не берёт задачи"), "внятная причина: {err}");
+    assert!(
+        err.contains("ведущий не берёт задачи"),
+        "внятная причина: {err}"
+    );
 }
 
 #[test]
