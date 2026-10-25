@@ -229,4 +229,64 @@ mod tests {
         }
         assert!(FailLevel::from_code(6).is_none());
     }
+
+    #[test]
+    fn report_from_registry_tasks() {
+        let tasks = vec![
+            ("gpt4".to_string(), 0u8, 3u8),
+            ("gpt4".to_string(), 1u8, 5u8),
+            ("gpt4".to_string(), 0u8, 4u8),
+            ("claude".to_string(), 2u8, 2u8),
+        ];
+        let report = generate_report(tasks);
+        assert!(report.contains("gpt4"));
+        assert!(report.contains("claude"));
+        assert!(report.contains("F0"));
+        assert!(report.contains("F1"));
+        assert!(report.contains("F2"));
+    }
+}
+
+pub fn generate_report<I>(tasks: I) -> String
+where
+    I: IntoIterator<Item = (String, u8, u8)>,
+{
+    let mut by_model: BTreeMap<String, ModelRatingAccum> = BTreeMap::new();
+
+    for (model, fail_code, complexity) in tasks {
+        let acc = by_model.entry(model.clone()).or_default();
+        acc.tasks_done += 1;
+        *acc.fail_distribution.entry(fail_code).or_insert(0) += 1;
+        if fail_code == 0 || fail_code == 1 {
+            if complexity > acc.ceiling {
+                acc.ceiling = complexity.min(10);
+            }
+        }
+    }
+
+    let mut output = String::new();
+    output.push_str(&format!(
+        "{:<28} {:<8} {:<24} {:<8}\n",
+        "модель", "сдано", "F-распределение", "потолок"
+    ));
+    for (model, acc) in by_model {
+        let f_dist: String = acc
+            .fail_distribution
+            .iter()
+            .map(|(k, v)| format!("F{}:{}", k, v))
+            .collect::<Vec<_>>()
+            .join(" ");
+        output.push_str(&format!(
+            "{:<28} {:<8} {:<24} C{:<7}\n",
+            model, acc.tasks_done, f_dist, acc.ceiling
+        ));
+    }
+    output
+}
+
+#[derive(Default)]
+struct ModelRatingAccum {
+    tasks_done: usize,
+    fail_distribution: BTreeMap<u8, usize>,
+    ceiling: u8,
 }
