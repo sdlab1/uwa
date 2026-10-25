@@ -104,7 +104,7 @@ fn table_ceiling(model: &str) -> u8 {
 /// Потолок C агента по реестру.
 ///
 /// Порядок источников: явный `c_ceiling` (решение lead'а/tech-lead'а) →
-//! потолок модели по истории сдачи → таблица моделей → **C1** (fail-closed).
+/// потолок модели по истории сдачи → таблица моделей → **C1** (fail-closed).
 pub fn ceiling_of(reg: &Registry, agent: &str) -> u8 {
     let canon = crate::core::identity::canonical(agent);
     let state = reg.agents.iter().find(|a| {
@@ -218,14 +218,27 @@ pub fn plan(reg: &Registry, lead: Option<&str>) -> RouterPlan {
     let mut out = RouterPlan::default();
 
     // Активные зоны (всех агентов) и текущая нагрузка.
+    //
+    // `load` — задачи В РАБОТЕ (жёсткий потолок параллелизма: не больше
+    // MAX_ACTIVE_PER_AGENT активных задач на агента).
+    // `backlog` — размер очереди агента (мягкий tie-break: сначала тому, у
+    // кого очередь короче).
     let mut active_zones: Vec<String> = Vec::new();
     let mut load: BTreeMap<String, usize> = BTreeMap::new();
+    let mut backlog: BTreeMap<String, usize> = BTreeMap::new();
     for t in &reg.tasks {
+        let owner = crate::core::identity::canonical(&t.agent);
+        let is_lead_buf = lead
+            .map(|l| owner == crate::core::identity::canonical(l))
+            .unwrap_or(false);
         if t.status == Status::Active {
             active_zones.extend(t.zones.iter().cloned());
-            *load
-                .entry(crate::core::identity::canonical(&t.agent))
-                .or_insert(0) += 1;
+            if !is_lead_buf {
+                *load.entry(owner.clone()).or_insert(0) += 1;
+            }
+        }
+        if t.status == Status::Queued && !is_lead_buf {
+            *backlog.entry(owner).or_insert(0) += 1;
         }
     }
 
@@ -283,7 +296,10 @@ pub fn plan(reg: &Registry, lead: Option<&str>) -> RouterPlan {
         }
 
         // Кандидаты-исполнители: подходящий потолок + свободная нагрузка.
-        let mut best: Option<(String, u8, usize, String)> = None; // (имя, потолок, нагрузка, роль)
+        // Порядок выбора: минимальный достаточный потолок (простые задачи —
+        // простым моделям, сильные остаются для тяжёлого), затем меньшая
+        // очередь, затем меньше активных задач, затем имя (детерминизм).
+        let mut best: Option<(String, u8, usize, usize, String)> = None;
         let mut rejects: Vec<String> = Vec::new();
         for a in &reg.agents {
             let canon = crate::core::identity::canonical(&a.name);
@@ -301,13 +317,16 @@ pub fn plan(reg: &Registry, lead: Option<&str>) -> RouterPlan {
                 rejects.push(format!("{canon}: уже {busy} активных задач"));
                 continue;
             }
+            let queued = backlog.get(&canon).copied().unwrap_or(0);
             let ceiling = ceiling_of(reg, &canon);
             let role = a.role.clone().unwrap_or_default();
-            let key = (canon.clone(), ceiling, busy, role);
+            let key = (canon.clone(), ceiling, queued, busy, role);
             let better = match &best {
                 None => true,
-                Some((_, bc, bb, _)) => (ceiling, busy, canon.as_str())
-                    < (*bc, *bb, key.0.as_str()),
+                Some((_, bc, bq, bb, _)) => {
+                    (ceiling, queued, busy, canon.as_str())
+                        < (*bc, *bq, *bb, key.0.as_str())
+                }
             };
             if better {
                 best = Some(key);
@@ -315,9 +334,9 @@ pub fn plan(reg: &Registry, lead: Option<&str>) -> RouterPlan {
         }
 
         match best {
-            Some((agent, ceiling, busy, role)) => {
+            Some((agent, ceiling, queued, busy, role)) => {
                 let reason = format!(
-                    "потолок C{ceiling}, активных {busy}, роль {}{}",
+                    "потолок C{ceiling}, в очереди {queued}, активных {busy}, роль {}{}",
                     if role.is_empty() { "worker" } else { &role }
                 );
                 out.assignments.push(Assignment {
@@ -327,6 +346,7 @@ pub fn plan(reg: &Registry, lead: Option<&str>) -> RouterPlan {
                     reason,
                 });
                 load.insert(agent.clone(), busy + 1);
+                *backlog.entry(agent.clone()).or_insert(0) += 1;
                 reserved.entry(agent).or_default().extend(t.zones.iter().cloned());
             }
             None => {
