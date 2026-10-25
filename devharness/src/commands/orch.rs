@@ -1474,7 +1474,61 @@ fn start(root: &Path, args: &[String]) -> anyhow::Result<()> {
             ));
         }
     }
-    // R24: ПРИНУДИТЕЛЬНАЯ ИДЕНТИФИКАЦИЯ перед КАЖДОЙ выдачей (fail-closed).
+    // R25: не-lead не начинает задачу из ГРЯЗНОГО общего дерева. Правки в
+    // main блокируют guard-commit у ВСЕХ агентов (инцидент: агент работал
+    // прямо в репо, дерево стало грязным, рабочие не могли коммитить).
+    // Отказ называет причину и лекарство; ведущий гейтом не касается —
+    // общее дерево его зона.
+    let main_root = orch_root(root);
+    if *root == main_root && lead.as_deref() != Some(caller.as_str()) {
+        if crate::shell::git::tree_dirty(&main_root) {
+            let dirty = crate::shell::git::status_names(&main_root);
+            let sample = dirty
+                .iter()
+                .take(5)
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join(", ");
+            let my_wt = reg
+                .agents
+                .iter()
+                .find(|a| crate::core::identity::canonical(&a.name) == caller)
+                .and_then(|a| a.worktree.clone())
+                .filter(|w| !w.trim().is_empty())
+                .map(PathBuf::from);
+            match my_wt {
+                Some(wt) => {
+                    return Err(anyhow!(
+                        "devh orch start: общее дерево репо {} грязное ({} файлов: {}) — \
+                         задача не начинается из грязного main (R25): правки в общем дереве \
+                         блокируют коммиты ВСЕХ агентов (guard-commit). \
+                         Причина: запуск из общего дерева вместо своего worktree. \
+                         Лекарство: (1) если файлы твои — закоммить ТОЛЬКО свои пути \
+                         (devh orch commit <ID> --path <пути> или devh git commit --path <пути>); \
+                         (2) если чужие — не трогай (O5), напиши ведущему (devh msg send); \
+                         (3) повтори start из СВОЕГО worktree: cd {} && devh orch start {}",
+                        main_root.display(),
+                        dirty.len(),
+                        sample,
+                        wt.display(),
+                        id
+                    ));
+                }
+                None => {
+                    println!(
+                        "devh orch: ⚠ общее дерево репо {} грязное ({} файлов: {}) — \
+                         работай ТОЛЬКО в выданном ниже worktree (R25): правки в main \
+                         блокируют чужие коммиты (guard-commit)",
+                        main_root.display(),
+                        dirty.len(),
+                        sample
+                    );
+                }
+            }
+        }
+    }
+    // R24: ПРИНУДИТЕЛЬНАЯ ИДЕНТИФИКАЦИЯ перед КАЖДОЙ выдачей (мягкий
+    // fail-closed: нет ответа — задача ВЫДАЁТСЯ, идентификация ОТЛОЖЕНА).
     // Проверка — последняя: до неё отказ даёт точную причину (зависимости,
     // потолок, «task taken»), а не «сначала ответь на вопрос».
     // Ответ — one-shot: расходуется ровно одной выдачей.
@@ -6248,6 +6302,67 @@ mod tests {
         g(&["add", "-A"]);
         g(&["commit", "-qm", "base"]);
         (d, root)
+    }
+
+    /// R25: не-lead не начинает задачу из ГРЯЗНОГО общего дерева — правки
+    /// в main блокируют guard-commit у всех агентов (инцидент: агент работал
+    /// прямо в репо). Отказ называет причину и лекарство, задача остаётся
+    /// в очереди.
+    #[test]
+    fn start_refuses_non_lead_from_dirty_main() {
+        let (_d, root) = git_repo_fixture();
+        let id = add_task(&root, &me(), "P2", "грязное main");
+        // Worktree агента известен реестру — агент обязан работать там;
+        // вызов из main при грязном дереве = отказ с лечебным текстом.
+        let my_wt = root.join("wts").join("devh-me");
+        {
+            let mut reg = load(&root);
+            let agent = reg
+                .agents
+                .iter_mut()
+                .find(|a| crate::core::identity::canonical(&a.name) == me())
+                .expect("агент в реестре");
+            agent.worktree = Some(my_wt.to_string_lossy().to_string());
+            save(&root, &reg).expect("save");
+        }
+        assert!(
+            load(&root).lead.is_none(),
+            "в фикстуре ведущего нет — вызывающий не-lead"
+        );
+        // Грязное общее дерево: чужой (или свой) незакоммиченный patch в main.
+        std::fs::write(root.join("a.txt"), "2\n").expect("dirty main");
+        let err = run(&root, "start", &[id.as_str()]).expect_err("отказ");
+        let msg = err.to_string();
+        assert!(msg.contains("грязное"), "{msg}");
+        assert!(msg.contains("R25"), "{msg}");
+        assert!(msg.contains("cd "), "{msg}"); // лекарство: уйти в свой worktree
+        assert!(msg.contains("devh msg send"), "{msg}");
+        // Задача осталась в очереди: взятия не произошло.
+        let t = load(&root)
+            .tasks
+            .iter()
+            .find(|t| t.id == id)
+            .expect("задача")
+            .clone();
+        assert_eq!(t.status, Status::Queued, "задача не взята: {t:?}");
+    }
+
+    /// Bootstrap не ломаем: агент БЕЗ выданного worktree получает
+    /// предупреждение (не отказ) — primo-задача должна начинаться, пока
+    /// грязное main — забота чужая/ведущего.
+    #[test]
+    fn start_warns_from_dirty_main_when_no_worktree() {
+        let (_d, root) = git_repo_fixture();
+        let id = add_task(&root, &me(), "P2", "primo-start");
+        std::fs::write(root.join("a.txt"), "2\n").expect("dirty main");
+        run(&root, "start", &[id.as_str()]).expect("start (предупреждение, не отказ)");
+        let t = load(&root)
+            .tasks
+            .iter()
+            .find(|t| t.id == id)
+            .expect("задача")
+            .clone();
+        assert_eq!(t.status, Status::Active, "задача взята: {t:?}");
     }
 
     /// Работа уже в истории: коммитить нечего — задача всё равно должна

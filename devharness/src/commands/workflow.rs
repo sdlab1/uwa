@@ -23,12 +23,15 @@ pub const QUICKSTART: &str = r#"=== БЫСТРЫЙ СТАРТ (30 секунд) 
   ДО любой работы (даже если «уже закончил код и собираюсь коммитить» — коммит отложи).
   Команда: devh orch identify --reply "MODEL: <полное имя модели из системного промпта>"
            --reply "VERSION: <версия/дата выхода>" --reply "DATE: <YYYY-MM-DD>"
+  Ответ one-shot: расходуется одной выдачей задачи. Без ответа работа НЕ стоит:
+  задача выдаётся, идентификация ОТЛОЖЕНА (мягкий fail-closed).
 
 ЧТО ЗАПУСТИТЬ (репо /home/user/project_uwa):
   cd /home/user/project_uwa
   ./target/debug/devh msg read      — твои задачи (consume-on-read), ПЕРВЫМ ДЕЛОМ в каждом ходе
-  ./target/debug/devh workflow      — канон (R1-R24, O1-O22, шкалы P/F/C, запреты)
+  ./target/debug/devh workflow      — канон (R1-R26, O1-O22, шкалы P/F/C, запреты)
   ./target/debug/devh orch board    — кто что делает, очереди, зоны
+  ./target/debug/devh orch wt sync <ты>  — обновить СВОЙ worktree до main (руками git pull/rebase нельзя)
   новый агент: cd /home/user/project_uwa && ./target/debug/devh orch welcome
 
 ТВОЙ ЦИКЛ (git тебе НЕ нужен — его делает харнесс):
@@ -60,6 +63,10 @@ pub const QUICKSTART: &str = r#"=== БЫСТРЫЙ СТАРТ (30 секунд) 
   - --in-place для аудита (R11), правка артефактов аудита руками (R12)
   - внешние watcher'ы, sleep-циклы, фоновые скрипты, ad-hoc разбор логов
     cargo-mutants (только devh mutate watch|status|problems, R2/R7/R13)
+  - РАБОТАТЬ В ОБЩЕМ ДЕРЕВЕ РЕПО (/home/user/project_uwa) — твоя зона ТОЛЬКО
+    свой worktree (его выдаёт devh orch start); правки в общем дереве блокируют
+    чужие коммиты (guard-commit), теряются при sync/merge и не видны в реестре (R25)
+  - руками git pull / git fetch / git rebase origin/main — только `devh orch wt sync <ты>` (R26)
   - править зону другого агента (O5); убивать процессы соседнего агента"#;
 
 pub const IDENTIFICATION: &str = r#"=== ИДЕНТИФИКАЦИЯ МОДЕЛИ (ВЫСШИЙ ПРИОРИТЕТ, R24) ===
@@ -69,7 +76,8 @@ pub const IDENTIFICATION: &str = r#"=== ИДЕНТИФИКАЦИЯ МОДЕЛИ 
 Если пришло письмо с темой «ИДЕНТИФИКАЦИЯ: …» (или devh orch start требует
 идентификации) — ОТВЕТЬ СРАЗУ. Даже если ты уже «проверил код и собираешься
 коммитить» — коммит ОТЛОЖИ, ответь сначала. Потеря внимания здесь = потеря
-задачи (fail-closed: без ответа задача не выдаётся).
+задачи (мягкий fail-closed: без ответа задача ВЫДАЁТСЯ, идентификация ОТЛОЖЕНА —
+работа не стоит; неподтверждённая модель видна техническому лиду и на доске).
 
 КОМАНДА ОТВЕТА (одна, выполни её сам):
   devh orch identify --reply "MODEL: <полное имя модели из ТВОЕГО системного промпта>"
@@ -129,10 +137,28 @@ pub const RULES: &str = r#"=== ПРАВИЛА ===
   R22 ELEVATION: роль lead выдаёт только текущий lead и только по паролю
       (devh orch elevate <агент> --password "…"); без пароля — отказ
   R23 WATCHDOG: нет активности >20 мин (письмо/коммит/обновление задачи) -> lead отзывает
+      задачу и освобождает worktree; очнулся -> снова devh orch welcome (посвящение заново)
   R24 ИДЕНТИФИКАЦИЯ: вопрос-идентификация модели = ПРИКАЗ высшего приоритета; ответь
       ДО любой работы (даже перед коммитом), назови модель ТОЧНО как в системном промпте
-      (с датой/версией релиза: разные даты = разные модели); без ответа задача не выдаётся
-      задачу и освобождает worktree; очнулся -> снова devh orch welcome (посвящение заново)"#;
+      (с датой/версией релиза: разные даты = разные модели); ответ one-shot (расходуется
+      одной выдачей); БЕЗ ответа задача ВЫДАЁТСЯ — идентификация ОТЛОЖЕНА (мягкий
+      fail-closed: работа не блокируется; неподтверждённая модель видна техлиду и доске)
+  R25 РАБОТАЙ ТОЛЬКО В СВОЁМ WORKTREE: общее дерево репо (/home/user/project_uwa, ветка main) —
+      зона ВЕДУЩЕГО. Свои правки делаешь ТОЛЬКО в личном worktree, который ВСЕГДА выдаёт
+      `devh orch start <ID>` (путь печатается в ответе). Работа в общем дереве ЗАПРЕЩЕНА:
+      (1) твоя грязь блокирует guard-commit у всех остальных агентов (активная задача в зоне);
+      (2) правки теряются при sync/merge и попадают не в твою ветку; (3) коммит в main —
+      только lead; (4) чужое незакоммиченное в общем дереве НЕ трогать и НЕ откатывать (R9).
+      Забыл путь — `devh orch wt path <ты>`; список — `devh orch wt list`. Нет worktree —
+      возьми задачу (`devh orch start`), дерево выдастся само
+  R26 ОБНОВЛЯЙ WORKTREE ТОЛЬКО `devh orch wt sync <ты>`: руками `git pull`, `git fetch`,
+      `git rebase origin/main` в СВОЁМ и ЧУЖОМ worktree ЗАПРЕЩЕНЫ — обновление делает харнесс
+      одной командой (предсказуемо, при конфликте rebase откатывается, твои коммиты целы).
+      Обновляйся: перед началом задачи, после мержа коллег в main, когда гейт/`devh next`
+      говорит «база отстала». Грязное дерево -> sync откажет с лечебным текстом: сперва
+      закоммить СВОИ пути (`devh orch commit <ID> --path <пути>` или `devh git commit`),
+      затем sync повтори. `.harness` в worktree — симлинк на главное дерево, его создаёт и
+      чинит харнесс (при `wt assign/ensure/sync`): руками создавать/править НЕ надо"#;
 
 /// Правила оркестрации: ведущий ↔ ведомые агенты.
 pub const ORCHESTRATION: &str = r#"=== ОРКЕСТРАЦИЯ (ведущий ↔ ведомые агенты) ===
@@ -286,6 +312,10 @@ pub const FORBIDDEN: &str = r#"=== ЗАПРЕЩЕНО (R1/R2/R9/R13) ===
   ✗ правка артефактов аудита руками             → результат обнуляется
   ✗ тяжёлые прогоны параллельно и при перегруженном CPU → сначала свежая проверка нагрузки
   ✗ убивать процессы соседнего агента            → ждать или останавливать ТОЛЬКО свой прогон
+  ✗ работать/править/коммитить в общем дереве репо → только свой worktree (R25);
+    зона ведущего, агент туда не лезет (забыл путь: devh orch wt path <ты>)
+  ✗ руками git pull / git fetch / git rebase origin/main в своём worktree → только `devh orch wt sync <ты>` (R26)
+  ✗ git checkout/restore/stash/reset в общем дереве → стирает чужую незакоммиченную работу (R9)
   ✗ cargo build/check/test чаще 1 раза в 15 мин  → окно devh rate build (R18)
   ✗ запуск при system load > 80%                 → снять нагрузку, потом работать (R19)
   ✗ мутационный аудит ведомым                    → аудит запускает ведущий (R17)"#;
@@ -451,9 +481,35 @@ mod tests {
         assert!(RULES.contains("20 мин"), "{RULES}");
         assert!(RULES.contains("WATCHDOG"), "{RULES}");
         // Быстрый старт печатает тот же цикл и номера правил.
-        assert!(QUICKSTART.contains("R1-R24"), "{QUICKSTART}");
+        assert!(QUICKSTART.contains("R1-R26"), "{QUICKSTART}");
         assert!(QUICKSTART.contains("git тебе НЕ нужен"), "{QUICKSTART}");
         assert!(QUICKSTART.contains("devh orch dod"), "{QUICKSTART}");
+    }
+
+    /// R25/R26: агент работает ТОЛЬКО в своём worktree; обновление — только
+    /// `devh orch wt sync`; идентификация мягкая (ответ откладывается, а не
+    /// блокирует выдачу).
+    #[test]
+    fn canon_covers_worktree_only_rules() {
+        assert!(RULES.contains("R25"), "{RULES}");
+        assert!(RULES.contains("R26"), "{RULES}");
+        assert!(RULES.contains("РАБОТАЙ ТОЛЬКО В СВОЁМ WORKTREE"), "{RULES}");
+        assert!(RULES.contains("зона ВЕДУЩЕГО"), "{RULES}");
+        assert!(RULES.contains("devh orch wt path"), "{RULES}");
+        assert!(RULES.contains("wt sync"), "{RULES}");
+        assert!(QUICKSTART.contains("wt sync"), "{QUICKSTART}");
+        assert!(FORBIDDEN.contains("worktree (R25)"), "{FORBIDDEN}");
+        assert!(FORBIDDEN.contains("wt sync"), "{FORBIDDEN}");
+    }
+
+    /// R24: идентификация — приказ, но НЕ блокировка: без ответа задача
+    /// выдаётся, идентификация откладывается (мягкий fail-closed).
+    #[test]
+    fn canon_identification_is_soft_fail_closed() {
+        assert!(RULES.contains("идентификация ОТЛОЖЕНА"), "{RULES}");
+        assert!(IDENTIFICATION.contains("ОТЛОЖЕНА"), "{IDENTIFICATION}");
+        assert!(!IDENTIFICATION.contains("без ответа задача не выдаётся"), "{IDENTIFICATION}");
+        assert!(!RULES.contains("без ответа задача не выдаётся"), "{RULES}");
     }
 
     #[test]
