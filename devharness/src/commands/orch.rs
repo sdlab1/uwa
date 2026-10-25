@@ -584,7 +584,7 @@ pub fn orch(root: &Path, sub: &str, args: &[String]) -> anyhow::Result<()> {
         "board" => board(root, args),
         "list" => list(root, args),
         "next" => next_cmd(root),
-        "selfcheck" => selfcheck(root),
+        "selfcheck" => selfcheck(root, args),
         "pulse" => pulse(root),
         "add" => add(root, args),
         "start" => start(root, args),
@@ -1931,7 +1931,8 @@ fn next_cmd(root: &Path) -> anyhow::Result<()> {
 /// Проверяет инварианты, нарушение которых ломает оркестрацию: активная
 /// задача без worktree, неизвестные/циклические зависимости, пересечение
 /// зон двумя исполнителями, пустой буфер, потерянные слияния, worktree в /tmp.
-fn selfcheck(root: &Path) -> anyhow::Result<()> {
+fn selfcheck(root: &Path, args: &[String]) -> anyhow::Result<()> {
+    let as_json = args.iter().any(|a| a == "--json");
     let reg = load(root);
     let mut problems: Vec<String> = Vec::new();
     let mut warns: Vec<String> = Vec::new();
@@ -2066,18 +2067,27 @@ fn selfcheck(root: &Path) -> anyhow::Result<()> {
             ));
         }
     }
-    println!("=== САМОПРОВЕРКА ОРКЕСТРАЦИИ ===");
+    // 6. Просроченные письма без ответа (T-271).
+    let lag_reports = crate::core::msg_lag::check_all_lag_reports(None);
+    warns.extend(lag_reports);
+
+    let mut report = crate::core::report_fmt::SelfcheckReport::with_check("orch_selfcheck");
     for p in &problems {
-        println!("✗ {p}");
+        report = report.add_problem(p.clone());
     }
     for w in &warns {
-        println!("⚠ {w}");
+        report = report.add_warn(w.clone());
     }
-    println!(
-        "итого: проблем {} · предупреждений {}",
-        problems.len(),
-        warns.len()
-    );
+
+    if as_json {
+        println!("{}", crate::core::report_fmt::format_selfcheck_json(&report));
+    } else {
+        print!("{}", crate::core::report_fmt::format_selfcheck_text(&report));
+        println!(
+            "итого: проблем {} · предупреждений {}",
+            report.problem_count, report.warn_count
+        );
+    }
     if !problems.is_empty() {
         anyhow::bail!("selfcheck: {} критических проблем оркестрации", problems.len());
     }

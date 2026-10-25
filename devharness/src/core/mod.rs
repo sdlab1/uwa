@@ -62,6 +62,7 @@ pub mod presence;
 pub mod slot;
 pub mod stub_check;
 pub mod model_ceiling;
+pub mod msg_lag;
 pub mod msg_consume_guard;
 pub mod degrade;
 pub mod timeout_policy;

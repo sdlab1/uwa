@@ -140,6 +140,46 @@ fn new_session_in_same_slot_does_not_inherit_claimed_name() {
     );
 }
 
+/// 5b. Новая сессия в том же слоте получает уНИКАЛЬное авто-имя.
+///
+/// Своё авто-имя гарантирует разные входящие/исходящие — два агента в одном
+/// editor-slot не сливаются в одну личность даже без claim.
+#[test]
+fn new_session_in_same_slot_gets_unique_auto_name() {
+    let c = Chan::new();
+    let (code, _, err) = c.run(&["msg", "claim", "minimax"], Some("session-A"), None);
+    assert_eq!(code, 0, "claim: {err}");
+    let name_b = c.whoami_name(Some("session-B"), None);
+    let name_c = c.whoami_name(Some("session-C"), None);
+    assert_ne!(name_b, name_c, "разные сессии — разные авто-имена");
+    assert_ne!(name_b, "minimax");
+    assert_ne!(name_c, "minimax");
+}
+
+/// 5c. slot-binding не перехватывает новую session-key: host_alias
+/// (рантайм-синоним) не должен работать для чужой сессии.
+///
+/// До T-213: claim minimax в session-A регистрировал алиас runtime-comm → minimax,
+/// и session-B (тот же runtime, другая сессия) получил minimax через host_alias.
+/// Теперь host_alias проверяет, что canon не является claimed-именем чужой сессии.
+#[test]
+fn slot_binding_does_not_intercept_new_session_key() {
+    let c = Chan::new();
+    let (code, out, err) = c.run(&["msg", "claim", "minimax"], Some("session-A"), None);
+    assert_eq!(code, 0, "claim: {out}{err}");
+    // session-A видит свой claim
+    let name_a = c.whoami_name(Some("session-A"), None);
+    assert_eq!(name_a, "minimax", "session-A должна видеть свой claim");
+    // session-B НЕ должна перехватывать через host_alias
+    let name_b = c.whoami_name(Some("session-B"), None);
+    assert_ne!(name_b, "minimax", "session-B не должна перехватывать чужой claim через алиас");
+    // session-B должна получить своё авто-имя
+    assert!(
+        name_b.starts_with("ag-"),
+        "session-B получает авто-имя, а не чужой канон: {name_b}"
+    );
+}
+
 /// 6. Два minimax: имя уже закреплено другим агентом — второй claim отвергнут.
 #[test]
 fn two_agents_cannot_claim_same_name() {
