@@ -26,6 +26,13 @@ use std::process::Command;
 use crate::core::types::RunConfig;
 use crate::shell::worktree::slug;
 
+/// Результат слияния с деталями перенесённых коммитов.
+#[derive(Debug, Clone)]
+pub struct MergeResult {
+    pub sha: String,
+    pub commits: Vec<String>,
+}
+
 /// Ветка агента в его worktree.
 pub fn agent_branch(agent: &str) -> String {
     format!("devh/agent-{}", sanitize(agent))
@@ -346,7 +353,7 @@ pub fn merge_via_cherry_pick(
     main_branch: &str,
     branch: &str,
     agent: &str,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<MergeResult> {
     let commits = transfer_commits(main_root, main_branch, branch)?;
     if commits.is_empty() {
         anyhow::bail!("нечего вливать: на {branch} нет коммитов сверх {main_branch}");
@@ -417,7 +424,7 @@ pub fn merge_via_cherry_pick(
     }
     let sha = git(main_root, &["rev-parse", "--short", "HEAD"])?;
     cleanup();
-    Ok(sha)
+    Ok(MergeResult { sha, commits })
 }
 
 /// Rebase с авторазрешением единственного известного конфликта.

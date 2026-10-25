@@ -1301,7 +1301,7 @@ fn auto_merge_agent(root: &Path, reg: &Registry, agent: &str, task_id: &str) -> 
     // (грязный) worktree остаётся нетронутым, rebase не нужен.
     match crate::commands::wtman::merge_via_cherry_pick(&main_root, &main_branch, &branch, &canon)
     {
-        Ok(sha) => {
+        Ok(result) => {
             // Ledger: событие Merged (здесь есть root — в record_merge его нет,
             // поэтому событие пишется на месте успешного слияния).
             let ledger_path = dir(root).join("ledger.jsonl");
@@ -1309,12 +1309,24 @@ fn auto_merge_agent(root: &Path, reg: &Registry, agent: &str, task_id: &str) -> 
                 &ledger_path,
                 &LedgerEntry::new(&canon, LedgerEvent::Merged, now())
                     .with_task(task_id)
-                    .with_detail(format!("{branch} -> {main_branch} ({sha})")),
+                    .with_detail(format!("{branch} -> {main_branch} ({})", result.sha)),
             );
+            // Отправить отчёт о слиянии агенту (файлы + SHA).
+            if std::env::var("DEVH_NO_MAIL").as_deref() != Ok("1") {
+                if let Ok(report) = crate::core::merge_report::build_merge_report(
+                    &main_root, &main_branch, &branch, &canon
+                ) {
+                    let _ = crate::core::merge_report::send_merge_report(
+                        &crate::core::identity::msg_home(),
+                        &canon,
+                        &report,
+                    );
+                }
+            }
             Some(MergeOutcome {
                 state: "влито".to_string(),
-                sha: Some(sha.clone()),
-                detail: format!("{branch} влит в {main_branch} ({sha}){wip_note}"),
+                sha: Some(result.sha.clone()),
+                detail: format!("{branch} влит в {main_branch} ({}){}", result.sha, wip_note),
             })
         }
         Err(e) => Some(MergeOutcome {
