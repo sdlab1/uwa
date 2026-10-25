@@ -14,6 +14,9 @@
 //! * `main_sha` не проставлен / не в `main` — Problem (работа не доказана в main);
 //! * ветка агента неизвестна — Warn (нечем проверить принадлежность; так было
 //!   до работы с worktree'ами, и старые задачи не надо делать красными);
+//! * задача закрыта ДО введения учёта SHA (помечена lead'ом legacy) — Info:
+//!   git-доказательств не существует в принципе, guard не применим; такие
+//!   задачи не блокируют гейт, но попадают в сводку строкой «legacy: N».
 //! * задача не закрыта (`queued`/`active`/...) — Ok (guard неприменим).
 //!
 //! Модуль чистый: git только на чтение (`core::commit_audit`).
@@ -46,6 +49,9 @@ pub struct CommitRecord {
     pub commit_sha: Option<String>,
     /// SHA коммита в `main` (доказательство, что работа доехала).
     pub main_sha: Option<String>,
+    /// Задача закрыта до введения учёта SHA (пометка lead'а в реестре):
+    /// git-доказательств не существует, guard выдает информационную строку.
+    pub legacy: bool,
 }
 
 /// Факты по ветке агента и `main` (снимаются git'ом).
@@ -98,6 +104,9 @@ pub enum CommitIssue {
     MainShaNotInMain { task: String, sha: String },
     /// Ветка агента неизвестна — принадлежность проверить нечем.
     AgentBranchUnknown { task: String },
+    /// Задача закрыта до введения учёта SHA: доказательств не существует
+    /// в принципе (legacy-пометка lead'а). Не блокирует гейт.
+    LegacyNoSha { task: String },
 }
 
 impl fmt::Display for CommitIssue {
@@ -130,13 +139,51 @@ impl fmt::Display for CommitIssue {
                     "{task}: ветка агента неизвестна — проверить принадлежность нечем"
                 )
             }
+            CommitIssue::LegacyNoSha { task } => {
+                write!(
+                    f,
+                    "{task}: закрыта до введения учёта SHA (legacy — проверка не применима)"
+                )
+            }
         }
     }
 }
 
-/// Блокирует ли находка сдачу (проблема), а только предупреждает.
+/// Класс находки: блокирует / предупреждает / информирует.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommitIssueClass {
+    /// Проблема: доказательство работы отсутствует или неверно.
+    Blocking,
+    /// Предупреждение: проверить нечем, но это не вина задачи.
+    Warn,
+    /// Информация: guard неприменим (историческая задача без SHA).
+    Info,
+}
+
+impl CommitIssue {
+    /// Класс находки — единая точка правды о блокируемости.
+    pub fn class(&self) -> CommitIssueClass {
+        match self {
+            CommitIssue::MissingCommitSha { .. }
+            | CommitIssue::MissingMainSha { .. }
+            | CommitIssue::InvalidSha { .. }
+            | CommitIssue::ShaNotFound { .. }
+            | CommitIssue::CommitNotInAgentBranch { .. }
+            | CommitIssue::MainShaNotInMain { .. } => CommitIssueClass::Blocking,
+            CommitIssue::AgentBranchUnknown { .. } => CommitIssueClass::Warn,
+            CommitIssue::LegacyNoSha { .. } => CommitIssueClass::Info,
+        }
+    }
+}
+
+/// Блокирует ли находка сдачу (проблема), а только предупреждает/информирует.
 pub fn is_blocking(issue: &CommitIssue) -> bool {
-    !matches!(issue, CommitIssue::AgentBranchUnknown { .. })
+    issue.class() == CommitIssueClass::Blocking
+}
+
+/// Информационная находка (legacy). Блокировать не должна, но попадает в сводку.
+pub fn is_info(issue: &CommitIssue) -> bool {
+    issue.class() == CommitIssueClass::Info
 }
 
 /// Закрыта ли задача (guard применим только к ней).
@@ -148,6 +195,9 @@ pub fn is_closed(status: &str) -> bool {
 ///
 /// Порядок детерминирован: сначала `commit_sha`, затем `main_sha`.
 /// Для незакрытой задачи список пуст (guard неприменим).
+/// Legacy-задача (закрыта до введения учёта SHA) short-circuit'ит: ни
+/// `commit_sha`, ни `main_sha` не проверяются — выдаётся одна Info-находка,
+/// потому что git-доказательств для такой задачи не существует в принципе.
 pub fn check_commit(
     record: &CommitRecord,
     branch: Option<&str>,
@@ -159,6 +209,13 @@ pub fn check_commit(
     let mut issues = Vec::new();
     let sha = match record.commit_sha.as_deref() {
         Some(s) if !s.trim().is_empty() => s.trim().to_string(),
+        _ if record.legacy => {
+            // Историческая задача: доказательств нет и быть не может.
+            issues.push(CommitIssue::LegacyNoSha {
+                task: record.task_id.clone(),
+            });
+            return issues;
+        }
         _ => {
             issues.push(CommitIssue::MissingCommitSha {
                 task: record.task_id.clone(),
@@ -239,9 +296,9 @@ pub fn collect_facts(repo: &Path, branch: Option<&str>, record: &CommitRecord) -
         (Some(b), Some(s)) if exists => is_commit_in_branch(repo, s, b),
         _ => false,
     };
-    let main_in = main_sha.as_deref().is_some_and(|s| {
-        commit_exists(repo, s) && is_commit_in_branch(repo, s, MAIN_BRANCH)
-    });
+    let main_in = main_sha
+        .as_deref()
+        .is_some_and(|s| commit_exists(repo, s) && is_commit_in_branch(repo, s, MAIN_BRANCH));
     CommitFacts {
         agent_branch_known: branch.is_some_and(|b| !b.trim().is_empty()),
         commit_in_agent_branch: in_branch,
@@ -301,6 +358,15 @@ mod tests {
             status: status.to_string(),
             commit_sha: sha.map(str::to_string),
             main_sha: main.map(str::to_string),
+            legacy: false,
+        }
+    }
+
+    /// Историческая задача: закрыта до введения учёта SHA (пометка lead'а).
+    fn rec_legacy(status: &str) -> CommitRecord {
+        CommitRecord {
+            legacy: true,
+            ..rec(status, None, None)
         }
     }
 
@@ -366,6 +432,49 @@ mod tests {
     }
 
     #[test]
+    fn legacy_task_without_sha_is_info_not_blocking() {
+        // (г) решения lead'а: 18 исторических задач без commit_sha — не красные.
+        let issues = check_commit(
+            &rec_legacy("done"),
+            Some("devh/agent-beam"),
+            &CommitFacts::clean(),
+        );
+        assert!(matches!(
+            issues.as_slice(),
+            [CommitIssue::LegacyNoSha { .. }]
+        ));
+        assert!(!issues.iter().any(is_blocking), "legacy не блокирует гейт");
+        assert!(issues.iter().any(is_info));
+    }
+
+    #[test]
+    fn legacy_task_with_partial_proof_is_still_checked() {
+        // Legacy подавляет только отсутствие доказательств; если SHA есть —
+        // он проверяется как обычно (main_sha не дописан → блокирует).
+        let mut f = CommitFacts::clean();
+        f.main_sha_in_main = false;
+        let issues = check_commit(
+            &CommitRecord {
+                legacy: true,
+                ..rec("done", Some("abc1234"), Some("def5678"))
+            },
+            Some("devh/agent-beam"),
+            &f,
+        );
+        assert!(matches!(
+            issues.as_slice(),
+            [CommitIssue::MainShaNotInMain { .. }]
+        ));
+        assert!(issues.iter().any(is_blocking));
+    }
+
+    #[test]
+    fn legacy_open_task_is_not_audited() {
+        let issues = check_commit(&rec_legacy("queued"), None, &CommitFacts::clean());
+        assert!(issues.is_empty());
+    }
+
+    #[test]
     fn invalid_sha_is_problem() {
         let issues = check_commit(
             &rec("done", Some("zzz"), Some("qqq")),
@@ -388,7 +497,10 @@ mod tests {
             Some("devh/agent-beam"),
             &f,
         );
-        assert!(matches!(issues.as_slice(), [CommitIssue::ShaNotFound { .. }]));
+        assert!(matches!(
+            issues.as_slice(),
+            [CommitIssue::ShaNotFound { .. }]
+        ));
     }
 
     #[test]
@@ -478,6 +590,15 @@ mod tests {
             warn.run(&GuardContext::default()),
             GuardVerdict::Warn(_)
         ));
+
+        // Legacy: не блокирует, но остаётся видимым (Warn), чтобы строку
+        // «legacy: N» можно was увидеть в отчёте.
+        let legacy = CommitReviewGuard::new(
+            rec_legacy("done"),
+            Some("devh/agent-beam".to_string()),
+            CommitFacts::clean(),
+        );
+        assert!(!legacy.run(&GuardContext::default()).is_problem());
     }
 
     #[test]
@@ -530,5 +651,16 @@ mod tests {
         assert!(check_commit(&r2, Some("main"), &f2)
             .iter()
             .any(|i| matches!(i, CommitIssue::ShaNotFound { .. })));
+    }
+
+    #[test]
+    fn legacy_without_any_sha_reports_single_info_issue() {
+        // Даже при «ничего не существует» legacy остаётся информацией.
+        let r = rec_legacy("done");
+        let f = facts_nothing_exists();
+        let issues = check_commit(&r, None, &f);
+        assert_eq!(issues.len(), 1);
+        assert!(is_info(&issues[0]));
+        assert!(!is_blocking(&issues[0]));
     }
 }

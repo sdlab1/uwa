@@ -14,8 +14,10 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::core::guards::backlog_guard::{self, Severity};
+use serde::Deserialize;
+
 use crate::core::commit_audit::{commit_exists, is_commit_in_branch};
+use crate::core::guards::backlog_guard::{self, Severity};
 use crate::core::guards::commit_review_guard::{self, CommitFacts, CommitRecord, MAIN_BRANCH};
 use crate::core::guards::deps_guard::check_deps;
 use crate::core::guards::identity_guard;
@@ -228,17 +230,8 @@ pub fn collect(root: &Path, reg: &Registry) -> GuardReport {
     );
 
     // ── ревью коммитов: commit_sha в ветке агента, main_sha в main ──
-    let (cr_problems, cr_warns) = commit_review_findings(root, reg);
-    report.push(
-        "commit_review_guard",
-        if !cr_problems.is_empty() {
-            GuardVerdict::Problem(cr_problems.join("; "))
-        } else if !cr_warns.is_empty() {
-            GuardVerdict::Warn(cr_warns.join("; "))
-        } else {
-            GuardVerdict::Ok
-        },
-    );
+    let cr = commit_review_findings(root, reg);
+    report.push("commit_review_guard", commit_review_verdict(&cr));
 
     // ── самопроверка guard'а декомпозиции ──
     report.push(decomposition_guard::ID, decomposition_guard::selfcheck());
@@ -252,7 +245,90 @@ pub fn collect(root: &Path, reg: &Registry) -> GuardReport {
 /// Git дергается только для закрытых задач, и каждый SHA проверяется один раз:
 /// батч-коммит (одна работа — много задач) не плодит вызовов. Кэш живёт внутри
 /// одного прогона, побочных эффектов нет.
-fn commit_review_findings(root: &Path, reg: &Registry) -> (Vec<String>, Vec<String>) {
+#[derive(Debug, Default)]
+struct CommitReviewFindings {
+    /// Блокирующие находки (Problem): доказательство отсутствует/неверно.
+    problems: Vec<String>,
+    /// Предупреждения (Warn): проверить нечем (ветка агента неизвестна).
+    warns: Vec<String>,
+    /// Сколько закрытых задач помечено lead'ом как legacy (до учёта SHA):
+    /// в гейт не идут, но попадают в сводку строкой «legacy: N».
+    legacy: usize,
+}
+
+/// Вердикт guard'а ревью коммитов: legacy не блокирует, но всегда виден.
+fn commit_review_verdict(cr: &CommitReviewFindings) -> GuardVerdict {
+    // Хвост «legacy: N» дописывается к любому непустому вердикту: lead просил
+    // видеть счётчик исторических задач в той же строке отчёта.
+    let tail = if cr.legacy > 0 {
+        format!(" [legacy: {} — проверка не применима]", cr.legacy)
+    } else {
+        String::new()
+    };
+    if !cr.problems.is_empty() {
+        GuardVerdict::Problem(format!("{}{tail}", cr.problems.join("; ")))
+    } else if !cr.warns.is_empty() {
+        GuardVerdict::Warn(format!("{}{tail}", cr.warns.join("; ")))
+    } else if cr.legacy > 0 {
+        GuardVerdict::Warn(format!(
+            "legacy: {} — задачи закрыты до введения учёта SHA",
+            cr.legacy
+        ))
+    } else {
+        GuardVerdict::Ok
+    }
+}
+
+/// Снимок пометки «legacy» из СЫРОГО JSON реестра.
+///
+/// Почему сырой JSON, а не типизированный `Task`: поле `legacy_no_sha` —
+/// маркер lead'а («закрыта до введения учёта SHA»), и разводить два класса
+/// находок он попросил явно. Раздувать ради одного флага типизированную
+/// структуру с 69 местами конструирования — плохой обмен: guard читает
+/// read-only срез, а `Task` остаётся моделью данных реестра.
+#[derive(Debug, Default, Deserialize)]
+struct LegacySnapshot {
+    #[serde(default)]
+    tasks: Vec<LegacyTask>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct LegacyTask {
+    id: String,
+    #[serde(default)]
+    legacy_no_sha: Option<bool>,
+    #[serde(default)]
+    note: String,
+}
+
+/// Историческая ли задача по заметке: «legacy» или «…до введения учёта…».
+/// Нормализация ё→е и регистра: lead может написать любым способом.
+fn note_is_legacy(note: &str) -> bool {
+    let n = note.to_lowercase().replace('ё', "е");
+    n.contains("legacy") || n.contains("до введения учета")
+}
+
+/// Множество ID задач, закрытых до введения учёта SHA (пометка lead'а).
+///
+/// Файл читается один раз за прогон; любая ошибка чтения = пустое множество
+/// (legacy — это снятие блокировки, а не её включение: осторожность правила).
+fn legacy_task_ids(root: &Path) -> std::collections::HashSet<String> {
+    let raw = match std::fs::read_to_string(crate::commands::orch::path(root)) {
+        Ok(s) => s,
+        Err(_) => return std::collections::HashSet::new(),
+    };
+    let snap: LegacySnapshot = match serde_json::from_str(&raw) {
+        Ok(s) => s,
+        Err(_) => return std::collections::HashSet::new(),
+    };
+    snap.tasks
+        .into_iter()
+        .filter(|t| t.legacy_no_sha == Some(true) || note_is_legacy(&t.note))
+        .map(|t| t.id)
+        .collect()
+}
+
+fn commit_review_findings(root: &Path, reg: &Registry) -> CommitReviewFindings {
     let branches: HashMap<String, String> = reg
         .agents
         .iter()
@@ -262,10 +338,10 @@ fn commit_review_findings(root: &Path, reg: &Registry) -> (Vec<String>, Vec<Stri
                 .map(|b| (crate::core::identity::canonical(&a.name), b.clone()))
         })
         .collect();
+    let legacy_ids = legacy_task_ids(root);
     let mut exists: HashMap<String, bool> = HashMap::new();
     let mut in_branch: HashMap<(String, String), bool> = HashMap::new();
-    let mut problems: Vec<String> = Vec::new();
-    let mut warns: Vec<String> = Vec::new();
+    let mut out = CommitReviewFindings::default();
     for t in reg.tasks.iter().filter(|t| t.status == Status::Done) {
         let record = CommitRecord {
             task_id: t.id.clone(),
@@ -273,12 +349,17 @@ fn commit_review_findings(root: &Path, reg: &Registry) -> (Vec<String>, Vec<Stri
             status: "done".to_string(),
             commit_sha: t.commit_sha.clone(),
             main_sha: t.main_sha.clone(),
+            legacy: legacy_ids.contains(&t.id),
         };
         let branch = branches
             .get(&record.agent)
             .map(String::as_str)
             .filter(|b| !b.trim().is_empty());
-        let mut exists_of = |sha: &str| *exists.entry(sha.to_string()).or_insert_with(|| commit_exists(root, sha));
+        let mut exists_of = |sha: &str| {
+            *exists
+                .entry(sha.to_string())
+                .or_insert_with(|| commit_exists(root, sha))
+        };
         let mut in_of = |sha: &str, br: &str| {
             *in_branch
                 .entry((sha.to_string(), br.to_string()))
@@ -305,13 +386,15 @@ fn commit_review_findings(root: &Path, reg: &Registry) -> (Vec<String>, Vec<Stri
         for issue in commit_review_guard::check_commit(&record, branch, &facts) {
             let text = issue.to_string();
             if commit_review_guard::is_blocking(&issue) {
-                problems.push(text);
+                out.problems.push(text);
+            } else if commit_review_guard::is_info(&issue) {
+                out.legacy = out.legacy.saturating_add(1);
             } else {
-                warns.push(text);
+                out.warns.push(text);
             }
         }
     }
-    (problems, warns)
+    out
 }
 
 /// Проблемы слияния по реестру: состояние «влито» без SHA и SHA не как git-хэш.
@@ -323,7 +406,9 @@ fn merge_problems(reg: &Registry) -> Vec<String> {
         };
         let sha = a.merged_sha.clone();
         match (state.as_str(), sha.as_deref()) {
-            ("влито", None) => out.push(format!("{}: merge_state=влито без merged_sha", a.name)),
+            ("влито", None) => {
+                out.push(format!("{}: merge_state=влито без merged_sha", a.name))
+            }
             ("влито", Some(sha)) => {
                 if !crate::core::guards::merge_guard::valid_sha(sha) {
                     out.push(format!("{}: некорректный SHA «{sha}»", a.name));
@@ -488,7 +573,9 @@ mod tests {
             main_sha: None,
             override_reason: None,
         });
-        reg.plan.deps.insert("T-001".to_string(), vec!["T-999".to_string()]);
+        reg.plan
+            .deps
+            .insert("T-001".to_string(), vec!["T-999".to_string()]);
         let report = collect(Path::new("/nonexistent-root"), &reg);
         let problems = report.problems();
         assert!(
@@ -497,5 +584,73 @@ mod tests {
                 .any(|(id, msg)| *id == "deps_guard" && msg.contains("T-999")),
             "ожидалась проблема зависимостей: {problems:?}"
         );
+    }
+
+    // ── (г): два класса находок ревью коммитов ──
+
+    #[test]
+    fn note_is_legacy_recognises_lead_markers() {
+        assert!(note_is_legacy("legacy"));
+        assert!(note_is_legacy("LEGACY: закрыта до введения учёта SHA"));
+        assert!(note_is_legacy("закрыта до введения учёта SHA"));
+        assert!(note_is_legacy("Закрыта ДО Введения Учета SHA"));
+        assert!(!note_is_legacy("обычная задача"));
+    }
+
+    #[test]
+    fn legacy_ids_read_from_registry_json() {
+        let d = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let expected = crate::commands::orch::path(d.path());
+        // Раскладка проверяется вместе с чтением: тест падает, если реестр
+        // переедет, а guard продолжит читать старое место.
+        assert_eq!(
+            expected,
+            d.path().join(".harness/orch/registry.json"),
+            "реестр по-прежнему в .harness/orch/registry.json"
+        );
+        std::fs::create_dir_all(d.path().join(".harness/orch")).unwrap_or_else(|_| unreachable!());
+        std::fs::write(
+            &expected,
+            r#"{"tasks":[
+                {"id":"T-001","note":"закрыта до введения учёта SHA"},
+                {"id":"T-002","legacy_no_sha":true},
+                {"id":"T-003","legacy_no_sha":false,"note":"рядовая"},
+                {"id":"T-004"}
+            ]}"#,
+        )
+        .unwrap_or_else(|_| unreachable!());
+        let ids = legacy_task_ids(d.path());
+        assert!(ids.contains("T-001"), "пометка в note: {ids:?}");
+        assert!(ids.contains("T-002"), "поле legacy_no_sha: {ids:?}");
+        assert!(!ids.contains("T-003"), "явный false — не legacy");
+        assert!(!ids.contains("T-004"), "без пометки — не legacy");
+    }
+
+    #[test]
+    fn legacy_count_is_visible_but_not_blocking() {
+        // Legacy-задача = Info: гейт чист, но счётчик виден строкой «legacy: N».
+        let mut cr = CommitReviewFindings::default();
+        cr.legacy = 18;
+        let v = commit_review_verdict(&cr);
+        assert!(!v.is_problem(), "legacy не блокирует: {v:?}");
+        assert!(v.message().contains("legacy: 18"));
+    }
+
+    #[test]
+    fn legacy_tail_rides_along_with_real_problems() {
+        let mut cr = CommitReviewFindings::default();
+        cr.problems.push("T-999: main_sha не в main".to_string());
+        cr.legacy = 2;
+        let v = commit_review_verdict(&cr);
+        assert!(v.is_problem());
+        assert!(v.message().contains("T-999"));
+        assert!(v.message().contains("[legacy: 2"), "хвост legacy: {v:?}");
+    }
+
+    #[test]
+    fn unreadable_registry_json_means_no_legacy() {
+        // Ошибка чтения = пустое множество: снятие блокировки не выдумывается.
+        let ids = legacy_task_ids(Path::new("/nonexistent-root"));
+        assert!(ids.is_empty());
     }
 }
