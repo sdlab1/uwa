@@ -41,6 +41,23 @@ const POLL_MS: i32 = 400;
 /// Тег авто-ответа: на такие письма авто-ответ НЕ отправляется (нет петли).
 const ACK_TAG: &str = "авто-ack";
 
+/// Запрещённые формулировки в авто-ответе: никаких решений, обещаний или
+/// имитации выдачи задач. Только факты (получено, тред, задача).
+const ACK_FORBIDDEN_WORDS: &[&str] = &[
+    "решено",
+    "выдаю",
+    "бери задачу",
+    "обещаю",
+    "гарантирую",
+    "выполняю",
+];
+
+/// Проверить: авто-ответ не содержит запрещённых формулировок.
+fn ack_is_safe(body: &str) -> bool {
+    let lower = body.to_lowercase();
+    !ACK_FORBIDDEN_WORDS.iter().any(|w| lower.contains(w))
+}
+
 /// Разобранное письмо.
 #[derive(Debug, Clone)]
 pub struct Letter {
@@ -295,6 +312,10 @@ fn send_auto_ack(me: &str, l: &Letter) -> bool {
         return false;
     }
     let body = ack_body(me, l);
+    if !ack_is_safe(&body) {
+        // Авто-ответ содержит запрещённые формулировки — не отправляем.
+        return false;
+    }
     let subject = format!(
         "авто-ответ: письмо {} получено",
         if l.id.is_empty() {
@@ -614,5 +635,63 @@ mod tests {
         let l2 = parse_letter(&block("beam", "minimax", "s", "b", &[]))
             .unwrap_or_else(|| unreachable!());
         assert!(!l2.is_ack());
+    }
+
+    /// T-273: авто-ответ по умолчанию выключен.
+    #[test]
+    fn auto_ack_disabled_by_default() {
+        let opts = Opts::default();
+        assert!(!opts.auto_ack, "auto_ack выключен по умолчанию");
+    }
+
+    /// T-273: auto-ack body не содержит запрещённых формулировок.
+    #[test]
+    fn ack_body_does_not_contain_forbidden_words() {
+        // "kilo" → "minimax" (алиас) — письмо от агента к себе.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path().to_path_buf();
+        crate::core::identity::set_alias_in(&home, "kilo", "minimax").expect("alias");
+        let l = parse_letter(&block("minimax", "kilo", "s", "b", &[]))
+            .unwrap_or_else(|| unreachable!());
+        let body = ack_body("kilo", &l);
+        assert!(ack_is_safe(&body), "auto-ack не содержит запрещённых слов: {body}");
+        assert!(!body.to_lowercase().contains("решено"));
+        assert!(!body.to_lowercase().contains("выдаю"));
+        assert!(!body.to_lowercase().contains("бери задачу"));
+    }
+
+    /// T-273: ack_is_safe блокирует тело с запрещёнными словами.
+    #[test]
+    fn ack_is_safe_rejects_forbidden_formulations() {
+        assert!(ack_is_safe("Письмо abcd получено — факт"));
+        assert!(!ack_is_safe("решено"));
+        assert!(!ack_is_safe("выдаю задачу"));
+        assert!(!ack_is_safe("бери задачу T-1"));
+        assert!(!ack_is_safe("обещаю ответить"));
+    }
+
+    #[test]
+    fn auto_ack_contains_only_facts_no_promises() {
+        use crate::shell::msg_events::{ack_body, ack_is_safe, Letter};
+
+        let letter = Letter {
+            id: "test123".to_string(),
+            from: "beam".to_string(),
+            to: "minimax".to_string(),
+            subject: "тест".to_string(),
+            thread: "thr-test".to_string(),
+            stamp: "03:05".to_string(),
+            tags: vec![],
+            body: "тело".to_string(),
+            raw: "".to_string(),
+        };
+
+        let body = ack_body("minimax", &letter);
+
+        // Должен содержать факты
+        assert!(body.contains("Письмо test123 от beam получено"), "факт получения: {body}");
+        assert!(body.contains("Тред: thr-test"), "факт треда: {body}");
+        // Должен НЕ содержать запрещённых слов
+        assert!(ack_is_safe(&body), "авто-ответ содержит запрещённые слова: {body}");
     }
 }
