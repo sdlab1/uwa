@@ -705,6 +705,7 @@ pub fn orch(root: &Path, sub: &str, args: &[String]) -> anyhow::Result<()> {
         "bug" => bug(root, args),
         "unsaved" => crate::commands::unsaved::run(root, args),
         "wt" => wt(root, args),
+        "wip" => wip_cmd(root, args),
         "models" => models(root),
         "review" => review_cmd(root, args),
         "ceiling" => ceiling_cmd(root, args),
@@ -3797,6 +3798,61 @@ fn wt(root: &Path, args: &[String]) -> anyhow::Result<()> {
             "devh orch wt: неизвестная подкоманда «{other}» (list|assign|path|sync|merge|release|gc)"
         )),
     }
+}
+
+/// `devh orch wip [<агент>]` — ручной WIP-проход для одного или всех живых агентов.
+///
+/// - без аргумента: все зарегистрированные агенты с worktree;
+/// - с аргументом: один агент.
+fn wip_cmd(root: &Path, args: &[String]) -> anyhow::Result<()> {
+    let reg = load(root);
+    let cfg = crate::commands::load_config(root).unwrap_or_default();
+
+    let agents = if let Some(agent) = positional(args).first() {
+        vec![agent.clone()]
+    } else {
+        reg.agents
+            .iter()
+            .filter(|a| a.worktree.is_some())
+            .map(|a| a.name.clone())
+            .collect()
+    };
+
+    let (lead, _) = lead_of(&reg);
+    let caller = crate::core::identity::canonical(&crate::core::identity::current().name);
+
+    for agent in &agents {
+        let agent_canon = crate::core::identity::canonical(agent);
+        let is_lead = lead.as_deref() == Some(caller.as_str());
+        let is_self = caller == agent_canon;
+        if !is_lead && !is_self {
+            return Err(crate::commands::DevhError::action(format!(
+                "devh orch wip: только lead или сам агент ({}) может WIP-проход для {agent}",
+                agent_canon
+            ))
+            .into());
+        }
+
+        let report = crate::commands::wtman::wip_pass(&cfg, root, &agent_canon)?;
+        match report {
+            crate::commands::wtman::WipReport::SkipClean => {
+                println!("  {} — чистый worktree, пропущен", agent_canon);
+            }
+            crate::commands::wtman::WipReport::Committed {
+                n_files,
+                commit_sha,
+            } => {
+                println!(
+                    "  {} — WIP-чекпоинт: {} файлов, commit {}",
+                    agent_canon, n_files, commit_sha
+                );
+            }
+            crate::commands::wtman::WipReport::NoWorktree => {
+                println!("  {} — worktree не выдан", agent_canon);
+            }
+        }
+    }
+    Ok(())
 }
 
 fn zones(root: &Path) -> anyhow::Result<()> {

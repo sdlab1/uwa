@@ -172,6 +172,41 @@ pub fn checkpoint_at(path: &Path, agent: &str) -> anyhow::Result<String> {
     res
 }
 
+/// Результат ручного WIP-прохода (`devh orch wip <агент>`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WipReport {
+    /// Чистый worktree — пропуск без коммита.
+    SkipClean,
+    /// Грязный worktree — создан WIP-коммит с N файлами.
+    Committed { n_files: usize, commit_sha: String },
+    /// Worktree не выдан агенту.
+    NoWorktree,
+}
+
+/// Ручной WIP-проход: сохранить незакоммиченную работу агента.
+///
+/// - чистый worktree → `SkipClean` (без коммита);
+/// - грязный worktree → чекпоинт через `checkpoint` + возврат количества файлов;
+/// - worktree не существует → `NoWorktree`.
+pub fn wip_pass(cfg: &RunConfig, root: &Path, agent: &str) -> anyhow::Result<WipReport> {
+    let wt_path = agent_path(cfg, root, agent);
+    if !wt_path.exists() {
+        return Ok(WipReport::NoWorktree);
+    }
+    if !crate::shell::git::tree_dirty(&wt_path) {
+        return Ok(WipReport::SkipClean);
+    }
+    let sha = checkpoint(cfg, root, agent)?;
+    if sha.is_empty() {
+        return Ok(WipReport::SkipClean);
+    }
+    let n_files = crate::shell::git::changed_files(&wt_path).len();
+    Ok(WipReport::Committed {
+        n_files,
+        commit_sha: sha,
+    })
+}
+
 /// Сформировать единый WIP-коммит сообщения: `wip: <агент> <T-ID|-> <n> файлов`.
 ///
 /// `task_ref` — Option<&str>: Some("T-316") → `T-316`, None → `-`.
@@ -2085,5 +2120,49 @@ mod tests {
         assert!(parse_wip_commit_msg("not a wip commit").is_none());
         assert!(parse_wip_commit_msg("wip: only-one-part").is_none());
         assert!(parse_wip_commit_msg("wip: a b").is_none());
+    }
+
+    #[test]
+    fn wip_pass_no_worktree() {
+        let d = tempfile::tempdir().unwrap();
+        let root = init_repo(d.path());
+        let cfg = crate::commands::load_config(&root).unwrap_or_default();
+        // agent "ghost" — worktree не создан
+        let report = wip_pass(&cfg, &root, "ghost").unwrap();
+        assert_eq!(report, WipReport::NoWorktree);
+    }
+
+    #[test]
+    fn wip_pass_clean_skips() {
+        let d = tempfile::tempdir().unwrap();
+        let root = init_repo(d.path());
+        let cfg = crate::commands::load_config(&root).unwrap_or_default();
+        // Создаём чистый worktree для агента
+        let wt = ensure(&cfg, &root, "clean-agent").unwrap().0;
+        // worktree чистый → skip
+        let report = wip_pass(&cfg, &root, "clean-agent").unwrap();
+        assert_eq!(report, WipReport::SkipClean);
+        let _ = wt; // suppress unused
+    }
+
+    #[test]
+    fn wip_pass_dirty_commits() {
+        let d = tempfile::tempdir().unwrap();
+        let root = init_repo(d.path());
+        let cfg = crate::commands::load_config(&root).unwrap_or_default();
+        // Создаём worktree и делаем его грязным
+        let (wt, _) = ensure(&cfg, &root, "dirty-agent").unwrap();
+        std::fs::write(wt.join("scratch.txt"), "dirty work").unwrap();
+        let report = wip_pass(&cfg, &root, "dirty-agent").unwrap();
+        match report {
+            WipReport::Committed {
+                n_files,
+                commit_sha,
+            } => {
+                assert!(n_files >= 1, "должен быть ≥1 файл: {n_files}");
+                assert!(!commit_sha.is_empty(), "commit SHA не пустой");
+            }
+            other => panic!("ожидался Committed, а не {other:?}"),
+        }
     }
 }
