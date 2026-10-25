@@ -18,6 +18,7 @@ pub mod next;
 pub mod orch;
 pub mod ps;
 pub mod rate;
+pub mod reclaim;
 pub mod run;
 pub mod survivors;
 pub mod test;
