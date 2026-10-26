@@ -33,6 +33,7 @@ const SECTIONS: &[(&str, &str)] = &[
     ("git", "Git: worktree'и, ветки, LOC"),
     ("plan", "План (docs/)"),
     ("reports", "Отчёты lead и tech_lead"),
+    ("chat", "Чат: треды и переписка"),
     ("incidents", "Инциденты и баги"),
     ("done", "Выполненные задачи"),
     ("speed", "Скорость агентов (7 суток)"),
@@ -182,6 +183,8 @@ pub fn fragment(section: &str, snap: &PanelSnapshot, query: &str) -> Option<Stri
             }
             speed_html(&rows)
         }
+        "chat" => chat_html(query),
+        "chat/older" => chat_older_html(query),
         "ledger" => ledger_html(snap),
         "dangling" => dangling_html(snap),
         _ => return None,
@@ -586,6 +589,182 @@ fn dangling_html(snap: &PanelSnapshot) -> String {
         out.push_str(&format!("<li><code>{}</code></li>", esc(&c)));
     }
     out.push_str("</ul>");
+    out
+}
+
+
+/// Чат: список тредов (слева) + окно последних сообщений (справа).
+///
+/// Окно — последние 20 сообщений снизу; история подгружается порциями
+/// по 20 («показать ещё 20»), чтение лога треда идёт с конца файла.
+fn chat_html(query: &str) -> String {
+    let rows = panel::chat::threads();
+    let selected = query_value(query, "thread").or_else(panel::chat::latest_thread);
+    let limit = panel::chat::WINDOW_DEFAULT;
+    let before = query_value(query, "before")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(0);
+    let win = selected
+        .as_ref()
+        .map(|id| panel::chat::window(id, limit, before))
+        .unwrap_or_default();
+
+    let mut out = String::new();
+
+    out.push_str("<style>\
+.chat{display:grid;grid-template-columns:minmax(220px,280px) 1fr;gap:12px;align-items:start}\
+.chat-list{overflow:auto;border:1px solid #333;border-radius:8px;padding:8px;background:#141414;max-height:78vh}\
+.chat-list-title{font-weight:600;opacity:.7;margin-bottom:6px}\
+.chat-row{display:block;padding:6px 8px;border-radius:6px;text-decoration:none;color:inherit;border:1px solid transparent}\
+.chat-row:hover{background:#1d1d1d}.chat-row.active{background:#233;border-color:#3a6}\
+.chat-row-subject{font-weight:600}.chat-row-meta,.chat-row-preview{font-size:12px;opacity:.65;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}\
+.chat-main{display:flex;flex-direction:column;min-height:0}\
+.chat-head{border-bottom:1px solid #333;padding-bottom:6px}.chat-title{font-weight:600}.chat-meta{font-size:12px;opacity:.65}\
+.chat-window{overflow:auto;padding:8px;display:flex;flex-direction:column;gap:8px;max-height:66vh}\
+.msg{border:1px solid #333;border-radius:8px;padding:8px 10px;background:#171717}\
+.msg.ps{border-left:3px solid #a78bfa}.msg.p0{border-left:3px solid #ef4444}\
+.msg-head{font-size:12px;opacity:.75;display:flex;gap:8px;flex-wrap:wrap}.msg-from{font-weight:700;color:#7dd3fc}\
+.msg-tags{border:1px solid #444;border-radius:4px;padding:0 4px}.msg-subject{font-weight:600;margin-top:2px}\
+.msg-place{font-size:12px;opacity:.7;font-family:monospace}.msg-body{word-wrap:break-word;margin-top:4px}\
+.chat-more{margin:6px 0;padding:6px 10px}.chat-hint{font-size:12px;opacity:.6;padding-top:6px}.chat-empty{opacity:.6}\
+</style>");    out.push_str("<div class=\"chat\">");
+    // --- список тредов ---
+    out.push_str("<aside class=\"chat-list\"><div class=\"chat-list-title\">Треды");
+    out.push_str(&format!(" ({})</div>", rows.len()));
+    for r in &rows {
+        let active = selected.as_deref() == Some(r.id.as_str());
+        out.push_str(&format!(
+            "<a class=\"chat-row{}\" href=\"/panel/chat?thread={}\" hx-get=\"/panel/chat?thread={}\" hx-target=\"#chat-panel\" hx-push-url=\"true\" hx-swap=\"innerHTML\"><div class=\"chat-row-subject\">{}</div><div class=\"chat-row-meta\">{} · {}</div><div class=\"chat-row-preview\">{}</div>{}</a>",
+            if active { " active" } else { "" },
+            esc(&r.id),
+            esc(&r.id),
+            esc(&r.subject),
+            esc(&r.participants),
+            esc(&r.last_stamp),
+            esc(&r.preview),
+            if r.unread > 0 {
+                format!("<span class=\"msg-tags\">не прочитано: {}</span>", r.unread)
+            } else {
+                String::new()
+            }
+        ));
+    }
+    out.push_str("</aside>");
+    // --- окно треда ---
+    out.push_str("<section class=\"chat-main\" id=\"chat-panel\">");
+    match &selected {
+        None => out.push_str("<div class=\"chat-empty\">тредов пока нет</div>"),
+        Some(id) => {
+            out.push_str(&format!(
+                "<div class=\"chat-head\"><div class=\"chat-title\">{}</div><div class=\"chat-meta\">{} · всего сообщений: {} · показаны последние {} · непрочитанных в окне: {}</div></div>",
+                esc(&win.messages.last().map(|m| m.subject.clone()).unwrap_or_else(|| id.clone())),
+                esc(id),
+                win.total,
+                win.messages.len(),
+                win.unread
+            ));
+            out.push_str("<div class=\"chat-window\" id=\"chat-window\">");
+            for m in &win.messages {
+                out.push_str(&chat_message_html(m));
+            }
+            out.push_str("</div>");
+            out.push_str(&chat_more_html(id, limit, before, win.has_more));
+        }
+    }
+    out.push_str("<div class=\"chat-hint\">Чат пока только для чтения: отправка писем из панели — задача T-631 (через канонический devh msg send).</div>");
+    out.push_str("</section></div>");
+    out.push_str("<script>(function(){document.querySelectorAll('.chat-window').forEach(function(e){e.scrollTop=e.scrollHeight;});})();</script>");
+    out
+}
+
+/// Карточка письма.
+fn chat_message_html(m: &panel::chat::ChatMessage) -> String {
+    let mut classes = String::from("msg");
+    let low = format!("{} {} {}", m.subject, m.tags.join(" "), m.body).to_lowercase();
+    if low.contains("ps") || low.contains("[ps security]") {
+        classes.push_str(" ps");
+    }
+    if low.contains("p0") {
+        classes.push_str(" p0");
+    }
+    let mut out = String::new();
+    out.push_str(&format!("<div class=\"{}\">", classes));
+    out.push_str(&format!(
+        "<div class=\"msg-head\"><span class=\"msg-from\">{}</span><span class=\"msg-to\">→ {}</span><span class=\"msg-stamp\">{}</span>",
+        esc(&m.from),
+        esc(&m.to),
+        esc(&m.stamp)
+    ));
+    if !m.tags.is_empty() {
+        out.push_str(&format!(
+            "<span class=\"msg-tags\">{}</span>",
+            esc(&m.tags.join(", "))
+        ));
+    }
+    out.push_str("</div>");
+    if !m.subject.is_empty() {
+        out.push_str(&format!(
+            "<div class=\"msg-subject\">{}</div>",
+            esc(&m.subject)
+        ));
+    }
+    if let Some(p) = &m.place {
+        out.push_str(&format!(
+            "<div class=\"msg-place\">{}</div>",
+            esc(p)
+        ));
+    }
+    out.push_str(&format!(
+        "<div class=\"msg-body\">{}</div>",
+        esc(&m.body).replace('\n', "<br>")
+    ));
+    out.push_str("</div>");
+    out
+}
+
+/// Кнопка подгрузки более старых сообщений.
+fn chat_more_html(thread: &str, limit: usize, before: usize, has_more: bool) -> String {
+    if !has_more {
+        return "<button id=\"chat-more\" class=\"chat-more\" disabled>история загружена полностью</button>".to_string();
+    }
+    let next = before.saturating_add(limit);
+    format!(
+        "<button id=\"chat-more\" class=\"chat-more\" hx-get=\"/panel/chat/older?thread={}&before={}&limit={}\" hx-target=\"#chat-window\" hx-swap=\"beforebegin\">показать ещё {} сообщений выше</button>",
+        esc(thread),
+        next,
+        limit,
+        limit
+    )
+}
+
+/// Подгрузка старых сообщений (OOB-обновление кнопки).
+fn chat_older_html(query: &str) -> String {
+    let thread = query_value(query, "thread").unwrap_or_default();
+    let limit = query_value(query, "limit")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(panel::chat::WINDOW_DEFAULT)
+        .clamp(1, 200);
+    let before = query_value(query, "before")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(0);
+    let win = panel::chat::window(&thread, limit, before);
+    let mut out = String::new();
+    for m in &win.messages {
+        out.push_str(&chat_message_html(m));
+    }
+    let next = before.saturating_add(limit);
+    let more = if win.has_more {
+        format!(
+            "<button id=\"chat-more\" class=\"chat-more\" hx-get=\"/panel/chat/older?thread={}&before={}&limit={}\" hx-target=\"#chat-window\" hx-swap=\"beforebegin\" hx-swap-oob=\"true\">показать ещё {} сообщений выше</button>",
+            esc(&thread),
+            next,
+            limit,
+            limit
+        )
+    } else {
+        "<button id=\"chat-more\" class=\"chat-more\" disabled hx-swap-oob=\"true\">история загружена полностью</button>".to_string()
+    };
+    out.push_str(&more);
     out
 }
 

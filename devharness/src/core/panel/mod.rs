@@ -10,6 +10,7 @@
 //! одинаковую проекцию. Сборка не меняет ни одного файла.
 
 pub mod agents;
+pub mod chat;
 pub mod git;
 pub mod ledger;
 pub mod plan;
