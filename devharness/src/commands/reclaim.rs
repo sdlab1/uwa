@@ -806,7 +806,17 @@ pub fn classify(
         }
     }
 
-    // 4. Лимит: лишние кандидаты откладываем (защита от мусора).
+    // 4. Порядок полезности: сперва грязные worktree'и (там работа), потом
+    //    брошенные ветки, и только потом dangling-коммиты (fsck в этом репо
+    //    даёт тысячи старых коммитов — они не должны съедать лимит).
+    candidates.sort_by_key(|c| match c.kind {
+        crate::commands::wtman::CandidateKind::AbandonedWorktree => 0,
+        crate::commands::wtman::CandidateKind::OrphanBranch => 1,
+        crate::commands::wtman::CandidateKind::WipBranch => 2,
+        crate::commands::wtman::CandidateKind::DanglingCommit => 3,
+    });
+
+    // 5. Лимит: лишние кандидаты откладываем (защита от мусора).
     if candidates.len() > max_candidates {
         let extra = candidates.split_off(max_candidates);
         for c in extra {
@@ -1363,6 +1373,26 @@ mod tests {
             "лимит должен быть виден в причинах: {:?}",
             cls.skipped
         );
+    }
+
+    #[test]
+    fn classify_puts_worktrees_before_dangling_commits() {
+        let d = tempfile::tempdir().unwrap();
+        let root = init_repo_committed(d.path());
+        let reg = orch::Registry::default();
+        git_ok(&root, &["branch", "devh/agent-ghost"]);
+        let cls = classify(&root, &reg, 50);
+        // Ветка брошенного агента должна идти раньше dangling-коммитов.
+        let first_branch = cls
+            .candidates
+            .iter()
+            .position(|c| c.branch.as_deref() == Some("devh/agent-ghost"));
+        let first_dangling = cls.candidates.iter().position(|c| {
+            c.kind == crate::commands::wtman::CandidateKind::DanglingCommit
+        });
+        if let (Some(b), Some(dg)) = (first_branch, first_dangling) {
+            assert!(b < dg, "ветка должна быть раньше dangling: {b} vs {dg}");
+        }
     }
 
     #[test]
