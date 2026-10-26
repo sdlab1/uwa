@@ -704,6 +704,7 @@ pub fn orch(root: &Path, sub: &str, args: &[String]) -> anyhow::Result<()> {
         "model" => model(root, args),
         "bug" => bug(root, args),
         "unsaved" => crate::commands::unsaved::run(root, args),
+        "speed" => crate::commands::speed::run(root, args),
         "wt" => wt(root, args),
         "wip" => wip_cmd(root, args),
         "models" => models(root),
@@ -781,6 +782,10 @@ fn print_help() {
   bug <доклад> [--from A] [--agent X] [--p P1] [--zone path]
                                баг devh -> задача В ПЕРВУЮ ОЧЕРЕДЬ (O21)
   zones                      зоны ответственности по исполнителям
+  speed [--agent X] [--json]  юнит скорости/эффективности: взвешенный LOC/час по
+                              РЕАЛЬНОМУ рабочему времени, токены, размышления,
+                              статистика по моделям (час / 24ч / неделя: по дням,
+                              по часам, по дням недели)
   wt list                    учёт worktree'ов агентов (путь, ветка, грязное, ahead/behind)
   wt assign <агент>           выдать worktree агенту (идемпотентно)
   wt path <агент>             путь worktree агента (для скриптов)

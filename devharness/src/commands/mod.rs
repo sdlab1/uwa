@@ -1006,3 +1006,4 @@ mod tests {
         assert_eq!(classify_error(&internal), ExitCode::InternalError);
     }
 }
+pub mod speed;
