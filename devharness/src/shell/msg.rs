@@ -341,6 +341,14 @@ fn thread_participants(blocks: &[String]) -> Vec<String> {
     who
 }
 
+/// Виден ли тред вызывающему: он участник или тред разослан `all` (T-490).
+fn thread_visible_to(blocks: &[String], caller: &str) -> bool {
+    let caller_canon = crate::core::identity::canonical(caller);
+    thread_participants(blocks)
+        .iter()
+        .any(|w| w == "all" || crate::core::identity::canonical(w) == caller_canon)
+}
+
 fn inbox_path(agent: &str) -> PathBuf {
     inbox_dir().join(format!("{agent}.log"))
 }
@@ -481,7 +489,7 @@ fn own_mailbox(requested: Option<&str>, caller: &str, operation: &str) -> Result
     let target = crate::core::identity::canonical(requested);
     if target != caller_canon {
         return Err(format!(
-            "{operation}: чужой ящик «{requested}» запрещён (ты «{caller_canon}») — T-489"
+            "{operation}: чужой ящик «{requested}» запрещён (ты «{caller_canon}») — T-489/T-490"
         ));
     }
     Ok(target)
@@ -1516,10 +1524,15 @@ pub fn send(args: &[String]) -> i32 {
                 eprintln!("нужен ID треда");
                 return 1;
             }
+            let caller = me(None);
             let text = fs::read_to_string(thread_path(&id)).unwrap_or_default();
             let (_h, blocks) = split_log(&text);
             if blocks.is_empty() {
                 eprintln!("тред {id} не найден");
+                return 1;
+            }
+            if !thread_visible_to(&blocks, &caller) {
+                eprintln!("devh msg thread: тред {id} не твой — доступ только участникам (T-490)");
                 return 1;
             }
             for b in blocks.iter() {
@@ -1861,7 +1874,15 @@ pub fn send(args: &[String]) -> i32 {
             0
         }
         "threads" => {
-            let agent = me(m.value("agent").as_deref());
+            let caller = me(None);
+            let agent = match own_mailbox(m.value("agent").as_deref(), &caller, "devh msg threads")
+            {
+                Ok(agent) => agent,
+                Err(e) => {
+                    eprintln!("{e}");
+                    return 1;
+                }
+            };
             let mut rows: Vec<(String, String, usize, Vec<String>)> = Vec::new();
             if let Ok(dir) = fs::read_dir(threads_dir()) {
                 for e in dir.flatten() {
@@ -1874,8 +1895,7 @@ pub fn send(args: &[String]) -> i32 {
                     if blocks.is_empty() {
                         continue;
                     }
-                    let who = thread_participants(&blocks);
-                    if !who.iter().any(|w| w == &agent) {
+                    if !thread_visible_to(&blocks, &agent) {
                         continue;
                     }
                     let mut tags: Vec<String> = Vec::new();
@@ -1933,7 +1953,15 @@ pub fn send(args: &[String]) -> i32 {
         }
         "pending" => {
             // Что из отправленного ещё не прочитано адресатами.
-            let agent = me(m.value("agent").as_deref());
+            let caller = me(None);
+            let agent = match own_mailbox(m.value("agent").as_deref(), &caller, "devh msg pending")
+            {
+                Ok(agent) => agent,
+                Err(e) => {
+                    eprintln!("{e}");
+                    return 1;
+                }
+            };
             let canon = crate::core::identity::canonical(&agent);
             // Синнонимные ящики — в канонический (дедуп по ID): иначе они
             // считаются отдельными письмами и раздувают счёт (R-8).
@@ -2061,7 +2089,14 @@ pub fn send(args: &[String]) -> i32 {
             0
         }
         "sent" => {
-            let agent = me(m.value("agent").as_deref());
+            let caller = me(None);
+            let agent = match own_mailbox(m.value("agent").as_deref(), &caller, "devh msg sent") {
+                Ok(agent) => agent,
+                Err(e) => {
+                    eprintln!("{e}");
+                    return 1;
+                }
+            };
             let text = fs::read_to_string(outbox_path(&safe_name(&agent))).unwrap_or_default();
             let (_h, blocks) = split_log(&text);
             for b in blocks.iter() {
@@ -2075,16 +2110,21 @@ pub fn send(args: &[String]) -> i32 {
                 eprintln!("нужен тэг или префикс ID");
                 return 1;
             }
+            let caller = me(None);
             let mut hits = 0usize;
-            let mut files: Vec<PathBuf> = Vec::new();
-            for dir in [inbox_dir(), outbox_dir(), threads_dir()] {
-                if let Ok(entries) = fs::read_dir(dir) {
-                    for e in entries.flatten() {
+            let mut files: Vec<PathBuf> = inbox_files(&caller);
+            files.push(outbox_path(&safe_name(&caller)));
+            if let Ok(entries) = fs::read_dir(threads_dir()) {
+                for e in entries.flatten() {
+                    let text = fs::read_to_string(e.path()).unwrap_or_default();
+                    let (_h, blocks) = split_log(&text);
+                    if thread_visible_to(&blocks, &caller) {
                         files.push(e.path());
                     }
                 }
             }
             files.sort();
+            files.dedup();
             for path in files {
                 let text = fs::read_to_string(&path).unwrap_or_default();
                 let (_h, blocks) = split_log(&text);
@@ -2752,6 +2792,15 @@ ID: abcd1234\n\
         assert!(err.contains("T-486"), "ошибка ссылается на T-486: {err}");
         assert_eq!(safe_from("attacker", Some("attacker")).unwrap(), "attacker");
         assert_eq!(safe_from("attacker", None).unwrap(), "attacker");
+    }
+
+    #[test]
+    fn thread_only_visible_to_participants_or_all() {
+        let private = vec![block_of("victim", "тема", &[], "тело")];
+        assert!(thread_visible_to(&private, "victim"));
+        assert!(!thread_visible_to(&private, "attacker"));
+        let public = vec![block_of("all", "тема", &[], "тело")];
+        assert!(thread_visible_to(&public, "attacker"));
     }
 
     #[test]
