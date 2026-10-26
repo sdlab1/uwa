@@ -50,6 +50,27 @@ const KNOWN_RUNTIMES: [&str; 11] = [
     "kilo",
 ];
 
+/// Позиционные имена канала: ими обозначают РОЛЬ, а не личность агента.
+///
+/// T-492: `claim lead` / `alias lead --for attacker` — угон позиции.
+/// Позиция не может быть закреплена за сессией и не может быть алиасом:
+/// иначе один агент получает и имя, и права другого.
+const POSITION_NAMES: [&str; 4] = ["lead", "tech_lead", "worker", "all"];
+
+/// Позиция канала (не личность)?
+pub fn is_position_name(name: &str) -> bool {
+    POSITION_NAMES.contains(&name.trim())
+}
+
+/// Запись реестра оркестратора в части, нужной идентификации (T-492).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RosterEntry {
+    /// Каноническое имя агента.
+    pub name: String,
+    /// Агент заведён ведущим и ещё НЕ закрепил имя (онбординг).
+    pub pending_welcome: bool,
+}
+
 /// Где взялось имя — для отчёта `devh msg whoami`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Source {
@@ -316,6 +337,21 @@ pub fn set_alias_in(home: &Path, alias: &str, canon: &str) -> Result<(), String>
     let canon = sanitize_name(canon)?;
     if alias == canon {
         return Err("синоним совпадает с каноном".to_string());
+    }
+    // T-492/T-498: позиция канала (`lead`, `tech_lead`, `worker`, `all`) —
+    // не личность. Алиас НА позицию подменяет адресата (почта/authority),
+    // алиас ИЗ позиции даёт позиции имя агента. Оба запрещены.
+    if is_position_name(&alias) {
+        return Err(format!(
+            "«{alias}» — позиция канала (lead/tech_lead/worker/all), а не имя агента; \
+             алиас на позицию запрещён (T-498)"
+        ));
+    }
+    if is_position_name(&canon) {
+        return Err(format!(
+            "«{canon}» — позиция канала (lead/tech_lead/worker/all), а не имя агента; \
+             позиции нельзя назначить алиас (T-498)"
+        ));
     }
     // T-481: алиас не должен затенять закреплённое имя агента.
     // Иначе `msg alias victim --for attacker` меняет canonical(victim)
@@ -982,6 +1018,86 @@ pub fn current() -> Identity {
 /// Если `takeover=true`, проверяется авторизация ведущим (файл takeover-авторизации).
 /// Это позволяет безопасно вернуть канон после рестарта рантайма, когда сессионный
 /// ключ изменился, но ведущий явно разрешил возврат имени.
+/// Рoster оркестратора: агенты реестра главного дерева (T-492).
+///
+/// Реестр читается из ГЛАВНОГО дерева: у worktree `.harness` — симлинк
+/// на него, но восстанавливать путь надёжнее через `git-common-dir`
+/// (как это делает `about::registry_path`). Реестр недоступен (не
+/// репозиторий devh) — ростер пустой, проверки нет (прежнее поведение).
+pub fn roster() -> Vec<RosterEntry> {
+    let root = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| crate::shell::git::main_root_from_cwd(&cwd).ok())
+        .unwrap_or_else(|| PathBuf::from("."));
+    roster_from_root(&root)
+}
+
+/// То же, но от явного корня (тесты + вызовы из команд).
+pub fn roster_from_root(root: &Path) -> Vec<RosterEntry> {
+    let path = root.join(".harness/orch/registry.json");
+    let Ok(text) = fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return Vec::new();
+    };
+    let mut out: Vec<RosterEntry> = Vec::new();
+    if let Some(agents) = value.get("agents").and_then(|a| a.as_array()) {
+        for a in agents {
+            if let Some(n) = a.get("name").and_then(|x| x.as_str()) {
+                let n = n.trim().to_string();
+                if n.is_empty() {
+                    continue;
+                }
+                out.push(RosterEntry {
+                    name: n,
+                    pending_welcome: a
+                        .get("pending_welcome")
+                        .and_then(|x| x.as_bool())
+                        .unwrap_or(false),
+                });
+            }
+        }
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out.dedup_by(|a, b| a.name == b.name);
+    out
+}
+
+/// Отказ в закреплении имени, если имя принадлежит оркестратору (T-492).
+///
+/// `None` — имя свободно (или онбординг), закрепить можно. Позиция
+/// (`lead`/`tech_lead`/`worker`/`all`) и имя действующего агента реестра
+/// закрепляются ТОЛЬКО с авторизацией ведущего (`claim-authorize`):
+/// иначе любой сессией угоняется личность соседа, а через неё — и права.
+fn roster_claim_refusal(
+    home: &Path,
+    name: &str,
+    key: &str,
+    roster: &[RosterEntry],
+) -> Option<String> {
+    if is_position_name(name) {
+        return Some(format!(
+            "«{name}» — позиция канала (lead/tech_lead/worker/all), а не имя агента; \
+             закрепить позицию за сессией нельзя (T-492)"
+        ));
+    }
+    let entry = roster.iter().find(|e| e.name == name)?;
+    if entry.pending_welcome {
+        // Онбординовый агент: имя завел ведущий и ещё никем не закреплено —
+        // новичок закрепляет его сам.
+        return None;
+    }
+    if check_takeover_authorization(home, name, key).unwrap_or(false) {
+        return None;
+    }
+    Some(format!(
+        "имя «{name}» принадлежит агенту оркестратора; закрепить его может \
+         только владелец с авторизацией ведущего: devh msg claim-authorize {name} --for {key}, \
+         затем devh msg claim {name} (T-492)"
+    ))
+}
+
 pub fn claim(raw: &str, takeover: bool) -> Result<Identity, String> {
     let name = sanitize_name(raw)?;
     let canon = canonical(&name);
@@ -1021,6 +1137,12 @@ pub fn claim(raw: &str, takeover: bool) -> Result<Identity, String> {
                 ));
             }
         }
+    }
+    // T-492: имя свободно в ЭТОМ хранилище, но принадлежит оркестратору
+    // (действующий агент реестра или позиция канала) — угон чужой личности
+    // без авторизации. Закреплять такое имя может только владелец.
+    if let Some(reason) = roster_claim_refusal(&home, &name, &key, &roster()) {
+        return Err(reason);
     }
     write_binding_in(&home, &key, &name, &label, true)
         .map_err(|e| format!("не записать привязку: {e}"))?;
@@ -1166,8 +1288,12 @@ fn check_takeover_authorization(home: &Path, name: &str, for_key: &str) -> Resul
 /// Вызывается командой `devh msg claim-authorize <name> --for <key>`.
 /// Проверка, что вызывающий — ведущий, делается на уровне команды (orch.rs).
 pub fn authorize_takeover(name: &str, for_key: &str) -> Result<(), String> {
-    let home = msg_home();
-    let path = takeover_auth_path(&home, name);
+    authorize_takeover_in(&msg_home(), name, for_key)
+}
+
+/// То же, но в явном хранилище (тесты и команды с `--home`).
+pub fn authorize_takeover_in(home: &Path, name: &str, for_key: &str) -> Result<(), String> {
+    let path = takeover_auth_path(home, name);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("не создать каталог takeover: {e}"))?;
     }
@@ -1602,5 +1728,113 @@ mod tests {
         );
         // Обычный синоним рантайма на агента по-прежнему разрешён.
         assert!(set_alias_in(home, "deepseek", "step5").is_ok());
+    }
+
+    /// T-492: закрепление имени ДЕЙСТВУЮЩЕГО агента реестра без авторизации
+    /// ведущего отклоняется — угон личности соседа закрыт.
+    #[test]
+    fn claim_of_roster_agent_refused_without_authorization() {
+        let dir = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let home = dir.path();
+        let roster = vec![
+            RosterEntry {
+                name: "minimax".to_string(),
+                pending_welcome: false,
+            },
+            RosterEntry {
+                name: "beam3".to_string(),
+                pending_welcome: true,
+            },
+        ];
+        // Имя действующего агента: отказ.
+        let reason = roster_claim_refusal(home, "minimax", "proc:1:2", &roster);
+        assert!(
+            reason.is_some(),
+            "закрепление имени действующего агента реестра требует авторизации"
+        );
+        assert!(
+            reason.unwrap_or_default().contains("T-492"),
+            "отказ ссылается на T-492"
+        );
+        // Свободное имя и онбординг — можно.
+        assert_eq!(roster_claim_refusal(home, "fresh-agent", "proc:1:2", &roster), None);
+        assert_eq!(roster_claim_refusal(home, "beam3", "proc:1:2", &roster), None);
+        // Привязка не создана.
+        assert!(claimed_binding_for_name(home, "minimax").is_none());
+    }
+
+    /// T-492: позиции канала (`lead`/`tech_lead`/`worker`/`all`) нельзя
+    /// закрепить за сессией — иначе `claim lead` даёт имя и права ведущего.
+    #[test]
+    fn claim_of_position_name_refused() {
+        let dir = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let home = dir.path();
+        for pos in POSITION_NAMES {
+            let reason = roster_claim_refusal(home, pos, "proc:1:2", &[]);
+            assert!(reason.is_some(), "позиция «{pos}» не должна закрепляться");
+            assert!(
+                reason.unwrap_or_default().contains("T-492"),
+                "отказ по позиции ссылается на T-492"
+            );
+        }
+        assert!(is_position_name("lead"));
+        assert!(!is_position_name("lead-agent"));
+    }
+
+    /// T-492: authorize-then-claim — владелец восстанавливает имя с
+    /// авторизацией ведущего (путь не сломан).
+    #[test]
+    fn claim_with_authorization_allowed() {
+        let dir = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let home = dir.path();
+        let roster = vec![RosterEntry {
+            name: "minimax".to_string(),
+            pending_welcome: false,
+        }];
+        // Без авторизации — отказ.
+        assert!(roster_claim_refusal(home, "minimax", "proc:1:2", &roster).is_some());
+        // Авторизация выдана на этот ключ — путь открыт.
+        authorize_takeover_in(home, "minimax", "proc:1:2")
+            .unwrap_or_else(|_| unreachable!());
+        assert_eq!(roster_claim_refusal(home, "minimax", "proc:1:2", &roster), None);
+    }
+
+    /// T-498: алиас на позицию канала (и позиции на алиас) запрещён.
+    #[test]
+    fn alias_of_position_name_refused() {
+        let dir = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let home = dir.path();
+        let err = set_alias_in(home, "lead", "attacker")
+            .expect_err("алиас на позицию lead должен падать");
+        assert!(err.contains("T-498"), "отказ ссылается на T-498: {err}");
+        // Позицию нельзя сделать алиасом агента.
+        let err2 = set_alias_in(home, "attacker", "lead")
+            .expect_err("позиция как канон должна падать");
+        assert!(err2.contains("T-498"), "отказ ссылается на T-498: {err2}");
+        // Обычный алиас рантайма на агента по-прежнему работает.
+        assert!(set_alias_in(home, "deepseek", "attacker").is_ok());
+    }
+
+    /// T-492: ростер строится из реестра (имена + флаг онбординга).
+    #[test]
+    fn roster_from_root_reads_registry() {
+        let dir = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let root = dir.path();
+        fs::create_dir_all(root.join(".harness/orch")).unwrap_or_else(|_| unreachable!());
+        fs::write(
+            root.join(".harness/orch/registry.json"),
+            r#"{"lead":"minimax","agents":[
+                 {"name":"minimax","pending_welcome":false},
+                 {"name":"beam","pending_welcome":true}]}"#,
+        )
+        .unwrap_or_else(|_| unreachable!());
+        let roster = roster_from_root(root);
+        let names: Vec<&str> = roster.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, vec!["beam", "minimax"], "имена агентов реестра");
+        assert!(!roster[1].pending_welcome, "minimax — действующий агент");
+        assert!(roster[0].pending_welcome, "beam — ожидает онбординга");
+        // Реестра нет — ростер пуст (прежнее поведение, без отказов).
+        let empty = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        assert!(roster_from_root(empty.path()).is_empty());
     }
 }
