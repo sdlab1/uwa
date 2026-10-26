@@ -881,6 +881,7 @@ pub fn orch(root: &Path, sub: &str, args: &[String]) -> anyhow::Result<()> {
         "guard" => crate::commands::guard::run(root, args),
         "calibrate" => crate::commands::calibration_cmd::run(root, args),
         "decompose" => crate::commands::decompose::run(root, args),
+        "reclaim" => crate::commands::reclaim::run(root, args),
         "install-hook" => install_hook_cmd(root),
         "lead" => lead_cmd(root, args),
         "role" => role_cmd(root, args),
