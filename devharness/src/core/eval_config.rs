@@ -137,6 +137,20 @@ pub struct EvalConfig {
     pub ratio_normal: f64,
     /// Граница «хорошо» (выше — «отлично»).
     pub ratio_good: f64,
+
+    // --- Эталон и сложность -------------------------------------------------
+    /// Сколько задач одного уровня нужно, чтобы эталон считался достаточным.
+    ///
+    /// Договорились: «по 4 задачи каждого уровня» — эталон ведущего это его
+    /// собственные замеры, снятые теми же метриками, что и у агентов.
+    pub cal_min_reference_tasks: usize,
+    /// Веса факторов сложности задачи
+    /// [цикломатичность, форма кода, хранение, функции, граф, декомпозиция].
+    ///
+    /// Шесть факторов сложности из технического задания (плюс CRAP) — ими
+    /// поправляется эталон, чтобы «сложная задача» и «простая задача»
+    /// сравнивались честно: у тяжёлой задачи ошибок естественно больше.
+    pub cal_complexity_weights: [f64; 6],
 }
 
 /// Значения по умолчанию — ЕДИНСТВЕННЫЙ источник правды для оценки.
@@ -175,6 +189,11 @@ pub const DEFAULTS: EvalConfig = EvalConfig {
     ratio_poor: 0.80,
     ratio_normal: 1.05,
     ratio_good: 1.20,
+
+    // Эталон: 4 задачи каждого уровня (C1..C4) — замеры самого ведущего.
+    cal_min_reference_tasks: 4,
+    // Факторы сложности в сумме = 1.0.
+    cal_complexity_weights: [0.25, 0.15, 0.10, 0.15, 0.25, 0.10],
 };
 
 impl EvalConfig {
@@ -194,6 +213,28 @@ impl EvalConfig {
     }
 
     /// Сумма весов сводного балла калибровки (должна быть 1.0).
+    /// Сумма весов факторов сложности (должна быть 1.0).
+    pub fn complexity_weight_sum(&self) -> f64 {
+        self.cal_complexity_weights.iter().sum()
+    }
+
+    /// Имена факторов сложности — в том же порядке, что и веса.
+    pub fn complexity_factor_names() -> [&'static str; 6] {
+        [
+            "cyclomatic",
+            "shape",
+            "storage",
+            "functions",
+            "exec_graph",
+            "decompose",
+        ]
+    }
+
+    /// Минимум задач одного уровня для эталона.
+    pub fn min_reference_tasks(&self) -> usize {
+        self.cal_min_reference_tasks
+    }
+
     pub fn calibration_weight_sum(&self) -> f64 {
         self.cal_w_build
             + self.cal_w_errors
@@ -257,6 +298,22 @@ mod tests {
     }
 
     #[test]
+    #[test]
+    fn complexity_weights_sum_to_one() {
+        assert!(
+            (DEFAULTS.complexity_weight_sum() - 1.0).abs() < 1e-9,
+            "веса сложности: {}",
+            DEFAULTS.complexity_weight_sum()
+        );
+        assert_eq!(EvalConfig::complexity_factor_names().len(), 6);
+    }
+
+    #[test]
+    fn reference_needs_four_tasks_per_level() {
+        // «По 4 задачи каждого уровня» — эталон не собирается на трёх.
+        assert_eq!(DEFAULTS.min_reference_tasks(), 4);
+    }
+
     fn ratio_boundaries_are_ascending() {
         assert!(DEFAULTS.ratio_unsatisfactory < DEFAULTS.ratio_poor);
         assert!(DEFAULTS.ratio_poor < DEFAULTS.ratio_normal);
