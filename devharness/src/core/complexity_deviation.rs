@@ -50,6 +50,38 @@ pub fn crap_factor(source: &str) -> f64 {
     normalize_crap(crate::core::crap::char_crap_metric(source).score)
 }
 
+/// Число частей, при котором фактор «декомпозиция» считается максимальным.
+pub const DECOMPOSE_FULL_PARTS: usize = 4;
+
+/// Фактор «декомпозиция» по числу частей задачи (0.0..=1.0).
+///
+/// Нет разбиения — 0.0; разбиение на `DECOMPOSE_FULL_PARTS` и больше частей —
+/// 1.0 (дальше не растёт: фактор нормирован).
+pub fn parts_factor(parts: usize) -> f64 {
+    if parts == 0 {
+        return 0.0;
+    }
+    (parts as f64 / DECOMPOSE_FULL_PARTS as f64).clamp(0.0, 1.0)
+}
+
+/// На сколько частей разбита задача (по журналу декомпозиций).
+///
+/// Источник — `core::task_decomposition`: применённые декомпозиции пишутся в
+/// `.harness/orch/decompositions.json` (родитель → список детей). Нет журнала
+/// или нет записи о задаче — 0 частей.
+pub fn decomposed_parts(root: &Path, task_id: &str) -> usize {
+    let path = crate::commands::orch::dir(root).join("decompositions.json");
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return 0;
+    };
+    let log: crate::commands::decompose::DecompositionLog =
+        serde_json::from_str(&text).unwrap_or_default();
+    log.applied
+        .get(task_id)
+        .map(|r| r.children.len())
+        .unwrap_or(0)
+}
+
 /// Шесть факторов сложности задачи — значения нормированы в 0.0..=1.0.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
 pub struct ComplexityFactors {
@@ -137,6 +169,19 @@ pub fn analyze_diff(diff: &str) -> ComplexityFactors {
         .collect::<Vec<_>>()
         .join("\n");
     analyze_source(&added)
+}
+
+/// Факторы ЗАДАЧИ: диф + реальное разбиение задачи на части.
+///
+/// Фактор 6 («декомпозиция») = максимум из структуры кода (модули/шаги в
+/// диффе) и разбиения ЗАДАЧИ по `core::task_decomposition`: и разбитая задача,
+/// и разбитый код — признак сложности, и оба влияют на индекс.
+pub fn analyze_task(root: &Path, task_id: &str, diff: &str) -> ComplexityFactors {
+    let mut f = analyze_diff(diff);
+    f.decompose = f
+        .decompose
+        .max(parts_factor(decomposed_parts(root, task_id)));
+    f
 }
 
 /// Разобрать ИСХОДНЫЙ КОД в факторы сложности.
@@ -408,6 +453,64 @@ mod tests {
             (zero.index() - 0.0).abs() < 1e-9,
             "нулевой CRAP — нулевой вклад"
         );
+    }
+
+    /// T-506: фактор «декомпозиция» по числу частей задачи.
+    #[test]
+    fn decompose_factor_counts_task_parts() {
+        assert_eq!(parts_factor(0), 0.0, "нет разбиения — ноль");
+        assert!((parts_factor(2) - 0.5).abs() < 1e-9);
+        assert_eq!(parts_factor(DECOMPOSE_FULL_PARTS), 1.0);
+        assert_eq!(parts_factor(99), 1.0, "фактор нормирован");
+    }
+
+    /// T-506: разбиение задачи (журнал `task_decomposition`) попадает в фактор 6
+    /// и в ИНДЕКС сложности.
+    #[test]
+    fn analyze_task_accounts_for_decomposition() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path();
+        let dir = crate::commands::orch::dir(root);
+        std::fs::create_dir_all(&dir).expect("каталог");
+        let mut log = crate::commands::decompose::DecompositionLog::default();
+        log.applied.insert(
+            "T-1".to_string(),
+            crate::commands::decompose::DecompositionRecord {
+                parent: "T-1".into(),
+                children: vec!["T-2".into(), "T-3".into()],
+                applied_at: 1,
+            },
+        );
+        std::fs::write(
+            dir.join("decompositions.json"),
+            serde_json::to_string_pretty(&log).expect("json"),
+        )
+        .expect("write");
+        let diff = "--- a/x.rs\n+++ b/x.rs\n@@\n+fn f() {}\n";
+        let plain = analyze_diff(diff);
+        let split = analyze_task(root, "T-1", diff);
+        assert_eq!(
+            decomposed_parts(root, "T-1"),
+            2,
+            "разбиение прочитано из журнала"
+        );
+        assert!(
+            split.decompose > plain.decompose,
+            "разбиение поднимает фактор: {} vs {}",
+            split.decompose,
+            plain.decompose
+        );
+        assert!((split.decompose - 0.5).abs() < 1e-9);
+        assert!(
+            split.index() > plain.index(),
+            "индекс учитывает разбиение: {} vs {}",
+            split.index(),
+            plain.index()
+        );
+        // Задача без разбиения — как обычно.
+        let other = analyze_task(root, "T-9", diff);
+        assert_eq!(other.decompose, plain.decompose);
+        assert_eq!(decomposed_parts(root, "T-9"), 0);
     }
 
     /// Диф-анализ тоже получает CRAP (по добавленным строкам).
