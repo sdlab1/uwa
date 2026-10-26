@@ -181,6 +181,25 @@ pub fn parse_weighted_by_file(text: &str) -> BTreeMap<String, SeverityCounts> {
     out
 }
 
+/// Счётчики по категориям тяжести с привязкой к файлу.
+///
+/// Нужно для разбивки замера по категориям (quality::category_breakdown):
+/// сколько былоFatal, сколько Careless — «3 грубейшие ошибки» против
+/// «10 опечаток» должны быть видны в ledger'е.
+pub fn parse_categories_by_file(text: &str) -> BTreeMap<String, CategoryCounts> {
+    let mut out: BTreeMap<String, CategoryCounts> = BTreeMap::new();
+    for d in parse_diagnostics(text) {
+        let Some(file) = d.file.clone() else { continue };
+        let slot = out.entry(file).or_default();
+        let e = slot.entry(d.category).or_insert((0, 0));
+        match d.level {
+            DiagLevel::Error => e.0 = e.0.saturating_add(1),
+            DiagLevel::Warning => e.1 = e.1.saturating_add(1),
+        }
+    }
+    out
+}
+
 /// Категория тяжести по коду/сообщению диагностики.
 pub fn classify(level: DiagLevel, code: Option<&str>, message: &str) -> SeverityCategory {
     if let Some(c) = code {

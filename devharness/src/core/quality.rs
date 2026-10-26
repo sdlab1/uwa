@@ -145,6 +145,12 @@ pub struct QualitySample {
     /// Взвешенная сумма предупреждений (по множителям тяжести).
     #[serde(default)]
     pub warnings_weighted: f64,
+    /// Разбивка ОШИБОК по категориям тяжести: категория → число.
+    #[serde(default)]
+    pub error_categories: BTreeMap<String, u32>,
+    /// Разбивка ПРЕДУПРЕЖДЕНИЙ по категориям тяжести: категория → число.
+    #[serde(default)]
+    pub warning_categories: BTreeMap<String, u32>,
     /// Финальная сборка прошла.
     #[serde(default)]
     pub build_ok: bool,
@@ -341,6 +347,22 @@ pub fn process_score(build_ok: bool, rework: u32) -> f64 {
 /// `c_level` — фильтр по уровню задачи (None = все уровни). Метрики
 /// нормируются на `level_scale(c_level)`: ошибки на сложной задаче
 /// ожидаемы и не должны штрафоваться так же, как на простой.
+/// Разбивка замера по категориям тяжести: категория → число диагностик.
+///
+/// Ключи — имена категорий (`fatal`, `logic`, `careless`, `style`).
+/// Ошибки и предупреждения складываются: важно видеть, ИЗ ЧЕГО состоит
+/// штраф — из грубейших ошибок или из опечаток.
+pub fn category_breakdown(sample: &QualitySample) -> BTreeMap<String, u32> {
+    let mut out: BTreeMap<String, u32> = BTreeMap::new();
+    for (cat, n) in &sample.error_categories {
+        *out.entry(cat.clone()).or_insert(0) = out.get(cat).copied().unwrap_or(0) + *n;
+    }
+    for (cat, n) in &sample.warning_categories {
+        *out.entry(cat.clone()).or_insert(0) = out.get(cat).copied().unwrap_or(0) + *n;
+    }
+    out
+}
+
 pub fn quality_vector(samples: &[QualitySample], c_level: Option<u8>) -> QualityVector {
     let selected: Vec<&QualitySample> = samples
         .iter()
@@ -450,6 +472,42 @@ pub fn vectors_by_agent(samples: &[QualitySample]) -> BTreeMap<String, QualityVe
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn category_breakdown_splits_by_severity() {
+        let mut sample = QualitySample {
+            ts: 1,
+            agent: "a".to_string(),
+            model: "m".to_string(),
+            task_id: Some("T-1".to_string()),
+            c_level: 1,
+            added_lines: 0,
+            comment_lines: 0,
+            code_lines: 0,
+            check_runs: 1,
+            errors_final: 3,
+            warnings_final: 1,
+            errors_weighted: 15.0,
+            warnings_weighted: 1.0,
+            error_categories: BTreeMap::new(),
+            warning_categories: BTreeMap::new(),
+            build_ok: true,
+            duration_secs: Some(1.0),
+            deliberation_actions: 1,
+            rework_rounds: 0,
+            identified: true,
+        };
+        sample
+            .error_categories
+            .insert("fatal".to_string(), 3);
+        sample
+            .warning_categories
+            .insert("careless".to_string(), 1);
+        let breakdown = category_breakdown(&sample);
+        assert_eq!(breakdown.get("fatal").copied(), Some(3));
+        assert_eq!(breakdown.get("careless").copied(), Some(1));
+        assert_eq!(breakdown.len(), 2, "разбивка: {breakdown:?}");
+    }
+
     use super::*;
 
     fn sample(c_level: u8, errors: u32, warnings: u32, ok: bool) -> QualitySample {
@@ -467,6 +525,8 @@ mod tests {
             warnings_final: warnings,
             errors_weighted: errors as f64,
             warnings_weighted: warnings as f64,
+            error_categories: BTreeMap::new(),
+            warning_categories: BTreeMap::new(),
             build_ok: ok,
             duration_secs: Some(60.0),
             deliberation_actions: 6,

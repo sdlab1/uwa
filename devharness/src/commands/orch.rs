@@ -4957,6 +4957,8 @@ pub fn verify_cmd(root: &Path, args: &[String]) -> anyhow::Result<()> {
             warnings_final: stats.warnings,
             errors_weighted: stats.errors_weighted,
             warnings_weighted: stats.warnings_weighted,
+            error_categories: scoped_category_counts(&combined_all, &task_zones).0,
+            warning_categories: scoped_category_counts(&combined_all, &task_zones).1,
             build_ok: all_ok,
             duration_secs: Some(duration_total),
             deliberation_actions: actions,
@@ -5014,6 +5016,34 @@ fn quality_diff_text(tree: &Path, commit_sha: Option<&str>) -> String {
         return String::from_utf8_lossy(&outp.stdout).to_string();
     }
     String::new()
+}
+
+/// Разбивка диагностик по категориям тяжести — ТОЛЬКО по зонам задачи.
+///
+/// Возвращает (ошибки, предупреждения): категория → число.
+fn scoped_category_counts(
+    text: &str,
+    scope: &[String],
+) -> (
+    std::collections::BTreeMap<String, u32>,
+    std::collections::BTreeMap<String, u32>,
+) {
+    let mut errors: std::collections::BTreeMap<String, u32> = std::collections::BTreeMap::new();
+    let mut warnings: std::collections::BTreeMap<String, u32> = std::collections::BTreeMap::new();
+    for (file, per_cat) in crate::core::severity::parse_categories_by_file(text) {
+        if !crate::core::check_telemetry::file_in_scope(&file, scope) {
+            continue;
+        }
+        for (cat, (e, w)) in per_cat {
+            if e > 0 {
+                *errors.entry(cat.name().to_string()).or_insert(0) += e;
+            }
+            if w > 0 {
+                *warnings.entry(cat.name().to_string()).or_insert(0) += w;
+            }
+        }
+    }
+    (errors, warnings)
 }
 
 /// Последний лог сессии агента — эвристика «обдумывания» (виды действий).
