@@ -44,6 +44,9 @@ pub struct IdleSnapshot {
     pub now: u64,
     /// Источник последнего сигнала.
     pub source: Option<SignalSource>,
+    /// Время последней синхронизации worktree (unix-сек). НЕ считается
+    /// признаком активности.
+    pub wt_synced_at: Option<u64>,
 }
 
 fn now_secs() -> u64 {
@@ -60,6 +63,7 @@ impl Default for IdleSnapshot {
             idle_limit_secs: 20 * 60,
             now: now_secs(),
             source: None,
+            wt_synced_at: None,
         }
     }
 }
@@ -117,6 +121,7 @@ mod tests {
             idle_limit_secs: 1200,
             now: 100000,
             source: None,
+            wt_synced_at: None,
         };
         assert_eq!(evaluate(&snap), IdleStatus::NoSignals);
         let (_, acts) = decide(&snap);
@@ -132,6 +137,7 @@ mod tests {
             idle_limit_secs: 1200,
             now: 100000,
             source: Some(SignalSource::Channel),
+            wt_synced_at: None,
         };
         assert_eq!(evaluate(&snap), IdleStatus::Alive);
         let (_, acts) = decide(&snap);
@@ -147,6 +153,7 @@ mod tests {
             idle_limit_secs: 1200,
             now: 100000,
             source: Some(SignalSource::Commit),
+            wt_synced_at: None,
         };
         assert_eq!(evaluate(&snap), IdleStatus::Stale);
         let (_, acts) = decide(&snap);
@@ -162,6 +169,7 @@ mod tests {
             idle_limit_secs: 1200,
             now: 100000,
             source: Some(SignalSource::Registry),
+            wt_synced_at: None,
         };
         assert_eq!(evaluate(&snap), IdleStatus::Alive);
     }
@@ -173,6 +181,7 @@ mod tests {
             idle_limit_secs: 1200,
             now: 100000, // idle = 1200, not > 1200
             source: Some(SignalSource::Commit),
+            wt_synced_at: None,
         };
         // idle = now - last_seen = 1200, condition is idle > limit => 1200 > 1200 is false
         assert_eq!(evaluate(&snap), IdleStatus::Alive);
