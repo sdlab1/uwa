@@ -1007,3 +1007,6 @@ mod tests {
     }
 }
 pub mod speed;
+
+/// ПУ — панель управления оркестратором (HTMX-сервер).
+pub mod dashboard;

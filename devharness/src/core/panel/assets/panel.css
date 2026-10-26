@@ -1,0 +1,29 @@
+:root{--bg:#0f1115;--card:#171a21;--fg:#e6e8ee;--dim:#9aa3b2;--ok:#4cc38a;--warn:#e5c07b;--bad:#e06c75;--line:#262b36}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+header{padding:16px 20px;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--bg);z-index:5}
+h1{font-size:18px;margin:0 0 4px}
+h2{font-size:15px;margin:0 0 10px;color:var(--dim);text-transform:uppercase;letter-spacing:.06em}
+h3{font-size:13px;margin:14px 0 6px;color:var(--dim)}
+.meta,.sub{color:var(--dim);font-size:12px}
+.card{margin:14px 20px;padding:14px 16px;background:var(--card);border:1px solid var(--line);border-radius:8px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px}
+.tile{background:#11141a;border:1px solid var(--line);border-radius:6px;padding:10px}
+.tile .k{color:var(--dim);font-size:11px;text-transform:uppercase;letter-spacing:.05em}
+.tile .v{font-size:22px;margin-top:4px}
+.tile.ok .v{color:var(--ok)}.tile.warn .v{color:var(--warn)}.tile.bad .v{color:var(--bad)}
+table{width:100%;border-collapse:collapse;font-size:12.5px}
+th{text-align:left;color:var(--dim);font-weight:600;border-bottom:1px solid var(--line);padding:6px 8px;white-space:nowrap}
+td{padding:6px 8px;border-bottom:1px solid #1e222b;vertical-align:top}
+tr.ps td{background:rgba(224,108,117,.10)}tr.stuck td{background:rgba(229,192,123,.10)}
+tr.bug td{background:rgba(229,192,123,.06)}
+a{color:#7fb3ff;text-decoration:none}a:hover{text-decoration:underline}
+.report{border-left:3px solid var(--warn);padding:8px 10px;margin:8px 0;background:#11141a;border-radius:0 6px 6px 0}
+.report.tech{border-left-color:#7fb3ff}
+.report pre{white-space:pre-wrap;word-break:break-word;margin:6px 0 0;font-size:12px;color:#cfd6e4}
+.doc{max-height:60vh;overflow:auto;margin-top:12px;padding:10px;background:#11141a;border:1px solid var(--line);border-radius:6px}
+.doc h3,.doc h4,.doc h5,.doc h6{color:var(--fg)}
+code{background:#11141a;padding:1px 4px;border-radius:3px}
+pre{background:#0b0d11;padding:10px;border-radius:6px;overflow:auto}
+.badge{display:inline-block;padding:1px 6px;border-radius:10px;font-size:11px;border:1px solid var(--line)}
+.badge.ps{border-color:var(--bad);color:var(--bad)}
