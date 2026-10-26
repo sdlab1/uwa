@@ -574,7 +574,16 @@ pub fn adjust(base: u8, stats: Option<&ModelStats>, cfg: &AutotuneConfig) -> u8 
     if !cfg.enabled || st.samples < cfg.min_samples {
         return base;
     }
-    let raw = base as f64 - penalty(st, cfg);
+    // T-413: только ERRORS понижают potolk. Warnings без errors не штрафуют
+    // (иначе 33 cargo-warning'а на весь проект понижают potolk до C1).
+    let p = if st.avg_errors > 0.0 {
+        penalty(st, cfg)
+    } else {
+        let mut zeroed = st.clone();
+        zeroed.avg_warnings = 0.0;
+        penalty(&zeroed, cfg)
+    };
+    let raw = base as f64 - p;
     let max_c = crate::core::complexity::Complexity::MAX as f64;
     let clamped = raw.clamp(0.0, max_c);
     (clamped.round() as u8).min(base)
