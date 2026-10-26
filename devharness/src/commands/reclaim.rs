@@ -332,8 +332,10 @@ fn live_keep_paths(root: &Path, reg: &orch::Registry) -> Vec<PathBuf> {
 }
 
 /// `scan` — список кандидатов + отчёт на диск (read-only).
-fn cmd_scan(root: &Path, json: bool) -> anyhow::Result<()> {
-    let cands = crate::commands::wtman::discover(root);
+fn cmd_scan(root: &Path, json: bool, max_candidates: usize) -> anyhow::Result<()> {
+    let reg = orch::load(root);
+    let cls = classify(root, &reg, max_candidates);
+    let cands = cls.candidates;
     let items: Vec<serde_json::Value> = cands
         .iter()
         .map(|c| {
@@ -346,12 +348,26 @@ fn cmd_scan(root: &Path, json: bool) -> anyhow::Result<()> {
             })
         })
         .collect();
-    let report = serde_json::json!({ "count": cands.len(), "candidates": items });
+    // Исключённые — по одной строке на ПРИЧИНУ (без полного дампа).
+    let mut by_reason: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    for sk in &cls.skipped {
+        *by_reason.entry(sk.reason.label()).or_insert(0) += 1;
+    }
+    let skipped: Vec<serde_json::Value> = by_reason
+        .iter()
+        .map(|(reason, n)| serde_json::json!({ "reason": reason, "count": n }))
+        .collect();
+    let report = serde_json::json!({
+        "count": cands.len(),
+        "candidates": items,
+        "skipped_by_reason": skipped,
+        "max_candidates": max_candidates,
+    });
     let body = serde_json::to_string_pretty(&report).unwrap_or_else(|_| "{}".to_string());
     if json {
         println!("{body}");
     } else {
-        println!("=== RECLAIM scan: кандидатов {} ===", cands.len());
+        println!("=== RECLAIM scan: кандидатов {} (лимит {}) ===", cands.len(), max_candidates);
         for c in &cands {
             println!(
                 "  [{}] agent={} branch={} path={} sha={}",
@@ -364,6 +380,20 @@ fn cmd_scan(root: &Path, json: bool) -> anyhow::Result<()> {
                     .unwrap_or_else(|| "-".to_string()),
                 c.sha.as_deref().unwrap_or("-"),
             );
+        }
+        let limit_more = cls
+            .skipped
+            .iter()
+            .filter(|s| matches!(s.reason, SkipReason::Limit { .. }))
+            .count();
+        if limit_more > 0 {
+            println!("  … ещё {limit_more} кандидатов сверх лимита {max_candidates}");
+        }
+        if !by_reason.is_empty() {
+            println!("--- почему не кандидат (по причинам) ---");
+            for (reason, n) in &by_reason {
+                println!("  — {reason}: {n}");
+            }
         }
     }
     let dir = orch::dir(root);
@@ -610,6 +640,192 @@ fn cmd_redistribute(root: &Path, apply: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Почему кандидат НЕ попал в список (T-565) — «почему не кандидат».
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SkipReason {
+    /// Главное дерево / ветка main — это не брошенная работа.
+    MainTree,
+    /// Агент зарегистрирован в реестре — работа не брошена.
+    RegisteredAgent { agent: String },
+    /// Работа уже спасена: есть rescue-ветка.
+    AlreadyRescued { branch: String },
+    /// Дерево чистое — спасать нечего.
+    CleanTree,
+    /// Превышен лимит кандидатов (защита от «спасения» мусора).
+    Limit { max: usize },
+}
+
+impl SkipReason {
+    /// Человекочитаемая причина (для экрана и письма).
+    pub fn label(&self) -> String {
+        match self {
+            SkipReason::MainTree => "главное дерево/main — не брошенная работа".to_string(),
+            SkipReason::RegisteredAgent { agent } => {
+                format!("агент {agent} в реестре — работа не брошена")
+            }
+            SkipReason::AlreadyRescued { branch } => {
+                format!("уже спасено: есть rescue-ветка {branch}")
+            }
+            SkipReason::CleanTree => "дерево чистое — спасать нечего".to_string(),
+            SkipReason::Limit { max } => {
+                format!("превышен лимит кандидатов ({max}) — лишние отложены")
+            }
+        }
+    }
+}
+
+/// Кандидат, отложенный с причиной.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Skipped {
+    /// Что отложено (путь worktree или имя ветки).
+    pub name: String,
+    /// Почему отложено.
+    pub reason: SkipReason,
+}
+
+/// Результат классификации: что спасаем и что (и почему) не спасаем.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Classification {
+    /// Кандидаты (в пределах лимита).
+    pub candidates: Vec<crate::commands::wtman::Candidate>,
+    /// Отложенные с причиной.
+    pub skipped: Vec<Skipped>,
+}
+
+/// Классифицировать брошенную работу (T-565).
+///
+/// Кандидаты — то, что действительно можно спасти; остальное откладывается
+/// с ПРИЧИНОЙ (отчёт «почему не кандидат»), а лимит `--max-candidates`
+/// защищает от спасения мусора (сотни веток-дублей).
+pub fn classify(
+    root: &Path,
+    reg: &orch::Registry,
+    max_candidates: usize,
+) -> Classification {
+    let registered: std::collections::HashSet<String> = reg
+        .agents
+        .iter()
+        .map(|a| crate::core::identity::canonical(&a.name))
+        .collect();
+    let mut candidates: Vec<crate::commands::wtman::Candidate> = Vec::new();
+    let mut skipped: Vec<Skipped> = Vec::new();
+    let mut wt_branches: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    // 1. Worktree'ы: main и зарегистрированные агенты — не кандидаты.
+    for wt in crate::shell::git::worktree_paths(root) {
+        let Some(branch) = crate::shell::git::branch_current(&wt) else {
+            continue;
+        };
+        wt_branches.insert(branch.clone());
+        let name = wt.display().to_string();
+        if wt == root || branch == "main" {
+            skipped.push(Skipped {
+                name,
+                reason: SkipReason::MainTree,
+            });
+            continue;
+        }
+        let agent = agent_of_branch(&branch);
+        if let Some(a) = &agent {
+            if registered.contains(&crate::core::identity::canonical(a)) {
+                skipped.push(Skipped {
+                    name,
+                    reason: SkipReason::RegisteredAgent { agent: a.clone() },
+                });
+                continue;
+            }
+            let rescue = rescue_branch(a);
+            if crate::shell::git::show_ref(root, &rescue) {
+                skipped.push(Skipped {
+                    name,
+                    reason: SkipReason::AlreadyRescued { branch: rescue },
+                });
+                continue;
+            }
+        }
+        if !crate::shell::git::tree_dirty(&wt) {
+            skipped.push(Skipped {
+                name,
+                reason: SkipReason::CleanTree,
+            });
+            continue;
+        }
+        candidates.push(crate::commands::wtman::Candidate {
+            kind: crate::commands::wtman::CandidateKind::AbandonedWorktree,
+            path: Some(wt),
+            branch: Some(branch),
+            sha: None,
+            agent,
+        });
+    }
+
+    // 2. Ветки devh/agent-* и devh/wip-* без worktree.
+    for branch in branches_with_prefix(root, "devh/agent-")
+        .into_iter()
+        .chain(branches_with_prefix(root, "devh/wip-"))
+    {
+        if wt_branches.contains(&branch) {
+            continue;
+        }
+        let agent = agent_of_branch(&branch);
+        if let Some(a) = &agent {
+            if registered.contains(&crate::core::identity::canonical(a)) {
+                skipped.push(Skipped {
+                    name: branch.clone(),
+                    reason: SkipReason::RegisteredAgent { agent: a.clone() },
+                });
+                continue;
+            }
+            let rescue = rescue_branch(a);
+            if crate::shell::git::show_ref(root, &rescue) {
+                skipped.push(Skipped {
+                    name: branch.clone(),
+                    reason: SkipReason::AlreadyRescued { branch: rescue },
+                });
+                continue;
+            }
+        }
+        let kind = if branch.starts_with("devh/wip-") {
+            crate::commands::wtman::CandidateKind::WipBranch
+        } else {
+            crate::commands::wtman::CandidateKind::OrphanBranch
+        };
+        candidates.push(crate::commands::wtman::Candidate {
+            kind,
+            path: None,
+            branch: Some(branch),
+            sha: None,
+            agent,
+        });
+    }
+
+    // 3. Недостижимые коммиты — из сканера wtman (git fsck).
+    for c in crate::commands::wtman::discover(root) {
+        if c.kind == crate::commands::wtman::CandidateKind::DanglingCommit {
+            candidates.push(c);
+        }
+    }
+
+    // 4. Лимит: лишние кандидаты откладываем (защита от мусора).
+    if candidates.len() > max_candidates {
+        let extra = candidates.split_off(max_candidates);
+        for c in extra {
+            skipped.push(Skipped {
+                name: c
+                    .path
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .or_else(|| c.branch.clone())
+                    .or_else(|| c.sha.clone())
+                    .unwrap_or_else(|| "?".to_string()),
+                reason: SkipReason::Limit { max: max_candidates },
+            });
+        }
+    }
+
+    Classification { candidates, skipped }
+}
+
 /// Сводка спасённой работы (T-562): что нашли, что под риском, что спасли
 /// и сколько задач из этого получилось. Lead видит это одним экраном (и
 /// одним письмом), а не копается в ветках руками.
@@ -788,7 +1004,15 @@ fn cmd_report(root: &Path, send: bool, dry_run: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Точка входа: `devh orch reclaim <scan|salvage|close|redistribute|show>`.
+/// Лимит кандидатов (защита от «спасения» мусора). По умолчанию 50.
+fn max_candidates_arg(args: &[String]) -> usize {
+    flag_value(args, "--max-candidates")
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(50)
+}
+
+/// Точка входа: `devh orch reclaim <scan|salvage|close|redistribute|report|show>`.
 pub fn run(root: &Path, args: &[String]) -> anyhow::Result<()> {
     let reg = orch::load(root);
     let caller = crate::core::identity::canonical(&crate::core::identity::current().name);
@@ -806,7 +1030,11 @@ pub fn run(root: &Path, args: &[String]) -> anyhow::Result<()> {
             println!("{out}");
             Ok(())
         }
-        "scan" => cmd_scan(root, rest.iter().any(|a| a == "--json")),
+        "scan" => cmd_scan(
+            root,
+            rest.iter().any(|a| a == "--json"),
+            max_candidates_arg(&rest),
+        ),
         "salvage" => {
             let agent = flag_value(&rest, "--agent");
             let path = flag_value(&rest, "--path").map(PathBuf::from);
@@ -1067,6 +1295,94 @@ mod tests {
     }
 
     #[test]
+    fn classify_marks_main_and_registered_agents_as_skipped() {
+        let d = tempfile::tempdir().unwrap();
+        let root = init_repo_committed(d.path());
+        let reg = orch::Registry {
+            agents: vec![orch::AgentState {
+                name: "worker".to_string(),
+                role: Some("worker".to_string()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        // Ветка зарегистрированного агента и ветка брошенного агента.
+        git_ok(&root, &["branch", "devh/agent-worker"]);
+        git_ok(&root, &["branch", "devh/agent-ghost"]);
+        let cls = classify(&root, &reg, 50);
+        assert!(
+            cls.skipped
+                .iter()
+                .any(|s| matches!(s.reason, SkipReason::MainTree)),
+            "main должен быть отложен: {:?}",
+            cls.skipped
+        );
+        assert!(
+            cls.skipped.iter().any(|s| matches!(
+                &s.reason,
+                SkipReason::RegisteredAgent { agent } if agent == "worker"
+            )),
+            "зарегистрированный агент должен быть отложен: {:?}",
+            cls.skipped
+        );
+        assert!(
+            cls.candidates
+                .iter()
+                .any(|c| c.branch.as_deref() == Some("devh/agent-ghost")),
+            "брошенный агент должен быть кандидатом: {:?}",
+            cls.candidates
+        );
+    }
+
+    #[test]
+    fn classify_reports_limit_and_rescued() {
+        let d = tempfile::tempdir().unwrap();
+        let root = init_repo_committed(d.path());
+        let reg = orch::Registry::default();
+        git_ok(&root, &["branch", "devh/agent-ghost"]);
+        // rescue-ветка уже есть — работа уже спасена.
+        git_ok(&root, &["branch", "devh/reclaim-ghost"]);
+        let cls = classify(&root, &reg, 50);
+        assert!(
+            cls.skipped.iter().any(|s| matches!(
+                &s.reason,
+                SkipReason::AlreadyRescued { branch } if branch == "devh/reclaim-ghost"
+            )),
+            "уже спасённое должно быть отложено: {:?}",
+            cls.skipped
+        );
+        // Лимит: лишние кандидаты откладываются с причиной Limit.
+        git_ok(&root, &["branch", "devh/agent-ghost2"]);
+        git_ok(&root, &["branch", "devh/agent-ghost3"]);
+        let cls = classify(&root, &reg, 1);
+        assert!(cls.candidates.len() <= 1);
+        assert!(
+            cls.skipped
+                .iter()
+                .any(|s| matches!(s.reason, SkipReason::Limit { max: 1 })),
+            "лимит должен быть виден в причинах: {:?}",
+            cls.skipped
+        );
+    }
+
+    #[test]
+    fn skip_reason_labels_are_readable() {
+        assert!(SkipReason::MainTree.label().contains("main"));
+        assert!(SkipReason::RegisteredAgent {
+            agent: "beam".to_string()
+        }
+        .label()
+        .contains("beam"));
+        assert!(SkipReason::AlreadyRescued {
+            branch: "devh/reclaim-beam".to_string()
+        }
+        .label()
+        .contains("devh/reclaim-beam"));
+        assert!(SkipReason::CleanTree.label().contains("чистое"));
+        assert!(SkipReason::Limit { max: 7 }.label().contains('7'));
+    }
+
+    #[test]
     fn summary_colored_render_has_counters() {
         let s = ReclaimSummary {
             candidates: 3,
@@ -1268,7 +1584,7 @@ mod tests {
         assert!(git_ok(&root, &["worktree", "add", "-b", "devh/agent-ghost", &wt_s]));
         std::fs::write(wt.join("q.txt"), "q\n").unwrap();
 
-        cmd_scan(&root, true).expect("scan");
+        cmd_scan(&root, true, 50).expect("scan");
         let report = orch::dir(&root).join("reclaim-scan.json");
         assert!(report.is_file(), "отчёт записан: {}", report.display());
         let body = std::fs::read_to_string(&report).unwrap();
