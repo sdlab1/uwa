@@ -20,6 +20,9 @@
 //!   devh orch model --agent X --model M [--runtime R]     — смена модели/рантайма
 //!   devh orch zones                 — кто какие зоны держит
 
+#[path = "../core/i18n.rs"]
+pub mod i18n;
+
 use crate::core::agent_state::{degrade_p, AgentState as CoreAgentState};
 use crate::core::ledger::{log_event, LedgerEntry, LedgerEvent};
 use anyhow::anyhow;
@@ -3045,6 +3048,25 @@ fn bug(root: &Path, args: &[String]) -> anyhow::Result<()> {
 }
 
 /// `devh orch list [--agent X]`.
+/// Важная информация `orch list` на языке модели агента (T-501).
+fn list_important_info(model: &str, ceiling: u8, hidden: usize) -> String {
+    use i18n::{text_for, Key};
+    let c = ceiling.to_string();
+    let mut out = text_for(model, Key::CeilingNow, &[("N", c.as_str())]);
+    if hidden > 0 {
+        let n = hidden.to_string();
+        out.push('\n');
+        out.push_str(&text_for(model, Key::HiddenAbove, &[("N", n.as_str())]));
+    }
+    out.push('\n');
+    out.push_str(&text_for(
+        model,
+        Key::SubmitTask,
+        &[("CMD", "devh next")],
+    ));
+    out
+}
+
 fn list(root: &Path, args: &[String]) -> anyhow::Result<()> {
     let reg = load(root);
     let only = flag(args, "--agent");
@@ -3127,11 +3149,11 @@ fn list(root: &Path, args: &[String]) -> anyhow::Result<()> {
         );
         let _ = ok;
     }
-    if hidden > 0 {
-        println!(
-            "⚠ скрыто задач выше потолка модели (C{ceiling}): {hidden} — узнать: devh orch models"
-        );
-    }
+    let (model, _) = model_of(root, &reg, &caller);
+    println!(
+        "{}",
+        list_important_info(model.as_deref().unwrap_or(""), ceiling, hidden)
+    );
     Ok(())
 }
 
@@ -7784,6 +7806,14 @@ mod tests {
     }
 
     #[test]
+    fn list_important_info_follows_model_language() {
+        assert!(list_important_info("deepseek-v4", 2, 1).contains("你当前的级别上限"));
+        assert!(list_important_info("mistral-large", 2, 0).contains("Ton plafond"));
+        assert!(list_important_info("unknown-model", 2, 1).contains("Your current ceiling"));
+        assert!(list_important_info("unknown-model", 2, 1).contains("Hidden tasks"));
+        assert!(list_important_info("unknown-model", 2, 0).contains("Next step"));
+    }
+
     fn owner_or_lead_can_act_on_task() {
         assert!(may_act_on_task("worker", "worker", Some("lead")));
         assert!(may_act_on_task("lead", "worker", Some("lead")));
