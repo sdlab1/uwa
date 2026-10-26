@@ -264,6 +264,22 @@ pub fn collect(root: &Path, reg: &Registry) -> GuardReport {
     // ── самопроверка guard'а декомпозиции ──
     report.push(decomposition_guard::ID, decomposition_guard::selfcheck());
 
+    // ── эталон собран: для каждого уровня C1..C4 есть >=4 замеров и запись
+    //    эталона. Без эталона нельзя честно оценить агента («лучше/хуже
+    //    уровня»), поэтому это Problem с указанием уровня, а не warn.
+    let calibration_agent = lead
+        .clone()
+        .unwrap_or_else(|| crate::core::calibration_guard::DEFAULT_REFERENCE_AGENT.to_string());
+    let calibration_statuses = crate::core::calibration_guard::check(
+        root,
+        &calibration_agent,
+        &crate::core::calibration_guard::LEVELS,
+    );
+    report.push(
+        crate::core::calibration_guard::ID,
+        crate::core::calibration_guard::verdict(&calibration_statuses),
+    );
+
     report
 }
 
