@@ -141,6 +141,19 @@ impl EmpiricalCeilings {
     }
 }
 
+/// Объявлена ли модель агента?
+///
+/// Нет → потолок C1 fail-closed: это НЕ «оценка на глаз», а осознанный
+/// запрет выдавать работу агенту, который не сказал, кто он. Поэтому
+/// мягкий допуск (probation) к такому потолку НЕ применяется.
+pub fn model_declared(reg: &Registry, agent: &str) -> bool {
+    let canon = crate::core::identity::canonical(agent);
+    reg.agents
+        .iter()
+        .filter(|a| crate::core::identity::canonical(&a.name) == canon)
+        .any(|a| a.model.as_ref().map(|m| !m.trim().is_empty()).unwrap_or(false))
+}
+
 /// Базовый потолок агента по МОДЕЛИ (без явного override и без эмпирики):
 /// история сдачи → таблица моделей → **C1** (fail-closed).
 pub fn base_ceiling(reg: &Registry, agent: &str) -> u8 {
@@ -295,9 +308,49 @@ fn agent_accepts(reg: &Registry, emp: &EmpiricalCeilings, agent: &str, c: u8) ->
     }
     let ceiling = ceiling_of_with(reg, &canon, emp);
     if c > ceiling {
-        return Some(format!("C{c} выше потолка агента C{ceiling}"));
+        // МЯГКИЙ ПОТОЛОК (probation): эмпирический/базовый потолок — оценка
+        // «на глаз», поэтому задача уровнем выше выдаётся как пробация.
+        // Явный потолок lead'а — жёсткий.
+        let explicit = explicit_ceiling_of(reg, &canon);
+        // Модель не объявлена → C1 fail-closed ЖЁСТКИЙ (осознанный запрет,
+        // а не оценка «на глаз»): мягкий допуск здесь не применяется.
+        if explicit.is_none() && !model_declared(reg, &canon) {
+            return Some(format!(
+                "C{c} выше потолка агента C{ceiling} (модель не объявлена — fail-closed)"
+            ));
+        }
+        match crate::core::probation::admit(
+            c,
+            ceiling,
+            explicit,
+            crate::core::probation::EMPIRICAL_SLACK,
+        ) {
+            crate::core::probation::Admission::Blocked { reason } => return Some(reason),
+            crate::core::probation::Admission::Stretch { .. } => {}
+            crate::core::probation::Admission::Allowed => {}
+        }
     }
     None
+}
+
+/// Мягкий предел потолка для конкретной задачи (пробация), если задача
+/// выдаётся «на разрыв» относительно потолка агента.
+pub fn stretch_limit(reg: &Registry, emp: &EmpiricalCeilings, agent: &str, c: u8) -> Option<u8> {
+    let canon = crate::core::identity::canonical(agent);
+    let ceiling = ceiling_of_with(reg, &canon, emp);
+    if c <= ceiling {
+        return None;
+    }
+    let explicit = explicit_ceiling_of(reg, &canon);
+    match crate::core::probation::admit(
+        c,
+        ceiling,
+        explicit,
+        crate::core::probation::EMPIRICAL_SLACK,
+    ) {
+        crate::core::probation::Admission::Stretch { limit } => Some(limit),
+        _ => None,
+    }
 }
 
 /// Построить план раздачи задач по приоритету.
@@ -614,6 +667,55 @@ mod tests {
         assert!(p.assignments.is_empty());
         assert_eq!(p.skipped.len(), 1);
         assert!(p.skipped[0].reason.contains("исключён"));
+    }
+
+    /// Мягкий потолок (probation): эмпирический потолок — не стена.
+    ///
+    /// Агент с объявленной моделью и потолком C1 получает задачу C2/C3
+    /// (пробация), но не C4; агент БЕЗ модели — по-прежнему fail-closed C1.
+    #[test]
+    fn empirical_ceiling_is_soft_but_unknown_model_is_not() {
+        let mut emp = EmpiricalCeilings::default();
+        emp.insert("worker1", 1);
+        let r = reg(
+            vec![
+                agent("minimax", ROLE_LEAD, Some("kilo"), None),
+                agent("worker1", "worker", Some("kilo"), None),
+            ],
+            vec![
+                task("T-001", "minimax", 2, &["src/a.rs"]),
+                task("T-002", "minimax", 3, &["src/b.rs"]),
+            ],
+        );
+        let p = plan_with(&r, Some("minimax"), &emp);
+        let assigned: Vec<(String, u8)> = p
+            .assignments
+            .iter()
+            .map(|a| (a.task_id.clone(), a.c_level))
+            .collect();
+        assert!(
+            assigned.contains(&("T-001".to_string(), 2)),
+            "C2 должен уйти на пробацию: {assigned:?}"
+        );
+        assert!(
+            assigned.contains(&("T-002".to_string(), 3)),
+            "C3 должен уйти на пробацию: {assigned:?}"
+        );
+
+        // Без объявленной модели — fail-closed C1 (жёстко).
+        let r2 = reg(
+            vec![
+                agent("minimax", ROLE_LEAD, Some("kilo"), None),
+                agent("worker2", "worker", None, None),
+            ],
+            vec![task("T-003", "minimax", 2, &["src/c.rs"])],
+        );
+        let p2 = plan_with(&r2, Some("minimax"), &emp);
+        assert!(
+            p2.assignments.is_empty(),
+            "без модели C2 нельзя: {:?}",
+            p2.assignments
+        );
     }
 
     #[test]

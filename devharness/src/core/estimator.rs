@@ -161,9 +161,23 @@ pub fn supply(reg: &Registry) -> SupplyReport {
             .collect();
         let active = mine.iter().filter(|t| t.status == Status::Active).count();
         let done = mine.iter().filter(|t| t.status == Status::Done).count();
+        // Мягкий потолок (probation): доступны и задачи «на пробацию»
+        // (уровнем выше потолка в пределах мягкого допуска).
+        let explicit = crate::core::task_router::explicit_ceiling_of(reg, &canon);
         let available = queued_tasks
             .iter()
-            .filter(|t| t.c_level.unwrap_or(t.complexity) <= *ceiling)
+            .filter(|t| {
+                let c = t.c_level.unwrap_or(t.complexity);
+                match crate::core::probation::admit(
+                    c,
+                    *ceiling,
+                    explicit,
+                    crate::core::probation::EMPIRICAL_SLACK,
+                ) {
+                    crate::core::probation::Admission::Blocked { .. } => false,
+                    _ => true,
+                }
+            })
             .count();
         let too_hard = queued_tasks.len() - available;
         let hpt = hours_per_task(&mine);

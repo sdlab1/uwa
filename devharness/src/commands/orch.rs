@@ -1363,10 +1363,36 @@ fn start(root: &Path, args: &[String]) -> anyhow::Result<()> {
     if let Some(c) = reg.tasks[idx].c_level {
         let ceiling = agent_ceiling_with(root, &reg, &caller);
         if c > ceiling {
-            return Err(anyhow!(
-                "devh orch start: {id} — сложность C{c} выше потолка модели агента \
-                 (C{ceiling}); задача скрыта в devh orch list, рейтинг: devh orch models"
-            ));
+            // Мягкий потолок (probation): эмпирический потолок — не стена.
+            // Явный потолок lead'а — жёсткий.
+            let explicit = crate::core::task_router::explicit_ceiling_of(&reg, &caller);
+            let declared = crate::core::task_router::model_declared(&reg, &caller);
+            let soft = explicit.is_some() || declared;
+            match crate::core::probation::admit(
+                c,
+                ceiling,
+                explicit,
+                crate::core::probation::EMPIRICAL_SLACK,
+            ) {
+                crate::core::probation::Admission::Blocked { reason } => {
+                    return Err(anyhow!(
+                        "devh orch start: {id} — {reason}; рейтинг: devh orch models"
+                    ));
+                }
+                crate::core::probation::Admission::Stretch { limit } if !soft => {
+                    return Err(anyhow!(
+                        "devh orch start: {id} — C{c} выше потолка C{ceiling}, модель не \
+                         объявлена (fail-closed); сначала devh orch identify"
+                    ));
+                }
+                crate::core::probation::Admission::Stretch { limit } => {
+                    println!(
+                        "devh orch: ⚠ пробация (stretch): {id} — C{c} при потолке C{ceiling} \
+                         (мягкий предел C{limit}); задача выдаётся, результат посмотрим"
+                    );
+                }
+                crate::core::probation::Admission::Allowed => {}
+            }
         }
     }
     if status != Status::Queued {
@@ -2753,12 +2779,37 @@ fn list(root: &Path, args: &[String]) -> anyhow::Result<()> {
                 continue;
             }
         }
-        // Задачи сложнее потолка модели агента — скрыты (нельзя взять).
+        // Задачи сложнее потолка — скрыты, ЕСЛИ их нельзя взять даже на
+        // пробации (мягкий допуск). Stretch-задачи видны: агент должен иметь
+        // выбор, а не простаивать из-за «оценки на глаз».
+        let mut stretch_mark = String::new();
         if crate::core::identity::canonical(&t.agent) == caller && t.status == Status::Queued {
             if let Some(c) = t.c_level {
                 if c > ceiling {
-                    hidden = hidden.saturating_add(1);
-                    continue;
+                    let explicit =
+                        crate::core::task_router::explicit_ceiling_of(&reg, &caller);
+                    let declared =
+                        crate::core::task_router::model_declared(&reg, &caller);
+                    let soft = explicit.is_some() || declared;
+                    match crate::core::probation::admit(
+                        c,
+                        ceiling,
+                        explicit,
+                        crate::core::probation::EMPIRICAL_SLACK,
+                    ) {
+                        crate::core::probation::Admission::Blocked { .. } => {
+                            hidden = hidden.saturating_add(1);
+                            continue;
+                        }
+                        crate::core::probation::Admission::Stretch { .. } if !soft => {
+                            hidden = hidden.saturating_add(1);
+                            continue;
+                        }
+                        crate::core::probation::Admission::Stretch { limit } => {
+                            stretch_mark = format!(" [пробация: C{c} > C{ceiling}, предел C{limit}]");
+                        }
+                        crate::core::probation::Admission::Allowed => {}
+                    }
                 }
             }
         }
@@ -2781,7 +2832,7 @@ fn list(root: &Path, args: &[String]) -> anyhow::Result<()> {
                 .map(|f| format!("F{f}"))
                 .unwrap_or_else(|| "-".to_string()),
             t.zones.join(","),
-            t.title
+            format!("{}{stretch_mark}", t.title)
         );
         let _ = ok;
     }

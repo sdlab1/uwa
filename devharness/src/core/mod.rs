@@ -58,6 +58,7 @@ pub mod observations;
 pub mod plan;
 pub mod presence;
 pub mod presence_alert;
+pub mod probation;
 pub mod queue_policy;
 pub mod rate;
 pub mod red_expect;
