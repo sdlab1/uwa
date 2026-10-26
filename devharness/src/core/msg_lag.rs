@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Порог просрочки в минутах.
-const LAG_THRESHOLD_MINUTES: u64 = 30;
+pub const LAG_THRESHOLD_MINUTES: u64 = 30;
 
 /// Хранилище сообщений (общее для всех агентов машины).
 pub fn msg_home() -> PathBuf {
@@ -24,7 +24,7 @@ fn inbox_dir() -> PathBuf {
 }
 
 /// Безопасное имя файла агента.
-fn safe_name(agent: &str) -> String {
+pub fn safe_name(agent: &str) -> String {
     agent
         .chars()
         .map(|c| match c {
@@ -143,7 +143,7 @@ pub fn stale_messages_in(home: &Path, agent: &str, threshold_min: u64) -> Vec<St
     results
 }
 
-fn inbox_dir_for(home: &Path, agent: &str) -> PathBuf {
+pub fn inbox_dir_for(home: &Path, agent: &str) -> PathBuf {
     home.join("inbox").join(format!("{}.log", safe_name(agent)))
 }
 
@@ -252,7 +252,7 @@ mod tests {
     }
 
     #[test]
-    fn safe_name_replaces_invalid_chars() {
+    pub fn safe_name_replaces_invalid_chars() {
         assert_eq!(safe_name("beam.agent"), "beam.agent");
         assert_eq!(safe_name("a b/c"), "a-b-c");
     }
