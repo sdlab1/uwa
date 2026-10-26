@@ -4929,7 +4929,12 @@ pub fn verify_cmd(root: &Path, args: &[String]) -> anyhow::Result<()> {
             Some(duration_total),
             &task_zones,
         );
-        let diff = quality_diff_text(&tree);
+        let task_commit_sha = reg
+            .tasks
+            .get(idx)
+            .and_then(|t| t.commit_sha.clone())
+            .filter(|s| !s.trim().is_empty());
+        let diff = quality_diff_text(&tree, task_commit_sha.as_deref());
         let (added, comments, code_lines) = crate::core::quality::diff_metrics(&diff);
         let actions = crate::core::quality::deliberation_actions(&agent_log_text(&reg, &agent));
         let identified = reg
@@ -4969,19 +4974,44 @@ pub fn verify_cmd(root: &Path, args: &[String]) -> anyhow::Result<()> {
 }
 
 /// Текст диффа дерева задачи — для метрик качества кода (комментарии/код).
-fn quality_diff_text(tree: &Path) -> String {
-    let variants: [&[&str]; 2] = [&["diff", "--unified=0", "HEAD"], &["show", "--format=", "--unified=0", "HEAD"]];
-    for args in variants.iter() {
-        let o = std::process::Command::new("git")
-            .args(*args)
-            .current_dir(tree)
-            .output();
-        if let Ok(outp) = o {
-            let text = String::from_utf8_lossy(&outp.stdout).to_string();
-            if !text.trim().is_empty() {
-                return text;
+fn quality_diff_text(tree: &Path, commit_sha: Option<&str>) -> String {
+    // 1) Незакоммиченные изменения задачи — канонический случай (verify идёт
+    //    ДО коммита): метрики кода описывают работу по задаче.
+    let o = std::process::Command::new("git")
+        .args(["diff", "--unified=0", "HEAD"])
+        .current_dir(tree)
+        .output();
+    if let Ok(outp) = o {
+        let text = String::from_utf8_lossy(&outp.stdout).to_string();
+        if !text.trim().is_empty() {
+            return text;
+        }
+    }
+    // 2) Дерево чистое (повторный verify после коммита) — берём дифф
+    //    КОММИТА ЗАДАЧИ, а не последнего чужого коммита: иначе метрики
+    //    качества кода врали бы (T-450: added_lines=1 вместо 63).
+    if let Some(sha) = commit_sha {
+        let sha = sha.trim();
+        if !sha.is_empty() {
+            let o = std::process::Command::new("git")
+                .args(["show", "--format=", "--unified=0", sha])
+                .current_dir(tree)
+                .output();
+            if let Ok(outp) = o {
+                let text = String::from_utf8_lossy(&outp.stdout).to_string();
+                if !text.trim().is_empty() {
+                    return text;
+                }
             }
         }
+    }
+    // 3) Последний коммит — крайний случай.
+    let o = std::process::Command::new("git")
+        .args(["show", "--format=", "--unified=0", "HEAD"])
+        .current_dir(tree)
+        .output();
+    if let Ok(outp) = o {
+        return String::from_utf8_lossy(&outp.stdout).to_string();
     }
     String::new()
 }
@@ -6340,6 +6370,65 @@ mod tests {
         .expect("add");
         let reg = load(root);
         reg.tasks.last().map(|t| t.id.clone()).unwrap_or_default()
+    }
+
+    /// Временный git-репозиторий: два коммита (a.txt, потом b.txt).
+    /// Возвращает SHA первого коммита.
+    fn git_two_commits(dir: &Path) -> anyhow::Result<String> {
+        let git = |args: &[&str]| -> anyhow::Result<String> {
+            let o = std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .output()?;
+            if !o.status.success() {
+                anyhow::bail!(
+                    "git {:?}: {}",
+                    args,
+                    String::from_utf8_lossy(&o.stderr)
+                );
+            }
+            Ok(String::from_utf8_lossy(&o.stdout).to_string())
+        };
+        git(&["init", "-q"])?;
+        git(&["config", "user.email", "t@t"])?;
+        git(&["config", "user.name", "t"])?;
+        std::fs::write(dir.join("a.txt"), "alpha\n")?;
+        git(&["add", "a.txt"])?;
+        git(&["commit", "-q", "-m", "first"])?;
+        let sha = git(&["rev-parse", "HEAD"])?.trim().to_string();
+        std::fs::write(dir.join("b.txt"), "beta\n")?;
+        git(&["add", "b.txt"])?;
+        git(&["commit", "-q", "-m", "second"])?;
+        Ok(sha)
+    }
+
+    /// Метрики кода задачи описывают ЕЁ коммит, а не последний чужой.
+    #[test]
+    fn quality_diff_uses_task_commit_when_tree_is_clean() {
+        let tmp = tempdir().expect("tmp");
+        let dir = tmp.path();
+        let task_sha = git_two_commits(dir).expect("fixture");
+        let diff = quality_diff_text(dir, Some(&task_sha));
+        assert!(diff.contains("alpha"), "дифф задачи: {diff}");
+        assert!(
+            !diff.contains("beta"),
+            "дифф задаи не должен содержать чужой коммит: {diff}"
+        );
+        let fallback = quality_diff_text(dir, None);
+        assert!(fallback.contains("beta"), "fallback на HEAD: {fallback}");
+    }
+
+    /// Незакоммиченные изменения приоритетнее коммита задачи.
+    #[test]
+    fn quality_diff_prefers_uncommitted_changes() {
+        let tmp = tempdir().expect("tmp");
+        let dir = tmp.path();
+        let task_sha = git_two_commits(dir).expect("fixture");
+        // Правка ОТСЛЕЖИВАЕМОГО файла: незакоммиченные изменения видны в diff.
+        std::fs::write(dir.join("a.txt"), "alpha changed\n").expect("write");
+        let diff = quality_diff_text(dir, Some(&task_sha));
+        assert!(diff.contains("changed"), "незакоммиченный дифф: {diff}");
+        assert!(!diff.contains("beta"), "не должен браться HEAD: {diff}");
     }
 
     /// Ответ на принудительный вопрос идентификации (one-shot на выдачу).
