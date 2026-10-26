@@ -17,6 +17,7 @@
 //! | `devh mutate problems` | руководство к действию: что чинить | выжил мутант |
 //! | `devh mutate verdict` | финальный вердикт, код возврата 0/1/2 | гейт перед мержем |
 //! | `devh mutate stop` | остановить идущий аудит | «аудит не нужен / завис» |
+//! | `devh mutate history` | что уже проверено (файлы, мутанты, sha) | «не проверять заново» |
 //!
 //! ## Почему аудит живёт отдельным процессом
 //!
@@ -59,6 +60,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::early;
 use crate::core::gates::{self, MutationStats};
+use crate::core::mut_history;
 use crate::core::mutaudit::{self, Audit};
 use crate::core::rate::{self, RateKind};
 use crate::core::tui;
@@ -96,6 +98,7 @@ pub fn mutate(root: &Path, sub: &str, args: &[String]) -> anyhow::Result<()> {
         "watch" => watch(root, args),
         "problems" => problems(root, args),
         "recheck" => recheck(root, args),
+        "history" => history(root),
         "verdict" => verdict(root),
         "stop" => stop(root),
         // Внутренняя подкоманда: её запускает `start` (супервизор).
@@ -142,6 +145,11 @@ pub const CANON: &str = r#"devh mutate — единственный вход в 
                               повреждённые детали/упавший инструмент),
                               2 = прогон ещё идёт / аудита нет.
   devh mutate stop            остановить идущий аудит (группа cargo-mutants).
+  devh mutate history         что УЖЕ проверено: пойманных мутантов всего,
+                              файлов в ledger покрытия, по каждому файлу —
+                              сколько мутантов/поймано/аудит когда. Проверенное
+                              заново не гоняется: харнесс сам добавляет cargo-mutants
+                              --iterate и подкладывает историю в output-каталог.
   devh mutate help            эта справка.
 
 Когда что:
@@ -477,6 +485,13 @@ fn start(root: &Path, args: &[String]) -> anyhow::Result<()> {
         );
         crate::commands::die(crate::commands::ExitCode::ActionError);
     }
+    // T-571: история аудитов — не проверять заново.
+    // Накопленные пойманные мутанты лежат в `.harness/mutate/caught_history.txt`;
+    // cargo-mutants с `--iterate` их пропускает, а харнесс сам кладёт историю
+    // в output-каталог ДО старта процесса (см. supervise).
+    let history = mut_history::load_caught(root);
+    let coverage = mut_history::load_coverage(root);
+    let (args, iterate_added) = with_iterate(args, !history.is_empty());
     // Тяжёлый вход: СВЕЖАЯ проверка нагрузки (не устаревший снимок).
     // Под контенцией мутации стоят ×2–4 (§9.10) — лучше не начинать вовсе.
     // Неизвестная нагрузка (нет /proc/loadavg) гейт НЕ блокирует.
@@ -557,6 +572,44 @@ fn start(root: &Path, args: &[String]) -> anyhow::Result<()> {
     println!("аудит запущен (супервизор pid {})", child.id());
     println!("  cargo-mutants: {}", args.join(" "));
     println!("  режим:         copy (дерево агента не мутируется)");
+    println!(
+        "  история:       {} ранее пойманных мутантов, {} файлов в ledger покрытия{}",
+        history.len(),
+        coverage.files.len(),
+        if iterate_added {
+            " — включён --iterate (проверенное заново не гоним)"
+        } else {
+            ""
+        }
+    );
+    // Что именно уже проверено: оператор видит, что перепроверка не нужна.
+    let requested: Vec<String> = args
+        .iter()
+        .filter(|a| a.ends_with(".rs") && Path::new(a).exists())
+        .cloned()
+        .collect();
+    if !requested.is_empty() {
+        let scope = mut_history::split_scope(root, &requested);
+        if !scope.covered.is_empty() {
+            println!(
+                "  уже проверено: {} файл(ов) не менялись — перепроверка не нужна: {}",
+                scope.covered.len(),
+                scope.covered.join(", ")
+            );
+        }
+        if !scope.changed.is_empty() {
+            println!(
+                "  менялись после аудита: {} — нужна проверка дельты",
+                scope.changed.join(", ")
+            );
+        }
+        if !scope.fresh.is_empty() {
+            println!(
+                "  никогда не проверялись: {} файл(ов)",
+                scope.fresh.len()
+            );
+        }
+    }
     println!("  лог прогона:   {}", dir.join(CARGO_LOG).display());
     println!("  живой кадр:   {}", dir.join(LIVE_FILE).display());
     println!();
@@ -625,10 +678,17 @@ fn supervise(root: &Path, args: &[String]) -> anyhow::Result<()> {
             return Err(e);
         }
     };
-    // Старый прогон — вон ПОД локом: параллельный `devh mutate start` того
-    // же output уже получил rc=2, а читатели (status/problems) не должны
-    // видеть полуразобранный каталог.
+    // T-571: история переживает очистку каталога. Пойманные мутанты
+    // прошлого прогона сохраняем в `.harness/mutate/caught_history.txt` и
+    // подкладываем в output-каталог: cargo-mutants с `--iterate` читает
+    // `caught.txt` ДО поворота каталога и пропускает уже проверенных.
+    let prev_caught = mut_history::read_run_caught(&adir);
+    let history_total = mut_history::merge_caught(root, &prev_caught);
     let _ = fs::remove_dir_all(&adir);
+    let _ = fs::remove_dir_all(adir.with_extension("out.old"));
+    if history_total > 0 {
+        let _ = mut_history::seed_output(&adir, &mut_history::load_caught(root));
+    }
     let started = now_secs();
     // F-1.8.1: аудит копирует дерево СЕЙЧАС. Отпечаток фиксируем до запуска
     // cargo-mutants: если дерево потом изменится, результат — снимок ДО правок.
@@ -761,6 +821,19 @@ fn supervise(root: &Path, args: &[String]) -> anyhow::Result<()> {
     }
     let exit = watcher.exit_code();
 
+    // T-571: итог прогона — в историю (пойманные) и в покрытие (по файлам).
+    // Следующий прогон сможет пропустить их (--iterate) и не полезет
+    // проверять то, что уже проверено.
+    {
+        let new_caught = mut_history::read_run_caught(&adir);
+        let total = mut_history::merge_caught(root, &new_caught);
+        let cov = mut_history::update_coverage(root, &adir, now_secs());
+        eprintln!(
+            ".. история аудитов: пойманных всего {total}, файлов в ledger покрытия {}",
+            cov.files.len()
+        );
+    }
+
     // Финальный кадр + полный отчёт — в live.log (чтобы «история» прогона
     // осталась в одном месте) и в verdict.json (машиночитаемо).
     write_frame(root, &args, &dir, true)?;
@@ -818,6 +891,18 @@ fn supervise(root: &Path, args: &[String]) -> anyhow::Result<()> {
         },
     )?;
     Ok(())
+}
+
+/// Добавить `--iterate`, если история пойманных мутантов непуста.
+///
+/// Чистая функция (чтобы поведение проверялось тестом без запуска
+/// cargo-mutants): уже пойманные мутанты повторно не проверяются.
+pub fn with_iterate(mut args: Vec<String>, history_nonempty: bool) -> (Vec<String>, bool) {
+    if history_nonempty && !args.iter().any(|a| a == "--iterate") {
+        args.push("--iterate".to_string());
+        return (args, true);
+    }
+    (args, false)
 }
 
 // ────────────────────────────── снимок и рендер ──────────────────────────────
@@ -1460,6 +1545,30 @@ fn problems(root: &Path, args: &[String]) -> anyhow::Result<()> {
         println!("  {l}");
     }
     crate::commands::die(crate::commands::ExitCode::ActionError);
+}
+
+/// Что уже проверено: история аудитов (чтобы не проверять заново).
+fn history(root: &Path) -> anyhow::Result<()> {
+    let caught = mut_history::load_caught(root);
+    let cov = mut_history::load_coverage(root);
+    println!("история мутационных аудитов");
+    println!("  пойманных мутантов всего: {}", caught.len());
+    println!("  файлов в ledger покрытия: {}", cov.files.len());
+    if cov.files.is_empty() {
+        println!("  (ledger пуст — это первый аудит в этой зоне)");
+    } else {
+        for (file, e) in &cov.files {
+            let hole = if e.clean() { "" } else { " ⚠ дыры" };
+            println!(
+                "  {} — мутантов {}, поймано {}{} (аудит {})",
+                file, e.mutants, e.caught, hole, e.at
+            );
+        }
+    }
+    println!();
+    println!("  уже пойманные мутанты не проверяются заново: cargo-mutants --iterate");
+    println!("  (харнесс добавляет флаг сам, если в истории есть пойманные; вручную — --iterate)");
+    Ok(())
 }
 
 // ──────────────────────────────── recheck ────────────────────────────────
@@ -2279,6 +2388,26 @@ mod tests {
         let args = vec!["src/main.rs".to_string()];
         let res = mutate_start_gate("lead", Some("lead"), &args, None, 1_000_000, 50);
         assert!(res.is_ok());
+    }
+
+    /// История пойманных → `--iterate`: проверять заново нельзя.
+    #[test]
+    fn iterate_added_when_history_nonempty() {
+        let (args, added) = with_iterate(vec!["-f".to_string(), "a.rs".to_string()], true);
+        assert!(added);
+        assert!(args.iter().any(|a| a == "--iterate"), "{args:?}");
+        // Повторно не добавляем.
+        let (args2, added2) = with_iterate(args, true);
+        assert!(!added2);
+        assert_eq!(
+            args2.iter().filter(|a| *a == "--iterate").count(),
+            1,
+            "флаг не дублируется"
+        );
+        // Пустая история — флаг не нужен.
+        let (args3, added3) = with_iterate(vec!["-f".to_string()], false);
+        assert!(!added3);
+        assert!(!args3.iter().any(|a| a == "--iterate"));
     }
 
     #[test]
