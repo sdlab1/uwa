@@ -610,6 +610,184 @@ fn cmd_redistribute(root: &Path, apply: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Сводка спасённой работы (T-562): что нашли, что под риском, что спасли
+/// и сколько задач из этого получилось. Lead видит это одним экраном (и
+/// одним письмом), а не копается в ветках руками.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReclaimSummary {
+    /// Кандидаты (покинутые worktree/ветки), найденные сканером.
+    pub candidates: usize,
+    /// Из них грязные — незакоммиченная работа под риском потери.
+    pub dirty: usize,
+    /// Rescue-ветки `devh/reclaim-*` (спасено харнессом).
+    pub rescue_branches: Vec<String>,
+    /// Ветки `devh/rescue-*` (спасено вручную lead'ом — другой префикс!).
+    pub manual_rescue: Vec<String>,
+    /// Задачи, созданные из спасённой работы (note: `reclaim:<ветка>@<sha>`).
+    pub created_tasks: Vec<String>,
+}
+
+impl ReclaimSummary {
+    /// Сколько веток спасено (харнессом + вручную).
+    pub fn saved_branches(&self) -> usize {
+        self.rescue_branches.len() + self.manual_rescue.len()
+    }
+
+    /// Текст сводки в стиле доски: цветные счётчики (как `devh orch board`).
+    pub fn render_colored(&self) -> String {
+        let c = crate::shell::color::colors();
+        let dirty_color = if self.dirty > 0 { c.r } else { c.g };
+        let mut out = String::new();
+        out.push_str(&format!(
+            "{}{}RECLAIM report{}: кандидатов {}{}{}{}\n",
+            c.b, c.c, c.z, c.b, self.candidates, c.z, c.z
+        ));
+        out.push_str(&format!(
+            "  грязных (работа под риском): {}{}{}{}\n",
+            dirty_color, self.dirty, c.z, c.z
+        ));
+        out.push_str(&format!(
+            "  спасено веток: {}{}{}{} (reclaim-*: {}, rescue-*: {})\n",
+            c.g,
+            self.saved_branches(),
+            c.z,
+            c.z,
+            self.rescue_branches.len(),
+            self.manual_rescue.len()
+        ));
+        out.push_str(&format!(
+            "  задач из спасённой работы: {}{}{}{}\n",
+            c.b,
+            self.created_tasks.len(),
+            c.z,
+            c.z
+        ));
+        for b in self.rescue_branches.iter().chain(self.manual_rescue.iter()) {
+            out.push_str(&format!("    {}- {}{}{}\n", c.g, b, c.z, c.z));
+        }
+        for t in &self.created_tasks {
+            out.push_str(&format!("    {}- {}{}{}\n", c.c, t, c.z, c.z));
+        }
+        out
+    }
+
+    /// Текст сводки: экран и письмо — один и тот же текст.
+    pub fn render(&self) -> String {
+        let mut out = String::new();
+        out.push_str(&format!("кандидатов: {}\n", self.candidates));
+        out.push_str(&format!(
+            "грязных (работа под риском): {}\n",
+            self.dirty
+        ));
+        out.push_str(&format!(
+            "спасено веток: {} (reclaim-*: {}, rescue-*: {})\n",
+            self.saved_branches(),
+            self.rescue_branches.len(),
+            self.manual_rescue.len()
+        ));
+        out.push_str(&format!(
+            "задач из спасённой работы: {}\n",
+            self.created_tasks.len()
+        ));
+        for b in self.rescue_branches.iter().chain(self.manual_rescue.iter()) {
+            out.push_str(&format!("  - {b}\n"));
+        }
+        for t in &self.created_tasks {
+            out.push_str(&format!("  * {t}\n"));
+        }
+        out
+    }
+}
+
+/// Ветки с указанным префиксом (`git for-each-ref`).
+fn branches_with_prefix(root: &Path, prefix: &str) -> Vec<String> {
+    let Ok(out) = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args([
+            "for-each-ref",
+            "--format=%(refname:short)",
+            &format!("refs/heads/{prefix}*"),
+        ])
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !out.status.success() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Собрать сводку по текущему состоянию репозитория.
+fn collect_summary(root: &Path, reg: &orch::Registry) -> ReclaimSummary {
+    let cands = crate::commands::wtman::discover(root);
+    let dirty = cands
+        .iter()
+        .filter(|c| {
+            c.path
+                .as_ref()
+                .map(|p| crate::shell::git::tree_dirty(p))
+                .unwrap_or(false)
+        })
+        .count();
+    let created_tasks: Vec<String> = reg
+        .tasks
+        .iter()
+        .filter(|t| t.note.contains("reclaim:"))
+        .map(|t| format!("{} ({})", t.id, t.title))
+        .collect();
+    ReclaimSummary {
+        candidates: cands.len(),
+        dirty,
+        rescue_branches: branches_with_prefix(root, "devh/reclaim-"),
+        manual_rescue: branches_with_prefix(root, "devh/rescue-"),
+        created_tasks,
+    }
+}
+
+/// `report` — сводка lead'у о спасённой работе (письмом при `--send`).
+fn cmd_report(root: &Path, send: bool, dry_run: bool) -> anyhow::Result<()> {
+    let reg = orch::load(root);
+    let summary = collect_summary(root, &reg);
+    print!("{}", summary.render_colored());
+    if !send {
+        println!("(письмо не отправлено — добавь --send)");
+        return Ok(());
+    }
+    let (lead, _src) = orch::lead_of(&reg);
+    let Some(to) = lead else {
+        anyhow::bail!("devh orch reclaim report: ведущий не назначен — письмо не отправлено");
+    };
+    if dry_run {
+        println!("dry-run: письмо не отправлено (получатель {to})");
+        return Ok(());
+    }
+    let body = format!(
+        "RECLAIM: сводка спасённой работы\n\n{}",
+        summary.render()
+    );
+    let rc = crate::shell::msg::run(&[
+        "send".to_string(),
+        "--to".to_string(),
+        to.clone(),
+        "--subject".to_string(),
+        "RECLAIM: сводка спасённой работы".to_string(),
+        "--body".to_string(),
+        body,
+    ]);
+    if rc != 0 {
+        anyhow::bail!("devh orch reclaim report: письмо не отправлено (rc={rc})");
+    }
+    println!("письмо отправлено: {to}");
+    Ok(())
+}
+
 /// Точка входа: `devh orch reclaim <scan|salvage|close|redistribute|show>`.
 pub fn run(root: &Path, args: &[String]) -> anyhow::Result<()> {
     let reg = orch::load(root);
@@ -650,9 +828,14 @@ pub fn run(root: &Path, args: &[String]) -> anyhow::Result<()> {
             )
         }
         "redistribute" => cmd_redistribute(root, rest.iter().any(|a| a == "--apply")),
+        "report" => cmd_report(
+            root,
+            rest.iter().any(|a| a == "--send"),
+            rest.iter().any(|a| a == "--dry-run"),
+        ),
         other => Err(anyhow::anyhow!(
             "devh orch reclaim: неизвестная подкоманда '{other}' \
-             (scan|salvage|close|redistribute|show)"
+             (scan|salvage|close|redistribute|report|show)"
         )),
     }
 }
@@ -863,6 +1046,95 @@ mod tests {
             main_sha: None,
             override_reason: None,
         }
+    }
+
+    #[test]
+    fn summary_render_counts_saved_and_created() {
+        let s = ReclaimSummary {
+            candidates: 5,
+            dirty: 2,
+            rescue_branches: vec!["devh/reclaim-beam".to_string()],
+            manual_rescue: vec!["devh/rescue-testname-20261026-2112".to_string()],
+            created_tasks: vec!["T-900 (спасённая работа)".to_string()],
+        };
+        assert_eq!(s.saved_branches(), 2);
+        let text = s.render();
+        assert!(text.contains("кандидатов: 5"));
+        assert!(text.contains("грязных (работа под риском): 2"));
+        assert!(text.contains("спасено веток: 2"));
+        assert!(text.contains("задач из спасённой работы: 1"));
+        assert!(text.contains("devh/rescue-testname-20261026-2112"));
+    }
+
+    #[test]
+    fn summary_colored_render_has_counters() {
+        let s = ReclaimSummary {
+            candidates: 3,
+            dirty: 1,
+            rescue_branches: vec!["devh/reclaim-beam".to_string()],
+            manual_rescue: vec![],
+            created_tasks: vec!["T-900 (спасённая работа)".to_string()],
+        };
+        let text = s.render_colored();
+        assert!(text.contains("RECLAIM report"));
+        assert!(text.contains("кандидатов 3"));
+        assert!(text.contains("грязных (работа под риском): 1"));
+        assert!(text.contains("спасено веток: 1"));
+    }
+
+    #[test]
+    fn branches_with_prefix_finds_only_matching() {
+        let d = tempfile::tempdir().unwrap();
+        let root = init_repo_committed(d.path());
+        for name in ["devh/reclaim-beam", "devh/rescue-kilo-2026", "devh/agent-x"] {
+            let _ = Command::new("git")
+                .args(["branch", name])
+                .current_dir(&root)
+                .output();
+        }
+        let reclaim = branches_with_prefix(&root, "devh/reclaim-");
+        assert_eq!(reclaim, vec!["devh/reclaim-beam".to_string()]);
+        let manual = branches_with_prefix(&root, "devh/rescue-");
+        assert_eq!(manual, vec!["devh/rescue-kilo-2026".to_string()]);
+    }
+
+    #[test]
+    fn collect_summary_sees_created_reclaim_tasks() {
+        let d = tempfile::tempdir().unwrap();
+        let root = init_repo(d.path());
+        std::fs::create_dir_all(root.join(".harness/orch")).unwrap();
+        let reg = orch::Registry {
+            tasks: vec![Task {
+                id: "T-901".to_string(),
+                agent: "minimax".to_string(),
+                title: "спасённая работа".to_string(),
+                complexity: 2,
+                c_level: Some(2),
+                model: None,
+                model_source: None,
+                started_by: None,
+                started_at: None,
+                started_key: None,
+                status: Status::Queued,
+                zones: vec!["devharness/src/core/x.rs".to_string()],
+                fail_level: None,
+                note: "reclaim:devh/reclaim-beam@abc1234\n+10 -2".to_string(),
+                created: 0,
+                updated: 0,
+                dod: Vec::new(),
+                checks: Vec::new(),
+                acked: Vec::new(),
+                evidence: Vec::new(),
+                commit_sha: None,
+                main_sha: None,
+                override_reason: None,
+            }],
+            ..Default::default()
+        };
+        orch::save(&root, &reg).unwrap();
+        let summary = collect_summary(&root, &reg);
+        assert_eq!(summary.created_tasks.len(), 1);
+        assert!(summary.created_tasks[0].starts_with("T-901"));
     }
 
     #[test]
