@@ -31,6 +31,7 @@ pub mod fail_reason;
 pub mod gates;
 pub mod guards;
 pub mod handoff;
+pub mod i18n;
 pub mod identity;
 pub mod identity_ledger;
 pub mod idle_guard;
