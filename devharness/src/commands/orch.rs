@@ -388,6 +388,40 @@ pub fn lead_of(reg: &Registry) -> (Option<String>, &'static str) {
     (None, "не назначен")
 }
 
+/// Может ли вызывающий действовать с задачей: её исполнитель или lead.
+fn may_act_on_task(caller: &str, task_agent: &str, lead: Option<&str>) -> bool {
+    let c = crate::core::identity::canonical(caller);
+    c == crate::core::identity::canonical(task_agent)
+        || lead
+            .map(crate::core::identity::canonical)
+            .as_deref()
+            == Some(c.as_str())
+}
+
+fn current_canon() -> String {
+    crate::core::identity::canonical(&crate::core::identity::current().name)
+}
+
+fn caller_is_lead(reg: &Registry) -> bool {
+    let (lead, _) = lead_of(reg);
+    lead.as_deref() == Some(current_canon().as_str())
+}
+
+/// T-485: DoD/verify/commit/done — только владелец задачи или lead.
+fn require_task_owner(reg: &Registry, task: &Task, action: &str) -> anyhow::Result<()> {
+    let caller = current_canon();
+    let (lead, _) = lead_of(reg);
+    if may_act_on_task(&caller, &task.agent, lead.as_deref()) {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "devh orch {action}: задача {} принадлежит «{}», а ты «{caller}» — \
+         чужие задачи не трогаем (T-485)",
+        task.id,
+        task.agent
+    )
+}
+
 /// Назначить ведущего; прежний lead становится worker.
 fn assign_lead(reg: &mut Registry, addr: &str) -> anyhow::Result<String> {
     let raw = addr.trim();
@@ -1577,6 +1611,17 @@ fn close(root: &Path, args: &[String], status: Status) -> anyhow::Result<()> {
     let reason = flag(args, "--reason").unwrap_or_default();
     let override_reason = flag(args, "--override");
     let mut reg = load(root);
+    {
+        let idx = find_task_index(&reg, &id)
+            .ok_or_else(|| anyhow!("devh orch: задача {id} не найдена"))?;
+        let cur = reg.tasks.get(idx).expect("индекс найден");
+        require_task_owner(&reg, cur, if status == Status::Done { "done" } else { "fail" })?;
+        if status == Status::Done && cur.status == Status::Queued {
+            return Err(anyhow!(
+                "devh orch done: {id} ещё не взята (queued) — сначала devh orch start {id} (T-485)"
+            ));
+        }
+    }
     // ИДЕМПОТЕНТНОСТЬ сдачи: повторный `done` по уже сданной задаче — no-op
     // (без нового события ledger, без auto_trigger, без повторного слияния).
     // Без этого «возврат в очередь → повторная сдача» давал 3 события done,
@@ -3574,6 +3619,15 @@ fn wt(root: &Path, args: &[String]) -> anyhow::Result<()> {
         }
         "assign" => {
             let agent = agent.ok_or_else(|| anyhow!("devh orch wt assign: нужен агент"))?;
+            let reg = load(root);
+            let caller = crate::core::identity::canonical(&crate::core::identity::current().name);
+            if !caller_is_lead(&reg)
+                && crate::core::identity::canonical(&agent) != caller
+            {
+                anyhow::bail!(
+                    "devh orch wt assign: чужой worktree назначает только lead (T-485)"
+                );
+            }
             let (p, created) = crate::commands::wtman::ensure(&cfg, root, &agent)?;
             let mut reg = load(root);
             if agent_index(&reg, &agent).is_none() {
@@ -4544,10 +4598,18 @@ pub fn dod_cmd(root: &Path, args: &[String]) -> anyhow::Result<()> {
     let mut reg = load(root);
     let idx = find_task_index(&reg, &id)
         .ok_or_else(|| anyhow!("devh orch dod: задача {id} не найдена"))?;
+    require_task_owner(&reg, reg.tasks.get(idx).expect("индекс найден"), "dod")?;
     let additions = flags_all(args, "--add");
     let acks = flags_all(args, "--ack");
     let checks = flags_all(args, "--check");
     let zones = flags_all(args, "--zone");
+    // T-488/T-485: DoD, проверки и зоны задачи назначает lead. Воркер,
+    // который сам дописывает себе зону/check, обходит и DoD, и изоляцию.
+    if !caller_is_lead(&reg) && !(additions.is_empty() && checks.is_empty() && zones.is_empty()) {
+        return Err(anyhow!(
+            "devh orch dod: менять DoD/--check/--zone может только lead (T-485)"
+        ));
+    }
     {
         let task = reg.tasks.get_mut(idx).expect("индекс найден");
         for criterion in additions {
@@ -4623,6 +4685,7 @@ pub fn verify_cmd(root: &Path, args: &[String]) -> anyhow::Result<()> {
     let mut reg = load(root);
     let idx = find_task_index(&reg, &id)
         .ok_or_else(|| anyhow!("devh orch verify: задача {id} не найдена"))?;
+    require_task_owner(&reg, reg.tasks.get(idx).expect("индекс найден"), "verify")?;
     let checks = reg.tasks.get(idx).expect("индекс найден").checks.clone();
     // Проверки идут в worktree ИСПОЛНИТЕЛЯ, а не в дерево вызова: агент,
     // запущенный из общего main, иначе проверял бы чужой код.
@@ -5070,6 +5133,7 @@ pub fn commit_cmd(root: &Path, args: &[String]) -> anyhow::Result<()> {
     let idx = find_task_index(&reg, &id)
         .ok_or_else(|| anyhow!("devh orch commit: задача {id} не найдена"))?;
     let task = reg.tasks.get(idx).expect("индекс найден");
+    require_task_owner(&reg, task, "commit")?;
     // Коммит — в worktree исполнителя задачи (его ветка), а не в дереве вызова.
     let tree = task_tree_strict(root, &reg, task)?;
     let state = dod_state(&tree, task);
@@ -6604,6 +6668,13 @@ mod tests {
     }
 
     #[test]
+    fn owner_or_lead_can_act_on_task() {
+        assert!(may_act_on_task("worker", "worker", Some("lead")));
+        assert!(may_act_on_task("lead", "worker", Some("lead")));
+        assert!(!may_act_on_task("attacker", "worker", Some("lead")));
+        assert!(!may_act_on_task("attacker", "worker", None));
+    }
+
     fn paths_within_zones_blocks_foreign_file() {
         let zones = vec!["devharness/src/shell".to_string()];
         assert!(paths_within_zones(
