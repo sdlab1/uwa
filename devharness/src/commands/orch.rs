@@ -5693,7 +5693,106 @@ pub fn commit_cmd(root: &Path, args: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Решение guard-commit по одному пересечению staged-путей с зоной активной задачи.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GuardAction {
+    /// Предупредить, но не блокировать коммит.
+    Warn,
+    /// Отказать в коммите.
+    Block,
+}
+
+/// Правило guard-commit (T-494).
+///
+/// Ложное срабатывание, которое закрывает эта задача: у активной задачи другого
+/// агента зона — целый каталог (`devharness/src/core` + `devharness/src/commands`),
+/// и ЛЮБОЙ коммит не-lead'а в этом каталоге отказывался («DoD не выполнен для
+/// активных задач (11)»). Пересечение широкой зоны — не двойная работа.
+///
+/// Правила:
+/// - `lead` и `tech_lead` не блокируются никогда: ведущий и технический лид
+///   коммитят инфраструктуру (техлид — ревью чужих коммитов);
+/// - своя активная задача — предупреждение: DoD-гейт держит `devh orch commit`
+///   (R16), хук не должен запрещать агенту фиксировать свой прогресс;
+/// - чужая зона — отказ только при РЕАЛЬНОЙ двойной работе: у владельца зоны
+///   есть незакоммиченные изменения в том же пути.
+fn guard_action(role: &str, own_task: bool, real_conflict: bool) -> GuardAction {
+    if role == ROLE_LEAD || role == ROLE_TECH_LEAD {
+        return GuardAction::Warn;
+    }
+    if own_task {
+        return GuardAction::Warn;
+    }
+    if real_conflict {
+        return GuardAction::Block;
+    }
+    GuardAction::Warn
+}
+
+/// Пути, которые git считает изменёнными (пустой список — ошибка или чисто).
+///
+/// Только чтение: `git diff`/`git ls-files` не пишут индекс (в отличие от
+/// `git status`, который refresh'ит индекс чужого worktree).
+fn git_paths(tree: &Path, args: &[&str]) -> Vec<String> {
+    let Ok(out) = Command::new("git").args(args).current_dir(tree).output() else {
+        return Vec::new();
+    };
+    if !out.status.success() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Незакоммиченная работа агента в указанных путях его worktree.
+///
+/// Это признак РЕАЛЬНОЙ двойной работы: агент сейчас правит тот же файл.
+/// Нет worktree/правки — пересечение зон остаётся предупреждением.
+fn agent_dirty_paths(reg: &Registry, owner: &str, paths: &[String]) -> Vec<String> {
+    let Some(wt) = reg
+        .agents
+        .iter()
+        .find(|a| crate::core::identity::canonical(&a.name) == owner)
+        .and_then(|a| a.worktree.clone())
+    else {
+        return Vec::new();
+    };
+    let wt = Path::new(&wt);
+    if !wt.is_dir() {
+        return Vec::new();
+    }
+    let mut dirty = Vec::new();
+    for path in paths {
+        let unstaged = git_paths(wt, &["diff", "--name-only", "--", path.as_str()]);
+        let staged = git_paths(
+            wt,
+            &["diff", "--cached", "--name-only", "--", path.as_str()],
+        );
+        let untracked = git_paths(
+            wt,
+            &[
+                "ls-files",
+                "--others",
+                "--exclude-standard",
+                "--",
+                path.as_str(),
+            ],
+        );
+        if !unstaged.is_empty() || !staged.is_empty() || !untracked.is_empty() {
+            dirty.push(path.clone());
+        }
+    }
+    dirty
+}
+
 /// Проверка DoD для активных задач, чьи зоны пересекаются со staged.
+///
+/// Само пересечение зон — предупреждение; отказ только при реальной двойной
+/// работе (владелец чужой зоны сейчас правит те же файлы).
 pub fn guard_commit_cmd(root: &Path) -> anyhow::Result<()> {
     let staged = git_output(root, &["diff", "--cached", "--name-only"])?;
     let staged: Vec<String> = staged
@@ -5706,47 +5805,57 @@ pub fn guard_commit_cmd(root: &Path) -> anyhow::Result<()> {
         return Ok(());
     }
     let reg = load(root);
-    // Ведущий может коммитить инфраструктуру: предупреждаем, но не блокируем.
     let (lead, _) = lead_of(&reg);
     let caller = crate::core::identity::canonical(&crate::core::identity::current().name);
-    if lead.as_deref() == Some(caller.as_str()) {
-        for task in reg.tasks.iter().filter(|t| t.status == Status::Active) {
-            if !task
-                .zones
-                .iter()
-                .any(|zone| staged.iter().any(|p| zones_overlap(p, zone)))
-            {
-                continue;
-            }
-            let state = dod_state(root, task);
-            if !state.complete {
-                eprintln!(
-                    "devh orch guard-commit: ⚠ ведущий ({caller}) коммитит зону активной задачи {} (DoD не выполнен: {})",
-                    task.id, state.missing
-                );
-            }
-        }
-        return Ok(());
-    }
-    let mut errors = Vec::new();
+    // Роль вызывающего: явное назначение ведущего в реестре — lead,
+    // иначе роль из карточки агента (worker / tech_lead).
+    let role = if lead.as_deref() == Some(caller.as_str()) {
+        ROLE_LEAD.to_string()
+    } else {
+        caller_role_of(&reg, &caller)
+    };
+    let mut warnings: Vec<String> = Vec::new();
+    let mut errors: Vec<String> = Vec::new();
     for task in reg.tasks.iter().filter(|t| t.status == Status::Active) {
-        if !task
-            .zones
+        let hit: Vec<String> = staged
             .iter()
-            .any(|zone| staged.iter().any(|path| zones_overlap(path, zone)))
-        {
+            .filter(|p| task.zones.iter().any(|zone| zones_overlap(p, zone)))
+            .cloned()
+            .collect();
+        if hit.is_empty() {
             continue;
         }
         let state = dod_state(root, task);
-        if !state.complete {
-            errors.push(format!("{}: {}", task.id, state.missing));
+        if state.complete {
+            continue;
         }
+        let owner = crate::core::identity::canonical(&task.agent);
+        let own_task = owner == caller;
+        let conflict = if own_task {
+            Vec::new()
+        } else {
+            agent_dirty_paths(&reg, &owner, &hit)
+        };
+        match guard_action(&role, own_task, !conflict.is_empty()) {
+            GuardAction::Block => errors.push(format!(
+                "{} (владелец {owner}, его незакоммиченная работа: {}): {}",
+                task.id,
+                conflict.join(", "),
+                state.missing
+            )),
+            GuardAction::Warn => {
+                warnings.push(format!("{} (владелец {owner}): {}", task.id, state.missing))
+            }
+        }
+    }
+    for w in &warnings {
+        eprintln!("devh orch guard-commit: ⚠ пересечение зоны активной задачи {w}");
     }
     if !errors.is_empty() {
         return Err(anyhow!(
-            "devh orch guard-commit: DoD не выполнен для активных задач ({}):\n  {}\n\
-             Подтверди критерии (devh orch dod <ID> --ack) и прогони проверки \
-             (devh orch verify <ID>).",
+            "devh orch guard-commit: двойная работа в чужой зоне ({}):\n  {}\n\
+             Владелец зоны сейчас правит эти же файлы — разведите зоны \
+             (devh orch reassign/revoke — только ведущий) или дождитесь его коммита.",
             errors.len(),
             errors.join("\n  ")
         ));
@@ -8376,5 +8485,240 @@ mod tests {
             Some(crate::core::agent_state::AgentRole::TechLead)
         );
         assert_eq!(ROLE_TECH_LEAD, "tech_lead");
+    }
+
+    // ---- T-494: guard-commit больше не блокирует по пересечению зон ----
+
+    /// Прогон git в каталоге: падает, если команда не удалась.
+    fn git_run(dir: &Path, args: &[&str]) {
+        let o = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("git запускается");
+        assert!(
+            o.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&o.stderr)
+        );
+    }
+
+    /// Git-репозиторий с одним закоммиченным файлом.
+    fn git_init_with_file(dir: &Path, rel: &str, body: &str) {
+        git_run(dir, &["init", "-q"]);
+        git_run(dir, &["config", "user.email", "t@t"]);
+        git_run(dir, &["config", "user.name", "t"]);
+        if let Some(parent) = Path::new(rel).parent() {
+            std::fs::create_dir_all(dir.join(parent)).expect("каталог");
+        }
+        std::fs::write(dir.join(rel), body).expect("файл");
+        git_run(dir, &["add", "."]);
+        git_run(dir, &["commit", "-q", "-m", "base"]);
+    }
+
+    /// Активная задача с невыполненным DoD (1 критерий, 0 подтверждений).
+    fn active_task(id: &str, agent: &str, zones: &[&str]) -> Task {
+        Task {
+            id: id.to_string(),
+            agent: agent.to_string(),
+            title: "задача".to_string(),
+            complexity: 1,
+            c_level: Some(1),
+            model: None,
+            model_source: None,
+            started_by: None,
+            started_at: None,
+            started_key: None,
+            status: Status::Active,
+            zones: zones.iter().map(|z| z.to_string()).collect(),
+            fail_level: None,
+            note: String::new(),
+            created: 1,
+            updated: 1,
+            dod: vec!["критерий приёмки".to_string()],
+            checks: vec![],
+            acked: vec![],
+            evidence: vec![],
+            commit_sha: None,
+            main_sha: None,
+            override_reason: None,
+        }
+    }
+
+    /// Реестр: вызывающий — worker, второй агент — владелец широкой зоны.
+    fn registry_with_foreign_task(other_wt: Option<&Path>) -> Registry {
+        let mut reg = Registry::default();
+        reg.agents.push(AgentState {
+            name: me(),
+            role: Some(ROLE_WORKER.to_string()),
+            ..Default::default()
+        });
+        reg.agents.push(AgentState {
+            name: "other".to_string(),
+            role: Some(ROLE_WORKER.to_string()),
+            worktree: other_wt.map(|p| p.to_string_lossy().to_string()),
+            ..Default::default()
+        });
+        reg.tasks
+            .push(active_task("T-1", "other", &["devharness/src/core"]));
+        reg
+    }
+
+    /// T-494 (репро): зона активной задачи другого агента — целый каталог.
+    /// Любой коммит в этом каталоге отказывался («DoD не выполнен для активных
+    /// задач»). Теперь это предупреждение, а не отказ.
+    #[test]
+    fn guard_commit_warns_instead_of_blocking_on_foreign_broad_zone() {
+        let tmp = tempdir().expect("tmp");
+        let root = tmp.path();
+        git_init_with_file(root, "devharness/src/core/mod.rs", "fn a() {}\n");
+        std::fs::write(
+            root.join("devharness/src/core/mod.rs"),
+            "fn a() { /* правка */ }\n",
+        )
+        .expect("правка");
+        git_run(root, &["add", "devharness/src/core/mod.rs"]);
+        save(root, &registry_with_foreign_task(None)).expect("save");
+        let out = guard_commit_cmd(root);
+        assert!(
+            out.is_ok(),
+            "пересечение широкой зоны не должно блокировать коммит: {:?}",
+            out.err()
+        );
+    }
+
+    /// T-494: реальная двойная работа (владелец зоны правит тот же файл) —
+    /// отказ в коммите, зона не отдана без спора.
+    #[test]
+    fn guard_commit_blocks_on_real_double_work() {
+        let tmp = tempdir().expect("tmp");
+        let root = tmp.path();
+        git_init_with_file(root, "devharness/src/core/mod.rs", "fn a() {}\n");
+        std::fs::write(
+            root.join("devharness/src/core/mod.rs"),
+            "fn a() { /* моя правка */ }\n",
+        )
+        .expect("правка");
+        git_run(root, &["add", "devharness/src/core/mod.rs"]);
+        // Worktree владельца зоны: там та же правка ещё не закоммичена.
+        let other_wt = tmp.path().join("other-wt");
+        std::fs::create_dir_all(&other_wt).expect("каталог");
+        git_init_with_file(&other_wt, "devharness/src/core/mod.rs", "fn a() {}\n");
+        std::fs::write(
+            other_wt.join("devharness/src/core/mod.rs"),
+            "fn a() { /* чужая правка */ }\n",
+        )
+        .expect("правка");
+        save(root, &registry_with_foreign_task(Some(&other_wt))).expect("save");
+        let err = guard_commit_cmd(root).expect_err("двойная работа должна блокировать коммит");
+        let text = err.to_string();
+        assert!(text.contains("двойная работа"), "текст ошибки: {text}");
+        assert!(text.contains("T-1"), "текст ошибки: {text}");
+    }
+
+    /// T-494: техлид не блокируется (как ведущий) — раньше был ложный отказ.
+    #[test]
+    fn guard_commit_tech_lead_is_exempt() {
+        let tmp = tempdir().expect("tmp");
+        let root = tmp.path();
+        git_init_with_file(root, "devharness/src/core/mod.rs", "fn a() {}\n");
+        std::fs::write(
+            root.join("devharness/src/core/mod.rs"),
+            "fn a() { /* правка */ }\n",
+        )
+        .expect("правка");
+        git_run(root, &["add", "devharness/src/core/mod.rs"]);
+        let other_wt = tmp.path().join("other-wt");
+        std::fs::create_dir_all(&other_wt).expect("каталог");
+        git_init_with_file(&other_wt, "devharness/src/core/mod.rs", "fn a() {}\n");
+        std::fs::write(
+            other_wt.join("devharness/src/core/mod.rs"),
+            "fn a() { /* чужая правка */ }\n",
+        )
+        .expect("правка");
+        let mut reg = registry_with_foreign_task(Some(&other_wt));
+        reg.agents[0].role = Some(ROLE_TECH_LEAD.to_string());
+        save(root, &reg).expect("save");
+        let out = guard_commit_cmd(root);
+        assert!(
+            out.is_ok(),
+            "tech_lead не должен блокироваться guard-commit: {:?}",
+            out.err()
+        );
+    }
+
+    /// T-494: собственная активная задача с невыполненным DoD — предупреждение.
+    /// DoD-гейт держит `devh orch commit` (R16), хук не запрещает прогресс.
+    #[test]
+    fn guard_commit_does_not_block_own_active_task() {
+        let tmp = tempdir().expect("tmp");
+        let root = tmp.path();
+        git_init_with_file(root, "devharness/src/core/mod.rs", "fn a() {}\n");
+        std::fs::write(
+            root.join("devharness/src/core/mod.rs"),
+            "fn a() { /* правка */ }\n",
+        )
+        .expect("правка");
+        git_run(root, &["add", "devharness/src/core/mod.rs"]);
+        let mut reg = Registry::default();
+        reg.agents.push(AgentState {
+            name: me(),
+            role: Some(ROLE_WORKER.to_string()),
+            ..Default::default()
+        });
+        reg.tasks
+            .push(active_task("T-2", &me(), &["devharness/src/core"]));
+        save(root, &reg).expect("save");
+        let out = guard_commit_cmd(root);
+        assert!(
+            out.is_ok(),
+            "своя активная задача не должна блокировать коммит: {:?}",
+            out.err()
+        );
+    }
+
+    /// Правило решения: таблица ролей и признаков двойной работы.
+    #[test]
+    fn guard_action_rules() {
+        // Ведущий и техлид не блокируются никогда.
+        assert_eq!(guard_action(ROLE_LEAD, false, true), GuardAction::Warn);
+        assert_eq!(guard_action(ROLE_TECH_LEAD, false, true), GuardAction::Warn);
+        // Своя задача — предупреждение.
+        assert_eq!(guard_action(ROLE_WORKER, true, false), GuardAction::Warn);
+        // Чужая зона без реальной двойной работы — предупреждение.
+        assert_eq!(guard_action(ROLE_WORKER, false, false), GuardAction::Warn);
+        // Чужая зона с реальной двойной работой — отказ.
+        assert_eq!(guard_action(ROLE_WORKER, false, true), GuardAction::Block);
+        // Незарегистрированный вызывающий — как worker.
+        assert_eq!(guard_action("", false, true), GuardAction::Block);
+    }
+
+    /// Незакоммиченная работа владельца зоны видна, чистое дерево — нет.
+    #[test]
+    fn agent_dirty_paths_sees_uncommitted_work() {
+        let tmp = tempdir().expect("tmp");
+        let wt = tmp.path();
+        git_init_with_file(wt, "devharness/src/core/mod.rs", "fn a() {}\n");
+        let mut reg = Registry::default();
+        reg.agents.push(AgentState {
+            name: "other".to_string(),
+            worktree: Some(wt.to_string_lossy().to_string()),
+            ..Default::default()
+        });
+        let paths = vec!["devharness/src/core/mod.rs".to_string()];
+        assert!(
+            agent_dirty_paths(&reg, "other", &paths).is_empty(),
+            "чистое дерево — нет незакоммиченной работы"
+        );
+        std::fs::write(
+            wt.join("devharness/src/core/mod.rs"),
+            "fn a() { /* правка */ }\n",
+        )
+        .expect("правка");
+        assert_eq!(
+            agent_dirty_paths(&reg, "other", &paths),
+            vec!["devharness/src/core/mod.rs".to_string()],
+            "правка без коммита — признак двойной работы"
+        );
     }
 }
