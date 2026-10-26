@@ -600,6 +600,11 @@ pub fn stats_for_agent(root: &Path, agent: &str, cfg: &AutotuneConfig) -> Option
     {
         return Some(st.clone());
     }
+    // T-413 fix: если есть свои samples (< min_samples), используем их,
+    // а НЕ падаем на aggregate_by_model (чужие warnings/errors понижают потолок).
+    if let Some(st) = by_agent.get(&canon) {
+        return Some(st.clone());
+    }
     let model = agent_model(root, agent)?;
     let by_model = aggregate_by_model(&samples);
     let st = model_stats_for(&by_model, &model)?;
