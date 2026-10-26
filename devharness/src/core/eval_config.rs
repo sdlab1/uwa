@@ -298,7 +298,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn complexity_weights_sum_to_one() {
         assert!(
             (DEFAULTS.complexity_weight_sum() - 1.0).abs() < 1e-9,
@@ -314,6 +313,7 @@ mod tests {
         assert_eq!(DEFAULTS.min_reference_tasks(), 4);
     }
 
+    #[test]
     fn ratio_boundaries_are_ascending() {
         assert!(DEFAULTS.ratio_unsatisfactory < DEFAULTS.ratio_poor);
         assert!(DEFAULTS.ratio_poor < DEFAULTS.ratio_normal);
