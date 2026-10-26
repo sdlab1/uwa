@@ -214,4 +214,27 @@ mod tests {
             }
         );
     }
+
+    #[test]
+    fn wt_sync_alone_does_not_clear_idle() {
+        let snap = IdleSnapshot {
+            last_seen: None,
+            idle_limit_secs: 1200,
+            now: 100000,
+            source: None,
+            wt_synced_at: Some(99999),
+        };
+        assert_eq!(evaluate(&snap), IdleStatus::NoSignals);
+        let (_, acts) = decide(&snap);
+        assert!(!acts.revoke_tasks);
+        assert!(acts.require_welcome);
+        let snap2 = IdleSnapshot {
+            last_seen: Some(80000),
+            idle_limit_secs: 1200,
+            now: 100000,
+            source: Some(SignalSource::Channel),
+            wt_synced_at: Some(99999),
+        };
+        assert_eq!(evaluate(&snap2), IdleStatus::Stale);
+    }
 }
