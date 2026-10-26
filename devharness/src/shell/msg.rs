@@ -454,6 +454,44 @@ fn me(explicit: Option<&str>) -> String {
     crate::core::identity::resolve(explicit).name
 }
 
+/// Корень репозитория, где лежит общий реестр (для проверки зарезервированных имён).
+fn repo_root_with_registry() -> Option<PathBuf> {
+    let mut cur = std::env::current_dir().ok()?;
+    loop {
+        if cur.join(".harness/orch/registry.json").exists() {
+            return Some(cur);
+        }
+        if !cur.pop() {
+            return None;
+        }
+    }
+}
+
+/// Имена, которые нельзя затенять алиасом: агенты реестра, ведущий, задачи,
+/// а также закреплённые привязки сессий.
+fn reserved_agent_names() -> Vec<String> {
+    let mut names = crate::core::identity::claimed_names();
+    if let Some(root) = repo_root_with_registry() {
+        let reg = crate::commands::orch::load(&root);
+        names.extend(reg.agents.into_iter().map(|a| a.name));
+        names.extend(reg.tasks.into_iter().map(|t| t.agent));
+        if let Some(lead) = reg.lead {
+            names.push(lead);
+        }
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// Затеняет ли алиас известного агента (T-481).
+fn alias_targets_agent(alias: &str, reserved: &[String]) -> bool {
+    let target = crate::core::identity::canonical(alias);
+    reserved
+        .iter()
+        .any(|n| n == alias || crate::core::identity::canonical(n) == target)
+}
+
 fn now_hm() -> String {
     Command::new("date")
         .arg("+%H:%M")
@@ -1634,6 +1672,13 @@ pub fn send(args: &[String]) -> i32 {
                     );
                     return 1;
                 }
+                let reserved = reserved_agent_names();
+                if alias_targets_agent(&alias, &reserved) {
+                    eprintln!(
+                        "devh msg alias: «{alias}» — имя агента; алиас на него запрещён (T-481)"
+                    );
+                    return 1;
+                }
                 let canon = m.value("for").unwrap_or_else(|| me(None));
                 match crate::core::identity::set_alias(&alias, &canon) {
                     Ok(()) => {
@@ -1723,7 +1768,11 @@ pub fn send(args: &[String]) -> i32 {
             }
             match crate::core::identity::authorize_takeover(&raw, &for_key.as_ref().unwrap()) {
                 Ok(_) => {
-                    println!("takeover авторизован для {} (ключ: {})", raw, for_key.as_ref().unwrap());
+                    println!(
+                        "takeover авторизован для {} (ключ: {})",
+                        raw,
+                        for_key.as_ref().unwrap()
+                    );
                     0
                 }
                 Err(e) => {
@@ -2154,10 +2203,7 @@ mod tests {
     /// иначе счёт `pending` пухнет от писем самому себе (R-8).
     #[test]
     fn addressed_only_to_self_detects_self_letters() {
-        let home = std::env::temp_dir().join(format!(
-            "devh-test-self-{}",
-            std::process::id()
-        ));
+        let home = std::env::temp_dir().join(format!("devh-test-self-{}", std::process::id()));
         std::fs::create_dir_all(&home).unwrap_or_default();
         std::fs::write(
             home.join("aliases.json"),
@@ -2637,5 +2683,13 @@ ID: abcd1234\n\
         assert_eq!(safe_name("../evil"), ".._evil");
         assert_eq!(safe_name(""), "agent");
         assert_eq!(safe_name("ok-name_1"), "ok-name_1");
+    }
+
+    #[test]
+    fn alias_targets_agent_detects_reserved_names() {
+        let reserved = vec!["minimax".to_string(), "step5".to_string()];
+        assert!(alias_targets_agent("minimax", &reserved));
+        assert!(alias_targets_agent("step5", &reserved));
+        assert!(!alias_targets_agent("deepseek", &reserved));
     }
 }
