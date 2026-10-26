@@ -2,6 +2,7 @@ pub mod about;
 pub mod auto;
 pub mod autoassign;
 pub mod bg;
+pub mod calibration_cmd;
 pub mod commit;
 pub mod decompose;
 pub mod doctor;

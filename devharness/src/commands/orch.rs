@@ -718,6 +718,7 @@ pub fn orch(root: &Path, sub: &str, args: &[String]) -> anyhow::Result<()> {
         "commit" => commit_cmd(root, args),
         "guard-commit" => guard_commit_cmd(root),
         "guard" => crate::commands::guard::run(root, args),
+        "calibrate" => crate::commands::calibration_cmd::run(root, args),
         "decompose" => crate::commands::decompose::run(root, args),
         "install-hook" => install_hook_cmd(root),
         "lead" => lead_cmd(root, args),
@@ -758,6 +759,9 @@ fn print_help() {
   done <ID> --f N            выполнена (только с зелёным DoD; --override только lead)
   commit <ID> [--message M] [--path path]...  коммит по задаче (только зелёный DoD)
   guard-commit               гейт для pre-commit хука
+  calibrate [--c N] [--agent X] [--dry-run]
+                          построить эталон уровня из замеров (quality.jsonl) и
+                          записать в calibration.jsonl; без --c — по всем уровням
   install-hook               установить pre-commit хук
   lead [--set ADDR] [--notify]  актуальный ведущий / назначение (смена — по паролю)
   role --agent X --role lead|worker|tech_lead  роль (lead — только ведущий и по паролю)
