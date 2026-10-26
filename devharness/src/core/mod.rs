@@ -102,6 +102,7 @@ pub mod estimator;
 pub mod eval_config;
 pub mod severity;
 pub mod calibration;
+pub mod agent_hint_i18n;
 pub mod calibration_guard;
 pub mod ledger_export;
 pub mod complexity_reference;
