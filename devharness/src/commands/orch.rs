@@ -1987,6 +1987,23 @@ fn paths_within_zones(paths: &[String], zones: &[String]) -> bool {
             .all(|p| zones.iter().any(|z| path_within_zone(p, z)))
 }
 
+/// T-488: нарушения зон задачи.
+///
+/// ЗОНЫ НЕ ЗАДАНЫ → ограничения нет: зоны ставит ведущий при создании
+/// задачи, и у большинства задач их нет — fail-closed здесь остановил бы
+/// всю доску (ни коммита, ни автослияния). ЗОНЫ ЗАДАНЫ → строго: любой путь
+/// вне зоны = нарушение (чужая правка не вливается).
+fn zone_violations(paths: &[String], zones: &[String]) -> Vec<String> {
+    if zones.is_empty() {
+        return Vec::new();
+    }
+    paths
+        .iter()
+        .filter(|p| !zones.iter().any(|z| path_within_zone(p, z)))
+        .cloned()
+        .collect()
+}
+
 /// T-488: что ветка собирается влить в main — все изменённые пути от `main`
 /// до `branch`. Пути вне зоны задачи = чужой файл, слияние запрещено.
 fn branch_changed_paths(tree: &Path, main_branch: &str, branch: &str) -> Vec<String> {
@@ -2069,27 +2086,15 @@ fn auto_merge_agent(
         .map(|t| t.zones.clone())
         .unwrap_or_default();
     let changed = branch_changed_paths(&path, &main_branch, &branch);
-    if !paths_within_zones(&changed, &zones) {
-        let outside: Vec<String> = changed
-            .iter()
-            .filter(|p| !zones.iter().any(|z| path_within_zone(p, z)))
-            .cloned()
-            .collect();
+    let outside = zone_violations(&changed, &zones);
+    if !outside.is_empty() {
         return Some(MergeOutcome {
             state: "ошибка: вне зоны задачи".to_string(),
             sha: None,
             detail: format!(
                 "в {branch} есть пути вне зон задачи {task_id} ({}): {}",
-                if zones.is_empty() {
-                    "зоны не заданы".to_string()
-                } else {
-                    zones.join(", ")
-                },
-                if outside.is_empty() {
-                    "пути не определены".to_string()
-                } else {
-                    outside.join(", ")
-                }
+                zones.join(", "),
+                outside.join(", ")
             ),
         });
     }
@@ -5792,20 +5797,12 @@ pub fn commit_cmd(root: &Path, args: &[String]) -> anyhow::Result<()> {
             "devh orch commit: не указан путь и у задачи нет зон (--path)"
         ));
     }
-    if !paths_within_zones(&paths, &task.zones) {
-        let outside: Vec<&str> = paths
-            .iter()
-            .map(String::as_str)
-            .filter(|p| !task.zones.iter().any(|z| path_within_zone(p, z)))
-            .collect();
+    let outside = zone_violations(&paths, &task.zones);
+    if !outside.is_empty() {
         return Err(anyhow!(
             "devh orch commit: пути вне зоны задачи {id}: {} (зоны: {}) — T-488",
             outside.join(", "),
-            if task.zones.is_empty() {
-                "не заданы".to_string()
-            } else {
-                task.zones.join(", ")
-            }
+            task.zones.join(", ")
         ));
     }
     let mut git_args = vec!["add", "--"];
@@ -7030,6 +7027,26 @@ mod tests {
         crate::core::identity::canonical(&crate::core::identity::current().name)
     }
 
+    /// Назначить вызывающего ведущим: смена DoD/зон, revoke/reassign —
+    /// только lead (T-485/T-487).
+    fn make_me_lead(root: &Path) {
+        let mut reg = load(root);
+        reg.lead = Some(me());
+        save(root, &reg).expect("save lead");
+    }
+
+    /// Задача «взята в работу» (active + started_by) без реального `start`:
+    /// в тестах worktree агента не нужен, а `done` требует active (T-485).
+    fn mark_started(root: &Path, id: &str, starter: &str) {
+        let mut reg = load(root);
+        if let Some(t) = reg.tasks.iter_mut().find(|t| t.id == id) {
+            t.status = Status::Active;
+            t.started_by = Some(starter.to_string());
+            t.started_at = Some(now());
+        }
+        save(root, &reg).expect("save started");
+    }
+
     /// Задача с DoD: критерий приёмки + быстрая машинная проверка.
     fn add_task(root: &Path, agent: &str, p: &str, title: &str) -> String {
         // Тесты не пишут в живой почтовый ящик.
@@ -7402,6 +7419,8 @@ mod tests {
     fn commit_binds_task_to_head_when_nothing_to_commit() {
         let (_d, root, wt) = agent_wt_fixture();
         let id = add_task(&root, &me(), "P2", "уже в истории");
+        make_me_lead(&root);
+        mark_started(&root, &id, &me());
         // Коммит — только в worktree исполнителя (в общее дерево нельзя).
         let mut reg = load(&root);
         let wt_s = wt.to_string_lossy().to_string();
@@ -7453,6 +7472,9 @@ mod tests {
         let id = add_task(root, &me(), "P1", "в работе");
         identify_now(root);
         run(root, "start", &[id.as_str()]).expect("start");
+        // reassign/revoke — только lead (T-487): назначаем себя ведущим
+        // уже после выдачи (lead не берёт задачи из очереди).
+        make_me_lead(root);
         let err = run(root, "reassign", &[id.as_str(), "--agent", "other-agent"])
             .expect_err("взятую задачу переназначать нельзя");
         assert!(err.to_string().contains("task taken"), "{err}");
@@ -7491,6 +7513,8 @@ mod tests {
     fn commit_without_agent_worktree_is_rejected() {
         let (_d, root) = git_repo_fixture();
         let id = add_task(&root, &me(), "P2", "коммит без дерева");
+        make_me_lead(&root);
+        mark_started(&root, &id, &me());
         run(&root, "dod", &[id.as_str(), "--zone", "a.txt"]).expect("dod zone");
         run(&root, "dod", &[id.as_str(), "--ack", "критерий приёмки"]).expect("ack");
         run(&root, "verify", &[id.as_str()]).expect("verify");
@@ -7523,6 +7547,8 @@ mod tests {
         let root = tmp.path();
         add_task(root, "beam", "P4", "эпик");
         add_task(root, "beam", "P3", "подсистема");
+        make_me_lead(root);
+        mark_started(root, "T-001", "beam");
         complete_dod(root, "T-001");
         run(root, "done", &["T-001", "--f", "F3"]).expect("done");
         let reg = load(root);
@@ -7668,6 +7694,8 @@ mod tests {
         let tmp = tempdir().expect("tmp");
         let root = tmp.path();
         add_task(root, "beam", "P1", "т");
+        make_me_lead(root);
+        mark_started(root, "T-001", "beam");
         complete_dod(root, "T-001");
         run(root, "done", &["T-001", "--f", "F0"]).expect("done");
         let err = run(root, "revoke", &["T-001", "--reason", "поздно"]);
@@ -7682,6 +7710,20 @@ mod tests {
         assert!(!may_act_on_task("attacker", "worker", None));
     }
 
+    /// T-488: зоны заданы → путь вне зоны = нарушение; зоны НЕ заданы →
+    /// ограничения нет (иначе встала бы вся доска: зоны ставит lead).
+    #[test]
+    fn zone_violations_policy() {
+        let zones = vec!["devharness/src/shell".to_string()];
+        assert_eq!(
+            zone_violations(&["README.md".to_string()], &zones),
+            vec!["README.md".to_string()]
+        );
+        assert!(zone_violations(&["devharness/src/shell/msg.rs".to_string()], &zones).is_empty());
+        assert!(zone_violations(&["README.md".to_string()], &[]).is_empty());
+    }
+
+    #[test]
     fn paths_within_zones_blocks_foreign_file() {
         let zones = vec!["devharness/src/shell".to_string()];
         assert!(paths_within_zones(
@@ -8000,6 +8042,7 @@ mod tests {
             "{err}"
         );
         // Закрываем зависимость — задача выдаётся.
+        mark_started(root, &base, &agent);
         complete_dod(root, &base);
         run(root, "done", &[base.as_str(), "--f", "0"]).expect("done");
         identify_now(root);

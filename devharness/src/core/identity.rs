@@ -1342,16 +1342,17 @@ mod tests {
         let home = dir.path();
         // Закрепляем имя "opencode" явно.
         write_binding_in(home, "proc:1:2", "opencode", "goose", true).unwrap_or_default();
-        // claimed_names должен содержать "opencode".
-        // Проверяем через alias_map: auto_register не должен перезаписать.
-        set_alias_in(home, "opencode", "beam").unwrap_or_else(|_| unreachable!());
-        // opencode claimed → auto_register должен пропустить регистрацию comm→name.
-        // (auto_register читает claimed_names из основного home, не из temp —
-        //  здесь проверяем только логику claimed_names на temp home.)
-        // Проверяем что alias остался.
-        assert_eq!(
-            alias_map_in(home).get("opencode").map(String::as_str),
-            Some("beam")
+        // T-481: алиас на закреплённое имя ЗАПРЕЩЁН — иначе `msg alias
+        // victim --for attacker` уводит личность жертвы (canonical/authority/
+        // почта/worktree) под атакующего.
+        let err = set_alias_in(home, "opencode", "beam")
+            .expect_err("алиас на закреплённое имя запрещён");
+        assert!(err.contains("T-481"), "{err}");
+        // Захваченное имя осталось прежним — подмены нет.
+        assert!(
+            alias_map_in(home).get("opencode").is_none(),
+            "алиас на закреплённое имя не пишется: {:?}",
+            alias_map_in(home)
         );
     }
 
