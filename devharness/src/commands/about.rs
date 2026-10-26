@@ -75,6 +75,19 @@ pub struct About {
 /// Имя файла реестра оркестратора относительно корня репозитория.
 const REGISTRY_REL: &str = ".harness/orch/registry.json";
 
+/// Путь к реестру оркестратора.
+///
+/// Реестр живёт ТОЛЬКО в главном дереве репо: у worktree агента своя
+/// `.harness/` без `orch/registry.json`. Раньше путь строился от cwd — из
+/// worktree `devh msg about` показывал «роль не назначена / ведущий не
+/// назначен» (реестр просто не читался). Теперь корень главного дерева
+/// берётся через `--git-common-dir`, как это делает оркестратор.
+pub fn registry_path(root: &Path) -> PathBuf {
+    crate::shell::git::main_root_from_cwd(root)
+        .map(|m| m.join(REGISTRY_REL))
+        .unwrap_or_else(|_| root.join(REGISTRY_REL))
+}
+
 /// Собрать мини-описание текущего агента.
 pub fn collect(root: &Path) -> About {
     let id = identity::current();
@@ -129,7 +142,7 @@ pub fn collect(root: &Path) -> About {
     }
 
     // 3) реестр оркестратора: роль, ведущий, модель агента.
-    let (reg_model, reg_runtime, role, lead) = registry_info(&root.join(REGISTRY_REL), &a.name);
+    let (reg_model, reg_runtime, role, lead) = registry_info(&registry_path(&root), &a.name);
     a.role = role;
     a.lead = lead;
     if a.model.is_none() {
@@ -519,6 +532,36 @@ mod tests {
         let clipped = first_lines(&long, 1);
         assert!(clipped.chars().count() <= 160, "{}", clipped.len());
         assert!(clipped.ends_with('…'));
+    }
+
+    /// Реестр оркестратора лежит в ГЛАВНОМ дереве: из worktree агента путь
+    /// должен вести туда (иначе `about` показывает «роль/ведущий не назначен»).
+    #[test]
+    fn registry_path_points_to_main_tree_from_worktree() {
+        let tmp = tempfile::TempDir::new().expect("tmp");
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("mkdir");
+        let g = |dir: &Path, args: &[&str]| {
+            let _ = std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .output();
+        };
+        g(&repo, &["init", "-q", "-b", "main"]);
+        g(&repo, &["config", "user.email", "t@example.com"]);
+        g(&repo, &["config", "user.name", "T"]);
+        std::fs::write(repo.join("a.txt"), "1\n").expect("write");
+        g(&repo, &["add", "-A"]);
+        g(&repo, &["commit", "-qm", "base"]);
+        let wt = tmp.path().join("wt");
+        g(&repo, &["worktree", "add", "-q", "-b", "devh/agent-x", wt.to_str().unwrap()]);
+        let got = registry_path(&wt);
+        let want = repo.canonicalize().unwrap_or_else(|_| repo.clone());
+        assert_eq!(
+            got,
+            want.join(REGISTRY_REL),
+            "из worktree реестр ищется в главном дереве"
+        );
     }
 
     #[test]

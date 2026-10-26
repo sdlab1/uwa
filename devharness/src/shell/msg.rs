@@ -1704,6 +1704,14 @@ pub fn send(args: &[String]) -> i32 {
                     break;
                 }
             }
+            // Worktree агента: реестра в нём нет — он в ГЛАВНОМ дереве.
+            if harness_path.is_none() {
+                if let Ok(main_root) = crate::shell::git::main_root_from_cwd(&root) {
+                    if main_root.join(".harness/orch/registry.json").exists() {
+                        harness_path = Some(main_root);
+                    }
+                }
+            }
             if let Some(repo_root) = harness_path {
                 let reg = crate::commands::orch::load(&repo_root);
                 let (lead, _) = crate::commands::orch::lead_of(&reg);
