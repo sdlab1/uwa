@@ -543,8 +543,11 @@ pub fn penalty_vector(stats: &ModelStats, cfg: &AutotuneConfig) -> CoefficientVe
     };
     // Ошибки и предупреждения считаются С ТЯЖЕСТЬЮ: 3 грубейшие ошибки
     // (Fatal ×5) весят как 10 опечаток, 3 мелких недочёта — заметно меньше.
-    v[Coefficient::Errors.index()] =
-        cfg.error_weight * (1.0 + stats.avg_errors_weighted.max(0.0)).log2();
+    // Ошибки давят на потолок не все: остаточные (непочиненные) — в полную
+    // силу, а быстро исчезнувшие — почти не давят (T-456, residual-сигналы).
+    v[Coefficient::Errors.index()] = cfg.error_weight
+        * (1.0 + stats.avg_errors_weighted.max(0.0)).log2()
+        * crate::core::autotune_residual::residual_factor_from_stats(stats);
     v[Coefficient::Warnings.index()] =
         cfg.warning_weight * (1.0 + stats.avg_warnings_weighted.max(0.0)).log2();
     v[Coefficient::Runs.index()] =
@@ -554,7 +557,9 @@ pub fn penalty_vector(stats: &ModelStats, cfg: &AutotuneConfig) -> CoefficientVe
     v[Coefficient::Neatness.index()] =
         cfg.neatness_weight * (1.0 - stats.warn_clean_rate.clamp(0.0, 1.0));
     v[Coefficient::Success.index()] = -cfg.success_bonus * (stats.success_rate - 0.5);
-    v[Coefficient::FixBonus.index()] = -cfg.fix_bonus * fix_rate;
+    // Кредит за починенные задачи: быстро починенные — с бустом ×2.5.
+    let fix_boost = crate::core::autotune_residual::self_fix_boost_from_stats(stats);
+    v[Coefficient::FixBonus.index()] = -cfg.fix_bonus * fix_rate * fix_boost;
     v
 }
 
@@ -581,6 +586,10 @@ pub fn adjust(base: u8, stats: Option<&ModelStats>, cfg: &AutotuneConfig) -> u8 
     } else {
         let mut zeroed = st.clone();
         zeroed.avg_warnings = 0.0;
+        // T-456: обнуляем и ВЗВЕШЕННЫЕ предупреждения — иначе намерение
+        // «warnings без errors не штрафуют» молча не работало (штраф читает
+        // avg_warnings_weighted, а обнулялся только сырой счётчик).
+        zeroed.avg_warnings_weighted = 0.0;
         penalty(&zeroed, cfg)
     };
     let raw = base as f64 - p;
@@ -984,11 +993,20 @@ mod tests {
     }
 
     #[test]
-    fn warnings_alone_lower_ceiling() {
+    fn warnings_alone_do_not_lower_ceiling() {
+        // T-413/T-456: только ОШИБКИ понижают потолок. Предупреждения сами по
+        // себе (в т.ч. из чужих файлов) потолок не давят — иначе 33 warning'а
+        // на весь проект сбивали бы потолок до C1. Тест раньше утверждал
+        // обратное и молча блокировал само намерение T-413.
         let cfg = AutotuneConfig::default();
         let low = stats("m", 10, 0.0, 1.0);
         let high = stats("m", 10, 0.0, 40.0);
-        assert!(adjust(5, Some(&high), &cfg) < adjust(5, Some(&low), &cfg));
+        assert_eq!(
+            adjust(5, Some(&high), &cfg),
+            adjust(5, Some(&low), &cfg),
+            "warnings без errors не меняют потолок"
+        );
+        assert_eq!(adjust(5, Some(&high), &cfg), 5);
     }
 
     #[test]

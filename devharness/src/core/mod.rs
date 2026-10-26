@@ -94,6 +94,7 @@ pub mod wt_persist;
 pub mod zone_guard;
 pub mod zone_index;
 pub mod autotune;
+pub mod autotune_residual;
 pub mod check_telemetry;
 pub mod reidentify;
 pub mod quality;
