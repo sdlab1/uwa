@@ -9,12 +9,25 @@
 //!
 //! Язык вопроса: английский — по умолчанию; китайский — если известная
 //! модель агента принадлежит китайскому семейству (Qwen/DeepSeek/GLM/Kimi/…).
+//!
+//! ИСТЕЧЕНИЕ (часовая переидентификация): ответ старше TTL (`IDENTIFY_TTL_SECS`,
+//! час) помечается истёкшим, а lead/tech_lead получает авто-задачу на проверку
+//! имени модели (`mark_expired` + `ensure_expiry_task` + `sweep_expiries`).
+//! Развёртка: `consume()` зовёт `sweep_expiries` — это безопасная точка: реестр
+//! к этому моменту уже сохранён выдачей задачи, поэтому запись из модуля не
+//! затирается снимком реестра.
 
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+
+/// TTL идентификации по умолчанию (час): ответ старше — истёкший.
+///
+/// Тот же дефолт, что у конфига (`IDENTIFY_TTL_SECS`), но канон живёт здесь,
+/// рядом с логикой истечения.
+pub const IDENTIFY_TTL_SECS: u64 = 3600;
 
 /// Язык вопроса агенту.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -168,6 +181,10 @@ pub struct Challenge {
     /// Ответ израсходован (выдача уже состоялась).
     #[serde(default)]
     pub consumed: bool,
+    /// Ответ истёк: он старше TTL, агент обязан переидентифицироваться,
+    /// а lead/tech_lead получает задачу на проверку имени модели.
+    #[serde(default)]
+    pub expired: bool,
 }
 
 /// Путь к состоянию вызовов: рядом с реестром (общий для worktree'ов).
@@ -292,6 +309,9 @@ pub fn issue(root: &Path, agent: &str, model_hint: Option<&str>) -> anyhow::Resu
         }
     }
     let lang = lang_for_model(model_hint);
+    // Новый вопрос НЕ стирает факт истечения прежнего ответа: флаг переносится,
+    // иначе авто-задача lead/tech_lead потеряла бы след.
+    let expired = map.get(&canon).map(|c| c.expired).unwrap_or(false);
     let ch = Challenge {
         nonce: nonce_of(&canon, ts),
         agent: canon.clone(),
@@ -300,6 +320,7 @@ pub fn issue(root: &Path, agent: &str, model_hint: Option<&str>) -> anyhow::Resu
         question: question_text(lang).to_string(),
         answer: None,
         consumed: false,
+        expired,
     };
     map.insert(canon, ch.clone());
     save(root, &map)?;
@@ -322,11 +343,14 @@ pub fn record_answer(root: &Path, agent: &str, raw: &str) -> anyhow::Result<Answ
             question: question_text(Lang::En).to_string(),
             answer: None,
             consumed: false,
+            expired: false,
         },
     };
     let mut ch = ch;
     ch.answer = Some(ans.clone());
     ch.consumed = false;
+    // Свежий ответ — истечение снято (агент переидентифицировался).
+    ch.expired = false;
     map.insert(canon, ch);
     save(root, &map)?;
     Ok(ans)
@@ -343,12 +367,20 @@ pub fn take_answer(root: &Path, agent: &str, ttl_secs: u64) -> Option<Answer> {
     let ans = ch.answer.as_ref()?;
     let age = now_secs().saturating_sub(ans.ts);
     if ttl_secs > 0 && age > ttl_secs {
+        // Ответ истёк: помечаем состояние (файл ответов — не реестр, конфликта
+        // записи с оркестратором здесь нет). Авто-задачу lead/tech_lead заводит
+        // `sweep_expiries`.
+        let _ = mark_expired(root, now_secs(), ttl_secs);
         return None;
     }
     Some(ans.clone())
 }
 
 /// Пометить ответ израсходованным (выдача состоялась).
+///
+/// Здесь же — безопасная точка для авто-задач по истёкшим идентификациям:
+/// `orch start` к этому моменту УЖЕ сохранил реестр, поэтому запись реестра
+/// из этого модуля не затирается последующим сохранением снимка.
 pub fn consume(root: &Path, agent: &str) -> anyhow::Result<()> {
     let canon = crate::core::identity::canonical(agent);
     let mut map = load(root);
@@ -356,7 +388,154 @@ pub fn consume(root: &Path, agent: &str) -> anyhow::Result<()> {
         ch.consumed = true;
     }
     save(root, &map)?;
+    // Истёкшие идентификации → авто-задача lead/tech_lead на проверку имени.
+    let _ = sweep_expiries(root, now_secs(), IDENTIFY_TTL_SECS);
     Ok(())
+}
+
+/// Истёк ли ответ идентификации (старше TTL).
+///
+/// `ttl_secs = 0` — проверка выключена (ответ не протухает никогда).
+pub fn is_expired(ch: &Challenge, now: u64, ttl_secs: u64) -> bool {
+    if ttl_secs == 0 {
+        return false;
+    }
+    match ch.answer.as_ref() {
+        Some(ans) => now.saturating_sub(ans.ts) > ttl_secs,
+        None => false,
+    }
+}
+
+/// Пометить истёкшие ответы в состоянии.
+///
+/// Возвращает агентов, у которых ответ помечен истёкшим (ранее не помеченные).
+pub fn mark_expired(root: &Path, now: u64, ttl_secs: u64) -> anyhow::Result<Vec<String>> {
+    let mut map = load(root);
+    let mut newly = Vec::new();
+    for (agent, ch) in map.iter_mut() {
+        if ch.expired {
+            continue;
+        }
+        if is_expired(ch, now, ttl_secs) {
+            ch.expired = true;
+            newly.push(agent.clone());
+        }
+    }
+    if !newly.is_empty() {
+        save(root, &map)?;
+    }
+    Ok(newly)
+}
+
+/// Авто-задача lead/tech_lead: проверить имя модели агента с истёкшей
+/// идентификацией.
+///
+/// Дедуп по заголовку — одна задача на агента, пока она не закрыта. Если
+/// техлида нет — задача уходит ведущему. `None` — задача уже есть или
+/// некому проверять.
+pub fn ensure_expiry_task(
+    root: &Path,
+    agent: &str,
+    ttl_secs: u64,
+) -> anyhow::Result<Option<String>> {
+    use crate::commands::orch::{
+        lead_of, load as load_reg, save as save_reg, Status, Task, ROLE_TECH_LEAD,
+    };
+    let mut reg = load_reg(root);
+    let title = format!("Верифицировать имя модели агента {agent}: идентификация истекла");
+    let open = reg.tasks.iter().any(|t| {
+        t.title == title && t.status != Status::Done && t.status != Status::Revoked
+    });
+    if open {
+        return Ok(None);
+    }
+    let (lead, _) = lead_of(&reg);
+    let Some(reviewer) = reg
+        .agents
+        .iter()
+        .find(|a| a.role.as_deref() == Some(ROLE_TECH_LEAD))
+        .map(|a| a.name.clone())
+        .or_else(|| lead.clone())
+    else {
+        // Некому проверять имя модели — задачу не создаём.
+        return Ok(None);
+    };
+    let ts = now_secs();
+    reg.seq = reg.seq.saturating_add(1);
+    let id = format!("T-{:03}", reg.seq);
+    let canon = crate::core::identity::canonical(agent);
+    let answer = load(root).get(&canon).and_then(|ch| ch.answer.clone());
+    let note = match &answer {
+        Some(a) => format!(
+            "Идентификация агента {agent} истекла: ответ старше TTL {ttl_secs} с.\n---\n\
+             Названная модель: {}\nВерсия: {}\nДата: {}\n\n\
+             Проверить: точное ли имя модели (модели с разными датами релиза — РАЗНЫЕ \
+             модели и измеряются раздельно) и переидентифицировался ли агент.",
+            a.model,
+            a.version.clone().unwrap_or_else(|| "-".to_string()),
+            a.date.clone().unwrap_or_else(|| "-".to_string()),
+        ),
+        None => format!(
+            "Идентификация агента {agent} истекла (TTL {ttl_secs} с) — переидентификация \
+             не выполнена."
+        ),
+    };
+    let dod = vec![
+        format!("Назвать точное имя модели агента {agent} (с датой/версией релиза)"),
+        "Подтвердить или опровергнуть ответ агента (devh orch identify --set <модель>)"
+            .to_string(),
+    ];
+    reg.tasks.push(Task {
+        id: id.clone(),
+        agent: reviewer.clone(),
+        title,
+        complexity: 0,
+        c_level: Some(2),
+        model: None,
+        model_source: None,
+        started_by: None,
+        started_at: None,
+        started_key: None,
+        status: Status::Queued,
+        zones: Vec::new(),
+        fail_level: None,
+        note,
+        created: ts,
+        updated: ts,
+        dod,
+        checks: Vec::new(),
+        acked: Vec::new(),
+        evidence: Vec::new(),
+        commit_sha: None,
+        main_sha: None,
+        override_reason: None,
+    });
+    reg.plan.prio.insert(id.clone(), 0);
+    save_reg(root, &reg)?;
+    Ok(Some(id))
+}
+
+/// Пометить истёкшие идентификации и завести авто-задачи lead/tech_lead.
+///
+/// Оркестратор зовёт это при выдаче задачи (и в doctor): ответ старше TTL
+/// помечается истёкшим, а lead/tech_lead получает задачу на проверку имени
+/// модели. Повторный вызов безопасен — дедуп по заголовку задачи.
+///
+/// Возвращает ID созданных задач.
+pub fn sweep_expiries(root: &Path, now: u64, ttl_secs: u64) -> anyhow::Result<Vec<String>> {
+    let _newly = mark_expired(root, now, ttl_secs)?;
+    let expired: Vec<String> = load(root)
+        .values()
+        .filter(|ch| ch.expired)
+        .map(|ch| ch.agent.clone())
+        .collect();
+    let mut ids = Vec::new();
+    for agent in expired {
+        if let Some(id) = ensure_expiry_task(root, &agent, ttl_secs)? {
+            ids.push(id);
+        }
+    }
+    Ok(ids)
 }
 
 /// Текущий вызов агента (для показа/повторной отправки вопроса).
@@ -476,6 +655,120 @@ mod tests {
         let a = crate::core::reidentify::record_answer(&root, "beam2", "MODEL: qwen3\nVERSION: v1").unwrap();
         assert_eq!(a.model, "qwen3");
         assert!(crate::core::reidentify::take_answer(&root, "beam2", 60).is_some());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    // ---- T-502: часовая переидентификация (TTL) + авто-задача техническому лиду ----
+
+    /// Реестр для тестов: ведущий + технический лид.
+    fn registry_with_roles(root: &Path, tech_lead: Option<&str>) {
+        let mut reg = crate::commands::orch::Registry::default();
+        reg.agents.push(crate::commands::orch::AgentState {
+            name: "boss".to_string(),
+            role: Some("lead".to_string()),
+            ..Default::default()
+        });
+        if let Some(tl) = tech_lead {
+            reg.agents.push(crate::commands::orch::AgentState {
+                name: tl.to_string(),
+                role: Some("tech_lead".to_string()),
+                ..Default::default()
+            });
+        }
+        crate::commands::orch::save(root, &reg).expect("save");
+    }
+
+    #[test]
+    fn ttl_default_is_one_hour() {
+        assert_eq!(IDENTIFY_TTL_SECS, 3600);
+    }
+
+    /// Ответ старше TTL помечается истёкшим (свежий — нет).
+    #[test]
+    fn expired_answer_is_marked_after_ttl() {
+        let root = tmp_root("expire");
+        record_answer(&root, "beam", "MODEL: gpt-4o").unwrap();
+        let now = now_secs();
+        assert!(
+            !is_expired(
+                &pending(&root, "beam").expect("challenge"),
+                now,
+                IDENTIFY_TTL_SECS
+            ),
+            "свежий ответ не истёкший"
+        );
+        let newly = mark_expired(&root, now + IDENTIFY_TTL_SECS + 1, IDENTIFY_TTL_SECS).unwrap();
+        assert_eq!(newly, vec!["beam".to_string()]);
+        assert!(
+            pending(&root, "beam").expect("challenge").expired,
+            "ответ старше TTL помечен истёкшим"
+        );
+        // ttl=0 — проверка выключена.
+        assert!(!is_expired(
+            &pending(&root, "beam").expect("challenge"),
+            now + IDENTIFY_TTL_SECS * 2,
+            0
+        ));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Новый вопрос не стирает след истечения прежнего ответа.
+    #[test]
+    fn new_question_keeps_expiry_notice() {
+        let root = tmp_root("carry");
+        record_answer(&root, "beam", "MODEL: gpt-4o").unwrap();
+        mark_expired(&root, now_secs() + IDENTIFY_TTL_SECS + 1, IDENTIFY_TTL_SECS).unwrap();
+        issue(&root, "beam", None).unwrap();
+        assert!(
+            pending(&root, "beam").expect("challenge").expired,
+            "факт истечения перенесён в новый вызов"
+        );
+        // Новый ответ снимает отметку.
+        record_answer(&root, "beam", "MODEL: gpt-4o").unwrap();
+        assert!(
+            !pending(&root, "beam").expect("challenge").expired,
+            "свежий ответ — истечение снято"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Авто-задача: техническому лиду — одна задача на истёкшего агента.
+    #[test]
+    fn sweep_creates_single_task_for_tech_lead() {
+        let root = tmp_root("sweep-tl");
+        registry_with_roles(&root, Some("tech"));
+        record_answer(&root, "beam", "MODEL: gpt-4o\nVERSION: 2024-11-20").unwrap();
+        let now = now_secs() + IDENTIFY_TTL_SECS + 1;
+        let ids = sweep_expiries(&root, now, IDENTIFY_TTL_SECS).unwrap();
+        assert_eq!(ids.len(), 1, "одна авто-задача на истёкшего агента");
+        let reg = crate::commands::orch::load(&root);
+        let task = reg.tasks.iter().find(|t| t.id == ids[0]).expect("задача");
+        assert_eq!(task.agent, "tech", "задача уходит техническому лиду");
+        assert!(task.title.contains("истекла"), "заголовок: {}", task.title);
+        assert_eq!(task.c_level, Some(2), "простая задача (C2)");
+        // Повторный проход — дубля нет.
+        let again = sweep_expiries(&root, now, IDENTIFY_TTL_SECS).unwrap();
+        assert!(
+            again.is_empty(),
+            "повторный проход не плодит задачи: {again:?}"
+        );
+        let reg = crate::commands::orch::load(&root);
+        assert_eq!(reg.tasks.len(), 1, "в реестре ровно одна авто-задача");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Если технического лида нет — авто-задача уходит ведущему.
+    #[test]
+    fn sweep_task_goes_to_lead_without_tech_lead() {
+        let root = tmp_root("sweep-lead");
+        registry_with_roles(&root, None);
+        record_answer(&root, "beam", "MODEL: gpt-4o").unwrap();
+        let now = now_secs() + IDENTIFY_TTL_SECS + 1;
+        let ids = sweep_expiries(&root, now, IDENTIFY_TTL_SECS).unwrap();
+        assert_eq!(ids.len(), 1);
+        let reg = crate::commands::orch::load(&root);
+        let task = reg.tasks.iter().find(|t| t.id == ids[0]).expect("задача");
+        assert_eq!(task.agent, "boss", "без техлида задача уходит ведущему");
         let _ = fs::remove_dir_all(&root);
     }
 }
