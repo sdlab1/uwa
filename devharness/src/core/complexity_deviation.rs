@@ -17,13 +17,70 @@
 //! 5. **граф исполнения** — алгоритм как граф (переходы, awaits, цепочки);
 //! 6. **декомпозиция** — наличие разбиения на части (модули/шаги).
 //!
-//! CRAP (Uncle Bob: `C²·(1−cov)³ + C`) — предварительная оценка; когда
-//! появится инструмент (`core::crap`), его балл подставляется в
-//! [`ComplexityFactors::crap`] и учитывается в отчёте.
+//! CRAP (Uncle Bob: `C²·(1−cov)³ + C`) — балл РЕАЛЬНОГО инструмента
+//! (`core::crap`): он считается по исходнику зоны, нормируется в 0..=1 и
+//! подставляется в [`ComplexityFactors::crap`], а оттуда — в индекс
+//! сложности (дополнительный фактор, [`CRAP_WEIGHT`]).
 
 use crate::core::calibration::{Reference, TaskMeasurement};
 use crate::core::eval_config::DEFAULTS;
 use serde::{Deserialize, Serialize};
+
+/// Доля индекса сложности, которую занимает CRAP-фактор (реальный инструмент).
+///
+/// Шесть базовых факторов (`eval_config::DEFAULTS.cal_complexity_weights`)
+/// занимают весь индекс; CRAP — дополнительный фактор, поэтому при его
+/// наличии базовые шесть нормируются на остаток `1 - CRAP_WEIGHT`.
+pub const CRAP_WEIGHT: f64 = 0.10;
+
+/// Балл CRAP зоны, при котором фактор считается максимальным.
+///
+/// `core::crap::CRAP_MAX` (12) задан на ФУНКЦИЮ, здесь мерится зона — берём
+/// в 10 раз больше: иначе фактор упирается в 1.0 уже на третьем ветвлении
+/// и не различает степени сложности.
+pub const CRAP_ZONE_CAP: f64 = crate::core::crap::CRAP_MAX * 10.0;
+
+/// Нормированный CRAP-фактор (0..=1) из числового балла.
+pub fn normalize_crap(score: f64) -> f64 {
+    (score / CRAP_ZONE_CAP).clamp(0.0, 1.0)
+}
+
+/// CRAP-фактор из РЕАЛЬНОГО инструмента `core::crap` по исходнику зоны.
+pub fn crap_factor(source: &str) -> f64 {
+    normalize_crap(crate::core::crap::char_crap_metric(source).score)
+}
+
+/// Число частей, при котором фактор «декомпозиция» считается максимальным.
+pub const DECOMPOSE_FULL_PARTS: usize = 4;
+
+/// Фактор «декомпозиция» по числу частей задачи (0.0..=1.0).
+///
+/// Нет разбиения — 0.0; разбиение на `DECOMPOSE_FULL_PARTS` и больше частей —
+/// 1.0 (дальше не растёт: фактор нормирован).
+pub fn parts_factor(parts: usize) -> f64 {
+    if parts == 0 {
+        return 0.0;
+    }
+    (parts as f64 / DECOMPOSE_FULL_PARTS as f64).clamp(0.0, 1.0)
+}
+
+/// На сколько частей разбита задача (по журналу декомпозиций).
+///
+/// Источник — `core::task_decomposition`: применённые декомпозиции пишутся в
+/// `.harness/orch/decompositions.json` (родитель → список детей). Нет журнала
+/// или нет записи о задаче — 0 частей.
+pub fn decomposed_parts(root: &Path, task_id: &str) -> usize {
+    let path = crate::commands::orch::dir(root).join("decompositions.json");
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return 0;
+    };
+    let log: crate::commands::decompose::DecompositionLog =
+        serde_json::from_str(&text).unwrap_or_default();
+    log.applied
+        .get(task_id)
+        .map(|r| r.children.len())
+        .unwrap_or(0)
+}
 
 /// Шесть факторов сложности задачи — значения нормированы в 0.0..=1.0.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
@@ -51,7 +108,7 @@ impl ComplexityFactors {
         Self::default()
     }
 
-    /// Подставить предварительный балл CRAP.
+    /// Подставить балл CRAP (нормированный, 0..=1).
     pub fn with_crap(mut self, crap: f64) -> Self {
         self.crap = Some(crap);
         self
@@ -69,6 +126,15 @@ impl ComplexityFactors {
             + w[3] * self.functions
             + w[4] * self.exec_graph
             + w[5] * self.decompose;
+        // CRAP (реальный инструмент) — дополнительный фактор индекса: базовые
+        // шесть нормируются на (1 - CRAP_WEIGHT), CRAP занимает CRAP_WEIGHT.
+        let raw = match self.crap {
+            Some(crap) => {
+                let rest = (1.0 - CRAP_WEIGHT).max(0.0);
+                raw * rest + CRAP_WEIGHT * crap.clamp(0.0, 1.0)
+            }
+            None => raw,
+        };
         raw.clamp(0.0, 1.0)
     }
 }
@@ -103,6 +169,19 @@ pub fn analyze_diff(diff: &str) -> ComplexityFactors {
         .collect::<Vec<_>>()
         .join("\n");
     analyze_source(&added)
+}
+
+/// Факторы ЗАДАЧИ: диф + реальное разбиение задачи на части.
+///
+/// Фактор 6 («декомпозиция») = максимум из структуры кода (модули/шаги в
+/// диффе) и разбиения ЗАДАЧИ по `core::task_decomposition`: и разбитая задача,
+/// и разбитый код — признак сложности, и оба влияют на индекс.
+pub fn analyze_task(root: &Path, task_id: &str, diff: &str) -> ComplexityFactors {
+    let mut f = analyze_diff(diff);
+    f.decompose = f
+        .decompose
+        .max(parts_factor(decomposed_parts(root, task_id)));
+    f
 }
 
 /// Разобрать ИСХОДНЫЙ КОД в факторы сложности.
@@ -152,7 +231,8 @@ pub fn analyze_source(source: &str) -> ComplexityFactors {
         functions: scaled(functions, 12.0),
         exec_graph: scaled(graph_hits, 20.0),
         decompose: scaled(decompose_hits, 8.0),
-        crap: None,
+        // CRAP — из реального инструмента `core::crap` (балл зоны).
+        crap: Some(crap_factor(source)),
     }
 }
 
@@ -309,5 +389,136 @@ mod tests {
     fn factors_report_crap_when_set() {
         let f = ComplexityFactors::zero().with_crap(0.4);
         assert_eq!(f.crap, Some(0.4));
+    }
+
+    /// T-504: CRAP-фактор берётся из РЕАЛЬНОГО инструмента `core::crap`.
+    #[test]
+    fn crap_factor_comes_from_real_instrument() {
+        let source = "fn f(a: u32) -> u32 { if a > 1 { a - 1 } else { a + 1 } }\n";
+        let metric = crate::core::crap::char_crap_metric(source);
+        assert!(metric.score > 0.0, "инструмент посчитал балл: {metric:?}");
+        let f = analyze_source(source);
+        assert_eq!(
+            f.crap,
+            Some(normalize_crap(metric.score)),
+            "CRAP-фактор = балл реального инструмента"
+        );
+        // Пустой исходник — нулевой фактор, а не паника.
+        assert_eq!(analyze_source("").crap, Some(0.0));
+    }
+
+    /// T-504: CRAP попадает в ИНДЕКС сложности (а не только в отчёт).
+    #[test]
+    fn crap_enters_complexity_index() {
+        let mut low = ComplexityFactors::zero();
+        low.cyclomatic = 0.5;
+        let mut high = low;
+        high = high.with_crap(1.0);
+        let base = low.index();
+        let with_crap = high.index();
+        assert!(
+            with_crap > base,
+            "CRAP-фактор должен поднимать индекс: {with_crap} vs {base}"
+        );
+        // Ровно вклад CRAP: (1 - CRAP_WEIGHT)·base + CRAP_WEIGHT·1.
+        let expected = base * (1.0 - CRAP_WEIGHT) + CRAP_WEIGHT;
+        assert!(
+            (with_crap - expected).abs() < 1e-9,
+            "{with_crap} != {expected}"
+        );
+    }
+
+    /// Индекс остаётся в 0..=1 и без CRAP считается как раньше (шесть факторов).
+    #[test]
+    fn index_stays_bounded_with_crap() {
+        let mut f = ComplexityFactors {
+            cyclomatic: 1.0,
+            shape: 1.0,
+            storage: 1.0,
+            functions: 1.0,
+            exec_graph: 1.0,
+            decompose: 1.0,
+            crap: Some(1.0),
+        };
+        assert!((f.index() - 1.0).abs() < 1e-9, "индекс: {}", f.index());
+        f.crap = None;
+        assert!((f.index() - 1.0).abs() < 1e-9, "без CRAP: {}", f.index());
+        let mut zero = ComplexityFactors::zero().with_crap(1.0);
+        assert!(
+            zero.index() > 0.0,
+            "CRAP даёт вклад даже при нулевых факторах"
+        );
+        zero.crap = Some(0.0);
+        assert!(
+            (zero.index() - 0.0).abs() < 1e-9,
+            "нулевой CRAP — нулевой вклад"
+        );
+    }
+
+    /// T-506: фактор «декомпозиция» по числу частей задачи.
+    #[test]
+    fn decompose_factor_counts_task_parts() {
+        assert_eq!(parts_factor(0), 0.0, "нет разбиения — ноль");
+        assert!((parts_factor(2) - 0.5).abs() < 1e-9);
+        assert_eq!(parts_factor(DECOMPOSE_FULL_PARTS), 1.0);
+        assert_eq!(parts_factor(99), 1.0, "фактор нормирован");
+    }
+
+    /// T-506: разбиение задачи (журнал `task_decomposition`) попадает в фактор 6
+    /// и в ИНДЕКС сложности.
+    #[test]
+    fn analyze_task_accounts_for_decomposition() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path();
+        let dir = crate::commands::orch::dir(root);
+        std::fs::create_dir_all(&dir).expect("каталог");
+        let mut log = crate::commands::decompose::DecompositionLog::default();
+        log.applied.insert(
+            "T-1".to_string(),
+            crate::commands::decompose::DecompositionRecord {
+                parent: "T-1".into(),
+                children: vec!["T-2".into(), "T-3".into()],
+                applied_at: 1,
+            },
+        );
+        std::fs::write(
+            dir.join("decompositions.json"),
+            serde_json::to_string_pretty(&log).expect("json"),
+        )
+        .expect("write");
+        let diff = "--- a/x.rs\n+++ b/x.rs\n@@\n+fn f() {}\n";
+        let plain = analyze_diff(diff);
+        let split = analyze_task(root, "T-1", diff);
+        assert_eq!(
+            decomposed_parts(root, "T-1"),
+            2,
+            "разбиение прочитано из журнала"
+        );
+        assert!(
+            split.decompose > plain.decompose,
+            "разбиение поднимает фактор: {} vs {}",
+            split.decompose,
+            plain.decompose
+        );
+        assert!((split.decompose - 0.5).abs() < 1e-9);
+        assert!(
+            split.index() > plain.index(),
+            "индекс учитывает разбиение: {} vs {}",
+            split.index(),
+            plain.index()
+        );
+        // Задача без разбиения — как обычно.
+        let other = analyze_task(root, "T-9", diff);
+        assert_eq!(other.decompose, plain.decompose);
+        assert_eq!(decomposed_parts(root, "T-9"), 0);
+    }
+
+    /// Диф-анализ тоже получает CRAP (по добавленным строкам).
+    #[test]
+    fn diff_analysis_gets_crap_from_added_lines() {
+        let diff = "--- a/x.rs\n+++ b/x.rs\n@@\n+if a { b(); }\n+fn f() {}\n";
+        let f = analyze_diff(diff);
+        assert!(f.crap.is_some(), "CRAP посчитан по диффу");
+        assert!(f.crap.unwrap() >= 0.0);
     }
 }

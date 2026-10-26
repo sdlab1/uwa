@@ -161,6 +161,22 @@ pub fn build(root: &Path, agent: &str, c_level: u8) -> Option<ComplexityReferenc
     Some(build_from(&pairs))
 }
 
+/// Индекс сложности задачи (0..=1) по её коммиту.
+///
+/// Факторы считаются по диффу коммита задачи — тем же путём, что и при
+/// построении эталона; фактор «декомпозиция» берётся из разбиения задачи
+/// (`core::task_decomposition` через `complexity_deviation::analyze_task`).
+///
+/// Нет задачи / нет коммита / коммит недоступен — `None`.
+pub fn task_complexity_index(root: &Path, task_id: &str) -> Option<f64> {
+    let reg = crate::commands::orch::load(root);
+    let task = reg.tasks.iter().find(|t| t.id == task_id)?;
+    let sha = task.commit_sha.clone()?;
+    let diff = complexity_deviation::diff_for_commit(root, &sha)?;
+    let factors = complexity_deviation::analyze_task(root, task_id, &diff);
+    Some(factors.index())
+}
+
 /// Обычный эталон уровня, приведённый к «средней сложности» этого уровня.
 pub fn reference_for(reference: &Reference, complexity: f64) -> Reference {
     let mut f = ComplexityFactors::zero();
@@ -209,6 +225,65 @@ mod tests {
             decompose: value,
             crap: None,
         }
+    }
+
+    /// T-513: индекс сложности задачи считается по её коммиту.
+    #[test]
+    fn task_complexity_index_uses_task_commit() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("repo");
+        std::fs::create_dir_all(&root).expect("mkdir");
+        let g = |args: &[&str]| {
+            let _ = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&root)
+                .output();
+        };
+        g(&["init", "-q", "-b", "main"]);
+        g(&["config", "user.email", "t@t"]);
+        g(&["config", "user.name", "t"]);
+        std::fs::write(root.join("a.rs"), "fn a() {}\n").expect("write");
+        g(&["add", "."]);
+        g(&["commit", "-qm", "base"]);
+        let out = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&root)
+            .output()
+            .expect("git");
+        let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        let mut reg = crate::commands::orch::Registry::default();
+        reg.tasks.push(crate::commands::orch::Task {
+            id: "T-1".into(),
+            agent: "beam".into(),
+            title: "задача".into(),
+            complexity: 1,
+            c_level: Some(1),
+            model: None,
+            model_source: None,
+            started_by: None,
+            started_at: None,
+            started_key: None,
+            status: crate::commands::orch::Status::Done,
+            zones: vec![],
+            fail_level: None,
+            note: String::new(),
+            created: 1,
+            updated: 1,
+            dod: vec![],
+            checks: vec![],
+            acked: vec![],
+            evidence: vec![],
+            commit_sha: Some(sha),
+            main_sha: None,
+            override_reason: None,
+        });
+        crate::commands::orch::save(&root, &reg).expect("save");
+        let idx = task_complexity_index(&root, "T-1").expect("индекс сложности");
+        assert!((0.0..=1.0).contains(&idx), "индекс нормирован: {idx}");
+        assert!(
+            task_complexity_index(&root, "T-9").is_none(),
+            "неизвестная задача — без индекса"
+        );
     }
 
     #[test]
