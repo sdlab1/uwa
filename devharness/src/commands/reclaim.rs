@@ -162,6 +162,501 @@ fn generate_hunks(root: &Path, task: &Task, reclaim_branch: &str) -> Result<Stri
     Ok(hunks)
 }
 
+// ═══════════════════════════════ RECLAIM: команда ═══════════════════════════════
+//
+// `devh orch reclaim <scan|salvage|close|redistribute|show>` — спасение
+// покинутой работы (T-320/T-535).
+//
+// Правила (fail-closed):
+// * только lead/tech_lead (check_role);
+// * `scan` — read-only: список кандидатов + отчёт на диск;
+// * `salvage` — коммит незакоммиченного в `devh/reclaim-<agent>` (ничего не
+//   удаляет);
+// * `close --apply` — снимает worktree ТОЛЬКО если rescue-ветка существует и
+//   указывает на тот же SHA, что и HEAD worktree, и дерево чистое;
+// * `redistribute --apply` — re-attach незавершённой работы в задачи (P2) с
+//   дедупом по rescue-имени.
+
+/// Имя rescue-ветки агента.
+pub fn rescue_branch(agent: &str) -> String {
+    format!("devh/reclaim-{agent}")
+}
+
+/// Агент из имени ветки (`devh/agent-X` или `devh/reclaim-X`).
+fn agent_of_branch(branch: &str) -> Option<String> {
+    branch
+        .strip_prefix("devh/agent-")
+        .or_else(|| branch.strip_prefix("devh/reclaim-"))
+        .map(|s| s.to_string())
+}
+
+/// Метка вида кандидата (для отчётов).
+fn kind_label(kind: crate::commands::wtman::CandidateKind) -> &'static str {
+    use crate::commands::wtman::CandidateKind as K;
+    match kind {
+        K::AbandonedWorktree => "abandoned-worktree",
+        K::OrphanBranch => "orphan-branch",
+        K::WipBranch => "wip-branch",
+        K::DanglingCommit => "dangling-commit",
+    }
+}
+
+/// Вывод git-команды (stdout; при ошибке — пусто).
+fn git_out(root: &Path, args: &[&str]) -> String {
+    std::process::Command::new("git")
+        .args(args)
+        .current_dir(root)
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        .unwrap_or_default()
+}
+
+/// Полный SHA ревизии.
+fn rev_parse(root: &Path, rev: &str) -> anyhow::Result<String> {
+    let out = std::process::Command::new("git")
+        .args(["rev-parse", rev])
+        .current_dir(root)
+        .output()
+        .map_err(|e| anyhow::anyhow!("git rev-parse {rev}: {e}"))?;
+    if !out.status.success() {
+        anyhow::bail!("git rev-parse {rev}: ревизия не разрешилась");
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// Короткий SHA (7 символов) для отчётов.
+fn short_sha(sha: &str) -> String {
+    sha.chars().take(7).collect()
+}
+
+/// Текущее время (секунды).
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Значение флага `--name value` или `--name=value`.
+fn flag_value(args: &[String], name: &str) -> Option<String> {
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if a == name {
+            return it
+                .next()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+        }
+        if let Some(rest) = a.strip_prefix(&format!("{name}=")) {
+            let t = rest.trim().to_string();
+            if !t.is_empty() {
+                return Some(t);
+            }
+        }
+    }
+    None
+}
+
+/// Найти worktree-кандидата по агенту/пути (только кандидаты с путём).
+fn find_worktree_candidate(
+    root: &Path,
+    agent: Option<&str>,
+    path: Option<&Path>,
+) -> anyhow::Result<crate::commands::wtman::Candidate> {
+    let cands = crate::commands::wtman::discover(root);
+    for c in &cands {
+        if c.path.is_none() {
+            continue;
+        }
+        if let Some(p) = path {
+            if c.path.as_deref() != Some(p) {
+                continue;
+            }
+        }
+        if let Some(a) = agent {
+            let cand_agent = c
+                .agent
+                .clone()
+                .or_else(|| agent_of_branch(c.branch.as_deref().unwrap_or("")));
+            if cand_agent.as_deref() != Some(a) {
+                continue;
+            }
+        }
+        return Ok(c.clone());
+    }
+    Err(anyhow::anyhow!(
+        "devh orch reclaim: кандидат не найден (agent={}, path={}) — см. devh orch reclaim scan",
+        agent.unwrap_or("-"),
+        path.map(|p| p.display().to_string())
+            .unwrap_or_else(|| "-".to_string())
+    ))
+}
+
+/// T-ID из текста сообщения коммита (`wip: beam T-123 7 файлов` → `T-123`).
+fn task_ref_from_msg(msg: &str) -> Option<String> {
+    msg.split_whitespace().find_map(|w| {
+        let t = w.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-');
+        if t.starts_with("T-") && t.len() > 2 && t[2..].chars().all(|c| c.is_ascii_digit()) {
+            Some(t.to_string())
+        } else {
+            None
+        }
+    })
+}
+
+
+/// Пути worktree'ов ЖИВЫХ агентов (зарегистрированных в реестре) + главное
+/// дерево: их reclaim НИКОГДА не снимает.
+///
+/// `wtman::registered_paths` возвращает ВСЕ worktree'и репозитория (включая
+/// брошенные) — такой keep-list блокировал бы снятие всегда.
+fn live_keep_paths(root: &Path, reg: &orch::Registry) -> Vec<PathBuf> {
+    let live: std::collections::HashSet<String> = reg
+        .agents
+        .iter()
+        .map(|a| crate::core::identity::canonical(&a.name))
+        .collect();
+    let mut keep = vec![root.to_path_buf()];
+    for wt in crate::shell::git::worktree_paths(root) {
+        let Some(branch) = crate::shell::git::branch_current(&wt) else {
+            continue;
+        };
+        let Some(agent) = agent_of_branch(&branch) else {
+            continue;
+        };
+        if live.contains(&crate::core::identity::canonical(&agent)) {
+            keep.push(wt);
+        }
+    }
+    keep
+}
+
+/// `scan` — список кандидатов + отчёт на диск (read-only).
+fn cmd_scan(root: &Path, json: bool) -> anyhow::Result<()> {
+    let cands = crate::commands::wtman::discover(root);
+    let items: Vec<serde_json::Value> = cands
+        .iter()
+        .map(|c| {
+            serde_json::json!({
+                "kind": kind_label(c.kind),
+                "agent": c.agent.clone().unwrap_or_default(),
+                "branch": c.branch.clone().unwrap_or_default(),
+                "path": c.path.as_ref().map(|p| p.display().to_string()).unwrap_or_default(),
+                "sha": c.sha.clone().unwrap_or_default(),
+            })
+        })
+        .collect();
+    let report = serde_json::json!({ "count": cands.len(), "candidates": items });
+    let body = serde_json::to_string_pretty(&report).unwrap_or_else(|_| "{}".to_string());
+    if json {
+        println!("{body}");
+    } else {
+        println!("=== RECLAIM scan: кандидатов {} ===", cands.len());
+        for c in &cands {
+            println!(
+                "  [{}] agent={} branch={} path={} sha={}",
+                kind_label(c.kind),
+                c.agent.as_deref().unwrap_or("-"),
+                c.branch.as_deref().unwrap_or("-"),
+                c.path
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "-".to_string()),
+                c.sha.as_deref().unwrap_or("-"),
+            );
+        }
+    }
+    let dir = orch::dir(root);
+    std::fs::create_dir_all(&dir)?;
+    let report_path = dir.join("reclaim-scan.json");
+    std::fs::write(&report_path, &body)?;
+    println!("отчёт: {}", report_path.display());
+    Ok(())
+}
+
+/// `salvage` — спасти грязный worktree в `devh/reclaim-<agent>` (ничего не удаляет).
+fn cmd_salvage(
+    root: &Path,
+    agent: Option<&str>,
+    path: Option<&Path>,
+    dry_run: bool,
+) -> anyhow::Result<()> {
+    let mut cand = find_worktree_candidate(root, agent, path)?;
+    let a = agent
+        .map(|s| s.to_string())
+        .or_else(|| agent_of_branch(cand.branch.as_deref().unwrap_or("")))
+        .ok_or_else(|| {
+            anyhow::anyhow!("devh orch reclaim salvage: агент не определён — нужен --agent")
+        })?;
+    cand.agent = Some(a.clone());
+    let branch = rescue_branch(&a);
+    println!("=== RECLAIM salvage ===");
+    println!(
+        "кандидат: [{}] agent={} branch={} path={}",
+        kind_label(cand.kind),
+        a,
+        cand.branch.as_deref().unwrap_or("-"),
+        cand.path
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "-".to_string()),
+    );
+    println!("rescue-ветка: {branch}");
+    if dry_run {
+        println!("dry-run: ничего не менял");
+        return Ok(());
+    }
+    let sha = crate::commands::wtman::salvage(root, &cand)?;
+    if sha.trim().is_empty() {
+        println!("пропуск: worktree чистый — нечего спасать");
+        return Ok(());
+    }
+    println!("спасено: {branch} ({})", short_sha(&sha));
+    Ok(())
+}
+
+/// `close --apply` — снять брошенный worktree (только при подтверждённом rescue-ref).
+fn cmd_close(
+    root: &Path,
+    agent: Option<&str>,
+    path: Option<&Path>,
+    apply: bool,
+) -> anyhow::Result<()> {
+    let mut cand = find_worktree_candidate(root, agent, path)?;
+    let a = agent
+        .map(|s| s.to_string())
+        .or_else(|| agent_of_branch(cand.branch.as_deref().unwrap_or("")))
+        .ok_or_else(|| {
+            anyhow::anyhow!("devh orch reclaim close: агент не определён — нужен --agent")
+        })?;
+    cand.agent = Some(a.clone());
+    let branch = rescue_branch(&a);
+    if !crate::shell::git::show_ref(root, &branch) {
+        anyhow::bail!(
+            "devh orch reclaim close: нет rescue-ветки {branch} — сначала: \
+             devh orch reclaim salvage --agent {a}"
+        );
+    }
+    let rescue_sha = rev_parse(root, &branch)?;
+    let wt = cand.path.clone().ok_or_else(|| {
+        anyhow::anyhow!("devh orch reclaim close: кандидат без пути — нечего снимать")
+    })?;
+    // fail-closed: незакоммиченное не удаляем НИ при каком флаге.
+    if crate::shell::git::tree_dirty(&wt) {
+        anyhow::bail!(
+            "devh orch reclaim close: fail-closed — в {} есть незакоммиченные изменения; \
+             сначала devh orch reclaim salvage",
+            wt.display()
+        );
+    }
+    let head = rev_parse(&wt, "HEAD")?;
+    if head != rescue_sha {
+        anyhow::bail!(
+            "devh orch reclaim close: fail-closed — rescue-ref {} ({}) не совпадает с HEAD \
+             worktree ({})",
+            branch,
+            short_sha(&rescue_sha),
+            short_sha(&head)
+        );
+    }
+    // rescue-ref подтверждён на тот же SHA — теперь снятие допустимо.
+    cand.branch = Some(branch.clone());
+    cand.sha = Some(rescue_sha.clone());
+    let keep = live_keep_paths(root, &orch::load(root));
+    let report = crate::commands::wtman::close_abandoned(root, &cand, &keep, !apply)?;
+    println!("=== RECLAIM close (apply={apply}) ===");
+    for line in report {
+        println!("{line}");
+    }
+    if !apply {
+        println!("dry-run: ничего не удалил (нужен --apply)");
+    }
+    Ok(())
+}
+
+/// `redistribute --apply` — re-attach спасённой работы в задачи (P2).
+fn cmd_redistribute(root: &Path, apply: bool) -> anyhow::Result<()> {
+    let _lock = crate::shell::lock::OutputLock::try_acquire(
+        root,
+        &orch::path(root),
+        "devh orch reclaim",
+    )
+    .map_err(|e| anyhow::anyhow!("devh orch reclaim: реестр занят ({e}) — повтори через секунду"))?;
+
+    let mut reg = orch::load(root);
+    let branches: Vec<String> = git_out(root, &["branch", "--list", "devh/reclaim-*"])
+        .lines()
+        .map(|l| l.trim().trim_start_matches('*').trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect();
+    let mut created = 0usize;
+    let mut updated = 0usize;
+    let mut skipped = 0usize;
+    for branch in branches {
+        let Some(agent) = agent_of_branch(&branch) else {
+            continue;
+        };
+        let sha = rev_parse(root, &branch)?;
+        let marker = format!("reclaim:{branch}@{}", short_sha(&sha));
+        // Дедуп по rescue-имени: повторный прогон не плодит задачи.
+        if reg.tasks.iter().any(|t| t.note.contains(&marker)) {
+            skipped += 1;
+            println!("пропуск (уже re-attach): {branch} ({})", short_sha(&sha));
+            continue;
+        }
+        let msg = git_out(root, &["log", "-1", "--format=%B", &branch]);
+        let task_ref = task_ref_from_msg(&msg);
+        let diff_range = format!("main...{branch}");
+        let files: Vec<String> = git_out(root, &["diff", "--name-only", &diff_range])
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect();
+        let snapshot = format!(
+            "rescue: {branch} ({})\n{}",
+            short_sha(&sha),
+            git_out(root, &["diff", "--name-status", &diff_range]).trim()
+        );
+        // Задача: по T-ID из коммита → активная задача агента → любая queued.
+        let mut idx = task_ref
+            .as_ref()
+            .and_then(|tid| reg.tasks.iter().position(|t| &t.id == tid));
+        if idx.is_none() {
+            idx = reg
+                .tasks
+                .iter()
+                .position(|t| t.agent == agent && t.status == Status::Active);
+        }
+        if idx.is_none() {
+            idx = reg
+                .tasks
+                .iter()
+                .position(|t| t.agent == agent && t.status == Status::Queued);
+        }
+        match idx {
+            Some(i) => {
+                let (id, title) = {
+                    let t = &reg.tasks[i];
+                    (t.id.clone(), t.title.clone())
+                };
+                if !apply {
+                    println!("план: re-attach {id} ({title}) -> queued P2, зон={}", files.len());
+                    continue;
+                }
+                let t = &mut reg.tasks[i];
+                t.status = Status::Queued;
+                t.complexity = 2; // P2 — работа не завершена, но сохранена.
+                if !files.is_empty() {
+                    t.zones = files.clone();
+                }
+                t.note = format!("{}\n{}\n{}", t.note, marker, snapshot)
+                    .trim()
+                    .to_string();
+                t.updated = now_secs();
+                updated += 1;
+                println!("re-attach: {id} -> queued P2 ({title})");
+            }
+            None => {
+                if !apply {
+                    println!(
+                        "план: создать incomplete-задачу для {agent} (P2, зон={})",
+                        files.len()
+                    );
+                    continue;
+                }
+                reg.seq = reg.seq.saturating_add(1);
+                let id = format!("T-{:03}", reg.seq);
+                let ts = now_secs();
+                reg.tasks.push(Task {
+                    id: id.clone(),
+                    agent: agent.clone(),
+                    title: format!("RECLAIM: незавершённая работа {agent} ({branch})"),
+                    complexity: 2,
+                    c_level: None,
+                    model: None,
+                    model_source: None,
+                    started_by: None,
+                    started_at: None,
+                    started_key: None,
+                    status: Status::Queued,
+                    zones: files.clone(),
+                    fail_level: None,
+                    note: format!("{marker}\n{snapshot}"),
+                    created: ts,
+                    updated: ts,
+                    dod: Vec::new(),
+                    checks: Vec::new(),
+                    acked: Vec::new(),
+                    evidence: Vec::new(),
+                    commit_sha: None,
+                    main_sha: None,
+                    override_reason: None,
+                });
+                created += 1;
+                println!("создана incomplete-задача {id} для {agent} (P2)");
+            }
+        }
+    }
+    if apply && (created > 0 || updated > 0) {
+        orch::save(root, &reg)?;
+        // Автораздача: incomplete-задачи уходят в очередь исполнителям.
+        crate::commands::autoassign::auto_trigger(root, &mut reg);
+        orch::save(root, &reg)?;
+    }
+    println!(
+        "RECLAIM redistribute: создано {created}, обновлено {updated}, пропущено {skipped} \
+         (apply={apply})"
+    );
+    Ok(())
+}
+
+/// Точка входа: `devh orch reclaim <scan|salvage|close|redistribute|show>`.
+pub fn run(root: &Path, args: &[String]) -> anyhow::Result<()> {
+    let reg = orch::load(root);
+    let caller = crate::core::identity::canonical(&crate::core::identity::current().name);
+    check_role(&reg, &caller).map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    let sub = args.first().map(|s| s.as_str()).unwrap_or("scan");
+    let rest: Vec<String> = args.iter().skip(1).cloned().collect();
+    match sub {
+        "show" => {
+            let id = rest
+                .first()
+                .ok_or_else(|| anyhow::anyhow!("devh orch reclaim show: нужен ID задачи"))?;
+            let with_diff = rest.iter().any(|a| a == "--diff");
+            let out = show(root, id, with_diff).map_err(|e| anyhow::anyhow!("{e}"))?;
+            println!("{out}");
+            Ok(())
+        }
+        "scan" => cmd_scan(root, rest.iter().any(|a| a == "--json")),
+        "salvage" => {
+            let agent = flag_value(&rest, "--agent");
+            let path = flag_value(&rest, "--path").map(PathBuf::from);
+            cmd_salvage(
+                root,
+                agent.as_deref(),
+                path.as_deref(),
+                rest.iter().any(|a| a == "--dry-run"),
+            )
+        }
+        "close" => {
+            let agent = flag_value(&rest, "--agent");
+            let path = flag_value(&rest, "--path").map(PathBuf::from);
+            cmd_close(
+                root,
+                agent.as_deref(),
+                path.as_deref(),
+                rest.iter().any(|a| a == "--apply"),
+            )
+        }
+        "redistribute" => cmd_redistribute(root, rest.iter().any(|a| a == "--apply")),
+        other => Err(anyhow::anyhow!(
+            "devh orch reclaim: неизвестная подкоманда '{other}' \
+             (scan|salvage|close|redistribute|show)"
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -308,5 +803,206 @@ mod tests {
         let snapshot = format_task_snapshot(&root, &task, false).unwrap();
         assert!(snapshot.contains("T-001"));
         assert!(snapshot.contains("Test"));
+    }
+
+    // ─────────── RECLAIM: команда (scan/salvage/close/redistribute) ───────────
+
+    /// Репозиторий с начальным коммитом на main (иначе `main...branch` пуст).
+    fn init_repo_committed(d: &Path) -> PathBuf {
+        let root = init_repo(d);
+        std::fs::write(root.join("base.txt"), "base\n").unwrap();
+        assert!(git_ok(&root, &["add", "-A"]));
+        assert!(git_ok(&root, &["commit", "-m", "base"]));
+        root
+    }
+
+    fn git_ok(repo: &Path, args: &[&str]) -> bool {
+        Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
+    fn lead_registry() -> orch::Registry {
+        orch::Registry {
+            agents: vec![orch::AgentState {
+                name: "lead".to_string(),
+                role: Some("lead".to_string()),
+                ..Default::default()
+            }],
+            lead: Some("lead".to_string()),
+            ..Default::default()
+        }
+    }
+
+    fn task(id: &str, agent: &str, status: Status) -> Task {
+        Task {
+            id: id.to_string(),
+            agent: agent.to_string(),
+            title: format!("задача {id}"),
+            complexity: 1,
+            c_level: None,
+            model: None,
+            model_source: None,
+            started_by: None,
+            started_at: None,
+            started_key: None,
+            status,
+            zones: vec!["src/a.rs".to_string()],
+            fail_level: None,
+            note: String::new(),
+            created: 0,
+            updated: 0,
+            dod: Vec::new(),
+            checks: Vec::new(),
+            acked: Vec::new(),
+            evidence: Vec::new(),
+            commit_sha: None,
+            main_sha: None,
+            override_reason: None,
+        }
+    }
+
+    #[test]
+    fn rescue_branch_name_is_stable() {
+        assert_eq!(rescue_branch("beam"), "devh/reclaim-beam");
+        assert_eq!(agent_of_branch("devh/reclaim-beam").as_deref(), Some("beam"));
+        assert_eq!(agent_of_branch("devh/agent-beam").as_deref(), Some("beam"));
+        assert_eq!(agent_of_branch("main"), None);
+    }
+
+    #[test]
+    fn task_ref_parsed_from_commit_message() {
+        assert_eq!(
+            task_ref_from_msg("wip: beam T-123 7 файлов").as_deref(),
+            Some("T-123")
+        );
+        assert_eq!(task_ref_from_msg("reclaim: beam (3 файла)"), None);
+        assert_eq!(task_ref_from_msg("просто текст"), None);
+    }
+
+    #[test]
+    fn close_without_rescue_ref_is_refused() {
+        let d = tempfile::tempdir().unwrap();
+        let root = init_repo(d.path());
+        let wt = d.path().join("wt-ghost");
+        let wt_s = wt.to_string_lossy().to_string();
+        assert!(git_ok(&root, &["worktree", "add", "-b", "devh/agent-ghost", &wt_s]));
+        std::fs::write(wt.join("x.txt"), "1\n").unwrap();
+
+        let err = cmd_close(&root, Some("ghost"), None, true).expect_err("close без rescue — отказ");
+        let msg = err.to_string();
+        assert!(msg.contains("rescue"), "отказ должен называть rescue-ветку: {msg}");
+
+        // Чистое дерево без rescue-ветки — тоже отказ (fail-closed).
+        git_ok(&wt, &["add", "-A"]);
+        git_ok(&wt, &["commit", "-m", "base"]);
+        let err2 = cmd_close(&root, Some("ghost"), None, true).expect_err("всё ещё отказ");
+        assert!(err2.to_string().contains("rescue"), "{}", err2);
+    }
+
+    #[test]
+    fn salvage_then_close_keeps_rescue_branch() {
+        let d = tempfile::tempdir().unwrap();
+        let root = init_repo(d.path());
+        let wt = d.path().join("wt-ghost");
+        let wt_s = wt.to_string_lossy().to_string();
+        assert!(git_ok(&root, &["worktree", "add", "-b", "devh/agent-ghost", &wt_s]));
+        std::fs::write(wt.join("y.txt"), "data\n").unwrap();
+
+        cmd_salvage(&root, Some("ghost"), None, false).expect("salvage");
+        assert!(
+            crate::shell::git::show_ref(&root, "devh/reclaim-ghost"),
+            "rescue-ветка создана"
+        );
+
+        cmd_close(&root, Some("ghost"), None, true).expect("close");
+        assert!(!wt.exists(), "worktree снят");
+        assert!(
+            crate::shell::git::show_ref(&root, "devh/reclaim-ghost"),
+            "rescue-ветка сохранена после снятия worktree"
+        );
+    }
+
+    #[test]
+    fn redistribute_marks_task_p2_and_is_idempotent() {
+        let d = tempfile::tempdir().unwrap();
+        let root = init_repo_committed(d.path());
+        assert!(git_ok(&root, &["checkout", "-b", "devh/reclaim-ghost"]));
+        std::fs::write(root.join("z.txt"), "z\n").unwrap();
+        git_ok(&root, &["add", "-A"]);
+        git_ok(&root, &["commit", "-m", "reclaim: ghost (1 файла)"]);
+        git_ok(&root, &["checkout", "main"]);
+
+        let mut reg = lead_registry();
+        reg.tasks.push(task("T-001", "ghost", Status::Active));
+        orch::save(&root, &reg).unwrap();
+
+        cmd_redistribute(&root, true).expect("redistribute");
+        let reg2 = orch::load(&root);
+        let t = reg2.tasks.iter().find(|t| t.id == "T-001").expect("T-001");
+        assert_eq!(t.status, Status::Queued, "задача возвращена в очередь");
+        assert_eq!(t.complexity, 2, "приоритет P2");
+        assert!(
+            t.note.contains("reclaim:devh/reclaim-ghost"),
+            "маркер rescue в note: {}",
+            t.note
+        );
+        assert!(
+            t.zones.iter().any(|z| z.ends_with("z.txt")),
+            "зоны = изменённые пути: {:?}",
+            t.zones
+        );
+
+        let n = reg2.tasks.len();
+        cmd_redistribute(&root, true).expect("повторный прогон");
+        let reg3 = orch::load(&root);
+        assert_eq!(reg3.tasks.len(), n, "дедуп: новых задач не появилось");
+    }
+
+    #[test]
+    fn redistribute_creates_incomplete_task_p2() {
+        let d = tempfile::tempdir().unwrap();
+        let root = init_repo_committed(d.path());
+        assert!(git_ok(&root, &["checkout", "-b", "devh/reclaim-ghost"]));
+        std::fs::write(root.join("w.txt"), "w\n").unwrap();
+        git_ok(&root, &["add", "-A"]);
+        git_ok(&root, &["commit", "-m", "reclaim: ghost (1 файла)"]);
+        git_ok(&root, &["checkout", "main"]);
+
+        let reg = lead_registry();
+        orch::save(&root, &reg).unwrap();
+
+        cmd_redistribute(&root, true).expect("redistribute");
+        let reg2 = orch::load(&root);
+        let t = reg2
+            .tasks
+            .iter()
+            .find(|t| t.title.contains("RECLAIM"))
+            .expect("создана incomplete-задача");
+        assert_eq!(t.status, Status::Queued);
+        assert_eq!(t.complexity, 2, "P2");
+        assert!(t.note.contains("reclaim:devh/reclaim-ghost"), "{}", t.note);
+    }
+
+    #[test]
+    fn scan_is_read_only_and_writes_report() {
+        let d = tempfile::tempdir().unwrap();
+        let root = init_repo(d.path());
+        let wt = d.path().join("wt-ghost");
+        let wt_s = wt.to_string_lossy().to_string();
+        assert!(git_ok(&root, &["worktree", "add", "-b", "devh/agent-ghost", &wt_s]));
+        std::fs::write(wt.join("q.txt"), "q\n").unwrap();
+
+        cmd_scan(&root, true).expect("scan");
+        let report = orch::dir(&root).join("reclaim-scan.json");
+        assert!(report.is_file(), "отчёт записан: {}", report.display());
+        let body = std::fs::read_to_string(&report).unwrap();
+        assert!(body.contains("abandoned-worktree"), "кандидат в отчёте: {body}");
+        // scan ничего не меняет: worktree на месте, dirty-файл цел.
+        assert!(wt.exists());
+        assert!(wt.join("q.txt").is_file());
     }
 }

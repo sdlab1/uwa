@@ -117,6 +117,66 @@ pub fn set_password(root: &Path, password: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Прочитать ТЕКУЩИЙ пароль из аргументов или окружения.
+///
+/// Отдельный источник от [`password_from`]: при СМЕНЕ пароля нужны оба —
+/// новый (`--password`) и текущий (`--current-password`).
+///
+/// Переменная окружения `DEVH_LEAD_CURRENT_PASSWORD` — чтобы не светить
+/// пароль в списке процессов.
+pub fn current_password_from(args: &[String]) -> Option<String> {
+    if let Ok(v) = std::env::var("DEVH_LEAD_CURRENT_PASSWORD") {
+        let t = v.trim().to_string();
+        if !t.is_empty() {
+            return Some(t);
+        }
+    }
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if a == "--current-password" {
+            return it
+                .next()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+        }
+        if let Some(rest) = a.strip_prefix("--current-password=") {
+            let t = rest.trim().to_string();
+            if !t.is_empty() {
+                return Some(t);
+            }
+        }
+    }
+    None
+}
+
+/// Сменить пароль ведущего.
+///
+/// Первичная установка (пароля ещё нет) — текущий пароль не требуется:
+/// пароль ставит сам ведущий. Любая СМЕНА — только с ВЕРНЫМ текущим паролем
+/// (сравнение без раннего выхода): иначе `DEVH_AGENT=lead devh orch passwd
+/// --password pwn` перехватывал бы роль ведущего (T-484).
+pub fn rotate_password(
+    root: &Path,
+    current: Option<&str>,
+    new_password: &str,
+) -> anyhow::Result<()> {
+    if new_password.trim().is_empty() {
+        anyhow::bail!("пустой пароль не принимается");
+    }
+    if is_set(root) {
+        let cur = current.ok_or_else(|| {
+            anyhow::anyhow!(
+                "смена пароля требует ТЕКУЩИЙ пароль \
+                 (--current-password или DEVH_LEAD_CURRENT_PASSWORD)"
+            )
+        })?;
+        if !verify(root, cur) {
+            anyhow::bail!("текущий пароль неверен");
+        }
+    }
+    set_password(root, new_password)
+}
+
 /// Задан ли пароль (файл с солью/хэшем существует).
 pub fn is_set(root: &Path) -> bool {
     pass_path(root).is_file()
@@ -188,6 +248,47 @@ mod tests {
         assert!(!verify(&root, "old"), "старый пароль больше не работает");
         assert!(verify(&root, "new"));
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn rotate_requires_current_password_when_set() {
+        let root = tmp();
+        set_password(&root, "old").unwrap_or_else(|_| unreachable!());
+        // Смена без текущего пароля — отказ.
+        let err = rotate_password(&root, None, "new").expect_err("без текущего — отказ");
+        assert!(
+            err.to_string().contains("ТЕКУЩИЙ"),
+            "сообщение должно требовать текущий пароль: {err}"
+        );
+        // Смена с неверным текущим — отказ.
+        let err = rotate_password(&root, Some("wrong"), "new").expect_err("неверный — отказ");
+        assert!(err.to_string().contains("неверен"), "{err}");
+        // Старый пароль жив.
+        assert!(verify(&root, "old"), "старый пароль ещё работает");
+        // Смена с верным текущим — ок.
+        rotate_password(&root, Some("old"), "new").unwrap_or_else(|_| unreachable!());
+        assert!(verify(&root, "new"), "новый пароль принят");
+        assert!(!verify(&root, "old"), "старый пароль больше не работает");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn first_set_does_not_require_current_password() {
+        let root = tmp();
+        assert!(!is_set(&root));
+        rotate_password(&root, None, "first").unwrap_or_else(|_| unreachable!());
+        assert!(verify(&root, "first"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn current_password_taken_from_flag_or_env() {
+        let args = vec!["--current-password".to_string(), "cur".to_string()];
+        assert_eq!(current_password_from(&args), Some("cur".to_string()));
+        let args = vec!["--current-password=cur2".to_string()];
+        assert_eq!(current_password_from(&args), Some("cur2".to_string()));
+        let args: Vec<String> = Vec::new();
+        assert_eq!(current_password_from(&args), None);
     }
 
     #[test]
