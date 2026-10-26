@@ -454,6 +454,23 @@ fn me(explicit: Option<&str>) -> String {
     crate::core::identity::resolve(explicit).name
 }
 
+/// Отправитель письма — только фактический caller сессии (T-486).
+/// `--from` разрешён лишь как no-op для того же канонического адреса;
+/// подделка lead/tech_lead отклоняется.
+fn safe_from(caller: &str, requested: Option<&str>) -> Result<String, String> {
+    let caller_canon = crate::core::identity::canonical(caller);
+    let Some(requested) = requested.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(caller_canon);
+    };
+    let requested_canon = crate::core::identity::canonical(requested);
+    if requested_canon != caller_canon {
+        return Err(format!(
+            "подделка отправителя запрещена: --from «{requested}», фактический адрес «{caller_canon}» (T-486)"
+        ));
+    }
+    Ok(caller_canon)
+}
+
 /// Корень репозитория, где лежит общий реестр (для проверки зарезервированных имён).
 fn repo_root_with_registry() -> Option<PathBuf> {
     let mut cur = std::env::current_dir().ok()?;
@@ -1407,9 +1424,14 @@ pub fn send(args: &[String]) -> i32 {
     let m = parse_args(args);
     match m.sub.as_str() {
         "send" | "reply" => {
-            let from = m
-                .value("from")
-                .unwrap_or_else(|| me(m.value("agent").as_deref()));
+            let caller = me(None);
+            let from = match safe_from(&caller, m.value("from").as_deref()) {
+                Ok(from) => from,
+                Err(e) => {
+                    eprintln!("devh msg send: {e}");
+                    return 1;
+                }
+            };
             let mut to = m.values("to");
             if to.is_empty() {
                 to.push("all".to_string());
@@ -2691,5 +2713,14 @@ ID: abcd1234\n\
         assert!(alias_targets_agent("minimax", &reserved));
         assert!(alias_targets_agent("step5", &reserved));
         assert!(!alias_targets_agent("deepseek", &reserved));
+    }
+
+    #[test]
+    fn sender_cannot_be_forged_via_from() {
+        let err =
+            safe_from("attacker", Some("lead")).expect_err("подделка --from lead должна падать");
+        assert!(err.contains("T-486"), "ошибка ссылается на T-486: {err}");
+        assert_eq!(safe_from("attacker", Some("attacker")).unwrap(), "attacker");
+        assert_eq!(safe_from("attacker", None).unwrap(), "attacker");
     }
 }
