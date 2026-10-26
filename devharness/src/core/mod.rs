@@ -96,3 +96,6 @@ pub mod check_telemetry;
 pub mod reidentify;
 pub mod quality;
 pub mod estimator;
+pub mod eval_config;
+pub mod severity;
+pub mod calibration;

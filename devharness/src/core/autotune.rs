@@ -123,6 +123,18 @@ pub struct CheckSample {
     pub errors: u32,
     /// Предупреждения компиляции.
     pub warnings: u32,
+    /// Взвешенная сумма ошибок (Σ множителей тяжести: Fatal ×5 и т.д.).
+    #[serde(default)]
+    pub errors_weighted: f64,
+    /// Взвешенная сумма предупреждений (Σ множителей тяжести).
+    #[serde(default)]
+    pub warnings_weighted: f64,
+    /// Сколько ошибок по категориям тяжести (имя категории → число).
+    #[serde(default)]
+    pub error_categories: std::collections::BTreeMap<String, u32>,
+    /// Сколько предупреждений по категориям тяжести.
+    #[serde(default)]
+    pub warning_categories: std::collections::BTreeMap<String, u32>,
     /// Сборка прошла без ошибок.
     pub build_ok: bool,
     /// Длительность прогона, секунды (для расчёта скорости починки).
@@ -149,6 +161,10 @@ pub struct ModelStats {
     pub avg_errors: f64,
     /// Среднее число предупреждений на запуск (нормировано по уровню).
     pub avg_warnings: f64,
+    /// Средняя ВЗВЕШЕННАЯ сумма ошибок (по множителям тяжести).
+    pub avg_errors_weighted: f64,
+    /// Средняя взвешенная сумма предупреждений (по множителям тяжести).
+    pub avg_warnings_weighted: f64,
     /// Среднее число прогонов `cargo check` на задачу.
     pub avg_runs_per_sample: f64,
     /// Доля успешных сборок (0..1).
@@ -227,17 +243,18 @@ pub struct AutotuneConfig {
 
 impl Default for AutotuneConfig {
     fn default() -> Self {
+        let d = crate::core::eval_config::DEFAULTS;
         Self {
             enabled: true,
-            error_weight: 1.2,
-            warning_weight: 0.35,
-            runs_weight: 0.15,
-            fix_latency_weight: 0.4,
-            fix_latency_ref_secs: 300.0,
-            fix_bonus: 0.5,
-            neatness_weight: 0.2,
-            success_bonus: 1.0,
-            min_samples: 3,
+            error_weight: d.autotune_error_weight,
+            warning_weight: d.autotune_warning_weight,
+            runs_weight: d.autotune_runs_weight,
+            fix_latency_weight: d.autotune_fix_latency_weight,
+            fix_latency_ref_secs: d.autotune_fix_latency_ref_secs,
+            fix_bonus: d.autotune_fix_bonus,
+            neatness_weight: d.autotune_neatness_weight,
+            success_bonus: d.autotune_success_bonus,
+            min_samples: d.autotune_min_samples,
         }
     }
 }
@@ -298,7 +315,10 @@ impl CoeffRecord {
         let terms = penalty_vector(stats, cfg);
         let mut named = BTreeMap::new();
         for c in Coefficient::ALL {
-            named.insert(c.name().to_string(), terms.get(c.index()).copied().unwrap_or(0.0));
+            named.insert(
+                c.name().to_string(),
+                terms.get(c.index()).copied().unwrap_or(0.0),
+            );
         }
         Self {
             ts: now_secs(),
@@ -376,6 +396,8 @@ struct Agg {
     fail_samples: u32,
     norm_errors: f64,
     norm_warnings: f64,
+    norm_errors_weighted: f64,
+    norm_warnings_weighted: f64,
     tasks: BTreeSet<String>,
     levels: BTreeMap<u8, u32>,
 }
@@ -409,6 +431,19 @@ fn aggregate_by(
             let scale = quality::level_scale(s.c_level);
             agg.norm_errors += s.errors as f64 / scale;
             agg.norm_warnings += s.warnings as f64 / scale;
+            // Старые сэмплы (без весов) считаем как «каждая диагностика ×1».
+            let ew = if s.errors_weighted > 0.0 {
+                s.errors_weighted
+            } else {
+                s.errors as f64
+            };
+            let ww = if s.warnings_weighted > 0.0 {
+                s.warnings_weighted
+            } else {
+                s.warnings as f64
+            };
+            agg.norm_errors_weighted += ew / scale;
+            agg.norm_warnings_weighted += ww / scale;
             if let Some(t) = s.task_id.as_ref() {
                 agg.tasks.insert(t.clone());
             }
@@ -417,7 +452,11 @@ fn aggregate_by(
         }
         let (fix_events, failed_tasks, fix_rate, fix_latency_avg) = fix_stats(&list);
         let tasks = agg.tasks.len().max(1) as f64;
-        let denom = if agg.runs > 0 { agg.runs as f64 } else { agg.samples as f64 };
+        let denom = if agg.runs > 0 {
+            agg.runs as f64
+        } else {
+            agg.samples as f64
+        };
         let stats = ModelStats {
             key: k.clone(),
             samples: agg.samples,
@@ -427,6 +466,8 @@ fn aggregate_by(
             warnings_total: agg.warnings_total,
             avg_errors: agg.norm_errors / denom,
             avg_warnings: agg.norm_warnings / denom,
+            avg_errors_weighted: agg.norm_errors_weighted / denom,
+            avg_warnings_weighted: agg.norm_warnings_weighted / denom,
             avg_runs_per_sample: agg.runs as f64 / tasks,
             success_rate: agg.ok_samples as f64 / agg.samples.max(1) as f64,
             failing_samples: agg.fail_samples,
@@ -500,15 +541,16 @@ pub fn penalty_vector(stats: &ModelStats, cfg: &AutotuneConfig) -> CoefficientVe
     } else {
         1.0
     };
-    v[Coefficient::Errors.index()] = cfg.error_weight * (1.0 + stats.avg_errors.max(0.0)).log2();
+    // Ошибки и предупреждения считаются С ТЯЖЕСТЬЮ: 3 грубейшие ошибки
+    // (Fatal ×5) весят как 10 опечаток, 3 мелких недочёта — заметно меньше.
+    v[Coefficient::Errors.index()] =
+        cfg.error_weight * (1.0 + stats.avg_errors_weighted.max(0.0)).log2();
     v[Coefficient::Warnings.index()] =
-        cfg.warning_weight * (1.0 + stats.avg_warnings.max(0.0)).log2();
-    v[Coefficient::Runs.index()] = cfg.runs_weight
-        * (1.0 + stats.avg_extra_runs()).log2()
-        * unfixed;
-    v[Coefficient::FixLatency.index()] = cfg.fix_latency_weight
-        * (1.0 + latency / ref_secs).log2()
-        * unfixed;
+        cfg.warning_weight * (1.0 + stats.avg_warnings_weighted.max(0.0)).log2();
+    v[Coefficient::Runs.index()] =
+        cfg.runs_weight * (1.0 + stats.avg_extra_runs()).log2() * unfixed;
+    v[Coefficient::FixLatency.index()] =
+        cfg.fix_latency_weight * (1.0 + latency / ref_secs).log2() * unfixed;
     v[Coefficient::Neatness.index()] =
         cfg.neatness_weight * (1.0 - stats.warn_clean_rate.clamp(0.0, 1.0));
     v[Coefficient::Success.index()] = -cfg.success_bonus * (stats.success_rate - 0.5);
@@ -539,11 +581,7 @@ pub fn adjust(base: u8, stats: Option<&ModelStats>, cfg: &AutotuneConfig) -> u8 
 }
 
 /// Штраф конкретного агента (по его ledger'у), если эмпирика доверена.
-pub fn penalty_for_agent(
-    root: &Path,
-    agent: &str,
-    cfg: &AutotuneConfig,
-) -> Option<f64> {
+pub fn penalty_for_agent(root: &Path, agent: &str, cfg: &AutotuneConfig) -> Option<f64> {
     let stats = stats_for_agent(root, agent, cfg)?;
     Some(penalty(&stats, cfg))
 }
@@ -556,7 +594,10 @@ pub fn stats_for_agent(root: &Path, agent: &str, cfg: &AutotuneConfig) -> Option
     }
     let canon = crate::core::identity::canonical(agent);
     let by_agent = aggregate_by_agent(&samples);
-    if let Some(st) = by_agent.get(&canon).filter(|s| s.samples >= cfg.min_samples) {
+    if let Some(st) = by_agent
+        .get(&canon)
+        .filter(|s| s.samples >= cfg.min_samples)
+    {
         return Some(st.clone());
     }
     let model = agent_model(root, agent)?;
@@ -709,7 +750,37 @@ pub fn record_output_timed(
     stderr: &str,
     duration_secs: Option<f64>,
 ) -> Option<CheckSample> {
-    let stats = CheckStats::from_output(stdout, stderr);
+    record_output_timed_scoped(
+        root,
+        agent,
+        model,
+        model_version,
+        task_id,
+        c_level,
+        stdout,
+        stderr,
+        duration_secs,
+        &[],
+    )
+}
+
+/// То же, но диагностики считаются ТОЛЬКО по зоне агента (`scope`).
+///
+/// Чужие файлы не понижают потолок агента (BROKEN-POTOLK).
+#[allow(clippy::too_many_arguments)]
+pub fn record_output_timed_scoped(
+    root: &Path,
+    agent: &str,
+    model: &str,
+    model_version: Option<&str>,
+    task_id: Option<&str>,
+    c_level: u8,
+    stdout: &str,
+    stderr: &str,
+    duration_secs: Option<f64>,
+    scope: &[String],
+) -> Option<CheckSample> {
+    let stats = CheckStats::from_output_scoped(stdout, stderr, scope);
     if stats.is_empty() {
         return None;
     }
@@ -723,11 +794,41 @@ pub fn record_output_timed(
         runs: stats.runs,
         errors: stats.errors,
         warnings: stats.warnings,
+        errors_weighted: stats.errors_weighted,
+        warnings_weighted: stats.warnings_weighted,
+        error_categories: category_map(stdout, stderr, scope, true),
+        warning_categories: category_map(stdout, stderr, scope, false),
         build_ok: stats.build_ok,
         duration_secs,
     };
     let _ = append_sample(root, &sample);
     Some(sample)
+}
+
+/// Сколько диагностик каждой категории тяжести (ошибки или предупреждения).
+fn category_map(
+    stdout: &str,
+    stderr: &str,
+    scope: &[String],
+    errors: bool,
+) -> std::collections::BTreeMap<String, u32> {
+    let mut out: std::collections::BTreeMap<String, u32> = std::collections::BTreeMap::new();
+    for text in [stdout, stderr] {
+        for d in crate::core::severity::parse_diagnostics(text) {
+            if d.level.is_error() != errors {
+                continue;
+            }
+            if !scope.is_empty() {
+                match &d.file {
+                    Some(f) if crate::core::check_telemetry::file_in_scope(f, scope) => {}
+                    _ => continue,
+                }
+            }
+            let slot = out.entry(d.category.name().to_string()).or_insert(0);
+            *slot = slot.saturating_add(1);
+        }
+    }
+    out
 }
 
 /// Текущее время (секунды).
@@ -761,6 +862,10 @@ mod tests {
             runs: 1,
             errors: err,
             warnings: warn,
+            errors_weighted: err as f64,
+            warnings_weighted: warn as f64,
+            error_categories: std::collections::BTreeMap::new(),
+            warning_categories: std::collections::BTreeMap::new(),
             build_ok: ok,
             duration_secs: Some(10.0),
         }
@@ -776,6 +881,8 @@ mod tests {
             warnings_total: 0,
             avg_errors,
             avg_warnings,
+            avg_errors_weighted: avg_errors,
+            avg_warnings_weighted: avg_warnings,
             avg_runs_per_sample: 1.0,
             success_rate: 1.0,
             failing_samples: 0,
@@ -789,6 +896,25 @@ mod tests {
     }
 
     #[test]
+    fn heavy_errors_penalize_more_than_typos() {
+        // Три грубейшие ошибки (Fatal ×5) должны штрафовать сильнее, чем
+        // три опечатки (Careless ×1.5) при ОДИНАКОВОМ числе диагностик.
+        let cfg = AutotuneConfig::default();
+        let mut heavy = stats("m", 3, 3.0, 0.0);
+        heavy.avg_errors_weighted = 15.0;
+        let mut typo = stats("m", 3, 3.0, 0.0);
+        typo.avg_errors_weighted = 4.5;
+        let v_heavy = penalty_vector(&heavy, &cfg);
+        let v_typo = penalty_vector(&typo, &cfg);
+        assert!(
+            v_heavy[Coefficient::Errors.index()] > v_typo[Coefficient::Errors.index()],
+            "тяжёлые ошибки должны штрафовать сильнее: {} vs {}",
+            v_heavy[Coefficient::Errors.index()],
+            v_typo[Coefficient::Errors.index()]
+        );
+    }
+
+    #[test]
     fn aggregate_by_model_averages_per_run() {
         let s = vec![
             sample("mimo-2", "beam", 4, 2, false, 0, 1),
@@ -798,7 +924,11 @@ mod tests {
         let st = agg.get("mimo-2").expect("модель есть");
         assert_eq!(st.samples, 2);
         assert_eq!(st.runs, 2);
-        assert!((st.avg_errors - 2.0).abs() < 1e-9, "avg_errors={}", st.avg_errors);
+        assert!(
+            (st.avg_errors - 2.0).abs() < 1e-9,
+            "avg_errors={}",
+            st.avg_errors
+        );
         assert!((st.avg_warnings - 1.0).abs() < 1e-9);
         assert!((st.success_rate - 0.5).abs() < 1e-9);
     }
@@ -868,7 +998,11 @@ mod tests {
         let v = penalty_vector(&st, &cfg);
         assert!(v[Coefficient::Errors.index()] > 0.0);
         assert!(v[Coefficient::Warnings.index()] > 0.0);
-        assert_eq!(v[Coefficient::Runs.index()], 0.0, "все починено — штрафа за прогоны нет");
+        assert_eq!(
+            v[Coefficient::Runs.index()],
+            0.0,
+            "все починено — штрафа за прогоны нет"
+        );
         assert!((v.iter().sum::<f64>() - penalty(&st, &cfg)).abs() < 1e-9);
     }
 
@@ -879,7 +1013,11 @@ mod tests {
         st.avg_runs_per_sample = 1.0;
         st.failed_tasks = 0;
         let v = penalty_vector(&st, &cfg);
-        assert_eq!(v[Coefficient::Runs.index()], 0.0, "один прогон — это не мучение");
+        assert_eq!(
+            v[Coefficient::Runs.index()],
+            0.0,
+            "один прогон — это не мучение"
+        );
         assert_eq!(v[Coefficient::FixLatency.index()], 0.0);
     }
 
@@ -933,7 +1071,10 @@ mod tests {
         let hard = vec![sample("m", "a", 6, 0, false, 9, 1)];
         let se = aggregate_by_agent(&easy).get("a").expect("stats").clone();
         let sh = aggregate_by_agent(&hard).get("a").expect("stats").clone();
-        assert!(sh.avg_errors < se.avg_errors, "C9 нормируется мягче, чем C0");
+        assert!(
+            sh.avg_errors < se.avg_errors,
+            "C9 нормируется мягче, чем C0"
+        );
         assert!(penalty(&sh, &cfg) < penalty(&se, &cfg));
     }
 
@@ -960,8 +1101,14 @@ mod tests {
         s1.task_id = Some("T-slow".into());
         let mut s2 = sample("m", "b", 0, 0, true, 0, 3600);
         s2.task_id = Some("T-slow".into());
-        let fast = aggregate_by_agent(&[f1, f2]).get("a").expect("fast").clone();
-        let slow = aggregate_by_agent(&[s1, s2]).get("b").expect("slow").clone();
+        let fast = aggregate_by_agent(&[f1, f2])
+            .get("a")
+            .expect("fast")
+            .clone();
+        let slow = aggregate_by_agent(&[s1, s2])
+            .get("b")
+            .expect("slow")
+            .clone();
         assert!(
             fast.repair_coefficient(300.0) > slow.repair_coefficient(300.0),
             "быстрый фикс коэффициент выше"
@@ -979,7 +1126,11 @@ mod tests {
         assert!(v[Coefficient::Runs.index()] > 0.0);
         st.fix_rate = 1.0;
         let v2 = penalty_vector(&st, &cfg);
-        assert_eq!(v2[Coefficient::Runs.index()], 0.0, "починил — прогоны не штрафуются");
+        assert_eq!(
+            v2[Coefficient::Runs.index()],
+            0.0,
+            "починил — прогоны не штрафуются"
+        );
     }
 
     #[test]
@@ -1030,7 +1181,10 @@ mod tests {
         assert_eq!(loaded.len(), 1);
         let got = loaded.first().expect("record");
         assert_eq!(got.terms.len(), PENALTY_TERMS);
-        assert!((got.terms[Coefficient::Errors.index()] - rec.terms[Coefficient::Errors.index()]).abs() < 1e-12);
+        assert!(
+            (got.terms[Coefficient::Errors.index()] - rec.terms[Coefficient::Errors.index()]).abs()
+                < 1e-12
+        );
         assert!(got.named.contains_key("fix_latency"));
         let _ = fs::remove_dir_all(&dir);
     }

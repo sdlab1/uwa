@@ -9,8 +9,10 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::core::severity;
+
 /// Счётчики одного прогона проверки сборки.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct CheckStats {
     /// Сколько раз запускался `cargo check` (по маркерам запуска/завершения).
     pub runs: u32,
@@ -18,6 +20,12 @@ pub struct CheckStats {
     pub errors: u32,
     /// Сколько диагностик уровня `warning`.
     pub warnings: u32,
+    /// Взвешенная сумма ошибок (Σ множителей тяжести: Fatal ×5 и т.д.).
+    #[serde(default)]
+    pub errors_weighted: f64,
+    /// Взвешенная сумма предупреждений (Σ множителей тяжести).
+    #[serde(default)]
+    pub warnings_weighted: f64,
     /// Сборка завершилась успешно (нет ошибок, есть `Finished`/`build-finished`).
     pub build_ok: bool,
 }
@@ -29,20 +37,24 @@ impl CheckStats {
         let mut mentions: u32 = 0;
         let mut finished: u32 = 0;
 
+        // Диагностики — с КЛАССИФИКАЦИЕЙ ТЯЖЕСТИ (категория → множитель).
+        let counts = severity::parse_severity_counts(text);
+        s.errors = counts.errors;
+        s.warnings = counts.warnings;
+        s.errors_weighted = counts.errors_weighted;
+        s.warnings_weighted = counts.warnings_weighted;
+
         for raw in text.lines() {
             let line = raw.trim();
             if line.is_empty() {
                 continue;
             }
-            if let Some(j) = parse_json_line(line) {
-                match j.level.as_deref() {
-                    Some("error") => s.errors = s.errors.saturating_add(1),
-                    Some("warning") => s.warnings = s.warnings.saturating_add(1),
-                    _ => {}
-                }
-                if j.build_finished {
+            if line.starts_with('{') {
+                if let Some(success) = severity::json_build_finished(line) {
                     finished = finished.saturating_add(1);
-                    s.build_ok = s.build_ok || j.success;
+                    if success {
+                        s.build_ok = true;
+                    }
                 }
                 continue;
             }
@@ -53,11 +65,6 @@ impl CheckStats {
             if lower.starts_with("finished") {
                 finished = finished.saturating_add(1);
                 s.build_ok = true;
-            }
-            if is_error_header(&lower) {
-                s.errors = s.errors.saturating_add(1);
-            } else if is_warning_header(&lower) {
-                s.warnings = s.warnings.saturating_add(1);
             }
         }
 
@@ -80,7 +87,42 @@ impl CheckStats {
             runs: a.runs.saturating_add(b.runs),
             errors,
             warnings,
+            errors_weighted: a.errors_weighted + b.errors_weighted,
+            warnings_weighted: a.warnings_weighted + b.warnings_weighted,
             build_ok: (a.build_ok || b.build_ok) && errors == 0,
+        }
+    }
+
+    /// Счётчики по двум потокам вывода, ОГРАНИЧЕННЫЕ ЗОНОЙ агента.
+    ///
+    /// Диагностики в чужих файлах НЕ считаются: агент не отвечает за чужую
+    /// грязь. Реальный случай: opencode-0a0e0cfc получил потолок C1 вместо
+    /// C3 — `cargo check` по всему крейту показал warnings из файлов ДРУГИХ
+    /// агентов, и «эмпирика» наказала его за чужой код (BROKEN-POTOLK).
+    ///
+    /// Пустая зона = счётчики по всему выводу (прежнее поведение).
+    pub fn from_output_scoped(stdout: &str, stderr: &str, scope: &[String]) -> Self {
+        let total = Self::from_output(stdout, stderr);
+        if scope.is_empty() {
+            return total;
+        }
+        let mut files = severity::parse_weighted_by_file(stdout);
+        for (f, c) in severity::parse_weighted_by_file(stderr) {
+            files.entry(f).or_default().merge(&c);
+        }
+        let mut acc = severity::SeverityCounts::default();
+        for (file, c) in &files {
+            if file_in_scope(file, scope) {
+                acc.merge(c);
+            }
+        }
+        Self {
+            runs: total.runs,
+            errors: acc.errors,
+            warnings: acc.warnings,
+            errors_weighted: acc.errors_weighted,
+            warnings_weighted: acc.warnings_weighted,
+            build_ok: total.build_ok,
         }
     }
 
@@ -99,83 +141,49 @@ impl CheckStats {
     }
 }
 
-/// Диагностика из JSON-строки cargo (`--message-format=json`).
-struct JsonDiag {
-    level: Option<String>,
-    build_finished: bool,
-    success: bool,
+/// Диагностики по файлам: `file -> (errors, warnings)`.
+pub type FileDiagnostics = std::collections::BTreeMap<String, (u32, u32)>;
+
+/// Разложить диагностики вывода по файлам (сырые счётчики).
+///
+/// Тяжесть диагностик — в `crate::core::severity`; здесь только файлы.
+pub fn parse_by_file(text: &str) -> FileDiagnostics {
+    let mut out: FileDiagnostics = std::collections::BTreeMap::new();
+    for (file, c) in severity::parse_weighted_by_file(text) {
+        out.insert(file, (c.errors, c.warnings));
+    }
+    out
 }
 
-fn parse_json_line(line: &str) -> Option<JsonDiag> {
-    if !line.starts_with('{') {
-        return None;
-    }
-    let v: serde_json::Value = serde_json::from_str(line).ok()?;
-    let reason = v.get("reason").and_then(|r| r.as_str()).unwrap_or("");
-    match reason {
-        "compiler-message" => {
-            let level = v
-                .get("message")
-                .and_then(|m| m.get("level"))
-                .and_then(|l| l.as_str())
-                .map(|s| s.to_string());
-            Some(JsonDiag {
-                level,
-                build_finished: false,
-                success: false,
-            })
+/// Файл диагностики относится к зоне агента?
+///
+/// Зона — это либо конкретный файл, либо каталог (`devharness/src/core`).
+/// Пути cargo бывают относительными и абсолютными, поэтому сравнение идёт
+/// по хвосту пути.
+pub fn file_in_scope(file: &str, scope: &[String]) -> bool {
+    let f = file.replace('\\', "/");
+    for s in scope {
+        let s = s
+            .replace('\\', "/")
+            .trim()
+            .trim_start_matches("./")
+            .to_string();
+        if s.is_empty() {
+            continue;
         }
-        "build-finished" => {
-            let success = v.get("success").and_then(|s| s.as_bool()).unwrap_or(false);
-            Some(JsonDiag {
-                level: None,
-                build_finished: true,
-                success,
-            })
+        if f == s {
+            return true;
         }
-        // Прочий JSON (artifact, future-incompat…) — не диагностика.
-        _ => Some(JsonDiag {
-            level: None,
-            build_finished: false,
-            success: false,
-        }),
+        // Файл внутри зоны-каталога.
+        if f.starts_with(&format!("{s}/")) || f.contains(&format!("/{s}/")) {
+            return true;
+        }
+        // Хвост пути совпал (разные корни репозитория).
+        if f.ends_with(&format!("/{s}")) {
+            return true;
+        }
     }
-}
-
-/// Строка-заголовок диагностики уровня error (без служебных итогов).
-fn is_error_header(lower: &str) -> bool {
-    if !lower.starts_with("error") {
-        return false;
-    }
-    // Итоговые строки cargo/rustc — НЕ диагностика (иначе ошибка считается дважды).
-    if lower.starts_with("error: could not compile") {
-        return false;
-    }
-    if lower.starts_with("error: aborting due to") {
-        return false;
-    }
-    if lower.starts_with("error: build failed") {
-        return false;
-    }
-    if lower.contains("errors emitted") {
-        return false;
-    }
-    true
-}
-
-/// Строка-заголовок диагностики уровня warning (без служебных итогов).
-fn is_warning_header(lower: &str) -> bool {
-    if !lower.starts_with("warning") {
-        return false;
-    }
-    if lower.contains("warnings emitted") {
-        return false;
-    }
-    // «warning: `devh` (lib) generated 5 warnings» — итог, а не диагностика.
-    if lower.contains("generated") && lower.contains("warning") {
-        return false;
-    }
-    true
+    false
 }
 
 #[cfg(test)]

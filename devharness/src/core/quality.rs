@@ -85,16 +85,17 @@ pub type QualityVector = [f64; QUALITY_TERMS];
 ///
 /// Ошибки весят больше всего, комментарии — меньше всего: комментируемость
 /// это стиль, а не ум; ошибки и варнинги — прямое качество кода.
-pub const QUALITY_WEIGHTS: [f64; QUALITY_TERMS] = [0.30, 0.15, 0.25, 0.05, 0.10, 0.15];
+pub const QUALITY_WEIGHTS: [f64; QUALITY_TERMS] =
+    crate::core::eval_config::DEFAULTS.quality_weights;
 
 /// Идеальная плотность комментариев (комментариев на строку кода).
-pub const IDEAL_COMMENT_RATIO: f64 = 0.12;
+pub const IDEAL_COMMENT_RATIO: f64 = crate::core::eval_config::DEFAULTS.quality_ideal_comment_ratio;
 
 /// Ширина «рабочей полосы» вокруг идеальной плотности.
-pub const COMMENT_BAND: f64 = 0.12;
+pub const COMMENT_BAND: f64 = crate::core::eval_config::DEFAULTS.quality_comment_band;
 
 /// Сколько действий считается «полным обдумыванием».
-pub const IDEAL_ACTIONS: f64 = 8.0;
+pub const IDEAL_ACTIONS: f64 = crate::core::eval_config::DEFAULTS.quality_ideal_actions;
 
 /// Ожидаемая «трудность» задачи уровня C: во сколько раз больше ошибок,
 /// варнингов и прогонов мы ожидаем от модели, работающей на этом уровне.
@@ -138,6 +139,12 @@ pub struct QualitySample {
     /// Предупреждений в финальной сборке.
     #[serde(default)]
     pub warnings_final: u32,
+    /// Взвешенная сумма ошибок (по множителям тяжести).
+    #[serde(default)]
+    pub errors_weighted: f64,
+    /// Взвешенная сумма предупреждений (по множителям тяжести).
+    #[serde(default)]
+    pub warnings_weighted: f64,
     /// Финальная сборка прошла.
     #[serde(default)]
     pub build_ok: bool,
@@ -351,8 +358,19 @@ pub fn quality_vector(samples: &[QualitySample], c_level: Option<u8>) -> Quality
     let mut comments = 0.0f64;
     for s in &selected {
         let scale = level_scale(s.c_level);
-        err_num += s.errors_final as f64 / scale;
-        warn_num += s.warnings_final as f64 / scale;
+        // Тяжесть учитывается: 3 грубейшие ошибки ≠ 3 опечатки.
+        let ew = if s.errors_weighted > 0.0 {
+            s.errors_weighted
+        } else {
+            s.errors_final as f64
+        };
+        let ww = if s.warnings_weighted > 0.0 {
+            s.warnings_weighted
+        } else {
+            s.warnings_final as f64
+        };
+        err_num += ew / scale;
+        warn_num += ww / scale;
         if s.build_ok {
             ok += 1.0;
             if s.warnings_final == 0 {
@@ -447,6 +465,8 @@ mod tests {
             check_runs: 2,
             errors_final: errors,
             warnings_final: warnings,
+            errors_weighted: errors as f64,
+            warnings_weighted: warnings as f64,
             build_ok: ok,
             duration_secs: Some(60.0),
             deliberation_actions: 6,

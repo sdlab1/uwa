@@ -244,16 +244,18 @@ impl Default for RunConfig {
             rules: None,
             rules_log: None,
             autotune_enabled: true,
-            autotune_error_weight: 1.2,
-            autotune_warning_weight: 0.35,
-            autotune_success_bonus: 1.0,
-            autotune_min_samples: 3,
+            autotune_error_weight: crate::core::eval_config::DEFAULTS.autotune_error_weight,
+            autotune_warning_weight: crate::core::eval_config::DEFAULTS.autotune_warning_weight,
+            autotune_success_bonus: crate::core::eval_config::DEFAULTS.autotune_success_bonus,
+            autotune_min_samples: crate::core::eval_config::DEFAULTS.autotune_min_samples,
             identify_ttl_secs: 3600,
-            autotune_runs_weight: 0.15,
-            autotune_fix_latency_weight: 0.4,
-            autotune_fix_latency_ref_secs: 300.0,
-            autotune_fix_bonus: 0.5,
-            autotune_neatness_weight: 0.2,
+            autotune_runs_weight: crate::core::eval_config::DEFAULTS.autotune_runs_weight,
+            autotune_fix_latency_weight: crate::core::eval_config::DEFAULTS
+                .autotune_fix_latency_weight,
+            autotune_fix_latency_ref_secs: crate::core::eval_config::DEFAULTS
+                .autotune_fix_latency_ref_secs,
+            autotune_fix_bonus: crate::core::eval_config::DEFAULTS.autotune_fix_bonus,
+            autotune_neatness_weight: crate::core::eval_config::DEFAULTS.autotune_neatness_weight,
         }
     }
 }

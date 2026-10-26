@@ -4717,8 +4717,15 @@ pub fn verify_cmd(root: &Path, args: &[String]) -> anyhow::Result<()> {
             .iter()
             .find(|a| crate::core::identity::canonical(&a.name) == canon)
             .and_then(|a| a.model_version.clone());
-        let stats = crate::core::check_telemetry::CheckStats::from_output(&combined_all, "");
-        let _ = crate::core::autotune::record_output_timed(
+        // Телеметрия — ТОЛЬКО по зонам задачи: чужие файлы не понижают
+        // потолок агента (BROKEN-POTOLK). Тяжесть диагностик — с весами.
+        let task_zones = reg.tasks.get(idx).map(|t| t.zones.clone()).unwrap_or_default();
+        let stats = crate::core::check_telemetry::CheckStats::from_output_scoped(
+            &combined_all,
+            "",
+            &task_zones,
+        );
+        let _ = crate::core::autotune::record_output_timed_scoped(
             root,
             &agent,
             &model,
@@ -4728,6 +4735,7 @@ pub fn verify_cmd(root: &Path, args: &[String]) -> anyhow::Result<()> {
             &combined_all,
             "",
             Some(duration_total),
+            &task_zones,
         );
         let diff = quality_diff_text(&tree);
         let (added, comments, code_lines) = crate::core::quality::diff_metrics(&diff);
@@ -4750,6 +4758,8 @@ pub fn verify_cmd(root: &Path, args: &[String]) -> anyhow::Result<()> {
             check_runs: checks_count,
             errors_final: stats.errors,
             warnings_final: stats.warnings,
+            errors_weighted: stats.errors_weighted,
+            warnings_weighted: stats.warnings_weighted,
             build_ok: all_ok,
             duration_secs: Some(duration_total),
             deliberation_actions: actions,
@@ -6284,6 +6294,10 @@ mod tests {
                 runs: 5,
                 errors: 20,
                 warnings: 10,
+                errors_weighted: 100.0,
+                warnings_weighted: 20.0,
+                error_categories: std::collections::BTreeMap::new(),
+                warning_categories: std::collections::BTreeMap::new(),
                 build_ok: false,
                 duration_secs: Some(300.0),
             };
