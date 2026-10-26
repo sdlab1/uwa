@@ -364,6 +364,22 @@ pub fn category_breakdown(sample: &QualitySample) -> BTreeMap<String, u32> {
 }
 
 pub fn quality_vector(samples: &[QualitySample], c_level: Option<u8>) -> QualityVector {
+    quality_vector_scaled(samples, c_level, |_| 0.0)
+}
+
+/// Вектор качества с учётом СЛОЖНОСТИ каждой задачи.
+///
+/// `complexity` отдаёт индекс сложности задачи (0..=1) по её образцу: ошибки
+/// и предупреждения делятся на `(1 + C)·(1 + сложность)` — столько ошибок на
+/// сложной работе ожидаемо, поэтому агент не штрафуется за сложность задачи.
+pub fn quality_vector_scaled<F>(
+    samples: &[QualitySample],
+    c_level: Option<u8>,
+    complexity: F,
+) -> QualityVector
+where
+    F: Fn(&QualitySample) -> f64,
+{
     let selected: Vec<&QualitySample> = samples
         .iter()
         .filter(|s| c_level.map(|c| s.c_level == c).unwrap_or(true))
@@ -379,7 +395,8 @@ pub fn quality_vector(samples: &[QualitySample], c_level: Option<u8>) -> Quality
     let mut actions = 0.0f64;
     let mut comments = 0.0f64;
     for s in &selected {
-        let scale = level_scale(s.c_level);
+        // Шкала ожидаемой «трудности»: уровень C × реальная сложность задачи.
+        let scale = level_scale(s.c_level) * (1.0 + complexity(s).clamp(0.0, 1.0));
         // Тяжесть учитывается: 3 грубейшие ошибки ≠ 3 опечатки.
         let ew = if s.errors_weighted > 0.0 {
             s.errors_weighted
@@ -448,6 +465,32 @@ pub fn capability_index(v: &QualityVector) -> f64 {
         return 0.0;
     }
     (sum / wsum).clamp(0.0, 1.0)
+}
+
+/// Вектор качества, где сложность каждой задачи взята из её коммита.
+///
+/// Источник сложности — `core::complexity_reference` (факторы по диффу
+/// коммита задачи, включая разбиение задачи на части).
+pub fn quality_vector_with_complexity(
+    root: &Path,
+    samples: &[QualitySample],
+    c_level: Option<u8>,
+) -> QualityVector {
+    quality_vector_scaled(samples, c_level, |s| {
+        s.task_id
+            .as_deref()
+            .and_then(|id| crate::core::complexity_reference::task_complexity_index(root, id))
+            .unwrap_or(0.0)
+    })
+}
+
+/// Индекс способности с учётом сложности задач (0..=1).
+pub fn capability_index_with_complexity(
+    root: &Path,
+    samples: &[QualitySample],
+    c_level: Option<u8>,
+) -> f64 {
+    capability_index(&quality_vector_with_complexity(root, samples, c_level))
 }
 
 /// Потолок C по коэффициенту ума (0..1 → C0..C10).
@@ -533,6 +576,28 @@ mod tests {
             rework_rounds: 0,
             identified: true,
         }
+    }
+
+    /// T-513: индекс способности нормируется на сложность задачи — те же
+    /// ошибки на сложной задаче штрафуются меньше.
+    #[test]
+    fn capability_index_is_normalized_by_complexity() {
+        let s = sample(2, 3, 0, true);
+        let plain = quality_vector(&[s.clone()], None);
+        let hard = quality_vector_scaled(&[s.clone()], None, |_| 0.8);
+        assert!(
+            hard[QualityTerm::Error.index()] > plain[QualityTerm::Error.index()],
+            "ошибки на сложной задаче ожидаемее: {} vs {}",
+            hard[QualityTerm::Error.index()],
+            plain[QualityTerm::Error.index()]
+        );
+        let cap_plain = capability_index(&plain);
+        let cap_hard = capability_index(&hard);
+        assert!(
+            cap_hard > cap_plain,
+            "индекс способности нормирован сложностью: {cap_hard} vs {cap_plain}"
+        );
+        assert!((0.0..=1.0).contains(&cap_hard));
     }
 
     #[test]
