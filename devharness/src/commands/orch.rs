@@ -3606,6 +3606,15 @@ fn identify(root: &Path, args: &[String]) -> anyhow::Result<()> {
     // Ответ модели на вопрос идентификации (VERBATIM).
     let replies = flags_all(args, "--reply");
     if !replies.is_empty() {
+        // Отвечать можно ТОЛЬКО за свой адрес: иначе любой вызывающий
+        // переписывает чужую карточку модели (отравление идентификации, T-477),
+        // а через модель — и потолок агента (T-478).
+        if canon != caller {
+            return Err(anyhow!(
+                "devh orch identify --reply: отвечать можно только за свой адрес \
+                 (вызывающий: {caller}, в ответе: {canon})"
+            ));
+        }
         let raw = replies.join("\n");
         let ans = crate::core::reidentify::record_answer(root, &canon, &raw)?;
         let mut reg = reg;

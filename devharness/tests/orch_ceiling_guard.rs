@@ -274,3 +274,68 @@ fn guard_sees_manual_registry_edit() {
     );
     assert!(!ok, "guard с Problem должен возвращать не-0");
 }
+
+#[test]
+fn identify_reply_is_allowed_only_for_own_address() {
+    // T-477: ответ об идентификации — только за СВОЙ адрес. Иначе любой
+    // вызывающий переписывает чужую карточку модели, а через модель — потолок.
+    let fx = Fx::new("identify-poison");
+    fx.claim("beam", "worker-3");
+    let (ok, out) = fx.run(
+        &[
+            "orch",
+            "identify",
+            "step5",
+            "--reply",
+            "MODEL: minimax-m2",
+            "--reply",
+            "VERSION: forged",
+            "--reply",
+            "DATE: 2026-10-26",
+        ],
+        &[("AGENT_SESSION_ID", "worker-3")],
+    );
+    assert!(!ok, "чужую идентификацию переписывать нельзя: {out}");
+    assert!(out.contains("только за свой адрес"), "{out}");
+    let reg = fx.registry();
+    let victim = reg["agents"]
+        .as_array()
+        .unwrap_or_else(|| unreachable!())
+        .iter()
+        .find(|a| a["name"] == "step5")
+        .unwrap_or_else(|| unreachable!());
+    assert_eq!(
+        victim["model"].as_str(),
+        Some("m"),
+        "карточка жертвы не должна меняться"
+    );
+}
+
+#[test]
+fn identify_reply_for_own_address_still_works() {
+    // Мягкий R24: ответ за свой адрес принимается (идентификация — не блокировка).
+    let fx = Fx::new("identify-self");
+    fx.claim("beam", "worker-4");
+    let (ok, out) = fx.run(
+        &[
+            "orch",
+            "identify",
+            "--reply",
+            "MODEL: minimax-m3.1",
+            "--reply",
+            "VERSION: unknown",
+            "--reply",
+            "DATE: 2026-10-26",
+        ],
+        &[("AGENT_SESSION_ID", "worker-4")],
+    );
+    assert!(ok, "ответ за свой адрес должен приниматься: {out}");
+    let reg = fx.registry();
+    let me = reg["agents"]
+        .as_array()
+        .unwrap_or_else(|| unreachable!())
+        .iter()
+        .find(|a| a["name"] == "beam")
+        .unwrap_or_else(|| unreachable!());
+    assert_eq!(me["model"].as_str(), Some("minimax-m3.1"));
+}
