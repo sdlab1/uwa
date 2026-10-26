@@ -5030,12 +5030,20 @@ pub fn verify_cmd(root: &Path, args: &[String]) -> anyhow::Result<()> {
 fn quality_diff_text(tree: &Path, commit_sha: Option<&str>) -> String {
     // 1) Незакоммиченные изменения задачи — канонический случай (verify идёт
     //    ДО коммита): метрики кода описывают работу по задаче.
+    //
+    //    ВАЖНО: `git diff` НЕ показывает НОВЫЕ (untracked) файлы — а задача
+    //    часто создаёт новый модуль. Без добавления untracked-файлов метрики
+    //    качества врали: модуль на 230 строк измерялся как 1 строка.
     let o = std::process::Command::new("git")
         .args(["diff", "--unified=0", "HEAD"])
         .current_dir(tree)
         .output();
     if let Ok(outp) = o {
-        let text = String::from_utf8_lossy(&outp.stdout).to_string();
+        let mut text = String::from_utf8_lossy(&outp.stdout).to_string();
+        let untracked = untracked_added_text(tree);
+        if !untracked.trim().is_empty() {
+            text.push_str(&untracked);
+        }
         if !text.trim().is_empty() {
             return text;
         }
@@ -5067,6 +5075,40 @@ fn quality_diff_text(tree: &Path, commit_sha: Option<&str>) -> String {
         return String::from_utf8_lossy(&outp.stdout).to_string();
     }
     String::new()
+}
+
+/// Новые (untracked, но не игнорируемые) файлы — как строки диффа.
+///
+/// `git diff` их не показывает, поэтому метрики «добавлено строк» и «плотность
+/// комментариев» теряли целые модули. Возвращаем строки в формате диффа
+/// (`+строка`), чтобы `quality::diff_metrics` их посчитал.
+fn untracked_added_text(tree: &Path) -> String {
+    let o = std::process::Command::new("git")
+        .args(["ls-files", "--others", "--exclude-standard"])
+        .current_dir(tree)
+        .output();
+    let Ok(outp) = o else {
+        return String::new();
+    };
+    let listing = String::from_utf8_lossy(&outp.stdout).to_string();
+    let mut out = String::new();
+    for rel in listing.lines() {
+        let rel = rel.trim();
+        if rel.is_empty() {
+            continue;
+        }
+        let path = tree.join(rel);
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        out.push_str(&format!("+++ b/{rel}\n"));
+        for line in content.lines() {
+            out.push('+');
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
 }
 
 /// Разбивка диагностик по категориям тяжести — ТОЛЬКО по зонам задачи.
@@ -6497,6 +6539,22 @@ mod tests {
         );
         let fallback = quality_diff_text(dir, None);
         assert!(fallback.contains("beta"), "fallback на HEAD: {fallback}");
+    }
+
+    /// Новый (untracked) файл тоже попадает в метрики кода.
+    #[test]
+    fn quality_diff_counts_untracked_files() {
+        let tmp = tempdir().expect("tmp");
+        let dir = tmp.path();
+        let _task_sha = git_two_commits(dir).expect("fixture");
+        std::fs::write(dir.join("new_module.rs"), "// комментарий\nfn a() {}\n")
+            .expect("write");
+        let diff = quality_diff_text(dir, None);
+        assert!(diff.contains("new_module.rs"), "untracked не попал: {diff}");
+        let (added, comments, code) = crate::core::quality::diff_metrics(&diff);
+        assert_eq!(added, 2, "должны посчитаться обе строки: {diff}");
+        assert_eq!(comments, 1);
+        assert_eq!(code, 1);
     }
 
     /// Незакоммиченные изменения приоритетнее коммита задачи.
