@@ -155,9 +155,9 @@ pub fn checkpoint_at(path: &Path, agent: &str) -> anyhow::Result<String> {
         ("GIT_COMMITTER_EMAIL", "devh@localhost".to_string()),
     ];
     let res = (|| -> anyhow::Result<String> {
-        git_env(path, &env, &["read-tree", "HEAD"])?;
-        git_env(path, &env, &["add", "-A"])?;
-        let tree = git_env(path, &env, &["write-tree"])?;
+        git_env(&path, &env, &["read-tree", "HEAD"])?;
+        git_env(&path, &env, &["add", "-A"])?;
+        let tree = git_env(&path, &env, &["write-tree"])?;
         let msg = format!("WIP({agent}): чекпоинт незакоммиченной работы");
         let commit = git_env(
             &path,
@@ -165,7 +165,7 @@ pub fn checkpoint_at(path: &Path, agent: &str) -> anyhow::Result<String> {
             &["commit-tree", &tree, "-p", "HEAD", "-m", &msg],
         )?;
         let refname = format!("refs/heads/{}", wip_branch(agent));
-        git_env(path, &env, &["update-ref", &refname, &commit])?;
+        git_env(&path, &env, &["update-ref", &refname, &commit])?;
         Ok(commit)
     })();
     let _ = std::fs::remove_file(&idx);
@@ -2127,7 +2127,6 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let root = init_repo(d.path());
         let cfg = crate::commands::load_config(&root).unwrap_or_default();
-        // agent "ghost" — worktree не создан
         let report = wip_pass(&cfg, &root, "ghost").unwrap();
         assert_eq!(report, WipReport::NoWorktree);
     }
@@ -2137,12 +2136,10 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let root = init_repo(d.path());
         let cfg = crate::commands::load_config(&root).unwrap_or_default();
-        // Создаём чистый worktree для агента
         let wt = ensure(&cfg, &root, "clean-agent").unwrap().0;
-        // worktree чистый → skip
         let report = wip_pass(&cfg, &root, "clean-agent").unwrap();
         assert_eq!(report, WipReport::SkipClean);
-        let _ = wt; // suppress unused
+        let _ = wt;
     }
 
     #[test]
@@ -2150,7 +2147,6 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let root = init_repo(d.path());
         let cfg = crate::commands::load_config(&root).unwrap_or_default();
-        // Создаём worktree и делаем его грязным
         let (wt, _) = ensure(&cfg, &root, "dirty-agent").unwrap();
         std::fs::write(wt.join("scratch.txt"), "dirty work").unwrap();
         let report = wip_pass(&cfg, &root, "dirty-agent").unwrap();
