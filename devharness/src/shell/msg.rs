@@ -1444,20 +1444,75 @@ fn deliver(from: &str, to: &[String], block: &str, thread: &str) -> Vec<String> 
     done
 }
 
+/// T-475: справка по send/reply. Раньше `--help` молча уходил в рассылку
+/// пустого письма (`devh msg reply --help` дал случайный пустой broadcast).
+fn print_send_reply_help(sub: &str) {
+    println!(
+        "devh msg {sub}: отправить письмо (reply = ответ; --to обязателен)\n\
+         --to <адресат[,адресат|all]>   кому (для reply обязателен)\n\
+         --subject <текст>              тема (обязательна)\n\
+         --body <текст> | --body-file <пут>   тело (или --at/--diff)\n\
+         --at <путь[:строка]>           привязка к коду вместо тела\n\
+         --diff <файл>                  unified diff как привязка\n\
+         --thread <id>                  тред (без флага — новый или по контексту кода)\n\
+         --tag <тэг>                    метка (можно несколько)\n\
+         --from <адрес>                 от чьего имени (своё — по умолчанию)"
+    );
+}
+
+/// T-475: слепые отправки запрещены. `reply` без `--to` молча рассылал
+/// «all»; пустые subject/body уходили без единого слова. Функция ЧИСТАЯ —
+/// проверяется без ящика и без отправки.
+fn send_guard(
+    sub: &str,
+    to: &[String],
+    subject: &str,
+    body: &str,
+    has_att: bool,
+) -> Result<(), String> {
+    if to.is_empty() && sub == "reply" {
+        return Err(
+            "без --to ответ рассылается «all» вслепую — укажи адресата (T-475)".to_string(),
+        );
+    }
+    if subject.trim().is_empty() {
+        return Err("--subject пуст — письмо без темы рассылается вслепую (T-475)".to_string());
+    }
+    if body.trim().is_empty() && !has_att {
+        return Err(
+            "тело пусто — нужен --body/--body-file или --at/--diff с указанием на код (T-475)"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 pub fn send(args: &[String]) -> i32 {
     let m = parse_args(args);
     match m.sub.as_str() {
-        "send" | "reply" => {
+        sub @ ("send" | "reply") => {
+            // T-475: --help печатаем ДО любых побочных эффектов (me(), доставка).
+            if m.flag("help") || m.flag("h") {
+                print_send_reply_help(sub);
+                return 0;
+            }
             let caller = me(None);
             let from = match safe_from(&caller, m.value("from").as_deref()) {
                 Ok(from) => from,
                 Err(e) => {
-                    eprintln!("devh msg send: {e}");
+                    eprintln!("devh msg {sub}: {e}");
                     return 1;
                 }
             };
             let mut to = m.values("to");
             if to.is_empty() {
+                // T-475: reply без --to молча рассылал «all».
+                if sub == "reply" {
+                    eprintln!(
+                        "devh msg {sub}: без --to ответ рассылается «all» вслепую — укажи адресата (T-475)"
+                    );
+                    return 1;
+                }
                 to.push("all".to_string());
             }
             let subject = m.value("subject").unwrap_or_default();
@@ -1485,6 +1540,11 @@ pub fn send(args: &[String]) -> i32 {
                     snippet = Some(marked);
                     ctx_key = Some((p, plain));
                 }
+            }
+            // T-475: слепая отправка (пустые subject/body, reply вслепую) — отказ.
+            if let Err(e) = send_guard(sub, &to, &subject, &body, place_label.is_some()) {
+                eprintln!("devh msg {sub}: {e}");
+                return 1;
             }
             let block = build_message(
                 &from,
@@ -2821,5 +2881,38 @@ ID: abcd1234\n\
             "attacker"
         );
         assert_eq!(own_mailbox(None, "attacker", "read").unwrap(), "attacker");
+    }
+
+    /// T-475: reply без --to молча рассылал «all» — теперь отказ (чистая проверка).
+    #[test]
+    fn reply_without_to_is_refused_not_broadcast() {
+        // reply без адресата — отказ: раньше уходило вслепую всем.
+        let err = send_guard("reply", &[], "тема", "тело", false)
+            .expect_err("reply без --to должен падать (T-475)");
+        assert!(err.contains("T-475"), "отказ ссылается на T-475: {err}");
+        // send без --to (явный охват «all») — по-прежнему можно.
+        assert!(send_guard("send", &[], "тема", "тело", false).is_ok());
+        // Пустые subject/body — отказ даже с явным адресатом.
+        assert!(send_guard("send", &["beam".to_string()], "", "тело", false).is_err());
+        assert!(send_guard("send", &["beam".to_string()], "тема", "   ", false).is_err());
+        // Привязка к коду вместо тела — валидно.
+        assert!(send_guard("send", &["beam".to_string()], "тема", "", true).is_ok());
+    }
+
+    /// T-475: `devh msg reply --help` дал случайный пустой broadcast — теперь справка.
+    #[test]
+    fn reply_help_prints_instead_of_broadcast() {
+        let dir = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let rc = with_msg_home(dir.path(), || {
+            send(&["reply".to_string(), "--help".to_string()])
+        });
+        assert_eq!(
+            rc, 0,
+            "--help печатает справку, а не рассылает письмо (T-475)"
+        );
+        // В ящике пусто: раз ни один адресат не указан, рассылать нечего.
+        let inbox = dir.path().join("inbox");
+        let entries = std::fs::read_dir(&inbox).map(|d| d.count()).unwrap_or(0);
+        assert_eq!(entries, 0, "пустой broadcast не создал писем: {entries}");
     }
 }
