@@ -44,6 +44,13 @@
 //! `--in-place`): исходники агента не трогаются. `--in-place` разрешён
 //! только синхронному гейту внутри `devh run` (там своя worktree).
 //!
+//! T-625: режим `--scratch` — аудит идёт в ОТДЕЛЬНОМ worktree-«черновике»
+//! (`/tmp/devh-mutate-scratch-<key>`), где cargo-mutants работает
+//! `--in-place` с тёплым кэшем сборки. Мутируется ТОЛЬКО черновик: дерево
+//! агента и `main` остаются нетронутыми (R11 по сути), а копия крейта на
+//! каждого мутанта исчезает — copy-режим на 500+ мутантах грузил машину до
+//! load ~30 и делал «асинхронный» аудит блокирующим для соседей.
+//!
 //! ## Имена исходов
 //!
 //! Ровно те, что пишет cargo-mutants 27.1.0: `CaughtMutant`,
@@ -127,6 +134,11 @@ pub const CANON: &str = r#"devh mutate — единственный вход в 
                               умереть — аудит продолжится. Печатает, что
                               запускать дальше. Фоновый аудит идёт в copy-режиме
                               (без --in-place): дерево агента не мутируется.
+                              --scratch: аудит в изолированном worktree-«черновике»
+                              (in-place ТАМ — ваше дерево не трогается; тёплый
+                              кэш сборки, без копии крейта на мутанта).
+                              --scratch-base=<sha>: дифф перегенерируется в
+                              scratch от этой базы (новая сторона = файл на диске).
   devh mutate status          мгновенный снимок: легенда + процент-пилюля +
                               счётчики (✓/✗/⏱/⊘) + ETA + текущий мутант.
                               rc=1, если уже есть проблемы. Ничего не ждёт.
@@ -479,6 +491,22 @@ fn start(root: &Path, args: &[String]) -> anyhow::Result<()> {
             crate::commands::die(crate::commands::ExitCode::EnvError);
         }
     }
+    // T-625: scratch-режим — аудит идёт в изолированном worktree-«черновике»:
+    // cargo-mutants работает `--in-place` ТАМ, а не в дереве агента (R11 по
+    // сути): тёплый кэш сборки вместо копии крейта на каждого мутанта.
+    let (scratch_mode, scratch_base, _scratch_rest) =
+        crate::core::mutate_scratch::split_flags(&args);
+    if scratch_mode
+        && args
+            .iter()
+            .any(|a| a == "--in-place" || a.starts_with("--in-place="))
+    {
+        println!(
+            "devh mutate start: --in-place вместе с --scratch нельзя — харнесс сам\n\
+             включает in-place в scratch-дереве (ваше дерево он не трогает)."
+        );
+        crate::commands::die(crate::commands::ExitCode::ActionError);
+    }
     // R11: фоновый аудит не мутирует дерево агента.
     if args
         .iter()
@@ -570,14 +598,23 @@ fn start(root: &Path, args: &[String]) -> anyhow::Result<()> {
             finished: None,
             args: args.clone(),
             cwd: root.display().to_string(),
-            mode: "copy".to_string(),
+            mode: if scratch_mode { "scratch".to_string() } else { "copy".to_string() },
             pgid: 0,
             tree_stamp: tree_stamp(root),
         },
     )?;
     println!("аудит запущен (супервизор pid {})", child.id());
     println!("  cargo-mutants: {}", args.join(" "));
-    println!("  режим:         copy (дерево агента не мутируется)");
+    if scratch_mode {
+        println!(
+            "  режим:         scratch (изолированный worktree, in-place ТАМ — дерево агента не мутируется)"
+        );
+        if let Some(base) = scratch_base.as_deref() {
+            println!("  база диффа:    {base} (дифф перегенерируется в scratch) ");
+        }
+    } else {
+        println!("  режим:         copy (дерево агента не мутируется)");
+    }
     println!(
         "  история:       {} ранее пойманных мутантов, {} файлов в ledger покрытия{}",
         history.len(),
@@ -650,7 +687,63 @@ fn acquire_output_for_run(root: &Path, output: &Path) -> anyhow::Result<OutputLo
     anyhow::bail!("output занят — {last}")
 }
 
-fn supervise(root: &Path, args: &[String]) -> anyhow::Result<()> {
+fn supervise(root: &Path, args_in: &[String]) -> anyhow::Result<()> {
+    // T-625: scratch-режим. Аудит идёт в изолированном worktree-«черновике»:
+    // cargo-mutants работает `--in-place` ТАМ (тёплый кэш сборки, без копии
+    // крейта на каждого мутанта), а результаты пишутся в `.harness/mutate/out`
+    // дерева агента — счётчики/проблемы/вердикт считаются как раньше.
+    let (scratch_mode, scratch_base, base_args) =
+        crate::core::mutate_scratch::split_flags(args_in);
+    let mut args: Vec<String> = base_args.clone();
+    let mut work_cwd: PathBuf = root.to_path_buf();
+    if scratch_mode {
+        let scratch = crate::core::mutate_scratch::scratch_dir(root);
+        crate::core::mutate_scratch::ensure_worktree(root, &scratch)
+            .map_err(|e| anyhow::anyhow!("--scratch: {e}"))?;
+        let mut files = crate::core::mutate_scratch::explicit_files(&base_args);
+        if let Some(df) = crate::core::mutate_scratch::diff_file(&base_args) {
+            let text = fs::read_to_string(&df).map_err(|e| {
+                anyhow::anyhow!("--scratch: не читается дифф {}: {e}", df.display())
+            })?;
+            files.extend(crate::core::mutate_scratch::parse_diff_paths(&text));
+        }
+        files.sort();
+        files.dedup();
+        if files.is_empty() {
+            anyhow::bail!(
+                "--scratch: нужен явный охват (--in-diff=<файл> или пути .rs) — иначе нечего аудитить"
+            );
+        }
+        let copied = crate::core::mutate_scratch::copy_scope(root, &scratch, &files)
+            .map_err(|e| anyhow::anyhow!("--scratch: {e}"))?;
+        if copied.is_empty() {
+            anyhow::bail!("--scratch: файлы зоны не найдены в дереве: {}", files.join(", "));
+        }
+        let mut scratch_diff: Option<PathBuf> = None;
+        if let Some(base) = scratch_base.as_deref() {
+            let out = scratch.with_extension("diff");
+            let ok = crate::core::mutate_scratch::regen_diff(&scratch, base, &copied, &out)
+                .map_err(|e| anyhow::anyhow!("--scratch: {e}"))?;
+            if !ok {
+                anyhow::bail!("--scratch: дифф {base}..HEAD по зоне пуст — нечего аудитить");
+            }
+            scratch_diff = Some(out);
+        }
+        let out_dir = work_dir(root).join("out");
+        args = crate::core::mutate_scratch::build_args(
+            &base_args,
+            scratch_diff.as_deref(),
+            &copied,
+            &out_dir,
+        );
+        work_cwd = scratch.clone();
+        eprintln!(
+            ".. scratch: {} — зона {} файлов, in-place в черновике, вывод в {}",
+            scratch.display(),
+            copied.len(),
+            out_dir.display()
+        );
+    }
     let args: Vec<String> = args.iter().filter(|a| *a != "--").cloned().collect();
     if args.is_empty() {
         anyhow::bail!("devh mutate run: нет аргументов cargo-mutants");
@@ -675,8 +768,8 @@ fn supervise(root: &Path, args: &[String]) -> anyhow::Result<()> {
                     started: now_secs(),
                     finished: Some(now_secs()),
                     args: args.clone(),
-                    cwd: root.display().to_string(),
-                    mode: "copy".to_string(),
+                    cwd: work_cwd.display().to_string(),
+                    mode: if scratch_mode { "scratch".to_string() } else { "copy".to_string() },
                     pgid: 0,
                     tree_stamp: String::new(),
                 },
@@ -712,8 +805,8 @@ fn supervise(root: &Path, args: &[String]) -> anyhow::Result<()> {
             started,
             finished: None,
             args: args.clone(),
-            cwd: root.display().to_string(),
-            mode: "copy".to_string(),
+            cwd: work_cwd.display().to_string(),
+            mode: if scratch_mode { "scratch".to_string() } else { "copy".to_string() },
             pgid: 0,
             tree_stamp: tree_stamp.clone(),
         },
@@ -727,10 +820,15 @@ fn supervise(root: &Path, args: &[String]) -> anyhow::Result<()> {
     let mut cmd = Command::new("cargo");
     cmd.arg("mutants")
         .args(&args)
-        .current_dir(root)
+        .current_dir(&work_cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(err));
+    // T-625: в scratch-режиме кэш сборки тёплый — cargo-mutants переиспользует
+    // артефакты вместо полной пересборки на каждого мутанта.
+    if scratch_mode {
+        cmd.env("CARGO_PROFILE_TEST_INCREMENTAL", "true");
+    }
     // Своя группа процессов: `devh mutate stop` гасит её целиком, и
     // cargo-mutants не получает Ctrl-C из терминала агента.
     unsafe {
@@ -751,8 +849,8 @@ fn supervise(root: &Path, args: &[String]) -> anyhow::Result<()> {
                     started,
                     finished: Some(now_secs()),
                     args: args.clone(),
-                    cwd: root.display().to_string(),
-                    mode: "copy".to_string(),
+                    cwd: work_cwd.display().to_string(),
+                    mode: if scratch_mode { "scratch".to_string() } else { "copy".to_string() },
                     pgid: 0,
                     tree_stamp: tree_stamp.clone(),
                 },
@@ -890,8 +988,8 @@ fn supervise(root: &Path, args: &[String]) -> anyhow::Result<()> {
             started,
             finished: Some(now_secs()),
             args: args.clone(),
-            cwd: root.display().to_string(),
-            mode: "copy".to_string(),
+            cwd: work_cwd.display().to_string(),
+            mode: if scratch_mode { "scratch".to_string() } else { "copy".to_string() },
             pgid,
             tree_stamp,
         },

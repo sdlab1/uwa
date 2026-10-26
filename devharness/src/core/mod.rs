@@ -55,6 +55,7 @@ pub mod msg_consume_guard;
 pub mod msg_lag;
 pub mod mut_history;
 pub mod mutate_cache;
+pub mod mutate_scratch;
 pub mod mutate_outcomes;
 pub mod mutation_hardening;
 pub mod mutaudit;
