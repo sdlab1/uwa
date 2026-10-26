@@ -239,6 +239,12 @@ pub struct Plan {
     /// Зависимости задачи: ID задач, которые должны быть закрыты (done).
     #[serde(default)]
     pub deps: BTreeMap<String, Vec<String>>,
+    /// Класс бага задачи: `PS` — безопасность (security).
+    ///
+    /// PS-баг может сообщить любой агент, но в зоне ceiling/settings его
+    /// берёт только lead/tech_lead (core::guards::ceiling_guard).
+    #[serde(default)]
+    pub bug_class: BTreeMap<String, String>,
 }
 
 /// Реестр задач и исполнителей.
@@ -355,6 +361,57 @@ pub fn tech_lead_buffer_tasks<'a>(reg: &'a Registry) -> Vec<&'a Task> {
 }
 
 /// Роль вызывающего в реестре ("" — агент не зарегистрирован).
+/// Идентичность вызывающего ПОДТВЕРЖДЕНА привязкой сессии/слотом?
+///
+/// DEVH_AGENT, --agent, рантайм и cwd — НЕ доказательство прав: иначе ведомый
+/// назвался бы ведущим и поднял себе потолок (воспроизведено: C2 → C9 за один
+/// вызов `DEVH_AGENT=minimax devh orch ceiling --agent beam --c 9`).
+fn caller_identity_proven() -> bool {
+    matches!(
+        crate::core::identity::current().source,
+        crate::core::identity::Source::Stored | crate::core::identity::Source::Slot
+    )
+}
+
+/// Факты об агентах для guard'а потолка/настроек (роль + явный потолок).
+fn ceiling_agent_facts(reg: &Registry) -> Vec<crate::core::guards::ceiling_guard::AgentFacts> {
+    reg.agents
+        .iter()
+        .map(|a| crate::core::guards::ceiling_guard::AgentFacts {
+            name: crate::core::identity::canonical(&a.name),
+            role: a.role.clone().unwrap_or_default(),
+            ceiling: a.c_ceiling,
+        })
+        .collect()
+}
+
+/// Записать изменение настройки в append-only журнал `.harness/orch/settings_ledger.jsonl`.
+fn log_settings_change(
+    root: &Path,
+    actor: &str,
+    actor_role: &str,
+    target: &str,
+    field: &str,
+    before: &str,
+    after: &str,
+    reason: &str,
+) {
+    let id = crate::core::identity::current();
+    let rec = crate::core::guards::ceiling_guard::SettingsChange {
+        ts: now(),
+        actor: actor.to_string(),
+        actor_key: id.key.clone(),
+        actor_source: id.source.as_str().to_string(),
+        actor_role: actor_role.to_string(),
+        target: target.to_string(),
+        field: field.to_string(),
+        before: before.to_string(),
+        after: after.to_string(),
+        reason: reason.to_string(),
+    };
+    let _ = crate::core::guards::ceiling_guard::append_change(root, &rec);
+}
+
 fn caller_role_of(reg: &Registry, caller: &str) -> String {
     reg.agents
         .iter()
@@ -779,8 +836,10 @@ fn print_help() {
   reassign <ID> --agent X    переназначить
   degrade --agent X [--to P] [--reason R]  понизить P очереди
   model --agent X --model M [--runtime R]   смена модели/рантайма => подозрение
-  bug <доклад> [--from A] [--agent X] [--p P1] [--zone path]
-                               баг devh -> задача В ПЕРВУЮ ОЧЕРЕДЬ (O21)
+  bug <доклад> [--from A] [--agent X] [--p P1] [--zone path] [--class PS]
+                               баг devh -> задача В ПЕРВУЮ ОЧЕРЕДЬ (O21);
+                               --class PS (security): приоритет P0, в зоне
+                               ceiling/settings берёт только lead/tech_lead
   zones                      зоны ответственности по исполнителям
   speed [--agent X] [--json]  юнит скорости/эффективности: взвешенный LOC/час по
                               РЕАЛЬНОМУ рабочему времени, токены, размышления,
@@ -798,7 +857,11 @@ fn print_help() {
   review [--agent X] [--json] [--notify] [--ask-model]
                                ревью коммитов агентов (ведущий или tech-lead)
   ceiling --agent X --c N     явный потолок сложности (C) агента (--clear — снять)
+                               ТОЛЬКО ведущий/tech-lead + подтверждённая привязка
+                               сессии; свой потолок меняет только ведущий; каждая
+                               правка пишется в .harness/orch/settings_ledger.jsonl
   ceiling --list              потолки всех агентов
+  ceiling --seed-ledger       базовый снимок журнала настроек (для старта)
   retune <ID> [--c C --p P --title T --check CMD --zone PATH --dod TEXT]
                                починка задачи без revoke/recreate (только ведущий)
 
@@ -1366,6 +1429,29 @@ fn start(root: &Path, args: &[String]) -> anyhow::Result<()> {
                  сначала закрой их (devh orch next)",
                 blocked.join(", ")
             ));
+        }
+    }
+    // PS-баг о безопасности в зоне ceiling/settings — только lead/tech_lead:
+    // ведомый может ДОКЛАДЫВАТЬ о таком баге, но не может брать его в работу
+    // (иначе он же «починит» себя, подняв себе потолок).
+    {
+        let class = reg.plan.bug_class.get(&id).cloned();
+        let zones = reg.tasks[idx].zones.clone();
+        if crate::core::guards::ceiling_guard::is_security(class.as_deref())
+            && crate::core::guards::ceiling_guard::zones_touch_settings(&zones)
+        {
+            let caller_role = caller_role_of(&reg, &caller);
+            if !crate::core::guards::ceiling_guard::is_privileged(&caller_role) {
+                return Err(anyhow!(
+                    "devh orch start: {id} — PS-баг о безопасности в зоне ceiling/settings \
+                     берёт только lead/tech_lead (твоя роль: «{}»)",
+                    if caller_role.is_empty() {
+                        "нет"
+                    } else {
+                        &caller_role
+                    }
+                ));
+            }
         }
     }
     // Потолок модели: задача выше потолка — не выдаётся.
@@ -2661,7 +2747,7 @@ fn bug(root: &Path, args: &[String]) -> anyhow::Result<()> {
     let _lock = crate::shell::lock::OutputLock::try_acquire(root, &path(root), "devh orch bug")
         .map_err(|e| anyhow!("devh orch bug: реестр занят ({e}) — повтори через секунду"))?;
     // Текст доклада — позиционные аргументы, кроме значений известных флагов.
-    const VALUE_FLAGS: [&str; 5] = ["--from", "--agent", "--p", "--zone", "--title"];
+    const VALUE_FLAGS: [&str; 6] = ["--from", "--agent", "--p", "--zone", "--title", "--class"];
     let mut report_parts: Vec<String> = Vec::new();
     let mut i = 0usize;
     while i < args.len() {
@@ -2688,7 +2774,19 @@ fn bug(root: &Path, args: &[String]) -> anyhow::Result<()> {
         ));
     }
     let from = flag(args, "--from").unwrap_or_default();
-    let p_raw = flag(args, "--p").unwrap_or_else(|| "P1".to_string());
+    // Класс бага: PS (security) — сообщить может любой, но в зоне
+    // ceiling/settings такой баг берёт только lead/tech_lead.
+    let class =
+        crate::core::guards::ceiling_guard::normalize_class(flag(args, "--class").as_deref())
+            .map_err(|e| anyhow!("devh orch bug: {e}"))?;
+    let security = crate::core::guards::ceiling_guard::is_security(class.as_deref());
+    let p_raw = flag(args, "--p").unwrap_or_else(|| {
+        if security {
+            "P0".to_string()
+        } else {
+            "P1".to_string()
+        }
+    });
     let complexity = parse_level(&p_raw, "уровень сложности")?;
     let mut zones: Vec<String> = Vec::new();
     for raw in flags_all(args, "--zone") {
@@ -2718,7 +2816,21 @@ fn bug(root: &Path, args: &[String]) -> anyhow::Result<()> {
         format!("[{}] {}", from.trim(), report)
     };
     let short: String = head.chars().take(160).collect();
-    let title = format!("БАГ devh: {short}");
+    let title = if security {
+        format!("БАГ PS (security): {short}")
+    } else {
+        format!("БАГ devh: {short}")
+    };
+    // PS-баг в зоне ceiling/settings: помечаем заметкой, чтобы правило
+    // «только lead/tech_lead» было видно прямо в задаче.
+    let note = if security {
+        format!(
+            "{head}\n[PS security] Потолок и настройки уровня меняет только lead/tech_lead; \
+             ведомый докладывает, но сам себе потолок не поднимает."
+        )
+    } else {
+        head.clone()
+    };
     let task = Task {
         id: id.clone(),
         agent: target.clone(),
@@ -2733,7 +2845,7 @@ fn bug(root: &Path, args: &[String]) -> anyhow::Result<()> {
         status: Status::Queued,
         zones: zones.clone(),
         fail_level: None,
-        note: head.clone(),
+        note,
         created: ts,
         updated: ts,
         dod: vec![
@@ -2753,12 +2865,36 @@ fn bug(root: &Path, args: &[String]) -> anyhow::Result<()> {
             ..Default::default()
         });
     }
-    // БАГИ — В ПЕРВУЮ ОЧЕРЕДЬ: в начало реестра, чтобы доска и list показывали первыми.
+    // БАГИ — В ПЕРВУЮ ОЧЕРЕДЬ: в начало реестра, чтобы доска и list показывают первыми.
     reg.tasks.insert(0, task);
+    // Класс бага — в план реестра (PS = security).
+    if let Some(c) = class.as_deref() {
+        reg.plan.bug_class.insert(id.clone(), c.to_string());
+    }
     save(root, &reg)?;
+    // Журнал настроек: PS-доклад виден как событие безопасности.
+    if security {
+        let caller_role = caller_role_of(&reg, &caller);
+        log_settings_change(
+            root,
+            &caller,
+            &caller_role,
+            &target,
+            "bug_ps",
+            "-",
+            &zones.join(","),
+            &short,
+        );
+    }
     println!(
         "devh orch bug: {id} — БАГ в первую очередь (P{complexity}), исполнитель {target}: {title}"
     );
+    if security {
+        println!(
+            "devh orch bug: {id} — класс PS (security): в зоне ceiling/settings берёт только \
+             lead/tech_lead; ведомый докладывает, но потолок себе не поднимает."
+        );
+    }
     Ok(())
 }
 
@@ -3495,10 +3631,28 @@ fn identify(root: &Path, args: &[String]) -> anyhow::Result<()> {
                 "devh orch identify --set: модель назначает ведущий или tech-lead"
             ));
         }
+        // Модель определяет потолок агента — это настройка доступа: право
+        // только у lead/tech_lead, идентичность подтверждена привязкой сессии,
+        // свои настройки меняет только ведущий.
+        let caller_role = caller_role_of(&reg, &caller);
+        crate::core::guards::ceiling_guard::require_settings_rights(
+            &caller_role,
+            caller_identity_proven(),
+            canon == caller,
+            "devh orch identify --set",
+        )
+        .map_err(|e| anyhow!("{e}"))?;
         let m = m.trim().to_string();
         if m.is_empty() {
             return Err(anyhow!("devh orch identify --set: пустая модель"));
         }
+        // Модель ДО изменения — для журнала настроек.
+        let model_before = reg
+            .agents
+            .iter()
+            .find(|a| crate::core::identity::canonical(&a.name) == canon)
+            .and_then(|a| a.model.clone())
+            .unwrap_or_else(|| "неизвестна".to_string());
         let mut reg = reg;
         match agent_index(&reg, &canon) {
             Some(i) => {
@@ -3519,6 +3673,16 @@ fn identify(root: &Path, args: &[String]) -> anyhow::Result<()> {
             &crate::core::identity::current().key,
             &m,
             None,
+        );
+        log_settings_change(
+            root,
+            &caller,
+            &caller_role,
+            &canon,
+            "model",
+            &model_before,
+            &m,
+            &flag(args, "--reason").unwrap_or_default(),
         );
         let who = if is_lead {
             "ведущим"
@@ -5765,8 +5929,27 @@ pub fn role_cmd(root: &Path, args: &[String]) -> anyhow::Result<()> {
         }
     }
     let mut reg = reg;
+    let canon_target = crate::core::identity::canonical(&agent);
+    let role_before = reg
+        .agents
+        .iter()
+        .find(|a| crate::core::identity::canonical(&a.name) == canon_target)
+        .and_then(|a| a.role.clone())
+        .unwrap_or_else(|| "нет".to_string());
     apply_role(&mut reg, &agent, &role);
     save(root, &reg)?;
+    // Роль — тоже настройка доступа: пишем в журнал.
+    let caller_role = caller_role_of(&reg, &caller);
+    log_settings_change(
+        root,
+        &caller,
+        &caller_role,
+        &canon_target,
+        "role",
+        &role_before,
+        &role,
+        &flag(args, "--reason").unwrap_or_default(),
+    );
     println!(
         "devh orch: {} — роль {role}",
         crate::core::identity::canonical(&agent)
@@ -5969,6 +6152,38 @@ fn review_cmd(root: &Path, args: &[String]) -> anyhow::Result<()> {
 fn ceiling_cmd(root: &Path, args: &[String]) -> anyhow::Result<()> {
     let reg = load(root);
     require_review_rights(&reg, "ceiling")?;
+    if args.iter().any(|a| a == "--seed-ledger") {
+        // Базовый снимок журнала настроек: для агентов с потолком, у которых
+        // ещё нет записи, пишем исходное состояние. После этого «правка
+        // реестра мимо харнесса» отличается от «истории до журнала».
+        let facts = ceiling_agent_facts(&reg);
+        let changes = crate::core::guards::ceiling_guard::read_changes(root);
+        let mut written = 0usize;
+        for a in facts.iter() {
+            let Some(c) = a.ceiling else { continue };
+            if crate::core::guards::ceiling_guard::last_change(&changes, &a.name, "ceiling")
+                .is_some()
+            {
+                continue;
+            }
+            let rec = crate::core::guards::ceiling_guard::SettingsChange {
+                ts: now(),
+                actor: "baseline".to_string(),
+                actor_key: String::new(),
+                actor_source: "снимок".to_string(),
+                actor_role: "baseline".to_string(),
+                target: a.name.clone(),
+                field: "ceiling".to_string(),
+                before: "?".to_string(),
+                after: format!("C{c}"),
+                reason: "базовый снимок (до введения журнала настроек)".to_string(),
+            };
+            let _ = crate::core::guards::ceiling_guard::append_change(root, &rec);
+            written = written.saturating_add(1);
+        }
+        println!("devh orch ceiling: базовый снимок журнала настроек — записей: {written}");
+        return Ok(());
+    }
     if args.iter().any(|a| a == "--list") {
         println!("потолки сложности (C):");
         for a in reg.agents.iter() {
@@ -5993,9 +6208,33 @@ fn ceiling_cmd(root: &Path, args: &[String]) -> anyhow::Result<()> {
         .map_err(|e| anyhow!("devh orch ceiling: реестр занят ({e}) — повтори через секунду"))?;
     let reg = load(root);
     require_review_rights(&reg, "ceiling")?;
+    let caller = crate::core::identity::canonical(&crate::core::identity::current().name);
+    let caller_role = caller_role_of(&reg, &caller);
     let raw_agent =
         flag(args, "--agent").ok_or_else(|| anyhow!("devh orch ceiling: нужен --agent"))?;
     let agent = crate::core::identity::canonical(&raw_agent);
+    // Права: только lead/tech_lead, идентичность подтверждена привязкой сессии,
+    // свой собственный потолок меняет только ведущий.
+    crate::core::guards::ceiling_guard::require_settings_rights(
+        &caller_role,
+        caller_identity_proven(),
+        agent == caller,
+        "devh orch ceiling",
+    )
+    .map_err(|e| anyhow!("{e}"))?;
+    // Fail-closed: если реестр правили мимо журнала настроек — потолок не трогаем.
+    let tampered: Vec<String> =
+        crate::core::guards::ceiling_guard::check_ledger(root, &ceiling_agent_facts(&reg))
+            .into_iter()
+            .filter(|v| v.severity() == crate::core::guards::ceiling_guard::Severity::Problem)
+            .map(|v| v.to_string())
+            .collect();
+    if !tampered.is_empty() {
+        return Err(anyhow!(
+            "devh orch ceiling: реестр правили мимо харнесса — сначала разберись: {}",
+            tampered.join("; ")
+        ));
+    }
     let clear = args.iter().any(|a| a == "--clear");
     let c = match flag(args, "--c") {
         Some(v) => Some(parse_c_level(&v)?),
@@ -6024,6 +6263,21 @@ fn ceiling_cmd(root: &Path, args: &[String]) -> anyhow::Result<()> {
     save(root, &reg)?;
     let after = reg.agents.get(idx).and_then(|a| a.c_ceiling);
     let reason = flag(args, "--reason").unwrap_or_default();
+    // Журнал настроек: кто, когда и с каким доказательством прав менял потолок.
+    log_settings_change(
+        root,
+        &caller,
+        &caller_role,
+        &agent,
+        "ceiling",
+        &before
+            .map(|v| format!("C{v}"))
+            .unwrap_or_else(|| "по модели".to_string()),
+        &after
+            .map(|v| format!("C{v}"))
+            .unwrap_or_else(|| "по модели".to_string()),
+        &reason,
+    );
     println!(
         "devh orch ceiling: {agent} — C{} → C{}{}",
         before
@@ -6112,8 +6366,26 @@ fn elevate(root: &Path, args: &[String]) -> anyhow::Result<()> {
         .ok_or_else(|| anyhow!("devh orch elevate: нужен агент"))?;
     check_lead_password(root, args)?;
     let mut reg = reg;
+    let canon_target = crate::core::identity::canonical(&target);
+    let role_before = reg
+        .agents
+        .iter()
+        .find(|a| crate::core::identity::canonical(&a.name) == canon_target)
+        .and_then(|a| a.role.clone())
+        .unwrap_or_else(|| "нет".to_string());
     apply_role(&mut reg, &target, ROLE_LEAD);
     save(root, &reg)?;
+    let caller_role = caller_role_of(&reg, &caller);
+    log_settings_change(
+        root,
+        &caller,
+        &caller_role,
+        &canon_target,
+        "role",
+        &role_before,
+        ROLE_LEAD,
+        "elevate по паролю",
+    );
     println!(
         "devh orch: {} — роль lead (elevate по паролю)",
         crate::core::identity::canonical(&target)

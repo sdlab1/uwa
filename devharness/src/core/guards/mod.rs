@@ -5,6 +5,7 @@
 //! выдачей/сдачей задачи и получает единый отчёт: ok / warn / problem.
 
 pub mod backlog_guard;
+pub mod ceiling_guard;
 pub mod commit_review_guard;
 pub mod decomposition_guard;
 pub mod deps_guard;
@@ -153,6 +154,7 @@ pub fn selfcheck() -> GuardReport {
     let mut report = GuardReport::new();
     report.push(decomposition_guard::ID, decomposition_guard::selfcheck());
     report.push(identity_guard::ID, identity_guard::selfcheck());
+    report.push(ceiling_guard::ID, ceiling_guard::selfcheck());
     report
 }
 
@@ -221,7 +223,11 @@ mod tests {
             ids.iter().any(|id| id == "identity_guard"),
             "guard идентичностей обязан вызываться из selfcheck: {ids:?}"
         );
-        assert_eq!(report.entries().len(), 2);
+        assert!(
+            ids.iter().any(|id| id == "ceiling_guard"),
+            "guard потолка/настроек обязан вызываться из selfcheck: {ids:?}"
+        );
+        assert_eq!(report.entries().len(), 3);
     }
 
     #[test]

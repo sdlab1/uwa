@@ -233,6 +233,34 @@ pub fn collect(root: &Path, reg: &Registry) -> GuardReport {
     let cr = commit_review_findings(root, reg);
     report.push("commit_review_guard", commit_review_verdict(&cr));
 
+    // ── потолок и настройки уровня агента: права, журнал, PS-маршрутизация ──
+    let ceiling_agents: Vec<crate::core::guards::ceiling_guard::AgentFacts> = reg
+        .agents
+        .iter()
+        .map(|a| crate::core::guards::ceiling_guard::AgentFacts {
+            name: crate::core::identity::canonical(&a.name),
+            role: a.role.clone().unwrap_or_default(),
+            ceiling: a.c_ceiling,
+        })
+        .collect();
+    let ceiling_tasks: Vec<crate::core::guards::ceiling_guard::TaskFacts> = reg
+        .tasks
+        .iter()
+        .map(|t| crate::core::guards::ceiling_guard::TaskFacts {
+            id: t.id.clone(),
+            agent: crate::core::identity::canonical(&t.agent),
+            zones: t.zones.clone(),
+            class: reg.plan.bug_class.get(&t.id).cloned(),
+            status: t.status.label().to_string(),
+        })
+        .collect();
+    let ceiling_findings =
+        crate::core::guards::ceiling_guard::check(root, &ceiling_agents, &ceiling_tasks);
+    report.push(
+        crate::core::guards::ceiling_guard::ID,
+        crate::core::guards::ceiling_guard::verdict(&ceiling_findings),
+    );
+
     // ── самопроверка guard'а декомпозиции ──
     report.push(decomposition_guard::ID, decomposition_guard::selfcheck());
 

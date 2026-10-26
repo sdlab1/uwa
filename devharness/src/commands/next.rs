@@ -1020,6 +1020,7 @@ mod tests {
                     .into_iter()
                     .collect(),
                 deps: Default::default(),
+                bug_class: Default::default(),
             },
         };
         crate::commands::orch::save(&root, &reg).unwrap_or_else(|_| unreachable!());
@@ -1137,6 +1138,7 @@ mod tests {
                 deps: [("T-002".to_string(), vec!["T-001".to_string()])]
                     .into_iter()
                     .collect(),
+                bug_class: Default::default(),
             },
         };
         crate::commands::orch::save(&root, &reg).unwrap_or_else(|_| unreachable!());
