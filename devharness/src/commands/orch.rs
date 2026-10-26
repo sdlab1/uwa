@@ -388,6 +388,19 @@ pub fn lead_of(reg: &Registry) -> (Option<String>, &'static str) {
     (None, "не назначен")
 }
 
+/// T-487: revoke/reassign/degrade — только lead или tech_lead.
+fn require_lead_or_tech(reg: &Registry, action: &str) -> anyhow::Result<()> {
+    let (lead, _) = lead_of(reg);
+    let caller = current_canon();
+    if lead.as_deref() == Some(caller.as_str()) || caller_has_review_rights(reg) {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "devh orch {action}: только lead/tech_lead (ты «{caller}», lead «{}») — T-487",
+        lead.as_deref().unwrap_or("не назначен")
+    )
+}
+
 /// Может ли вызывающий действовать с задачей: её исполнитель или lead.
 fn may_act_on_task(caller: &str, task_agent: &str, lead: Option<&str>) -> bool {
     let c = crate::core::identity::canonical(caller);
@@ -2297,6 +2310,7 @@ fn revoke(root: &Path, args: &[String]) -> anyhow::Result<()> {
         .ok_or_else(|| anyhow!("devh orch revoke: нужен ID задачи"))?;
     let reason = flag(args, "--reason").unwrap_or_default();
     let mut reg = load(root);
+    require_lead_or_tech(&reg, "revoke")?;
     let idx =
         find_task_index(&reg, &id).ok_or_else(|| anyhow!("devh orch: задача {id} не найдена"))?;
     {
@@ -2334,6 +2348,7 @@ fn reassign(root: &Path, args: &[String]) -> anyhow::Result<()> {
     let agent =
         flag(args, "--agent").ok_or_else(|| anyhow!("devh orch reassign: нужен --agent"))?;
     let mut reg = load(root);
+    require_lead_or_tech(&reg, "reassign")?;
     let idx =
         find_task_index(&reg, &id).ok_or_else(|| anyhow!("devh orch: задача {id} не найдена"))?;
     // «task taken»: задачу, которую агент УЖЕ ВЗЯЛ в работу, переназначать
@@ -2504,6 +2519,7 @@ fn degrade(root: &Path, args: &[String]) -> anyhow::Result<()> {
     };
     let reason = flag(args, "--reason").unwrap_or_else(|| "ручная деградация".to_string());
     let mut reg = load(root);
+    require_lead_or_tech(&reg, "degrade")?;
     let touched = degrade_queue(&mut reg, &agent, &reason, floor);
     save(root, &reg)?;
     println!("devh orch: P очереди {agent} понижен ({touched} задач) — причина: {reason}");
