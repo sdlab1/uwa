@@ -396,7 +396,7 @@ fn require_lead_or_tech(reg: &Registry, action: &str) -> anyhow::Result<()> {
         return Ok(());
     }
     anyhow::bail!(
-        "devh orch {action}: только lead/tech_lead (ты «{caller}», lead «{}») — T-487",
+        "devh orch {action}: только lead/tech_lead (ты «{caller}», lead «{}») — T-487/T-491",
         lead.as_deref().unwrap_or("не назначен")
     )
 }
@@ -6025,6 +6025,8 @@ fn onboard_register(root: &Path, args: &[String]) -> anyhow::Result<Onboarded> {
         ));
     }
     let mut reg = load(root);
+    // T-491: регистрация агента и первое задание (с --check!) — только lead/tech.
+    require_lead_or_tech(&reg, "onboard")?;
     // Адрес не должен совпадать с чужим (в т.ч. с адресом ведущего).
     let (lead_now, _) = lead_of(&reg);
     if let Some(l) = lead_now.as_ref() {
