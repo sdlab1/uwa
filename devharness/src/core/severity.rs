@@ -221,6 +221,16 @@ fn classify_by_lint(code: &str) -> Option<SeverityCategory> {
         | "unnecessary_wraps"
         | "unnecessary_map_on_constructor"
         | "unnecessary_unwrap"
+        | "needless_borrow"
+        | "needless_borrow_mut"
+        | "redundant_clone"
+        | "clone_on_copy"
+        | "redundant_field_names"
+        | "redundant_pattern_matching"
+        | "needless_return"
+        | "single_char_pattern"
+        | "manual_strip"
+        | "needless_late_init"
         | "typos" => return Some(SeverityCategory::Careless),
         // Логическая/небезопасная ошибка.
         "unsafe_op_in_unsafe_fn"
@@ -568,6 +578,57 @@ warning: this expression creates a reference which is immediately dereferenced
             Some("clippy::needless_borrow"),
             "имя линта из примечания"
         );
+    }
+
+    #[test]
+    fn needless_borrow_and_redundant_clone_are_careless() {
+        // «Лишняя ссылка» и «лишний клон» — потеря внимания, не катастрофа.
+        for code in [
+            "clippy::needless_borrow",
+            "clippy::needless_borrow_mut",
+            "clippy::redundant_clone",
+            "clippy::clone_on_copy",
+            "clippy::redundant_field_names",
+        ] {
+            assert_eq!(
+                classify(DiagLevel::Warning, Some(code), "this is needless"),
+                SeverityCategory::Careless,
+                "{code} должен быть Careless"
+            );
+        }
+    }
+
+    #[test]
+    fn crate_summary_is_not_charged_to_previous_file() {
+        // Итог «generated N warnings» — не диагностика файла: его нельзя
+        // вешать на последний упомянутый файл (иначе чужой файл попадёт
+        // в скоуп задачи и понизит потолок агента).
+        let out = "warning: function `x` is never used\n  --> devharness/src/core/eval_config.rs:10:5\n\
+                   warning: `devh` (lib test) generated 51 warnings (run `cargo fix`)\n";
+        let by_file = parse_weighted_by_file(out);
+        assert_eq!(
+            by_file
+                .get("devharness/src/core/eval_config.rs")
+                .map(|c| c.warnings),
+            Some(1),
+            "_summary_ не должен добавлять предупреждение файлу"
+        );
+        assert_eq!(parse_severity_counts(out).warnings, 1);
+    }
+
+    #[test]
+    fn scoped_counts_ignore_other_files() {
+        // BROKEN-POTOLK: чужие файлы не понижают потолок агента.
+        let out = "warning: unused variable: `a`\n  --> devharness/src/core/other.rs:1:1\n\
+                   warning: unused variable: `b`\n  --> devharness/src/core/eval_config.rs:2:1\n";
+        let scope = vec!["devharness/src/core/eval_config.rs".to_string()];
+        let stats = crate::core::check_telemetry::CheckStats::from_output_scoped(out, "", &scope);
+        assert_eq!(stats.warnings, 1, "считается только файл из зоны");
+        assert_eq!(stats.warnings_weighted, 1.0);
+        assert!(!crate::core::check_telemetry::file_in_scope(
+            "devharness/src/core/other.rs",
+            &scope
+        ));
     }
 
     #[test]
