@@ -18,6 +18,7 @@
 //! | `devh mutate verdict` | финальный вердикт, код возврата 0/1/2 | гейт перед мержем |
 //! | `devh mutate stop` | остановить идущий аудит | «аудит не нужен / завис» |
 //! | `devh mutate history` | что уже проверено (файлы, мутанты, sha) | «не проверять заново» |
+//! | `devh mutate plan` | что ещё не проверено (три списка по зоне) | «что брать в аудит» |
 //!
 //! ## Почему аудит живёт отдельным процессом
 //!
@@ -99,6 +100,7 @@ pub fn mutate(root: &Path, sub: &str, args: &[String]) -> anyhow::Result<()> {
         "problems" => problems(root, args),
         "recheck" => recheck(root, args),
         "history" => history(root),
+        "plan" => plan(root, args),
         "verdict" => verdict(root),
         "stop" => stop(root),
         // Внутренняя подкоманда: её запускает `start` (супервизор).
@@ -145,6 +147,10 @@ pub const CANON: &str = r#"devh mutate — единственный вход в 
                               повреждённые детали/упавший инструмент),
                               2 = прогон ещё идёт / аудита нет.
   devh mutate stop            остановить идущий аудит (группа cargo-mutants).
+  devh mutate plan [пути...]  что ещё НЕ проверено: по зоне (файлы/каталоги)
+                              три списка — никогда не проверялись / менялись
+                              после аудита (нужна дельта) / уже проверено и не
+                              менялось (перепроверка не нужна).
   devh mutate history         что УЖЕ проверено: пойманных мутантов всего,
                               файлов в ledger покрытия, по каждому файлу —
                               сколько мутантов/поймано/аудит когда. Проверенное
@@ -1571,6 +1577,77 @@ fn history(root: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// `devh mutate plan [пути...]` — что уже проверено, а что ещё надо.
+///
+/// Зона задаётся файлами или каталогами (рекурсивно, *.rs). Ответ — три
+/// списка: никогда не проверялись, менялись после аудита (нужна дельта),
+/// уже проверено и не менялось (перепроверка НЕ нужна).
+fn plan(root: &Path, args: &[String]) -> anyhow::Result<()> {
+    let mut files: Vec<String> = Vec::new();
+    for a in args.iter().filter(|a| !a.starts_with('-')) {
+        let p = if Path::new(a).is_absolute() {
+            Path::new(a).to_path_buf()
+        } else {
+            root.join(a)
+        };
+        if p.is_dir() {
+            collect_rs(&p, root, &mut files);
+        } else if p.is_file() {
+            push_rel(root, &p, &mut files);
+        }
+    }
+    files.sort();
+    files.dedup();
+    let caught = mut_history::load_caught(root);
+    println!("план мутационного аудита");
+    println!("  истории пойманных мутантов: {}", caught.len());
+    if files.is_empty() {
+        println!("  зона не задана — укажи файлы или каталог:");
+        println!("    devh mutate plan devharness/src/core");
+        return Ok(());
+    }
+    let scope = mut_history::split_scope(root, &files);
+    println!("  зона: {} файл(ов)", files.len());
+    println!("  никогда не проверялись ({}):", scope.fresh.len());
+    for f in &scope.fresh {
+        println!("    + {f}");
+    }
+    println!("  менялись после аудита — нужна дельта ({}):", scope.changed.len());
+    for f in &scope.changed {
+        println!("    ~ {f}");
+    }
+    println!(
+        "  уже проверено и не менялось — перепроверка НЕ нужна ({}):",
+        scope.covered.len()
+    );
+    for f in &scope.covered {
+        println!("    = {f}");
+    }
+    Ok(())
+}
+
+/// Собрать *.rs под каталогом (рекурсивно) — относительными путями от корня.
+fn collect_rs(dir: &Path, root: &Path, out: &mut Vec<String>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            collect_rs(&p, root, out);
+        } else if p.extension().and_then(|x| x.to_str()) == Some("rs") {
+            push_rel(root, &p, out);
+        }
+    }
+}
+
+/// Добавить путь относительно корня репозитория.
+fn push_rel(root: &Path, path: &Path, out: &mut Vec<String>) {
+    if let Ok(rel) = path.strip_prefix(root) {
+        out.push(rel.to_string_lossy().to_string());
+    }
+}
+
 // ──────────────────────────────── recheck ────────────────────────────────
 
 const RECHECK_FILE: &str = "rechecked.json";
@@ -1992,6 +2069,7 @@ fn stop(root: &Path) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn diff_name_decodes_to_path_and_line() {
@@ -2388,6 +2466,36 @@ mod tests {
         let args = vec!["src/main.rs".to_string()];
         let res = mutate_start_gate("lead", Some("lead"), &args, None, 1_000_000, 50);
         assert!(res.is_ok());
+    }
+
+    /// План аудита: зона собирается рекурсивно, пути — относительные.
+    #[test]
+    fn plan_collects_rs_relative_to_root() {
+        let tmp = tempdir().expect("tmp");
+        let root = tmp.path();
+        fs::create_dir_all(root.join("devharness/src/core/guards")).expect("mkdir");
+        fs::write(root.join("devharness/src/core/a.rs"), "fn a() {}").expect("write");
+        fs::write(root.join("devharness/src/core/guards/b.rs"), "fn b() {}").expect("write");
+        fs::write(root.join("devharness/src/core/notes.txt"), "x").expect("write");
+        let mut files = Vec::new();
+        collect_rs(&root.join("devharness/src/core"), root, &mut files);
+        files.sort();
+        assert_eq!(
+            files,
+            vec![
+                "devharness/src/core/a.rs".to_string(),
+                "devharness/src/core/guards/b.rs".to_string()
+            ],
+            "только *.rs, относительные пути"
+        );
+    }
+
+    /// План без зоны — не ошибка: печатает подсказку.
+    #[test]
+    fn plan_without_scope_is_not_error() {
+        let tmp = tempdir().expect("tmp");
+        let root = tmp.path();
+        plan(root, &[]).expect("plan без зоны не падает");
     }
 
     /// История пойманных → `--iterate`: проверять заново нельзя.
