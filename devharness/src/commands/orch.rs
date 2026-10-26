@@ -1070,15 +1070,11 @@ fn apply_identification(
                 a.model_answer_verbatim = Some(ans.raw.clone());
             }
         }
-        None => reg.agents.push(AgentState {
-            name: canon.clone(),
-            model: Some(ans.model.clone()),
-            model_version: ans.version.clone(),
-            model_date: ans.date.clone(),
-            last_identify_ts: Some(ts),
-            model_answer_verbatim: Some(ans.raw.clone()),
-            ..Default::default()
-        }),
+        None => {
+            // Фантом-агента НЕ создаём: ответ без записи в реестре — отказ
+            // (проверка выше; здесь — страховка от прямого вызова).
+            return None;
+        }
     }
     crate::core::identity_ledger::log_identify(
         &canon,
@@ -3743,6 +3739,43 @@ fn identify(root: &Path, args: &[String]) -> anyhow::Result<()> {
                 "devh orch identify --reply: отвечать можно только за свой адрес \
                  (вызывающий: {caller}, в ответе: {canon})"
             ));
+        }
+        // Совпадение канонов НЕ достаточно: «caller == canon» проходит и при
+        // подмене личности (DEVH_AGENT) и при алиасе/claim (T-477, ретест).
+        // Нужна ПРИВЯЗКА СЕССИИ:
+        //   * источник идентичности — привязка/слот, а не env/--agent;
+        //   * ключ привязки совпадает с ключом сессии агента в реестре
+        //     (если он записан) — иначе это ЧУЖАЯ сессия;
+        //   * агент существует в реестре — фантом-агентов не создаём.
+        let ident = crate::core::identity::current();
+        if !matches!(
+            ident.source,
+            crate::core::identity::Source::Stored | crate::core::identity::Source::Slot
+        ) {
+            return Err(anyhow!(
+                "devh orch identify --reply: ответ принимается только при привязке сессии \
+                 (DEVH_AGENT/--agent — не доказательство; источник: {})",
+                ident.source.as_str()
+            ));
+        }
+        let rec = reg
+            .agents
+            .iter()
+            .find(|a| crate::core::identity::canonical(&a.name) == canon);
+        let Some(rec) = rec else {
+            return Err(anyhow!(
+                "devh orch identify --reply: агент {canon} не зарегистрирован в реестре — \
+                 ответ отклонён (фантом-агентов не создаём)"
+            ));
+        };
+        if let Some(sk) = rec.session_key.as_ref().filter(|s| !s.trim().is_empty()) {
+            if sk.trim() != ident.key.trim() {
+                return Err(anyhow!(
+                    "devh orch identify --reply: привязка сессии не совпадает с записанной \
+                     для {canon} (вызывающий: {}, в реестре: {})",
+                    ident.key, sk
+                ));
+            }
         }
         let raw = replies.join("\n");
         let ans = crate::core::reidentify::record_answer(root, &canon, &raw)?;
@@ -6667,10 +6700,21 @@ fn elevate(root: &Path, args: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `devh orch passwd [--password P]` — задать/сменить пароль ведущего.
+/// `devh orch passwd [--password P] [--current-password C]` — задать/сменить
+/// пароль ведущего.
+///
+/// T-484 (security): пароль ведущего — это право выдавать роль lead и менять
+/// ведущего. Поэтому:
+///
+/// * право подтверждается ПРИВЯЗКОЙ сессии (`Source::Stored`/`Source::Slot`),
+///   а не именем: `DEVH_AGENT=lead`/`--agent` доказательством прав не являются;
+/// * СМЕНА уже заданного пароля требует ТЕКУЩИЙ пароль (сравнение без раннего
+///   выхода): иначе любой, кто доказал имя ведущего, забирал бы роль целиком;
+/// * первичная установка текущего пароля не требует (его ещё нет).
 fn passwd_cmd(root: &Path, args: &[String]) -> anyhow::Result<()> {
     let reg = load(root);
-    let caller = crate::core::identity::canonical(&crate::core::identity::current().name);
+    let ident = crate::core::identity::current();
+    let caller = crate::core::identity::canonical(&ident.name);
     let (lead, _) = lead_of(&reg);
     let lead_canon = lead.as_ref().map(|l| crate::core::identity::canonical(l));
     if lead_canon.as_deref() != Some(caller.as_str()) {
@@ -6679,10 +6723,35 @@ fn passwd_cmd(root: &Path, args: &[String]) -> anyhow::Result<()> {
             lead_canon.unwrap_or_else(|| "не назначен".to_string())
         ));
     }
+    // Право = доказанная привязка, а не совпадение имени.
+    if !matches!(
+        ident.source,
+        crate::core::identity::Source::Stored | crate::core::identity::Source::Slot
+    ) {
+        return Err(anyhow!(
+            "devh orch passwd: пароль меняет ведущий с ДОКАЗАННОЙ привязкой сессии \
+             (DEVH_AGENT/--agent/рантайм — не доказательство; источник: {})",
+            ident.source.as_str()
+        ));
+    }
     let password = crate::commands::leadpass::password_from(args).ok_or_else(|| {
-        anyhow!("devh orch passwd: нужен пароль (--password или DEVH_LEAD_PASSWORD)")
+        anyhow!("devh orch passwd: нужен НОВЫЙ пароль (--password или DEVH_LEAD_PASSWORD)")
     })?;
-    crate::commands::leadpass::set_password(root, &password)?;
+    let current = crate::commands::leadpass::current_password_from(args);
+    let was_set = crate::commands::leadpass::is_set(root);
+    crate::commands::leadpass::rotate_password(root, current.as_deref(), &password)
+        .map_err(|e| anyhow!("devh orch passwd: {e}"))?;
+    // Журнал настроек: сам пароль НЕ пишем — только факт смены.
+    log_settings_change(
+        root,
+        &caller,
+        &caller_role_of(&reg, &caller),
+        &caller,
+        "lead_password",
+        if was_set { "задан" } else { "не задан" },
+        "задан",
+        "смена пароля ведущего (текущий пароль подтверждён)",
+    );
     println!("devh orch: пароль ведущего задан (.harness/orch/lead.key, права 0600)");
     Ok(())
 }
