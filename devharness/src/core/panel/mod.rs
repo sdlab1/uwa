@@ -114,11 +114,40 @@ pub fn main_root(root: &Path) -> std::path::PathBuf {
 }
 
 /// Собрать снимок панели.
+/// TTL кэша снимка (секунды): пачка запросов htmx (12 разделов при
+/// обновлении раз в 5 с) не должна пересчитывать состояние 12 раз.
+const SNAPSHOT_TTL_SECS: u64 = 5;
+
+/// Кэш снимка: (время, снимок).
+fn snapshot_cache() -> &'static std::sync::Mutex<Option<(u64, PanelSnapshot)>> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<Option<(u64, PanelSnapshot)>>> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// Снимок состояния панели (из кэша; пересчёт не чаще раза в 5 с).
 pub fn collect(root: &Path) -> PanelSnapshot {
+    let now = now_secs();
+    if let Ok(map) = snapshot_cache().lock() {
+        if let Some((ts, snap)) = map.as_ref() {
+            if now.saturating_sub(*ts) < SNAPSHOT_TTL_SECS {
+                return snap.clone();
+            }
+        }
+    }
+    let snap = collect_uncached(root);
+    if let Ok(mut map) = snapshot_cache().lock() {
+        *map = Some((now, snap.clone()));
+    }
+    snap
+}
+
+/// Снимок без кэша (полный пересчёт всех источников).
+pub fn collect_uncached(root: &Path) -> PanelSnapshot {
     let root = main_root(root);
     let now = now_secs();
     let reg = crate::commands::orch::load(&root);
-    let git_panel = git::collect(&root, &reg, now);
+    let git_panel = git::cached_collect(&root, &reg, now);
 
     let mut snap = PanelSnapshot {
         generated_at: now,

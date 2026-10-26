@@ -6,6 +6,7 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use crate::core::throughput::{self, WorkKind};
@@ -47,21 +48,61 @@ fn cache() -> &'static Mutex<Option<(u64, Vec<SpeedRow>)>> {
     CACHE.get_or_init(|| Mutex::new(None))
 }
 
+/// Флаг «пересчёт уже идёт» — чтобы не плодить потоки.
+fn refresh_in_flight() -> &'static AtomicBool {
+    static FLAG: OnceLock<AtomicBool> = OnceLock::new();
+    FLAG.get_or_init(|| AtomicBool::new(false))
+}
+
+/// Идёт ли сейчас фоновый пересчёт скорости.
+///
+/// Раздел «Скорость» показывает пометку «считается…», пока пересчёт идёт:
+/// HTTP-поток при этом не блокируется (отдаётся последнее значение).
+pub fn is_refreshing() -> bool {
+    refresh_in_flight().load(Ordering::SeqCst)
+}
+
 /// Скорость агентов из кэша (пересчёт не чаще раза в 5 минут).
+///
+/// Тяжёлый пересчёт НИКОГДА не держит HTTP-поток: если кэш протух, мы
+/// отдаём последнее значение и запускаем пересчёт в фоне. Иначе раздел
+/// «Скорость» висел бы на минуты под нагрузкой (сбор по истории git).
 pub fn cached(root: &Path, since: u64) -> Vec<SpeedRow> {
     let now = super::now_secs();
-    if let Ok(map) = cache().lock() {
-        if let Some((ts, rows)) = map.as_ref() {
+    let fresh = cache().lock().ok().and_then(|map| {
+        map.as_ref().and_then(|(ts, rows)| {
             if now.saturating_sub(*ts) < CACHE_TTL_SECS {
-                return rows.clone();
+                Some(rows.clone())
+            } else {
+                None
             }
+        })
+    });
+    if let Some(rows) = fresh {
+        return rows;
+    }
+    // Кэш протух (или пуст): запускаем пересчёт в фоне и отдаём прошлое
+    // значение (пусто = «считается»).
+    if !refresh_in_flight().swap(true, Ordering::SeqCst) {
+        let root = root.to_path_buf();
+        let spawned = std::thread::Builder::new()
+            .name("panel-speed".to_string())
+            .spawn(move || {
+                let rows = collect(&root, since);
+                if let Ok(mut map) = cache().lock() {
+                    *map = Some((super::now_secs(), rows));
+                }
+                refresh_in_flight().store(false, Ordering::SeqCst);
+            });
+        if spawned.is_err() {
+            refresh_in_flight().store(false, Ordering::SeqCst);
         }
     }
-    let rows = collect(root, since);
-    if let Ok(mut map) = cache().lock() {
-        *map = Some((now, rows.clone()));
-    }
-    rows
+    cache()
+        .lock()
+        .ok()
+        .and_then(|map| map.as_ref().map(|(_, rows)| rows.clone()))
+        .unwrap_or_default()
 }
 
 /// Собрать скорость агентов за окно `since` (unix-секунды).

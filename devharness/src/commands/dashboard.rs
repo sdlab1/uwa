@@ -176,6 +176,10 @@ pub fn fragment(section: &str, snap: &PanelSnapshot, query: &str) -> Option<Stri
         "speed" => {
             let since = panel::now_secs().saturating_sub(7 * 86_400);
             let rows = panel::speed::cached(std::path::Path::new(&snap.root), since);
+            if rows.is_empty() && panel::speed::is_refreshing() {
+                // Пересчёт идёт в фоне — поток HTTP не держим.
+                return Some("<p>считается… (пересчёт скорости идёт в фоне)</p>".to_string());
+            }
             speed_html(&rows)
         }
         "ledger" => ledger_html(snap),

@@ -168,6 +168,36 @@ pub fn agent_of_branch(branch: &str) -> Option<String> {
 }
 
 /// Собрать git-сводку.
+/// TTL кэша полного git-снимка (секунды).
+///
+/// Снимок тянет `git status` в КАЖДОМ worktree и `git diff --numstat` по
+/// веткам — под нагрузкой это 8-12 с на запрос. Панель обновляется раз в
+/// 5 с, поэтому метрики веток берём из кэша: повторный запрос отвечает
+/// сразу, а пересчёт идёт не чаще раза в 30 с.
+const PANEL_CACHE_TTL_SECS: u64 = 30;
+
+/// Кэш git-снимка: (время, снимок).
+fn panel_cache() -> &'static Mutex<Option<(u64, GitPanel)>> {
+    static CACHE: OnceLock<Mutex<Option<(u64, GitPanel)>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(None))
+}
+
+/// Git-снимок из кэша (полный пересчёт — не чаще раза в 30 с).
+pub fn cached_collect(root: &Path, reg: &Registry, now: u64) -> GitPanel {
+    if let Ok(map) = panel_cache().lock() {
+        if let Some((ts, panel)) = map.as_ref() {
+            if now.saturating_sub(*ts) < PANEL_CACHE_TTL_SECS {
+                return panel.clone();
+            }
+        }
+    }
+    let panel = collect(root, reg, now);
+    if let Ok(mut map) = panel_cache().lock() {
+        *map = Some((now, panel.clone()));
+    }
+    panel
+}
+
 pub fn collect(root: &Path, reg: &Registry, now: u64) -> GitPanel {
     let main_branch = detect_main(root);
     let mut panel = GitPanel {
