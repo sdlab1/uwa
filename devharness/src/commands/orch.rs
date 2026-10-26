@@ -413,9 +413,7 @@ fn log_settings_change(
 }
 
 fn caller_role_of(reg: &Registry, caller: &str) -> String {
-    reg.agents
-        .iter()
-        .find(|a| crate::core::identity::canonical(&a.name) == caller)
+    find_agent(reg, &caller)
         .and_then(|a| a.role.clone())
         .unwrap_or_default()
 }
@@ -639,12 +637,73 @@ fn parse_level(v: &str, what: &str) -> anyhow::Result<u8> {
 /// Раньше DoD/verify/commit работали в дереве, ОТКУДА вызвали. Агент, чей
 /// процесс запущен из общего main, коммитил прямо в main — минуя свой
 /// worktree, ветку и автослияние (и засорял main чужими файлами).
-fn task_tree(root: &Path, reg: &Registry, task: &Task) -> PathBuf {
-    let canon = crate::core::identity::canonical(&task.agent);
-    if let Some(wt) = reg
+/// Запись агента по имени: сначала ТОЧНОЕ совпадение, потом — каноническое.
+///
+/// Каноническое имя склеивает синонимы ('opencode' → 'opencode-d7f20bce').
+/// Если искать только по канону, первая найденная запись выигрывает — а это
+/// может быть агент БЕЗ worktree ('opencode'): автослияние и доска смотрели
+/// не в ту ветку, и код агента «зависал» вне main (T-495).
+fn find_agent<'a>(reg: &'a Registry, name: &str) -> Option<&'a AgentState> {
+    let names: Vec<&str> = reg.agents.iter().map(|a| a.name.as_str()).collect();
+    let idx = pick_exact_first(&names, |n| crate::core::identity::canonical(n), name)?;
+    reg.agents.get(idx)
+}
+
+/// Выбрать запись: ТОЧНОЕ имя важнее канона (чистая функция — тестируется).
+///
+/// Канон склеивает синонимы, поэтому поиск «только по канону» отдаёт первую
+/// подходящую запись — а это может быть агент БЕЗ worktree ('opencode').
+fn pick_exact_first<F>(names: &[&str], canon: F, wanted: &str) -> Option<usize>
+where
+    F: Fn(&str) -> String,
+{
+    if let Some(i) = names.iter().position(|n| *n == wanted) {
+        return Some(i);
+    }
+    let c = canon(wanted);
+    names.iter().position(|n| canon(n) == c)
+}
+
+/// То же, но для изменения записи (порядок: точное имя → канон).
+fn find_agent_mut<'a>(reg: &'a mut Registry, name: &str) -> Option<&'a mut AgentState> {
+    if let Some(pos) = reg.agents.iter().position(|a| a.name == name) {
+        return reg.agents.get_mut(pos);
+    }
+    let canon = crate::core::identity::canonical(name);
+    let pos = reg
         .agents
         .iter()
-        .find(|a| crate::core::identity::canonical(&a.name) == canon)
+        .position(|a| crate::core::identity::canonical(&a.name) == canon);
+    pos.and_then(|p| reg.agents.get_mut(p))
+}
+
+/// Зоны для проверки автослияния: зоны сдаваемой задачи ПЛЮС зоны всех
+/// сданных задач того же агента.
+///
+/// Иначе агент с несколькими задачами (разные зоны) не сливается НИКОГДА:
+/// файлы его других задач выглядят как «путь вне зоны задачи» (T-495).
+fn agent_task_zones(reg: &Registry, agent: &str, task_id: &str) -> Vec<String> {
+    let canon = crate::core::identity::canonical(agent);
+    let mut out: Vec<String> = Vec::new();
+    for t in reg.tasks.iter() {
+        let same = t.id == task_id
+            || (t.status == Status::Done
+                && crate::core::identity::canonical(&t.agent) == canon);
+        if !same {
+            continue;
+        }
+        for z in t.zones.iter() {
+            if !out.contains(z) {
+                out.push(z.clone());
+            }
+        }
+    }
+    out
+}
+
+fn task_tree(root: &Path, reg: &Registry, task: &Task) -> PathBuf {
+    let canon = crate::core::identity::canonical(&task.agent);
+    if let Some(wt) = find_agent(reg, &canon)
         .and_then(|a| a.worktree.clone())
     {
         let p = PathBuf::from(wt);
@@ -662,10 +721,7 @@ fn task_tree(root: &Path, reg: &Registry, task: &Task) -> PathBuf {
 /// агента). Коммит разрешён ТОЛЬКО в worktree исполнителя.
 fn task_tree_strict(root: &Path, reg: &Registry, task: &Task) -> anyhow::Result<PathBuf> {
     let canon = crate::core::identity::canonical(&task.agent);
-    let wt = reg
-        .agents
-        .iter()
-        .find(|a| crate::core::identity::canonical(&a.name) == canon)
+    let wt = find_agent(reg, &canon)
         .and_then(|a| a.worktree.clone());
     match wt {
         Some(wt) => {
@@ -929,9 +985,7 @@ fn model_key(model: &str) -> String {
 /// Модель агента из реестра оркестратора.
 fn registry_model(reg: &Registry, agent: &str) -> Option<String> {
     let canon = crate::core::identity::canonical(agent);
-    reg.agents
-        .iter()
-        .find(|a| crate::core::identity::canonical(&a.name) == canon)
+    find_agent(reg, &canon)
         .and_then(|a| a.model.clone())
 }
 
@@ -984,10 +1038,7 @@ fn agent_ceiling(reg: &Registry, agent: &str) -> u8 {
         None => crate::core::complexity::ModelCeiling::DEFAULT,
     };
     let canon = crate::core::identity::canonical(agent);
-    let explicit = reg
-        .agents
-        .iter()
-        .find(|a| crate::core::identity::canonical(&a.name) == canon)
+    let explicit = find_agent(reg, &canon)
         .and_then(|a| a.c_ceiling);
     crate::core::tech_lead::effective_ceiling(explicit, base)
 }
@@ -1659,10 +1710,7 @@ fn start(root: &Path, args: &[String]) -> anyhow::Result<()> {
                 .map(String::as_str)
                 .collect::<Vec<_>>()
                 .join(", ");
-            let my_wt = reg
-                .agents
-                .iter()
-                .find(|a| crate::core::identity::canonical(&a.name) == caller)
+            let my_wt = find_agent(&reg, &caller)
                 .and_then(|a| a.worktree.clone())
                 .filter(|w| !w.trim().is_empty())
                 .map(PathBuf::from);
@@ -2003,7 +2051,10 @@ fn zone_violations(paths: &[String], zones: &[String]) -> Vec<String> {
 /// T-488: что ветка собирается влить в main — все изменённые пути от `main`
 /// до `branch`. Пути вне зоны задачи = чужой файл, слияние запрещено.
 fn branch_changed_paths(tree: &Path, main_branch: &str, branch: &str) -> Vec<String> {
-    let range = format!("{main_branch}..{branch}");
+    // merge-base (три точки!), а не концы веток: двухточечный diff показывает
+    // и ПРАВКИ MAIN, сделанные после точки ветвления — они не belong агенту,
+    // но выглядели как «путь вне зоны задачи» и блокировали автослияние (T-495).
+    let range = format!("{main_branch}...{branch}");
     git_output(tree, &["diff", "--name-only", &range])
         .map(|out| {
             out.lines()
@@ -2027,10 +2078,7 @@ fn auto_merge_agent(
     task_id: &str,
 ) -> Option<MergeOutcome> {
     let canon = crate::core::identity::canonical(agent);
-    let a = reg
-        .agents
-        .iter()
-        .find(|x| crate::core::identity::canonical(&x.name) == canon)?;
+    let a = find_agent(reg, &canon)?;
     let wt = a.worktree.clone()?;
     let path = PathBuf::from(&wt);
     if !path.is_dir() {
@@ -2075,12 +2123,7 @@ fn auto_merge_agent(
     }
     // T-488: вливаем только то, что лежит в зонах задачи. Иначе воркер
     // коммитит README/чужой модуль и `done` протаскивает это в main.
-    let zones = reg
-        .tasks
-        .iter()
-        .find(|t| t.id == task_id)
-        .map(|t| t.zones.clone())
-        .unwrap_or_default();
+    let zones = agent_task_zones(reg, agent, task_id);
     let changed = branch_changed_paths(&path, &main_branch, &branch);
     let outside = zone_violations(&changed, &zones);
     if !outside.is_empty() {
@@ -2184,11 +2227,7 @@ fn notify_merge(agent: &str, task_id: &str, out: &MergeOutcome) {
 /// Записать результат слияния в состояние агента.
 fn record_merge(reg: &mut Registry, agent: &str, out: &MergeOutcome) {
     let canon = crate::core::identity::canonical(agent);
-    if let Some(a) = reg
-        .agents
-        .iter_mut()
-        .find(|x| crate::core::identity::canonical(&x.name) == canon)
-    {
+    if let Some(a) = find_agent_mut(reg, agent) {
         a.merge_state = Some(out.state.clone());
         a.merged_sha = out.sha.clone();
         a.merged_at = Some(now());
@@ -3758,10 +3797,7 @@ fn identify(root: &Path, args: &[String]) -> anyhow::Result<()> {
                 ident.source.as_str()
             ));
         }
-        let rec = reg
-            .agents
-            .iter()
-            .find(|a| crate::core::identity::canonical(&a.name) == canon);
+        let rec = find_agent(&reg, &canon);
         let Some(rec) = rec else {
             return Err(anyhow!(
                 "devh orch identify --reply: агент {canon} не зарегистрирован в реестре — \
@@ -3818,10 +3854,7 @@ fn identify(root: &Path, args: &[String]) -> anyhow::Result<()> {
             return Err(anyhow!("devh orch identify --set: пустая модель"));
         }
         // Модель ДО изменения — для журнала настроек.
-        let model_before = reg
-            .agents
-            .iter()
-            .find(|a| crate::core::identity::canonical(&a.name) == canon)
+        let model_before = find_agent(&reg, &canon)
             .and_then(|a| a.model.clone())
             .unwrap_or_else(|| "неизвестна".to_string());
         let mut reg = reg;
@@ -4368,10 +4401,7 @@ fn board_worker_json(reg: &Registry, lead: Option<&str>, caller: &str) -> String
     let (active, queued) = agent_sections(reg, caller);
     let buffer = buffer_tasks(reg, lead);
 
-    let state = reg
-        .agents
-        .iter()
-        .find(|a| crate::core::identity::canonical(&a.name) == caller);
+    let state = find_agent(reg, &caller);
 
     let model = state
         .and_then(|s| s.model.clone())
@@ -4919,10 +4949,7 @@ fn board_worker(
     caller: &str,
     as_json: bool,
 ) -> anyhow::Result<()> {
-    let state = reg
-        .agents
-        .iter()
-        .find(|a| crate::core::identity::canonical(&a.name) == caller);
+    let state = find_agent(reg, &caller);
     let (active, queued) = agent_sections(reg, caller);
     let model = state
         .and_then(|s| s.model.clone())
@@ -5317,10 +5344,7 @@ pub fn verify_cmd(root: &Path, args: &[String]) -> anyhow::Result<()> {
         let c_level = task.c_level.unwrap_or(task.complexity);
         let model = registry_model(&reg, &agent).unwrap_or_default();
         let canon = crate::core::identity::canonical(&agent);
-        let version = reg
-            .agents
-            .iter()
-            .find(|a| crate::core::identity::canonical(&a.name) == canon)
+        let version = find_agent(&reg, &canon)
             .and_then(|a| a.model_version.clone());
         // Телеметрия — ТОЛЬКО по зонам задачи: чужие файлы не понижают
         // потолок агента (BROKEN-POTOLK). Тяжесть диагностик — с весами.
@@ -5350,10 +5374,7 @@ pub fn verify_cmd(root: &Path, args: &[String]) -> anyhow::Result<()> {
         let diff = quality_diff_text(&tree, task_commit_sha.as_deref());
         let (added, comments, code_lines) = crate::core::quality::diff_metrics(&diff);
         let actions = crate::core::quality::deliberation_actions(&agent_log_text(&reg, &agent));
-        let identified = reg
-            .agents
-            .iter()
-            .find(|a| crate::core::identity::canonical(&a.name) == canon)
+        let identified = find_agent(&reg, &canon)
             .map(|a| a.last_identify_ts.is_some())
             .unwrap_or(false);
         let sample = crate::core::quality::QualitySample {
@@ -5504,10 +5525,7 @@ fn scoped_category_counts(
 /// Последний лог сессии агента — эвристика «обдумывания» (виды действий).
 fn agent_log_text(reg: &Registry, agent: &str) -> String {
     let canon = crate::core::identity::canonical(agent);
-    let wt = reg
-        .agents
-        .iter()
-        .find(|a| crate::core::identity::canonical(&a.name) == canon)
+    let wt = find_agent(reg, &canon)
         .and_then(|a| a.worktree.clone());
     let Some(wt) = wt else {
         return String::new();
@@ -5583,10 +5601,7 @@ fn validate_commit_sha(tree: &Path, sha: &str, agent: &str, reg: &Registry) -> a
     // в worktree реестра нет, и старая проверка молча пропускала ЛЮБОЙ SHA
     // (fail-open — ровно тот баг, который чинит T-210).
     let canon_agent = crate::core::identity::canonical(&agent);
-    let agent_state = reg
-        .agents
-        .iter()
-        .find(|a| crate::core::identity::canonical(&a.name) == canon_agent);
+    let agent_state = find_agent(reg, &canon_agent);
     let wt_branch = agent_state
         .and_then(|a| a.wt_branch.as_deref())
         .map(str::trim)
@@ -5942,10 +5957,7 @@ fn git_paths(tree: &Path, args: &[&str]) -> Vec<String> {
 /// Это признак РЕАЛЬНОЙ двойной работы: агент сейчас правит тот же файл.
 /// Нет worktree/правки — пересечение зон остаётся предупреждением.
 fn agent_dirty_paths(reg: &Registry, owner: &str, paths: &[String]) -> Vec<String> {
-    let Some(wt) = reg
-        .agents
-        .iter()
-        .find(|a| crate::core::identity::canonical(&a.name) == owner)
+    let Some(wt) = find_agent(reg, &owner)
         .and_then(|a| a.worktree.clone())
     else {
         return Vec::new();
@@ -6237,10 +6249,7 @@ pub fn role_cmd(root: &Path, args: &[String]) -> anyhow::Result<()> {
     }
     let mut reg = reg;
     let canon_target = crate::core::identity::canonical(&agent);
-    let role_before = reg
-        .agents
-        .iter()
-        .find(|a| crate::core::identity::canonical(&a.name) == canon_target)
+    let role_before = find_agent(&reg, &canon_target)
         .and_then(|a| a.role.clone())
         .unwrap_or_else(|| "нет".to_string());
     apply_role(&mut reg, &agent, &role);
@@ -6674,10 +6683,7 @@ fn elevate(root: &Path, args: &[String]) -> anyhow::Result<()> {
     check_lead_password(root, args)?;
     let mut reg = reg;
     let canon_target = crate::core::identity::canonical(&target);
-    let role_before = reg
-        .agents
-        .iter()
-        .find(|a| crate::core::identity::canonical(&a.name) == canon_target)
+    let role_before = find_agent(&reg, &canon_target)
         .and_then(|a| a.role.clone())
         .unwrap_or_else(|| "нет".to_string());
     apply_role(&mut reg, &target, ROLE_LEAD);
@@ -7236,7 +7242,19 @@ mod tests {
     fn identify_reply_does_not_create_phantom_agent() {
         let tmp = tempdir().expect("tmp");
         let root = tmp.path();
-        identify_now(root);
+        // T-477: ответ принимается только для ЗАРЕГИСТРИРОВАННОГО агента с
+        // доказанной привязкой сессии. Незарегистрированный агент → отказ,
+        // фантом в реестре не появляется.
+        let err = run(
+            root,
+            "identify",
+            &[me().as_str(), "--reply", "MODEL: test-model-2026-01-01"],
+        )
+        .expect_err("ответ незарегистрированного агента должен быть отклонён");
+        assert!(
+            err.to_string().contains("не зарегистрирован"),
+            "сообщение: {err}"
+        );
         let reg = load(root);
         assert!(
             !reg.agents.iter().any(|a| a.name.contains("MODEL:")),
@@ -7244,8 +7262,8 @@ mod tests {
             reg.agents.iter().map(|a| &a.name).collect::<Vec<_>>()
         );
         assert!(
-            reg.agents.iter().any(|a| a.name == me() && a.model.is_some()),
-            "ответ должен попасть в карточку вызывающего агента"
+            !reg.agents.iter().any(|a| a.name == me() && a.model.is_some()),
+            "незарегистрированный агент не должен получить модель"
         );
     }
 
@@ -8207,6 +8225,79 @@ mod tests {
         let mut reg = reg_with_agent(agent, wt);
         reg.agents[0].wt_branch = Some(branch.to_string());
         reg
+    }
+
+    // ---- T-495: автослияние не блокируется правками main ------------------
+
+    /// Точное имя важнее канона: синоним не перехватывает агента с worktree.
+    #[test]
+    fn pick_exact_first_prefers_exact_name() {
+        let names = vec!["opencode", "opencode-d7f20bce"];
+        let canon = |n: &str| {
+            if n == "opencode" {
+                "opencode-d7f20bce".to_string()
+            } else {
+                n.to_string()
+            }
+        };
+        assert_eq!(
+            pick_exact_first(&names, canon, "opencode-d7f20bce"),
+            Some(1),
+            "точное имя должно выиграть у синонима"
+        );
+        assert_eq!(pick_exact_first(&names, canon, "opencode"), Some(0));
+    }
+
+    /// Правки MAIN после точки ветвления — не «путь вне зоны задачи».
+    ///
+    /// Регрессия: двухточечный diff (main..branch) показывал и изменения main
+    /// (mutate.rs, core/mod.rs, ...) — автослияние блокировалось, и код агента
+    /// висел вне main навсегда (T-495).
+    #[test]
+    fn auto_merge_ignores_main_side_changes_outside_zone() {
+        let (d, root, wt) = agent_wt_fixture();
+        let g = |args: &[&str], cwd: &Path| {
+            let _ = std::process::Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .output();
+        };
+        // main меняет файл ВНЕ зоны задачи ПОСЛЕ точки ветвления.
+        std::fs::write(root.join("other.txt"), "main side\n").expect("write");
+        g(&["add", "-A"], &root);
+        g(&["commit", "-qm", "main side change"], &root);
+        let mut reg = reg_with_agent("beam", &wt);
+        let mut t = active_task("T-001", "beam", &["b.txt"]);
+        t.status = Status::Done;
+        reg.tasks.push(t);
+        let out = auto_merge_agent(&root, &reg, "beam", "T-001").expect("результат слияния");
+        assert_eq!(
+            out.state, "влито",
+            "правки main вне зоны не должны блокировать слияние: {out:?}"
+        );
+        drop(d);
+    }
+
+    /// Зоны автослияния = зоны сдаваемой задачи + зоны сданных задач агента.
+    #[test]
+    fn agent_task_zones_unions_done_tasks_of_agent() {
+        let mut reg = Registry::default();
+        let mut t1 = active_task("T-1", "beam", &["a.txt"]);
+        t1.status = Status::Done;
+        let mut t2 = active_task("T-2", "beam", &["b.txt"]);
+        t2.status = Status::Done;
+        let mut t3 = active_task("T-3", "other", &["c.txt"]);
+        t3.status = Status::Done;
+        reg.tasks.push(t1);
+        reg.tasks.push(t2);
+        reg.tasks.push(t3);
+        let zones = agent_task_zones(&reg, "beam", "T-1");
+        assert!(zones.iter().any(|z| z == "a.txt"), "зона своей задачи");
+        assert!(
+            zones.iter().any(|z| z == "b.txt"),
+            "зона другой задачи агента"
+        );
+        assert!(!zones.iter().any(|z| z == "c.txt"), "зона чужого агента");
     }
 
     /// SHA, которого нет в git, — отказ (такой SHA в реестр не попадает).
