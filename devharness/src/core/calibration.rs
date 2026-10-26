@@ -159,6 +159,12 @@ pub struct Metrics {
     pub tasks: usize,
     /// Среднее число ошибок в финальной сборке.
     pub avg_errors: f64,
+    /// Средняя ВЗВЕШЕННАЯ сумма ошибок (по множителям тяжести).
+    #[serde(default)]
+    pub avg_errors_weighted: f64,
+    /// Средняя взвешенная сумма предупреждений.
+    #[serde(default)]
+    pub avg_warnings_weighted: f64,
     /// Среднее число предупреждений.
     pub avg_warnings: f64,
     /// Среднее число прогонов сборки.
@@ -289,6 +295,8 @@ pub fn aggregate(measurements: &[TaskMeasurement]) -> Metrics {
         return Metrics {
             tasks: 0,
             avg_errors: 0.0,
+            avg_errors_weighted: 0.0,
+            avg_warnings_weighted: 0.0,
             avg_warnings: 0.0,
             avg_runs: 0.0,
             avg_duration: 0.0,
@@ -303,6 +311,8 @@ pub fn aggregate(measurements: &[TaskMeasurement]) -> Metrics {
     let nf = n as f64;
     let sum_errors: f64 = measurements.iter().map(|m| m.errors_final as f64).sum();
     let sum_warnings: f64 = measurements.iter().map(|m| m.warnings_final as f64).sum();
+    let sum_ew: f64 = measurements.iter().map(|m| m.errors_weighted).sum();
+    let sum_ww: f64 = measurements.iter().map(|m| m.warnings_weighted).sum();
     let sum_runs: f64 = measurements.iter().map(|m| m.check_runs as f64).sum();
     let sum_duration: f64 = measurements.iter().map(|m| m.duration_secs).sum();
     let sum_added: f64 = measurements.iter().map(|m| m.added_lines as f64).sum();
@@ -317,6 +327,8 @@ pub fn aggregate(measurements: &[TaskMeasurement]) -> Metrics {
     Metrics {
         tasks: n,
         avg_errors: sum_errors / nf,
+        avg_errors_weighted: sum_ew / nf,
+        avg_warnings_weighted: sum_ww / nf,
         avg_warnings: sum_warnings / nf,
         avg_runs: sum_runs / nf,
         avg_duration: sum_duration / nf,
@@ -343,6 +355,159 @@ pub fn build_reference(root: &Path, agent: &str, c_level: u8) -> Option<Referenc
         c_level,
         metrics: aggregate(&ms),
     })
+}
+
+// ----------------------------------------------------------------------------
+// Комплексный float отличия от эталона
+// ----------------------------------------------------------------------------
+
+/// Нормированные метрики (0.0..=1.0): больше — лучше.
+fn norm_build(ok: bool) -> f64 {
+    if ok {
+        1.0
+    } else {
+        0.0
+    }
+}
+
+fn norm_errors(weighted: f64) -> f64 {
+    1.0 / (1.0 + weighted.max(0.0))
+}
+
+fn norm_warnings(weighted: f64) -> f64 {
+    1.0 / (1.0 + weighted.max(0.0))
+}
+
+fn norm_rework(rounds: f64) -> f64 {
+    1.0 / (1.0 + rounds.max(0.0))
+}
+
+fn norm_comment(ratio: f64) -> f64 {
+    if quality::IDEAL_COMMENT_RATIO > 0.0 {
+        (ratio / quality::IDEAL_COMMENT_RATIO).min(1.0)
+    } else {
+        0.0
+    }
+}
+
+fn norm_deliberation(actions: f64) -> f64 {
+    if quality::IDEAL_ACTIONS > 0.0 {
+        (actions / quality::IDEAL_ACTIONS).min(1.0)
+    } else {
+        0.0
+    }
+}
+
+fn norm_process(extra_runs: f64) -> f64 {
+    1.0 / (1.0 + extra_runs.max(0.0))
+}
+
+/// Взвешенная сумма ошибок замера (с откатом на сырое число).
+fn task_errors_weighted(m: &TaskMeasurement) -> f64 {
+    if m.errors_weighted > 0.0 {
+        m.errors_weighted
+    } else {
+        m.errors_final as f64
+    }
+}
+
+/// Взвешенная сумма предупреждений замера (с откатом на сырое число).
+fn task_warnings_weighted(m: &TaskMeasurement) -> f64 {
+    if m.warnings_weighted > 0.0 {
+        m.warnings_weighted
+    } else {
+        m.warnings_final as f64
+    }
+}
+
+/// Взвешенная сумма ошибок эталона (с откатом на сырое среднее).
+fn ref_errors_weighted(r: &Metrics) -> f64 {
+    if r.avg_errors_weighted > 0.0 {
+        r.avg_errors_weighted
+    } else {
+        r.avg_errors
+    }
+}
+
+/// Взвешенная сумма предупреждений эталона (с откатом на сырое среднее).
+fn ref_warnings_weighted(r: &Metrics) -> f64 {
+    if r.avg_warnings_weighted > 0.0 {
+        r.avg_warnings_weighted
+    } else {
+        r.avg_warnings
+    }
+}
+
+/// Одна составляющая отличия: метрика, вес и вклад (нормированная разница).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeviationPart {
+    /// Имя метрики (`build`, `errors`, `warnings`, ...).
+    pub metric: String,
+    /// Вес метрики в сводном балле.
+    pub weight: f64,
+    /// Нормированная разница «замер − эталон» (положительная — лучше).
+    pub delta: f64,
+}
+
+/// Разложение отличия замера от эталона по метрикам.
+///
+/// Каждая метрика нормализована к 0.0..=1.0 (больше — лучше), разница с
+/// эталоном — вклад этой метрики в общее отличие.
+pub fn deviation_parts(m: &TaskMeasurement, reference: &Reference) -> Vec<DeviationPart> {
+    let r = &reference.metrics;
+    vec![
+        DeviationPart {
+            metric: "build".to_string(),
+            weight: W_BUILD,
+            delta: norm_build(m.build_ok) - r.build_ok_ratio,
+        },
+        DeviationPart {
+            metric: "errors".to_string(),
+            weight: W_ERRORS,
+            delta: norm_errors(task_errors_weighted(m)) - norm_errors(ref_errors_weighted(r)),
+        },
+        DeviationPart {
+            metric: "warnings".to_string(),
+            weight: W_WARNINGS,
+            delta: norm_warnings(task_warnings_weighted(m)) - norm_warnings(ref_warnings_weighted(r)),
+        },
+        DeviationPart {
+            metric: "rework".to_string(),
+            weight: W_REWORK,
+            delta: norm_rework(m.rework_rounds as f64) - norm_rework(r.avg_rework),
+        },
+        DeviationPart {
+            metric: "comment".to_string(),
+            weight: W_COMMENT,
+            delta: norm_comment(m.comment_ratio()) - norm_comment(r.avg_comment_ratio),
+        },
+        DeviationPart {
+            metric: "deliberation".to_string(),
+            weight: W_DELIBERATION,
+            delta: norm_deliberation(m.deliberation_actions as f64)
+                - norm_deliberation(r.avg_deliberation),
+        },
+        DeviationPart {
+            metric: "process".to_string(),
+            weight: W_PROCESS,
+            delta: norm_process(m.extra_runs() as f64) - norm_process((r.avg_runs - 1.0).max(0.0)),
+        },
+    ]
+}
+
+/// Комплексный float отличия замера от эталона (со знаком).
+///
+/// Одно число вместо набора метрик: `+` — работа лучше эталона, `−` — хуже.
+/// Величина — взвешенная сумма разниц по НОРМИРОВАННЫМ метрикам (те же веса,
+/// что и в сводном балле), поэтому лежит в диапазоне примерно −1..=+1.
+///
+/// Позже (C3/C4) эта величина будет поправляться на СЛОЖНОСТЬ задачи:
+/// у сложной задачи и ошибок больше, и эталон должен это учитывать.
+pub fn deviation_float(m: &TaskMeasurement, reference: &Reference) -> f64 {
+    deviation_parts(m, reference)
+        .iter()
+        .map(|p| p.weight * p.delta)
+        .sum()
 }
 
 /// Оценка замера относительно эталона: (оценка, разрыв).
@@ -496,6 +661,51 @@ mod tests {
             deliberation_actions: 8,
             rework_rounds: 0,
         }
+    }
+
+    #[test]
+    fn deviation_float_is_zero_for_reference_task() {
+        // Замер, совпадающий с эталоном, — нулевое отличие.
+        let base = m("T-1", 0, 0, 1, 2, 10);
+        let reference = Reference {
+            ts: 1,
+            agent: "lead".to_string(),
+            c_level: 2,
+            metrics: aggregate(&[base.clone()]),
+        };
+        let dev = deviation_float(&base, &reference);
+        assert!(dev.abs() < 1e-9, "отличие должно быть нулём: {dev}");
+    }
+
+    #[test]
+    fn deviation_float_is_signed() {
+        let good = m("T-good", 0, 0, 1, 2, 10);
+        let bad = m("T-bad", 6, 4, 3, 0, 10);
+        let reference = Reference {
+            ts: 1,
+            agent: "lead".to_string(),
+            c_level: 2,
+            metrics: aggregate(&[good.clone(), good.clone()]),
+        };
+        let better = deviation_float(&good, &reference);
+        let worse = deviation_float(&bad, &reference);
+        assert!(better > worse, "лучше {better} должно быть > хуже {worse}");
+        assert!(worse < 0.0, "плохая работа — отрицательное отличие: {worse}");
+    }
+
+    #[test]
+    fn deviation_parts_weights_are_complete() {
+        let t = m("T-1", 1, 1, 1, 1, 1);
+        let reference = Reference {
+            ts: 1,
+            agent: "lead".to_string(),
+            c_level: 2,
+            metrics: aggregate(&[t.clone()]),
+        };
+        let parts = deviation_parts(&t, &reference);
+        let sum: f64 = parts.iter().map(|p| p.weight).sum();
+        assert!((sum - 1.0).abs() < 1e-9, "веса отличий: {sum}");
+        assert_eq!(parts.len(), 7, "составляющих: {parts:?}");
     }
 
     #[test]
