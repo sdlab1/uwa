@@ -167,7 +167,7 @@ pub fn git_cmd(root: &Path, args: &[String]) -> anyhow::Result<()> {
         "diff" => diff(&ctx, &tail),
         "log" => log(&ctx, &tail),
         "add" => add(&ctx, &tail),
-        "commit" => commit(&ctx, &tail),
+        "commit" => commit(root, &ctx, &tail),
         "show" => show(&ctx, &tail),
         "branch" => branch(&ctx),
         "restore" => restore(&ctx, &tail),
@@ -294,13 +294,66 @@ fn add(ctx: &Ctx, tail: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn commit(ctx: &Ctx, tail: &[String]) -> anyhow::Result<()> {
+/// Путь лежит в зоне (файл или каталог)?
+fn path_in_zone(path: &str, zone: &str) -> bool {
+    let p = path.trim().trim_start_matches("./").trim_end_matches('/');
+    let z = zone.trim().trim_start_matches("./").trim_end_matches('/');
+    !z.is_empty() && (p == z || p.starts_with(&format!("{z}/")))
+}
+
+/// Зоны всех АКТИВНЫХ задач агента (T-488). Пусто — значит коммит запрещён:
+/// без зоны нельзя отличить работу задачи от подмены чужого файла.
+fn active_zones(root: &Path, caller: &str) -> Vec<String> {
+    let reg = crate::commands::orch::load(root);
+    let canon = crate::core::identity::canonical(caller);
+    let mut zones: Vec<String> = Vec::new();
+    for t in reg.tasks.iter().filter(|t| {
+        t.status == crate::commands::orch::Status::Active
+            && crate::core::identity::canonical(&t.agent) == canon
+    }) {
+        for z in &t.zones {
+            let z = z.trim();
+            if !z.is_empty() && !zones.iter().any(|x| x == z) {
+                zones.push(z.to_string());
+            }
+        }
+    }
+    zones
+}
+
+/// Каждый коммитимый путь — внутри зоны активной задачи (T-488).
+/// Нельзя коммитить `README.md`, если задача объявлена только в `src/`.
+fn enforce_commit_zones(root: &Path, caller: &str, paths: &[String]) -> anyhow::Result<()> {
+    let zones = active_zones(root, caller);
+    if zones.is_empty() {
+        anyhow::bail!(
+            "devh git commit: у «{caller}» нет активной задачи с зоной — \
+             коммит запрещён (T-488). Возьми задачу с --zone или попроси lead уточнить зону."
+        );
+    }
+    let outside: Vec<&str> = paths
+        .iter()
+        .map(String::as_str)
+        .filter(|p| !zones.iter().any(|z| path_in_zone(p, z)))
+        .collect();
+    if !outside.is_empty() {
+        anyhow::bail!(
+            "devh git commit: пути вне зоны задачи: {} (зоны: {}) — T-488",
+            outside.join(", "),
+            zones.join(", ")
+        );
+    }
+    Ok(())
+}
+
+fn commit(root: &Path, ctx: &Ctx, tail: &[String]) -> anyhow::Result<()> {
     let paths = guard_paths(&flag_values(tail, "--path"))?;
     let msg = flag_value(tail, "-m")
         .or_else(|| flag_value(tail, "--message"))
         .map(|m| m.trim().to_string())
         .filter(|m| !m.is_empty())
         .ok_or_else(|| anyhow::anyhow!("devh git commit: нужен текст (-m \"…\")"))?;
+    enforce_commit_zones(root, &ctx.caller, &paths)?;
     git::add_paths(&ctx.tree, &paths)?;
     let staged = git::staged_names(&ctx.tree);
     if !staged_subset_ok(&staged, &paths) {
@@ -514,5 +567,28 @@ mod tests {
         assert_eq!(ctx.tree, wt, "ведомый работает в своём worktree");
         assert!(!ctx.is_lead);
         let _ = std::fs::remove_dir_all(&root);
+    }
+    /// T-488: путь вне зоны задачи не коммитится.
+    #[test]
+    fn zone_prefix_contains_files_not_parent_dirs() {
+        let zones = vec!["devharness/src/shell".to_string()];
+        let ok = |paths: &[&str]| {
+            paths.iter().all(|p| {
+                let p = p.to_string();
+                zones.iter().any(|z| path_in_zone(&p, z))
+            })
+        };
+        assert!(ok(&["devharness/src/shell/msg.rs"]));
+        assert!(!ok(&["devharness/src"]));
+        assert!(!ok(&["README.md"]));
+    }
+
+    /// T-488: зона-файл не расширяется на соседний файл с тем же префиксом.
+    #[test]
+    fn exact_file_zone_and_parent_prefix() {
+        assert!(path_in_zone("README.md", "README.md"));
+        assert!(!path_in_zone("README.md.bak", "README.md"));
+        assert!(path_in_zone("a/b/c.rs", "a"));
+        assert!(!path_in_zone("ab/c.rs", "a"));
     }
 }

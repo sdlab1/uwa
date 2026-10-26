@@ -445,6 +445,53 @@ pub fn lead_of(reg: &Registry) -> (Option<String>, &'static str) {
     (None, "не назначен")
 }
 
+/// T-487: revoke/reassign/degrade — только lead или tech_lead.
+fn require_lead_or_tech(reg: &Registry, action: &str) -> anyhow::Result<()> {
+    let (lead, _) = lead_of(reg);
+    let caller = current_canon();
+    if lead.as_deref() == Some(caller.as_str()) || caller_has_review_rights(reg) {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "devh orch {action}: только lead/tech_lead (ты «{caller}», lead «{}») — T-487/T-491",
+        lead.as_deref().unwrap_or("не назначен")
+    )
+}
+
+/// Может ли вызывающий действовать с задачей: её исполнитель или lead.
+fn may_act_on_task(caller: &str, task_agent: &str, lead: Option<&str>) -> bool {
+    let c = crate::core::identity::canonical(caller);
+    c == crate::core::identity::canonical(task_agent)
+        || lead
+            .map(crate::core::identity::canonical)
+            .as_deref()
+            == Some(c.as_str())
+}
+
+fn current_canon() -> String {
+    crate::core::identity::canonical(&crate::core::identity::current().name)
+}
+
+fn caller_is_lead(reg: &Registry) -> bool {
+    let (lead, _) = lead_of(reg);
+    lead.as_deref() == Some(current_canon().as_str())
+}
+
+/// T-485: DoD/verify/commit/done — только владелец задачи или lead.
+fn require_task_owner(reg: &Registry, task: &Task, action: &str) -> anyhow::Result<()> {
+    let caller = current_canon();
+    let (lead, _) = lead_of(reg);
+    if may_act_on_task(&caller, &task.agent, lead.as_deref()) {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "devh orch {action}: задача {} принадлежит «{}», а ты «{caller}» — \
+         чужие задачи не трогаем (T-485)",
+        task.id,
+        task.agent
+    )
+}
+
 /// Назначить ведущего; прежний lead становится worker.
 fn assign_lead(reg: &mut Registry, addr: &str) -> anyhow::Result<String> {
     let raw = addr.trim();
@@ -1772,6 +1819,17 @@ fn close(root: &Path, args: &[String], status: Status) -> anyhow::Result<()> {
     let reason = flag(args, "--reason").unwrap_or_default();
     let override_reason = flag(args, "--override");
     let mut reg = load(root);
+    {
+        let idx = find_task_index(&reg, &id)
+            .ok_or_else(|| anyhow!("devh orch: задача {id} не найдена"))?;
+        let cur = reg.tasks.get(idx).expect("индекс найден");
+        require_task_owner(&reg, cur, if status == Status::Done { "done" } else { "fail" })?;
+        if status == Status::Done && cur.status == Status::Queued {
+            return Err(anyhow!(
+                "devh orch done: {id} ещё не взята (queued) — сначала devh orch start {id} (T-485)"
+            ));
+        }
+    }
     // ИДЕМПОТЕНТНОСТЬ сдачи: повторный `done` по уже сданной задаче — no-op
     // (без нового события ledger, без auto_trigger, без повторного слияния).
     // Без этого «возврат в очередь → повторная сдача» давал 3 события done,
@@ -1914,6 +1972,36 @@ struct MergeOutcome {
     detail: String,
 }
 
+/// Путь внутри зоны (файл или каталог) — та же семантика, что в gitfacade.
+fn path_within_zone(path: &str, zone: &str) -> bool {
+    let p = path.trim().trim_start_matches("./").trim_end_matches('/');
+    let z = zone.trim().trim_start_matches("./").trim_end_matches('/');
+    !z.is_empty() && (p == z || p.starts_with(&format!("{z}/")))
+}
+
+fn paths_within_zones(paths: &[String], zones: &[String]) -> bool {
+    !paths.is_empty()
+        && !zones.is_empty()
+        && paths
+            .iter()
+            .all(|p| zones.iter().any(|z| path_within_zone(p, z)))
+}
+
+/// T-488: что ветка собирается влить в main — все изменённые пути от `main`
+/// до `branch`. Пути вне зоны задачи = чужой файл, слияние запрещено.
+fn branch_changed_paths(tree: &Path, main_branch: &str, branch: &str) -> Vec<String> {
+    let range = format!("{main_branch}..{branch}");
+    git_output(tree, &["diff", "--name-only", &range])
+        .map(|out| {
+            out.lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Автослияние: после сдачи задачи харнесс сам вливает ветку агента.
 ///
 /// Merge не должен быть вопросом агенту («нужен devh orch wt merge X»):
@@ -1970,6 +2058,39 @@ fn auto_merge_agent(
             state: "нечего вливать".to_string(),
             sha: None,
             detail: format!("на {branch} нет коммитов сверх {main_branch} (задача {task_id})"),
+        });
+    }
+    // T-488: вливаем только то, что лежит в зонах задачи. Иначе воркер
+    // коммитит README/чужой модуль и `done` протаскивает это в main.
+    let zones = reg
+        .tasks
+        .iter()
+        .find(|t| t.id == task_id)
+        .map(|t| t.zones.clone())
+        .unwrap_or_default();
+    let changed = branch_changed_paths(&path, &main_branch, &branch);
+    if !paths_within_zones(&changed, &zones) {
+        let outside: Vec<String> = changed
+            .iter()
+            .filter(|p| !zones.iter().any(|z| path_within_zone(p, z)))
+            .cloned()
+            .collect();
+        return Some(MergeOutcome {
+            state: "ошибка: вне зоны задачи".to_string(),
+            sha: None,
+            detail: format!(
+                "в {branch} есть пути вне зон задачи {task_id} ({}): {}",
+                if zones.is_empty() {
+                    "зоны не заданы".to_string()
+                } else {
+                    zones.join(", ")
+                },
+                if outside.is_empty() {
+                    "пути не определены".to_string()
+                } else {
+                    outside.join(", ")
+                }
+            ),
         });
     }
     let main_root =
@@ -2417,6 +2538,7 @@ fn revoke(root: &Path, args: &[String]) -> anyhow::Result<()> {
         .ok_or_else(|| anyhow!("devh orch revoke: нужен ID задачи"))?;
     let reason = flag(args, "--reason").unwrap_or_default();
     let mut reg = load(root);
+    require_lead_or_tech(&reg, "revoke")?;
     let idx =
         find_task_index(&reg, &id).ok_or_else(|| anyhow!("devh orch: задача {id} не найдена"))?;
     {
@@ -2459,6 +2581,7 @@ fn reassign(root: &Path, args: &[String]) -> anyhow::Result<()> {
     let agent =
         flag(args, "--agent").ok_or_else(|| anyhow!("devh orch reassign: нужен --agent"))?;
     let mut reg = load(root);
+    require_lead_or_tech(&reg, "reassign")?;
     let idx =
         find_task_index(&reg, &id).ok_or_else(|| anyhow!("devh orch: задача {id} не найдена"))?;
     // «task taken»: задачу, которую агент УЖЕ ВЗЯЛ в работу, переназначать
@@ -2629,6 +2752,7 @@ fn degrade(root: &Path, args: &[String]) -> anyhow::Result<()> {
     };
     let reason = flag(args, "--reason").unwrap_or_else(|| "ручная деградация".to_string());
     let mut reg = load(root);
+    require_lead_or_tech(&reg, "degrade")?;
     let touched = degrade_queue(&mut reg, &agent, &reason, floor);
     save(root, &reg)?;
     println!("devh orch: P очереди {agent} понижен ({touched} задач) — причина: {reason}");
@@ -3900,6 +4024,15 @@ fn wt(root: &Path, args: &[String]) -> anyhow::Result<()> {
         }
         "assign" => {
             let agent = agent.ok_or_else(|| anyhow!("devh orch wt assign: нужен агент"))?;
+            let reg = load(root);
+            let caller = crate::core::identity::canonical(&crate::core::identity::current().name);
+            if !caller_is_lead(&reg)
+                && crate::core::identity::canonical(&agent) != caller
+            {
+                anyhow::bail!(
+                    "devh orch wt assign: чужой worktree назначает только lead (T-485)"
+                );
+            }
             let (p, created) = crate::commands::wtman::ensure(&cfg, root, &agent)?;
             let mut reg = load(root);
             if agent_index(&reg, &agent).is_none() {
@@ -4977,10 +5110,18 @@ pub fn dod_cmd(root: &Path, args: &[String]) -> anyhow::Result<()> {
     let mut reg = load(root);
     let idx = find_task_index(&reg, &id)
         .ok_or_else(|| anyhow!("devh orch dod: задача {id} не найдена"))?;
+    require_task_owner(&reg, reg.tasks.get(idx).expect("индекс найден"), "dod")?;
     let additions = flags_all(args, "--add");
     let acks = flags_all(args, "--ack");
     let checks = flags_all(args, "--check");
     let zones = flags_all(args, "--zone");
+    // T-488/T-485: DoD, проверки и зоны задачи назначает lead. Воркер,
+    // который сам дописывает себе зону/check, обходит и DoD, и изоляцию.
+    if !caller_is_lead(&reg) && !(additions.is_empty() && checks.is_empty() && zones.is_empty()) {
+        return Err(anyhow!(
+            "devh orch dod: менять DoD/--check/--zone может только lead (T-485)"
+        ));
+    }
     {
         let task = reg.tasks.get_mut(idx).expect("индекс найден");
         for criterion in additions {
@@ -5056,6 +5197,7 @@ pub fn verify_cmd(root: &Path, args: &[String]) -> anyhow::Result<()> {
     let mut reg = load(root);
     let idx = find_task_index(&reg, &id)
         .ok_or_else(|| anyhow!("devh orch verify: задача {id} не найдена"))?;
+    require_task_owner(&reg, reg.tasks.get(idx).expect("индекс найден"), "verify")?;
     let checks = reg.tasks.get(idx).expect("индекс найден").checks.clone();
     // Проверки идут в worktree ИСПОЛНИТЕЛЯ, а не в дерево вызова: агент,
     // запущенный из общего main, иначе проверял бы чужой код.
@@ -5618,6 +5760,7 @@ pub fn commit_cmd(root: &Path, args: &[String]) -> anyhow::Result<()> {
     let idx = find_task_index(&reg, &id)
         .ok_or_else(|| anyhow!("devh orch commit: задача {id} не найдена"))?;
     let task = reg.tasks.get(idx).expect("индекс найден");
+    require_task_owner(&reg, task, "commit")?;
     // Коммит — в worktree исполнителя задачи (его ветка), а не в дереве вызова.
     let tree = task_tree_strict(root, &reg, task)?;
     let state = dod_state(&tree, task);
@@ -5647,6 +5790,22 @@ pub fn commit_cmd(root: &Path, args: &[String]) -> anyhow::Result<()> {
     if paths.is_empty() {
         return Err(anyhow!(
             "devh orch commit: не указан путь и у задачи нет зон (--path)"
+        ));
+    }
+    if !paths_within_zones(&paths, &task.zones) {
+        let outside: Vec<&str> = paths
+            .iter()
+            .map(String::as_str)
+            .filter(|p| !task.zones.iter().any(|z| path_within_zone(p, z)))
+            .collect();
+        return Err(anyhow!(
+            "devh orch commit: пути вне зоны задачи {id}: {} (зоны: {}) — T-488",
+            outside.join(", "),
+            if task.zones.is_empty() {
+                "не заданы".to_string()
+            } else {
+                task.zones.join(", ")
+            }
         ));
     }
     let mut git_args = vec!["add", "--"];
@@ -6701,6 +6860,8 @@ fn onboard_register(root: &Path, args: &[String]) -> anyhow::Result<Onboarded> {
         ));
     }
     let mut reg = load(root);
+    // T-491: регистрация агента и первое задание (с --check!) — только lead/tech.
+    require_lead_or_tech(&reg, "onboard")?;
     // Адрес не должен совпадать с чужим (в т.ч. с адресом ведущего).
     let (lead_now, _) = lead_of(&reg);
     if let Some(l) = lead_now.as_ref() {
@@ -7514,6 +7675,25 @@ mod tests {
     }
 
     #[test]
+    fn owner_or_lead_can_act_on_task() {
+        assert!(may_act_on_task("worker", "worker", Some("lead")));
+        assert!(may_act_on_task("lead", "worker", Some("lead")));
+        assert!(!may_act_on_task("attacker", "worker", Some("lead")));
+        assert!(!may_act_on_task("attacker", "worker", None));
+    }
+
+    fn paths_within_zones_blocks_foreign_file() {
+        let zones = vec!["devharness/src/shell".to_string()];
+        assert!(paths_within_zones(
+            &["devharness/src/shell/msg.rs".to_string()],
+            &zones
+        ));
+        assert!(!paths_within_zones(&["README.md".to_string()], &zones));
+        assert!(!paths_within_zones(&["devharness/src".to_string()], &zones));
+        assert!(!paths_within_zones(&[], &zones));
+        assert!(!paths_within_zones(&["README.md".to_string()], &[]));
+    }
+
     fn zones_overlap_is_prefix_based() {
         assert!(zones_overlap("devharness/src", "devharness/src/lib.rs"));
         assert!(zones_overlap("devharness/src/lib.rs", "devharness/src"));

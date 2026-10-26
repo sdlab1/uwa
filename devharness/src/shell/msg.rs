@@ -341,6 +341,14 @@ fn thread_participants(blocks: &[String]) -> Vec<String> {
     who
 }
 
+/// Виден ли тред вызывающему: он участник или тред разослан `all` (T-490).
+fn thread_visible_to(blocks: &[String], caller: &str) -> bool {
+    let caller_canon = crate::core::identity::canonical(caller);
+    thread_participants(blocks)
+        .iter()
+        .any(|w| w == "all" || crate::core::identity::canonical(w) == caller_canon)
+}
+
 fn inbox_path(agent: &str) -> PathBuf {
     inbox_dir().join(format!("{agent}.log"))
 }
@@ -452,6 +460,77 @@ pub fn safe_name(agent: &str) -> String {
 /// ручной `DEVH_AGENT=...`; без него все агенты были «default».
 fn me(explicit: Option<&str>) -> String {
     crate::core::identity::resolve(explicit).name
+}
+
+/// Отправитель письма — только фактический caller сессии (T-486).
+/// `--from` разрешён лишь как no-op для того же канонического адреса;
+/// подделка lead/tech_lead отклоняется.
+fn safe_from(caller: &str, requested: Option<&str>) -> Result<String, String> {
+    let caller_canon = crate::core::identity::canonical(caller);
+    let Some(requested) = requested.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(caller_canon);
+    };
+    let requested_canon = crate::core::identity::canonical(requested);
+    if requested_canon != caller_canon {
+        return Err(format!(
+            "подделка отправителя запрещена: --from «{requested}», фактический адрес «{caller_canon}» (T-486)"
+        ));
+    }
+    Ok(caller_canon)
+}
+
+/// Ящик, который разрешено читать/сторожить (T-489): только свой.
+/// `--agent` чужого агента отклоняется.
+fn own_mailbox(requested: Option<&str>, caller: &str, operation: &str) -> Result<String, String> {
+    let caller_canon = crate::core::identity::canonical(caller);
+    let Some(requested) = requested.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(caller_canon);
+    };
+    let target = crate::core::identity::canonical(requested);
+    if target != caller_canon {
+        return Err(format!(
+            "{operation}: чужой ящик «{requested}» запрещён (ты «{caller_canon}») — T-489/T-490"
+        ));
+    }
+    Ok(target)
+}
+
+/// Корень репозитория, где лежит общий реестр (для проверки зарезервированных имён).
+fn repo_root_with_registry() -> Option<PathBuf> {
+    let mut cur = std::env::current_dir().ok()?;
+    loop {
+        if cur.join(".harness/orch/registry.json").exists() {
+            return Some(cur);
+        }
+        if !cur.pop() {
+            return None;
+        }
+    }
+}
+
+/// Имена, которые нельзя затенять алиасом: агенты реестра, ведущий, задачи,
+/// а также закреплённые привязки сессий.
+fn reserved_agent_names() -> Vec<String> {
+    let mut names = crate::core::identity::claimed_names();
+    if let Some(root) = repo_root_with_registry() {
+        let reg = crate::commands::orch::load(&root);
+        names.extend(reg.agents.into_iter().map(|a| a.name));
+        names.extend(reg.tasks.into_iter().map(|t| t.agent));
+        if let Some(lead) = reg.lead {
+            names.push(lead);
+        }
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// Затеняет ли алиас известного агента (T-481).
+fn alias_targets_agent(alias: &str, reserved: &[String]) -> bool {
+    let target = crate::core::identity::canonical(alias);
+    reserved
+        .iter()
+        .any(|n| n == alias || crate::core::identity::canonical(n) == target)
 }
 
 fn now_hm() -> String {
@@ -1369,9 +1448,14 @@ pub fn send(args: &[String]) -> i32 {
     let m = parse_args(args);
     match m.sub.as_str() {
         "send" | "reply" => {
-            let from = m
-                .value("from")
-                .unwrap_or_else(|| me(m.value("agent").as_deref()));
+            let caller = me(None);
+            let from = match safe_from(&caller, m.value("from").as_deref()) {
+                Ok(from) => from,
+                Err(e) => {
+                    eprintln!("devh msg send: {e}");
+                    return 1;
+                }
+            };
             let mut to = m.values("to");
             if to.is_empty() {
                 to.push("all".to_string());
@@ -1440,10 +1524,15 @@ pub fn send(args: &[String]) -> i32 {
                 eprintln!("нужен ID треда");
                 return 1;
             }
+            let caller = me(None);
             let text = fs::read_to_string(thread_path(&id)).unwrap_or_default();
             let (_h, blocks) = split_log(&text);
             if blocks.is_empty() {
                 eprintln!("тред {id} не найден");
+                return 1;
+            }
+            if !thread_visible_to(&blocks, &caller) {
+                eprintln!("devh msg thread: тред {id} не твой — доступ только участникам (T-490)");
                 return 1;
             }
             for b in blocks.iter() {
@@ -1452,7 +1541,14 @@ pub fn send(args: &[String]) -> i32 {
             0
         }
         "read" => {
-            let agent = me(m.value("agent").as_deref());
+            let caller = me(None);
+            let agent = match own_mailbox(m.value("agent").as_deref(), &caller, "devh msg read") {
+                Ok(agent) => agent,
+                Err(e) => {
+                    eprintln!("{e}");
+                    return 1;
+                }
+            };
             let peek = m.flag("peek");
             let filter = m.value("tag");
             let mut shown = 0usize;
@@ -1511,7 +1607,14 @@ pub fn send(args: &[String]) -> i32 {
             0
         }
         "watch" => {
-            let agent = me(m.value("agent").as_deref());
+            let caller = me(None);
+            let agent = match own_mailbox(m.value("agent").as_deref(), &caller, "devh msg watch") {
+                Ok(agent) => agent,
+                Err(e) => {
+                    eprintln!("{e}");
+                    return 1;
+                }
+            };
             let interval: u64 = m
                 .value("interval")
                 .and_then(|s| s.parse::<u64>().ok())
@@ -1631,6 +1734,13 @@ pub fn send(args: &[String]) -> i32 {
                 if alias.is_empty() {
                     eprintln!(
                         "нужно: devh msg alias <синоним> [--for <канон>] | --list | --remove <синоним>"
+                    );
+                    return 1;
+                }
+                let reserved = reserved_agent_names();
+                if alias_targets_agent(&alias, &reserved) {
+                    eprintln!(
+                        "devh msg alias: «{alias}» — имя агента; алиас на него запрещён (T-481)"
                     );
                     return 1;
                 }
@@ -1772,7 +1882,15 @@ pub fn send(args: &[String]) -> i32 {
             0
         }
         "threads" => {
-            let agent = me(m.value("agent").as_deref());
+            let caller = me(None);
+            let agent = match own_mailbox(m.value("agent").as_deref(), &caller, "devh msg threads")
+            {
+                Ok(agent) => agent,
+                Err(e) => {
+                    eprintln!("{e}");
+                    return 1;
+                }
+            };
             let mut rows: Vec<(String, String, usize, Vec<String>)> = Vec::new();
             if let Ok(dir) = fs::read_dir(threads_dir()) {
                 for e in dir.flatten() {
@@ -1785,8 +1903,7 @@ pub fn send(args: &[String]) -> i32 {
                     if blocks.is_empty() {
                         continue;
                     }
-                    let who = thread_participants(&blocks);
-                    if !who.iter().any(|w| w == &agent) {
+                    if !thread_visible_to(&blocks, &agent) {
                         continue;
                     }
                     let mut tags: Vec<String> = Vec::new();
@@ -1844,7 +1961,15 @@ pub fn send(args: &[String]) -> i32 {
         }
         "pending" => {
             // Что из отправленного ещё не прочитано адресатами.
-            let agent = me(m.value("agent").as_deref());
+            let caller = me(None);
+            let agent = match own_mailbox(m.value("agent").as_deref(), &caller, "devh msg pending")
+            {
+                Ok(agent) => agent,
+                Err(e) => {
+                    eprintln!("{e}");
+                    return 1;
+                }
+            };
             let canon = crate::core::identity::canonical(&agent);
             // Синнонимные ящики — в канонический (дедуп по ID): иначе они
             // считаются отдельными письмами и раздувают счёт (R-8).
@@ -1972,7 +2097,14 @@ pub fn send(args: &[String]) -> i32 {
             0
         }
         "sent" => {
-            let agent = me(m.value("agent").as_deref());
+            let caller = me(None);
+            let agent = match own_mailbox(m.value("agent").as_deref(), &caller, "devh msg sent") {
+                Ok(agent) => agent,
+                Err(e) => {
+                    eprintln!("{e}");
+                    return 1;
+                }
+            };
             let text = fs::read_to_string(outbox_path(&safe_name(&agent))).unwrap_or_default();
             let (_h, blocks) = split_log(&text);
             for b in blocks.iter() {
@@ -1986,16 +2118,21 @@ pub fn send(args: &[String]) -> i32 {
                 eprintln!("нужен тэг или префикс ID");
                 return 1;
             }
+            let caller = me(None);
             let mut hits = 0usize;
-            let mut files: Vec<PathBuf> = Vec::new();
-            for dir in [inbox_dir(), outbox_dir(), threads_dir()] {
-                if let Ok(entries) = fs::read_dir(dir) {
-                    for e in entries.flatten() {
+            let mut files: Vec<PathBuf> = inbox_files(&caller);
+            files.push(outbox_path(&safe_name(&caller)));
+            if let Ok(entries) = fs::read_dir(threads_dir()) {
+                for e in entries.flatten() {
+                    let text = fs::read_to_string(e.path()).unwrap_or_default();
+                    let (_h, blocks) = split_log(&text);
+                    if thread_visible_to(&blocks, &caller) {
                         files.push(e.path());
                     }
                 }
             }
             files.sort();
+            files.dedup();
             for path in files {
                 let text = fs::read_to_string(&path).unwrap_or_default();
                 let (_h, blocks) = split_log(&text);
@@ -2646,5 +2783,43 @@ ID: abcd1234\n\
         assert_eq!(safe_name("../evil"), ".._evil");
         assert_eq!(safe_name(""), "agent");
         assert_eq!(safe_name("ok-name_1"), "ok-name_1");
+    }
+
+    #[test]
+    fn alias_targets_agent_detects_reserved_names() {
+        let reserved = vec!["minimax".to_string(), "step5".to_string()];
+        assert!(alias_targets_agent("minimax", &reserved));
+        assert!(alias_targets_agent("step5", &reserved));
+        assert!(!alias_targets_agent("deepseek", &reserved));
+    }
+
+    #[test]
+    fn sender_cannot_be_forged_via_from() {
+        let err =
+            safe_from("attacker", Some("lead")).expect_err("подделка --from lead должна падать");
+        assert!(err.contains("T-486"), "ошибка ссылается на T-486: {err}");
+        assert_eq!(safe_from("attacker", Some("attacker")).unwrap(), "attacker");
+        assert_eq!(safe_from("attacker", None).unwrap(), "attacker");
+    }
+
+    #[test]
+    fn thread_only_visible_to_participants_or_all() {
+        let private = vec![block_of("victim", "тема", &[], "тело")];
+        assert!(thread_visible_to(&private, "victim"));
+        assert!(!thread_visible_to(&private, "attacker"));
+        let public = vec![block_of("all", "тема", &[], "тело")];
+        assert!(thread_visible_to(&public, "attacker"));
+    }
+
+    #[test]
+    fn mailbox_cannot_be_read_for_another_agent() {
+        let err =
+            own_mailbox(Some("victim"), "attacker", "read").expect_err("чужой ящик должен падать");
+        assert!(err.contains("T-489"), "ошибка ссылается на T-489: {err}");
+        assert_eq!(
+            own_mailbox(Some("attacker"), "attacker", "read").unwrap(),
+            "attacker"
+        );
+        assert_eq!(own_mailbox(None, "attacker", "read").unwrap(), "attacker");
     }
 }

@@ -317,6 +317,14 @@ pub fn set_alias_in(home: &Path, alias: &str, canon: &str) -> Result<(), String>
     if alias == canon {
         return Err("синоним совпадает с каноном".to_string());
     }
+    // T-481: алиас не должен затенять закреплённое имя агента.
+    // Иначе `msg alias victim --for attacker` меняет canonical(victim)
+    // и уводит authority/почту/worktree чужого агента.
+    if claimed_names_in(home).iter().any(|n| n == &alias) {
+        return Err(format!(
+            "«{alias}» — закреплённое имя агента; алиас на него запрещён (T-481)"
+        ));
+    }
     // Авто-имя одноразовое: привязка к нему «протухает» при рестарте
     // рантайма и уводит агента в чужую личность. Каноном может быть
     // только устойчивое (не сгенерированное) имя.
@@ -386,7 +394,7 @@ pub fn remove_alias(alias: &str) -> Result<bool, String> {
 }
 
 /// Те же имена, но в указанном хранилище (для тестов с отдельным home).
-fn claimed_names_in(home: &Path) -> Vec<String> {
+pub(crate) fn claimed_names_in(home: &Path) -> Vec<String> {
     let mut out = Vec::new();
     let dir = home.join("agents");
     let Ok(entries) = fs::read_dir(dir) else {
@@ -404,10 +412,22 @@ fn claimed_names_in(home: &Path) -> Vec<String> {
             continue;
         };
         if claimed {
-            out.push(canonical(name.trim()));
+            let raw = name.trim().to_string();
+            let canon = canonical(&raw);
+            if !out.contains(&raw) {
+                out.push(raw);
+            }
+            if !out.contains(&canon) {
+                out.push(canon);
+            }
         }
     }
     out
+}
+
+/// Закреплённые имена в основном хранилище (для проверок на уровне команд).
+pub fn claimed_names() -> Vec<String> {
+    claimed_names_in(&msg_home())
 }
 
 /// Зарегистрировать синоним хоста-рантайма → наше имя.
@@ -1565,5 +1585,21 @@ mod tests {
         if let Ok(id) = result {
             assert_eq!(id.name, "minimax");
         }
+    }
+
+    #[test]
+    fn set_alias_rejects_claimed_agent_name() {
+        let dir = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let home = dir.path();
+        write_binding_in(home, "proc:1:2", "step5", "test", true)
+            .unwrap_or_else(|_| unreachable!());
+        let err = set_alias_in(home, "step5", "attacker")
+            .expect_err("алиас на закреплённое имя должен падать");
+        assert!(
+            err.contains("T-481"),
+            "ошибка должна ссылаться на T-481: {err}"
+        );
+        // Обычный синоним рантайма на агента по-прежнему разрешён.
+        assert!(set_alias_in(home, "deepseek", "step5").is_ok());
     }
 }
