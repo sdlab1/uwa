@@ -102,6 +102,7 @@ pub mod estimator;
 pub mod eval_config;
 pub mod severity;
 pub mod calibration;
+pub mod complexity_reference;
 pub mod eval_report;
 pub mod calibration_compare;
 pub mod complexity_deviation;
