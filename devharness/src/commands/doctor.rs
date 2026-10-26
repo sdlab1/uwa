@@ -94,6 +94,45 @@ pub fn doctor(store: &Store, cfg: &RunConfig, root: &Path) -> anyhow::Result<()>
         warn = warn.saturating_add(1);
     }
 
+    // T-551: журнал настроек (append-only) — битые строки видны, но не гейт.
+    let ledger = root.join(".harness/orch/settings_ledger.jsonl");
+    match std::fs::read_to_string(&ledger) {
+        Ok(text) => {
+            let problems = settings_ledger_problems(&text);
+            if problems.is_empty() {
+                say("ok   settings_ledger.jsonl: JSONL цел");
+            } else {
+                for p in problems {
+                    say(&format!("WARN {p}"));
+                    warn = warn.saturating_add(1);
+                }
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            say("..   settings_ledger.jsonl ещё нет (появится после первой правки настроек)");
+        }
+        Err(e) => {
+            say(&format!("WARN settings_ledger.jsonl не прочитать: {e}"));
+            warn = warn.saturating_add(1);
+        }
+    }
+
+    // T-551: новые guard-модули безопасности должны быть подключены (soft-warn).
+    let guards_mod = root.join("devharness/src/core/guards/mod.rs");
+    if let Ok(text) = std::fs::read_to_string(&guards_mod) {
+        let missing = missing_guard_modules(&text);
+        if missing.is_empty() {
+            say("ok   SEC-GUARDS: все guard-модули подключены");
+        } else {
+            say(&format!(
+                "WARN SEC-GUARDS: не подключены ({}): {} — добавь pub mod в core/guards/mod.rs",
+                missing.len(),
+                missing.join(", ")
+            ));
+            warn = warn.saturating_add(1);
+        }
+    }
+
     if let Some(m) = &cfg.mutate {
         // Шаблон может начинаться с env-assignments
         // (CARGO_PROFILE_TEST_INCREMENTAL=true cargo mutants ...) — берём
@@ -639,6 +678,50 @@ fn shellcheck_cache(root: &Path) -> usize {
         .unwrap_or(0)
 }
 
+/// Guard-модули безопасности, которые должны быть подключены (T-534/T-551).
+const SEC_GUARD_MODULES: [&str; 6] = [
+    "authz_guard",
+    "owner_guard",
+    "commit_scope_guard",
+    "mail_scope_guard",
+    "dod_exec_guard",
+    "identity_bind_guard",
+];
+
+/// Проблемы append-only журнала настроек: каждая строка — JSON-объект.
+///
+/// Битый JSON — Warn с номером строки (последняя строка может быть недописана
+/// при аварийном завершении; это не повод блокировать doctor).
+fn settings_ledger_problems(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for (i, line) in text.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<serde_json::Value>(line) {
+            Ok(v) if v.is_object() => {}
+            Ok(_) => out.push(format!(
+                "settings_ledger: строка {} — не JSON-объект",
+                i.saturating_add(1)
+            )),
+            Err(e) => out.push(format!(
+                "settings_ledger: битый JSON в строке {}: {e}",
+                i.saturating_add(1)
+            )),
+        }
+    }
+    out
+}
+
+/// Guard-модули из белого списка, не подключённые в `core/guards/mod.rs`.
+fn missing_guard_modules(mod_rs: &str) -> Vec<&'static str> {
+    SEC_GUARD_MODULES
+        .iter()
+        .copied()
+        .filter(|name| !mod_rs.contains(&format!("pub mod {name};")))
+        .collect()
+}
+
 /// Инкрементный кеш devh в главном дереве: признак прогретого target.
 fn warm_target(root: &Path) -> bool {
     let dir = root.join("target").join("debug").join("incremental");
@@ -750,6 +833,61 @@ mod tests {
         let (lines, warn) = run_replay(&store, &ItemId(1));
         assert!(lines.is_empty(), "здоровый журнал молчит: {lines:?}");
         assert_eq!(warn, 0);
+    }
+
+    #[test]
+    fn settings_ledger_valid_jsonl_is_clean() {
+        let text = "{\"ts\":1,\"actor\":\"lead\"}\n{\"ts\":2}\n";
+        assert!(settings_ledger_problems(text).is_empty());
+    }
+
+    #[test]
+    fn settings_ledger_empty_is_clean() {
+        assert!(settings_ledger_problems("").is_empty());
+        assert!(settings_ledger_problems("\n\n").is_empty());
+    }
+
+    #[test]
+    fn settings_ledger_last_line_broken_reports_line_number() {
+        let text = "{\"ts\":1}\n{\"ts\":2,\"actor\":";
+        let p = settings_ledger_problems(text);
+        assert_eq!(p.len(), 1, "{p:?}");
+        assert!(p[0].contains("строке 2"), "{p:?}");
+        assert!(p[0].contains("битый JSON"), "{p:?}");
+    }
+
+    #[test]
+    fn settings_ledger_middle_line_broken_is_reported() {
+        let text = "{\"ts\":1}\nnot-json\n{\"ts\":3}\n";
+        let p = settings_ledger_problems(text);
+        assert_eq!(p.len(), 1, "{p:?}");
+        assert!(p[0].contains("строке 2"), "{p:?}");
+    }
+
+    #[test]
+    fn settings_ledger_non_object_is_reported() {
+        let p = settings_ledger_problems("[1,2,3]\n");
+        assert_eq!(p.len(), 1, "{p:?}");
+        assert!(p[0].contains("не JSON-объект"), "{p:?}");
+    }
+
+    #[test]
+    fn guard_modules_all_present() {
+        let text = SEC_GUARD_MODULES
+            .iter()
+            .map(|n| format!("pub mod {n};"))
+            .collect::<Vec<String>>()
+            .join("\n");
+        assert!(missing_guard_modules(&text).is_empty());
+    }
+
+    #[test]
+    fn guard_modules_missing_is_reported() {
+        let text = "pub mod authz_guard;\npub mod owner_guard;\n";
+        let missing = missing_guard_modules(text);
+        assert_eq!(missing.len(), 4, "{missing:?}");
+        assert!(missing.contains(&"mail_scope_guard"), "{missing:?}");
+        assert!(missing.contains(&"identity_bind_guard"), "{missing:?}");
     }
 
     #[test]
