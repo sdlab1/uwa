@@ -1025,11 +1025,34 @@ pub fn current() -> Identity {
 /// (как это делает `about::registry_path`). Реестр недоступен (не
 /// репозиторий devh) — ростер пустой, проверки нет (прежнее поведение).
 pub fn roster() -> Vec<RosterEntry> {
-    let root = std::env::current_dir()
+    roster_from_root(&registry_root())
+}
+
+/// Корень репозитория devh (где лежит реестр оркестратора) от cwd.
+fn registry_root() -> PathBuf {
+    std::env::current_dir()
         .ok()
         .and_then(|cwd| crate::shell::git::main_root_from_cwd(&cwd).ok())
-        .unwrap_or_else(|| PathBuf::from("."));
-    roster_from_root(&root)
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// Канонический адрес ТЕКУЩЕГО ведущего из реестра главного дерева.
+///
+/// `None` — реестр недоступен или ведущий не назначен. Для takeover-авторизаций
+/// это fail-closed: без подтверждённого текущего ведущего авторизация не сильна
+/// (T-492: файл авторизации подделывается в хранилище, доступном на запись).
+pub fn registry_lead() -> Option<String> {
+    let text = fs::read_to_string(registry_root().join(".harness/orch/registry.json")).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let lead = value
+        .get("lead")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim();
+    if lead.is_empty() {
+        return None;
+    }
+    Some(canonical(lead))
 }
 
 /// То же, но от явного корня (тесты + вызовы из команд).
@@ -1074,6 +1097,8 @@ fn roster_claim_refusal(
     home: &Path,
     name: &str,
     key: &str,
+    takeover: bool,
+    lead_canon: Option<&str>,
     roster: &[RosterEntry],
 ) -> Option<String> {
     if is_position_name(name) {
@@ -1088,14 +1113,82 @@ fn roster_claim_refusal(
         // новичок закрепляет его сам.
         return None;
     }
-    if check_takeover_authorization(home, name, key).unwrap_or(false) {
-        return None;
+    // T-492 (усиление): имя ДЕЙСТВУЮЩЕГО агента реестра закрепляется только
+    // явным `--takeover` + авторизацией ТЕКУЩЕГО ведущего реестра. Без флага
+    // авторизация не помогает: тихий угон чужой личности невозможен.
+    if !takeover {
+        return Some(format!(
+            "имя «{name}» принадлежит агенту оркестратора; закрепить его может \
+             только владелец: devh msg claim-authorize {name} --for {key}, \
+             затем devh msg claim {name} --takeover (T-492)"
+        ));
     }
-    Some(format!(
-        "имя «{name}» принадлежит агенту оркестратора; закрепить его может \
-         только владелец с авторизацией ведущего: devh msg claim-authorize {name} --for {key}, \
-         затем devh msg claim {name} (T-492)"
-    ))
+    match takeover_authorization_ok(home, name, key, lead_canon) {
+        Ok(true) => None,
+        Ok(false) => Some(format!(
+            "имя «{name}» принадлежит агенту оркестратора; для takeover нужна \
+             авторизация ТЕКУЩЕГО ведущего: devh msg claim-authorize {name} --for {key}, \
+             затем devh msg claim {name} --takeover (T-492)"
+        )),
+        Err(e) => Some(format!("авторизация takeover не проверена: {e} (T-492)")),
+    }
+}
+
+/// T-492 (усиление): валидна ли takeover-авторизация СЕЙЧАС.
+///
+/// Помимо прежних условий (for_key + TTL 24 ч + непустой authorized_by)
+/// требуется, чтобы авторизацию выдал ТЕКУЩИЙ ведущий реестра: файл лежит в
+/// хранилище сообщений, куда при same-user модели может писать любая сессия.
+/// Без сверки с реестром подделка файла возвращает личность действующего
+/// агента (воспроизведено: forged takeover/<name>.auth -> claim -> роль lead).
+fn takeover_authorization_ok(
+    home: &Path,
+    name: &str,
+    for_key: &str,
+    lead_canon: Option<&str>,
+) -> Result<bool, String> {
+    if !check_takeover_authorization(home, name, for_key)? {
+        return Ok(false);
+    }
+    let Some(lead) = lead_canon else {
+        // Ведущий не подтверждён реестром — авторизация не принимается.
+        return Ok(false);
+    };
+    let text = fs::read_to_string(takeover_auth_path(home, name))
+        .map_err(|e| format!("не прочитать авторизацию: {e}"))?;
+    let value: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| format!("не разобрать авторизацию: {e}"))?;
+    let authorized_by = value
+        .get("authorized_by")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    Ok(canonical(authorized_by) == lead)
+}
+
+/// T-492: аудит разрешённого takeover'а имени действующего агента реестра.
+///
+/// Файловая модель авторизаций при same-user не является неподдельной по
+/// построению — поэтому каждое разрешённое закрепление чужого имени оставляет
+/// след (имя, ключ сессии, чья авторизация, когда).
+fn audit_takeover_claim(
+    home: &Path,
+    name: &str,
+    key: &str,
+    authorized_by: &str,
+) -> Result<(), String> {
+    let path = home.join("takeover").join("audit.log");
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("не создать каталог takeover: {e}"))?;
+    }
+    let line = format!("{}\ttakeover\t{name}\t{key}\t{authorized_by}\n", unix_now());
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|e| format!("не открыть аудит takeover: {e}"))?;
+    use std::io::Write;
+    f.write_all(line.as_bytes())
+        .map_err(|e| format!("не записать аудит takeover: {e}"))
 }
 
 pub fn claim(raw: &str, takeover: bool) -> Result<Identity, String> {
@@ -1141,8 +1234,22 @@ pub fn claim(raw: &str, takeover: bool) -> Result<Identity, String> {
     // T-492: имя свободно в ЭТОМ хранилище, но принадлежит оркестратору
     // (действующий агент реестра или позиция канала) — угон чужой личности
     // без авторизации. Закреплять такое имя может только владелец.
-    if let Some(reason) = roster_claim_refusal(&home, &name, &key, &roster()) {
+    let roster = roster();
+    if let Some(reason) = roster_claim_refusal(
+        &home,
+        &name,
+        &key,
+        takeover,
+        registry_lead().as_deref(),
+        &roster,
+    ) {
         return Err(reason);
+    }
+    // T-492: разрешённый takeover имени действующего агента реестра попадает
+    // в аудит — компрометация обнаруживается.
+    if takeover && roster.iter().any(|e| e.name == name) {
+        let lead = registry_lead().unwrap_or_else(|| "?".to_string());
+        let _ = audit_takeover_claim(&home, &name, &key, &lead);
     }
     write_binding_in(&home, &key, &name, &label, true)
         .map_err(|e| format!("не записать привязку: {e}"))?;
@@ -1293,13 +1400,23 @@ pub fn authorize_takeover(name: &str, for_key: &str) -> Result<(), String> {
 
 /// То же, но в явном хранилище (тесты и команды с `--home`).
 pub fn authorize_takeover_in(home: &Path, name: &str, for_key: &str) -> Result<(), String> {
+    // T-492 (усиление): в файл пишется ТЕКУЩИЙ ведущий реестра — проверка
+    // авторизации сверяет это имя с реестром на момент claim'а.
+    let authorized_by = registry_lead().unwrap_or_else(|| "lead".to_string());
+    write_takeover_auth(home, name, for_key, &authorized_by)
+}
+
+/// Запись файла takeover-авторизации с ЯВНЫМ издателем (тесты + команда).
+fn write_takeover_auth(
+    home: &Path,
+    name: &str,
+    for_key: &str,
+    authorized_by: &str,
+) -> Result<(), String> {
     let path = takeover_auth_path(home, name);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("не создать каталог takeover: {e}"))?;
     }
-    // Получаем имя ведущего из реестра (если доступно).
-    // Для простоты используем "lead" — проверка вызывающего делается в команде.
-    let authorized_by = "lead";
     let body = serde_json::json!({
         "for_key": for_key,
         "authorized_by": authorized_by,
@@ -1471,8 +1588,8 @@ mod tests {
         // T-481: алиас на закреплённое имя ЗАПРЕЩЁН — иначе `msg alias
         // victim --for attacker` уводит личность жертвы (canonical/authority/
         // почта/worktree) под атакующего.
-        let err = set_alias_in(home, "opencode", "beam")
-            .expect_err("алиас на закреплённое имя запрещён");
+        let err =
+            set_alias_in(home, "opencode", "beam").expect_err("алиас на закреплённое имя запрещён");
         assert!(err.contains("T-481"), "{err}");
         // Захваченное имя осталось прежним — подмены нет.
         assert!(
@@ -1746,19 +1863,30 @@ mod tests {
                 pending_welcome: true,
             },
         ];
-        // Имя действующего агента: отказ.
-        let reason = roster_claim_refusal(home, "minimax", "proc:1:2", &roster);
+        // Имя действующего агента без --takeover: отказ.
+        let reason = roster_claim_refusal(home, "minimax", "proc:1:2", false, None, &roster);
         assert!(
             reason.is_some(),
-            "закрепление имени действующего агента реестра требует авторизации"
+            "закрепление имени действующего агента реестра требует --takeover и авторизации"
         );
         assert!(
             reason.unwrap_or_default().contains("T-492"),
             "отказ ссылается на T-492"
         );
+        // С takeover, но без авторизации — тоже отказ.
+        assert!(
+            roster_claim_refusal(home, "minimax", "proc:1:2", true, None, &roster).is_some(),
+            "takeover без валидной авторизации отклоняется"
+        );
         // Свободное имя и онбординг — можно.
-        assert_eq!(roster_claim_refusal(home, "fresh-agent", "proc:1:2", &roster), None);
-        assert_eq!(roster_claim_refusal(home, "beam3", "proc:1:2", &roster), None);
+        assert_eq!(
+            roster_claim_refusal(home, "fresh-agent", "proc:1:2", false, None, &roster),
+            None
+        );
+        assert_eq!(
+            roster_claim_refusal(home, "beam3", "proc:1:2", false, None, &roster),
+            None
+        );
         // Привязка не создана.
         assert!(claimed_binding_for_name(home, "minimax").is_none());
     }
@@ -1770,7 +1898,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
         let home = dir.path();
         for pos in POSITION_NAMES {
-            let reason = roster_claim_refusal(home, pos, "proc:1:2", &[]);
+            let reason = roster_claim_refusal(home, pos, "proc:1:2", false, None, &[]);
             assert!(reason.is_some(), "позиция «{pos}» не должна закрепляться");
             assert!(
                 reason.unwrap_or_default().contains("T-492"),
@@ -1781,8 +1909,8 @@ mod tests {
         assert!(!is_position_name("lead-agent"));
     }
 
-    /// T-492: authorize-then-claim — владелец восстанавливает имя с
-    /// авторизацией ведущего (путь не сломан).
+    /// T-492: authorize-then-claim — владелец восстанавливает имя явным
+    /// `--takeover` с авторизацией ТЕКУЩЕГО ведущего (путь не сломан).
     #[test]
     fn claim_with_authorization_allowed() {
         let dir = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
@@ -1791,12 +1919,89 @@ mod tests {
             name: "minimax".to_string(),
             pending_welcome: false,
         }];
-        // Без авторизации — отказ.
-        assert!(roster_claim_refusal(home, "minimax", "proc:1:2", &roster).is_some());
-        // Авторизация выдана на этот ключ — путь открыт.
-        authorize_takeover_in(home, "minimax", "proc:1:2")
+        // Без флага и авторизации — отказ.
+        assert!(roster_claim_refusal(home, "minimax", "proc:1:2", false, None, &roster).is_some());
+        // Авторизация выдана на этот ключ ТЕКУЩИМ ведущим (явно, тест не
+        // зависит от окружения: в тестах cwd может быть любым репозиторием).
+        write_takeover_auth(home, "minimax", "proc:1:2", "lead").unwrap_or_else(|_| unreachable!());
+        assert_eq!(
+            roster_claim_refusal(home, "minimax", "proc:1:2", true, Some("lead"), &roster),
+            None,
+            "владелец с авторизацией ведущего закрепляет имя"
+        );
+        // Но БЕЗ флага --takeover та же авторизация не работает:
+        // тихий угон (подделанный файл + claim без --takeover) закрыт.
+        assert!(
+            roster_claim_refusal(home, "minimax", "proc:1:2", false, Some("lead"), &roster)
+                .is_some(),
+            "без --takeover авторизация не помогает"
+        );
+    }
+
+    /// T-492 (усиление): авторизация имеет силу, только если выдана ТЕКУЩИМ
+    /// ведущим реестра. Подделка authorized_by мимо реестра не проходит.
+    #[test]
+    fn takeover_auth_requires_current_lead() {
+        let dir = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let home = dir.path();
+        let roster = vec![RosterEntry {
+            name: "minimax".to_string(),
+            pending_welcome: false,
+        }];
+        write_takeover_auth(home, "minimax", "proc:1:2", "lead").unwrap_or_else(|_| unreachable!());
+        // Ведущий реестра подтверждён (canonical("lead") == "lead") — путь открыт.
+        assert_eq!(
+            takeover_authorization_ok(home, "minimax", "proc:1:2", Some("lead")),
+            Ok(true),
+            "авторизация текущего ведущего принимается"
+        );
+        // Подделка: авторизация от чужого имени — не этот ведущий — отказ.
+        write_takeover_auth(home, "minimax", "proc:1:2", "attacker")
             .unwrap_or_else(|_| unreachable!());
-        assert_eq!(roster_claim_refusal(home, "minimax", "proc:1:2", &roster), None);
+        assert_eq!(
+            takeover_authorization_ok(home, "minimax", "proc:1:2", Some("lead")),
+            Ok(false),
+            "авторизация не от текущего ведущего не принимается"
+        );
+        write_takeover_auth(home, "minimax", "proc:1:2", "lead").unwrap_or_else(|_| unreachable!());
+        // Ведущий не подтверждён — fail-closed.
+        assert_eq!(
+            takeover_authorization_ok(home, "minimax", "proc:1:2", None),
+            Ok(false),
+            "без подтверждённого ведущего авторизация не сильна"
+        );
+        // Ведущий реестра — другой агент: файл писал не он — отказ.
+        assert_eq!(
+            takeover_authorization_ok(home, "minimax", "proc:1:2", Some("minimax")),
+            Ok(false),
+            "авторизация не текущего ведущего не принимается"
+        );
+        // Не тот ключ сессии — отказ.
+        assert_eq!(
+            takeover_authorization_ok(home, "minimax", "proc:other", Some("lead")),
+            Ok(false),
+            "авторизация на чужой ключ сессии не принимается"
+        );
+    }
+
+    /// T-492: разрешённый takeover имени ростера оставляет аудит-след.
+    #[test]
+    fn authorized_roster_takeover_is_audited() {
+        let dir = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let home = dir.path();
+        audit_takeover_claim(home, "minimax", "proc:1:2", "lead")
+            .unwrap_or_else(|_| unreachable!());
+        let text =
+            std::fs::read_to_string(home.join("takeover").join("audit.log")).unwrap_or_default();
+        assert!(text.contains("minimax"), "аудит фиксирует имя: {text}");
+        assert!(
+            text.contains("proc:1:2"),
+            "аудит фиксирует ключ сессии: {text}"
+        );
+        assert!(
+            text.contains("\ttakeover\t"),
+            "аудит помечает событие: {text}"
+        );
     }
 
     /// T-498: алиас на позицию канала (и позиции на алиас) запрещён.
@@ -1808,8 +2013,8 @@ mod tests {
             .expect_err("алиас на позицию lead должен падать");
         assert!(err.contains("T-498"), "отказ ссылается на T-498: {err}");
         // Позицию нельзя сделать алиасом агента.
-        let err2 = set_alias_in(home, "attacker", "lead")
-            .expect_err("позиция как канон должна падать");
+        let err2 =
+            set_alias_in(home, "attacker", "lead").expect_err("позиция как канон должна падать");
         assert!(err2.contains("T-498"), "отказ ссылается на T-498: {err2}");
         // Обычный алиас рантайма на агента по-прежнему работает.
         assert!(set_alias_in(home, "deepseek", "attacker").is_ok());
