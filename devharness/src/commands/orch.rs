@@ -1989,8 +1989,14 @@ fn paths_within_zones(paths: &[String], zones: &[String]) -> bool {
 
 /// T-488: что ветка собирается влить в main — все изменённые пути от `main`
 /// до `branch`. Пути вне зоны задачи = чужой файл, слияние запрещено.
+///
+/// T-568: считаем ТО, что ветка добавила относительно точки расхождения
+/// (`main...branch` = merge-base → branch). Range `main..branch` (две точки)
+/// — это разница двух КОНЦОВ: в неё попадают ещё и файлы, изменённые в main
+/// ДРУГИМИ агентами после расхождения, и автослияние объявляло их «вне зоны
+/// задачи» (работа агента не вливалась вообще).
 fn branch_changed_paths(tree: &Path, main_branch: &str, branch: &str) -> Vec<String> {
-    let range = format!("{main_branch}..{branch}");
+    let range = format!("{main_branch}...{branch}");
     git_output(tree, &["diff", "--name-only", &range])
         .map(|out| {
             out.lines()
@@ -8656,6 +8662,38 @@ mod tests {
         assert_eq!(base, crate::core::complexity::ModelCeiling::DEFAULT);
         reg.agents[0].c_ceiling = Some(2);
         assert_eq!(agent_ceiling(&reg, "worker1"), 2);
+    }
+
+    /// T-568: автослияние считает только то, что ветка добавила САМА.
+    /// Чужие коммиты, пришедшие в main после точки расхождения, — не «вне
+    /// зоны задачи» (иначе автослияние не работает никогда).
+    #[test]
+    fn branch_changed_paths_ignores_foreign_commits_in_main() {
+        let tmp = tempdir().expect("tmp");
+        let dir = tmp.path();
+        git_run(dir, &["init", "-q"]);
+        git_run(dir, &["config", "user.email", "t@t"]);
+        git_run(dir, &["config", "user.name", "t"]);
+        std::fs::write(dir.join("base.txt"), "base\n").expect("write");
+        git_run(dir, &["add", "."]);
+        git_run(dir, &["commit", "-q", "-m", "base"]);
+        git_run(dir, &["checkout", "-q", "-b", "main"]);
+        // Ветка агента: свой файл.
+        git_run(dir, &["checkout", "-q", "-b", "devh/agent-x"]);
+        std::fs::write(dir.join("mine.txt"), "mine\n").expect("write");
+        git_run(dir, &["add", "."]);
+        git_run(dir, &["commit", "-q", "-m", "mine"]);
+        // main уезжает вперёд: чужой коммит другого агента.
+        git_run(dir, &["checkout", "-q", "main"]);
+        std::fs::write(dir.join("theirs.txt"), "theirs\n").expect("write");
+        git_run(dir, &["add", "."]);
+        git_run(dir, &["commit", "-q", "-m", "theirs"]);
+        let changed = branch_changed_paths(dir, "main", "devh/agent-x");
+        assert_eq!(
+            changed,
+            vec!["mine.txt".to_string()],
+            "в список попали чужие файлы из main: {changed:?}"
+        );
     }
 
     #[test]
