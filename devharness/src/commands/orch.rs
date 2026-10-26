@@ -1709,6 +1709,36 @@ struct MergeOutcome {
     detail: String,
 }
 
+/// Путь внутри зоны (файл или каталог) — та же семантика, что в gitfacade.
+fn path_within_zone(path: &str, zone: &str) -> bool {
+    let p = path.trim().trim_start_matches("./").trim_end_matches('/');
+    let z = zone.trim().trim_start_matches("./").trim_end_matches('/');
+    !z.is_empty() && (p == z || p.starts_with(&format!("{z}/")))
+}
+
+fn paths_within_zones(paths: &[String], zones: &[String]) -> bool {
+    !paths.is_empty()
+        && !zones.is_empty()
+        && paths
+            .iter()
+            .all(|p| zones.iter().any(|z| path_within_zone(p, z)))
+}
+
+/// T-488: что ветка собирается влить в main — все изменённые пути от `main`
+/// до `branch`. Пути вне зоны задачи = чужой файл, слияние запрещено.
+fn branch_changed_paths(tree: &Path, main_branch: &str, branch: &str) -> Vec<String> {
+    let range = format!("{main_branch}..{branch}");
+    git_output(tree, &["diff", "--name-only", &range])
+        .map(|out| {
+            out.lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Автослияние: после сдачи задачи харнесс сам вливает ветку агента.
 ///
 /// Merge не должен быть вопросом агенту («нужен devh orch wt merge X»):
@@ -1758,6 +1788,39 @@ fn auto_merge_agent(root: &Path, reg: &Registry, agent: &str, task_id: &str) -> 
             state: "нечего вливать".to_string(),
             sha: None,
             detail: format!("на {branch} нет коммитов сверх {main_branch} (задача {task_id})"),
+        });
+    }
+    // T-488: вливаем только то, что лежит в зонах задачи. Иначе воркер
+    // коммитит README/чужой модуль и `done` протаскивает это в main.
+    let zones = reg
+        .tasks
+        .iter()
+        .find(|t| t.id == task_id)
+        .map(|t| t.zones.clone())
+        .unwrap_or_default();
+    let changed = branch_changed_paths(&path, &main_branch, &branch);
+    if !paths_within_zones(&changed, &zones) {
+        let outside: Vec<String> = changed
+            .iter()
+            .filter(|p| !zones.iter().any(|z| path_within_zone(p, z)))
+            .cloned()
+            .collect();
+        return Some(MergeOutcome {
+            state: "ошибка: вне зоны задачи".to_string(),
+            sha: None,
+            detail: format!(
+                "в {branch} есть пути вне зон задачи {task_id} ({}): {}",
+                if zones.is_empty() {
+                    "зоны не заданы".to_string()
+                } else {
+                    zones.join(", ")
+                },
+                if outside.is_empty() {
+                    "пути не определены".to_string()
+                } else {
+                    outside.join(", ")
+                }
+            ),
         });
     }
     let main_root =
@@ -5038,6 +5101,22 @@ pub fn commit_cmd(root: &Path, args: &[String]) -> anyhow::Result<()> {
             "devh orch commit: не указан путь и у задачи нет зон (--path)"
         ));
     }
+    if !paths_within_zones(&paths, &task.zones) {
+        let outside: Vec<&str> = paths
+            .iter()
+            .map(String::as_str)
+            .filter(|p| !task.zones.iter().any(|z| path_within_zone(p, z)))
+            .collect();
+        return Err(anyhow!(
+            "devh orch commit: пути вне зоны задачи {id}: {} (зоны: {}) — T-488",
+            outside.join(", "),
+            if task.zones.is_empty() {
+                "не заданы".to_string()
+            } else {
+                task.zones.join(", ")
+            }
+        ));
+    }
     let mut git_args = vec!["add", "--"];
     git_args.extend(paths.iter().map(String::as_str));
     git_output(&tree, &git_args)?;
@@ -6525,6 +6604,18 @@ mod tests {
     }
 
     #[test]
+    fn paths_within_zones_blocks_foreign_file() {
+        let zones = vec!["devharness/src/shell".to_string()];
+        assert!(paths_within_zones(
+            &["devharness/src/shell/msg.rs".to_string()],
+            &zones
+        ));
+        assert!(!paths_within_zones(&["README.md".to_string()], &zones));
+        assert!(!paths_within_zones(&["devharness/src".to_string()], &zones));
+        assert!(!paths_within_zones(&[], &zones));
+        assert!(!paths_within_zones(&["README.md".to_string()], &[]));
+    }
+
     fn zones_overlap_is_prefix_based() {
         assert!(zones_overlap("devharness/src", "devharness/src/lib.rs"));
         assert!(zones_overlap("devharness/src/lib.rs", "devharness/src"));
