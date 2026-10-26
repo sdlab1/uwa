@@ -983,12 +983,10 @@ fn agent_ceiling(reg: &Registry, agent: &str) -> u8 {
         Some(m) => ceiling_for_model(&m, &model_records(reg)),
         None => crate::core::complexity::ModelCeiling::DEFAULT,
     };
-    let canon = crate::core::identity::canonical(agent);
-    let explicit = reg
-        .agents
-        .iter()
-        .find(|a| crate::core::identity::canonical(&a.name) == canon)
-        .and_then(|a| a.c_ceiling);
+    // Явный потолок lead'а: МАКСИМУМ по всем записям агента. Раньше был
+    // `.find().and_then(...)` — первая запись побеждала, и агент с
+    // дубликатами в реестре мог получить потолок НИЖЕ выданного.
+    let explicit = crate::core::task_router::explicit_ceiling_of(reg, agent);
     crate::core::tech_lead::effective_ceiling(explicit, base)
 }
 
@@ -998,6 +996,19 @@ fn agent_ceiling(reg: &Registry, agent: &str) -> u8 {
 /// ТОЛЬКО понизить потолок: `min(объявленный, эмпирический)`.
 fn agent_ceiling_with(root: &Path, reg: &Registry, agent: &str) -> u8 {
     let declared = agent_ceiling(reg, agent);
+    // ЯВНЫЙ потолок lead'а ВЫШЕ эмпирики автотюна.
+    //
+    // Эмпирика (ошибки/варнинги/прогоны cargo check) — это РЕКОМЕНДАЦИЯ
+    // «посмотреть, как модель справляется», а не приговор: жёсткий lock по
+    // потолку ломает работу (агент теряет задачи, которых не может взять).
+    // Раньше здесь было `emp.min(declared)` — эмпирика перебивала явное
+    // решение lead'а, и «пострадавшие» агенты теряли выданный уровень.
+    // То же правило уже зашито в `core::task_router::ceiling_of_with`
+    // (`explicit.unwrap_or(model_ceiling)`) — здесь оркестратор с ним
+    // расходился.
+    if crate::core::task_router::explicit_ceiling_of(reg, agent).is_some() {
+        return declared;
+    }
     let canon = crate::core::identity::canonical(agent);
     let cfg = crate::commands::load_config(root).unwrap_or_default();
     let at = crate::core::autotune::AutotuneConfig::from_run_config(&cfg);
@@ -7276,16 +7287,17 @@ mod tests {
         );
     }
 
-    /// Эмпирика (ошибки/повторные cargo check) понижает потолок агента.
+    /// Плохая эмпирика (ошибки/повторные cargo check) понижает потолок,
+    /// ЕСЛИ lead явного потолка не выдавал.
     #[test]
-    fn empirical_ceiling_lowers_declared_ceiling() {
+    fn empirical_ceiling_lowers_model_ceiling_without_explicit() {
         let tmp = tempdir().expect("tmp");
         let root = tmp.path();
         let mut reg = load(root);
         reg.agents.push(AgentState {
             name: me(),
             model: Some("mimo-2".into()),
-            c_ceiling: Some(5),
+            c_ceiling: None,
             ..Default::default()
         });
         save(root, &reg).expect("save");
@@ -7312,6 +7324,69 @@ mod tests {
         }
         let emp = agent_ceiling_with(root, &reg, &me());
         assert!(emp < 5, "эмпирика понизила потолок: {emp}");
+    }
+
+    /// ЯВНЫЙ потолок lead'а ВЫШЕ эмпирики: «пострадавший» агент возвращает
+    /// свой уровень (то же правило, что в core::task_router::ceiling_of_with).
+    #[test]
+    fn explicit_ceiling_beats_empirical() {
+        let tmp = tempdir().expect("tmp");
+        let root = tmp.path();
+        let mut reg = load(root);
+        reg.agents.push(AgentState {
+            name: me(),
+            model: Some("mimo-2".into()),
+            c_ceiling: Some(5),
+            ..Default::default()
+        });
+        save(root, &reg).expect("save");
+        for i in 0..3u64 {
+            let sample = crate::core::autotune::CheckSample {
+                ts: 1000 + i,
+                agent: me(),
+                model: "mimo-2".into(),
+                model_version: None,
+                task_id: Some(format!("T-{}", i + 1)),
+                c_level: 0,
+                runs: 5,
+                errors: 20,
+                warnings: 10,
+                errors_weighted: 100.0,
+                warnings_weighted: 20.0,
+                error_categories: std::collections::BTreeMap::new(),
+                warning_categories: std::collections::BTreeMap::new(),
+                build_ok: false,
+                duration_secs: Some(300.0),
+            };
+            crate::core::autotune::append_sample(root, &sample).expect("sample");
+        }
+        assert_eq!(
+            agent_ceiling_with(root, &reg, &me()),
+            5,
+            "явный потолок lead'а выше эмпирики"
+        );
+    }
+
+    /// Дубликаты записей агента в реестре: берётся МАКСИМУМ явных потолков.
+    #[test]
+    fn duplicate_agent_records_take_max_ceiling() {
+        let tmp = tempdir().expect("tmp");
+        let root = tmp.path();
+        let mut reg = load(root);
+        reg.agents.push(AgentState {
+            name: me(),
+            model: Some("mimo-2".into()),
+            c_ceiling: Some(2),
+            ..Default::default()
+        });
+        reg.agents.push(AgentState {
+            name: me(),
+            model: Some("mimo-2".into()),
+            c_ceiling: Some(4),
+            ..Default::default()
+        });
+        save(root, &reg).expect("save");
+        assert_eq!(agent_ceiling(&reg, &me()), 4, "максимум по дубликатам");
     }
 
     /// Зелёный DoD: критерий подтверждён + машинная проверка пройдена.
