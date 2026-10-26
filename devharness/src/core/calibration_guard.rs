@@ -16,8 +16,8 @@ use std::path::Path;
 /// Идентификатор guard'а.
 pub const ID: &str = "calibration_guard";
 
-/// Уровни, для которых эталон обязателен.
-pub const LEVELS: [u8; 4] = [1, 2, 3, 4];
+/// Уровни, для которых эталон обязателен (единый источник — eval_config).
+pub const LEVELS: [u8; 4] = crate::core::eval_config::DEFAULTS.cal_reference_levels;
 
 /// Верхний уровень, для которого проверяется эталон.
 pub const LEVELS_MAX: u8 = 4;

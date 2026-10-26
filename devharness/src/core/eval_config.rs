@@ -160,6 +160,12 @@ pub struct EvalConfig {
     pub cal_complexity_warning_scale: f64,
     /// То же для числа прогонов сборки.
     pub cal_complexity_runs_scale: f64,
+    /// Уровни сложности, для которых эталон ОБЯЗАТЕЛЕН (C1..C4).
+    ///
+    /// «Твои 4 (четыре!) задачи каждого уровня» — эталон уровня считается
+    /// собранным, только когда набрано не меньше
+    /// [`Self::cal_min_reference_tasks`] замеров И есть запись эталона.
+    pub cal_reference_levels: [u8; 4],
 }
 
 /// Значения по умолчанию — ЕДИНСТВЕННЫЙ источник правды для оценки.
@@ -208,6 +214,8 @@ pub const DEFAULTS: EvalConfig = EvalConfig {
     cal_complexity_error_scale: 0.6,
     cal_complexity_warning_scale: 0.4,
     cal_complexity_runs_scale: 0.25,
+    // Уровни, для которых нужен эталон.
+    cal_reference_levels: [1, 2, 3, 4],
 };
 
 impl EvalConfig {
