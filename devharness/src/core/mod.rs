@@ -17,6 +17,8 @@ pub mod dashboard_projection;
 pub mod corpus_freshness;
 pub mod coverage;
 pub mod coverage_index;
+pub mod crap;
+pub mod cyclomatic;
 pub mod degrade;
 pub mod diff_scope;
 pub mod digest;
