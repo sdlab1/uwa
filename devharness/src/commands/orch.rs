@@ -3067,12 +3067,32 @@ fn list_important_info(model: &str, ceiling: u8, hidden: usize) -> String {
     out
 }
 
+/// Подсказка агенту на ЕГО языке: потолок + рейтинг + следующий шаг (T-510).
+fn agent_hint_i18n(reg: &Registry, agent: &str, ceiling: u8) -> String {
+    use i18n::{text_for, Key};
+    let (model, _) = model_of(Path::new("."), reg, agent);
+    let model = model.unwrap_or_default();
+    let stats = crate::core::modelrank::aggregate(&model_records(reg));
+    let done = stats
+        .iter()
+        .find(|s| s.model == model)
+        .map(|s| s.tasks_done)
+        .unwrap_or(0);
+    let c = ceiling.to_string();
+    format!(
+        "{} · rating: {done} · {}",
+        text_for(&model, Key::CeilingNow, &[("N", c.as_str())]),
+        text_for(&model, Key::SubmitTask, &[("CMD", "devh orch next")])
+    )
+}
+
 fn list(root: &Path, args: &[String]) -> anyhow::Result<()> {
     let reg = load(root);
     let only = flag(args, "--agent");
     let caller = crate::core::identity::canonical(&crate::core::identity::current().name);
     let ceiling = agent_ceiling_with(root, &reg, &caller);
     let mut hidden = 0usize;
+    let mut hint_agents: Vec<String> = Vec::new();
     println!("ID      агент   P  C   pr  статус    F  зоны                     задача");
     let (lead, _) = lead_of(&reg);
     let is_lead = lead.as_deref() == Some(caller.as_str());
@@ -3148,12 +3168,20 @@ fn list(root: &Path, args: &[String]) -> anyhow::Result<()> {
             format!("{}{stretch_mark}", t.title)
         );
         let _ = ok;
+        let canon_agent = crate::core::identity::canonical(&t.agent);
+        if !hint_agents.iter().any(|x| x == &canon_agent) {
+            hint_agents.push(canon_agent);
+        }
     }
     let (model, _) = model_of(root, &reg, &caller);
     println!(
         "{}",
         list_important_info(model.as_deref().unwrap_or(""), ceiling, hidden)
     );
+    for agent in hint_agents {
+        let c = agent_ceiling_with(root, &reg, &agent);
+        println!("[{agent}] {}", agent_hint_i18n(&reg, &agent, c));
+    }
     Ok(())
 }
 
@@ -7806,6 +7834,18 @@ mod tests {
     }
 
     #[test]
+    fn agent_hint_uses_agent_model_language() {
+        let mut reg = Registry::default();
+        reg.agents.push(AgentState {
+            name: "beam".to_string(),
+            model: Some("deepseek-v3".to_string()),
+            ..Default::default()
+        });
+        let hint = agent_hint_i18n(&reg, "beam", 3);
+        assert!(hint.contains("你当前的级别上限"), "{hint}");
+        assert!(hint.contains("devh orch next"), "{hint}");
+    }
+
     fn list_important_info_follows_model_language() {
         assert!(list_important_info("deepseek-v4", 2, 1).contains("你当前的级别上限"));
         assert!(list_important_info("mistral-large", 2, 0).contains("Ton plafond"));
