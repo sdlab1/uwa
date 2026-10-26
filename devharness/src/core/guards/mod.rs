@@ -9,6 +9,7 @@ pub mod ceiling_guard;
 pub mod commit_review_guard;
 pub mod decomposition_guard;
 pub mod deps_guard;
+pub mod dod_exec_guard;
 pub mod identity_guard;
 pub mod merge_guard;
 pub mod module_list_guard;
