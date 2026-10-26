@@ -108,6 +108,16 @@ pub enum Cmd {
         /// Остальные аргументы (флаги подкоманды).
         args: Vec<String>,
     },
+    /// Очередь запусков: статус, физические лимиты CPU/RAM, отмена своей заявки.
+    Queue {
+        /// Аргументы после `queue`: list|status|cancel|enqueue|limits.
+        args: Vec<String>,
+    },
+    /// Единая точка запуска рантайма агента (ditch zed): worktree + лимиты + очередь.
+    Launch {
+        /// Аргументы после `launch`: <agent>|pump|list|status|stop|limits.
+        args: Vec<String>,
+    },
 }
 
 impl Default for Cmd {
@@ -258,6 +268,24 @@ impl Cmd {
                         .trailing_var_arg(true)
                         .allow_hyphen_values(true)
                         .help("аргументы подкоманды"),
+                ),
+            Command::new("queue")
+                .about("очередь запусков: статус, физические лимиты CPU/RAM, отмена своей заявки")
+                .arg(
+                    Arg::new("args")
+                        .num_args(0..)
+                        .trailing_var_arg(true)
+                        .allow_hyphen_values(true)
+                        .help("list|status <ID>|cancel <ID>|enqueue|limits"),
+                ),
+            Command::new("launch")
+                .about("единая точка запуска рантайма агента (ditch zed): worktree + лимиты + очередь")
+                .arg(
+                    Arg::new("args")
+                        .num_args(0..)
+                        .trailing_var_arg(true)
+                        .allow_hyphen_values(true)
+                        .help("<agent> [--task T-NNN] [--wait] | pump|list|status|stop|limits"),
                 ),
             Command::new("orch")
                 .about("оркестратор: реестр задач, шкалы P0-P5/F0-F5, дашборд")
@@ -464,6 +492,26 @@ impl Cmd {
                     .map(|v| v.cloned().collect::<Vec<String>>())
                     .unwrap_or_default();
                 Ok(Cmd::Orch { sub, args })
+            }
+            Some("queue") => {
+                let m = matches
+                    .subcommand_matches("queue")
+                    .unwrap_or_else(|| unreachable!());
+                let args = m
+                    .get_many::<String>("args")
+                    .map(|v| v.cloned().collect::<Vec<String>>())
+                    .unwrap_or_default();
+                Ok(Cmd::Queue { args })
+            }
+            Some("launch") => {
+                let m = matches
+                    .subcommand_matches("launch")
+                    .unwrap_or_else(|| unreachable!());
+                let args = m
+                    .get_many::<String>("args")
+                    .map(|v| v.cloned().collect::<Vec<String>>())
+                    .unwrap_or_default();
+                Ok(Cmd::Launch { args })
             }
             _ => Err("unknown subcommand".to_string()),
         }

@@ -11,6 +11,11 @@ pub mod gitfacade;
 pub mod guard;
 pub mod init;
 pub mod leadpass;
+pub mod launch;
+// T-623: очередь запусков лежит в core/, но подключена здесь через #[path]:
+// core/mod.rs сейчас в зоне T-572 (ведущий) — зоны не пересекаются (O5).
+#[path = "../core/resource_queue.rs"]
+pub mod resource_queue;
 pub mod merge;
 pub mod misc;
 pub mod mutate;
@@ -18,6 +23,7 @@ pub mod new;
 pub mod next;
 pub mod orch;
 pub mod ps;
+pub mod queue;
 pub mod rate;
 pub mod reclaim;
 pub mod run;
@@ -149,7 +155,7 @@ pub fn classify_error(e: &anyhow::Error) -> ExitCode {
     ExitCode::ActionError
 }
 
-pub const CONFIG_KEYS: [&str; 55] = [
+pub const CONFIG_KEYS: [&str; 62] = [
     "VERIFY",
     "BOOTSTRAP",
     "AGENT",
@@ -205,6 +211,13 @@ pub const CONFIG_KEYS: [&str; 55] = [
     "AUTOTUNE_FIX_LATENCY_REF_SECS",
     "AUTOTUNE_FIX_BONUS",
     "AUTOTUNE_NEATNESS_WEIGHT",
+    "RESOURCE_CPU_CORES",
+    "RESOURCE_CPU_SECS",
+    "RESOURCE_MEM_MB",
+    "RESOURCE_MAX_PROCS",
+    "RESOURCE_MAX_ACTIVE",
+    "RESOURCE_LOAD_MAX",
+    "RESOURCE_NICE",
 ];
 
 pub fn load_config(root: &Path) -> anyhow::Result<RunConfig> {
@@ -481,6 +494,11 @@ pub fn dispatch(cmd: &Cmd, root: &Path) -> anyhow::Result<()> {
             orch::orch(root, sub, args)?;
             return Ok(());
         }
+        // Очередь запусков: работает БЕЗ .harness/config (файл — в .harness/orch).
+        Cmd::Queue { args } => {
+            queue::run(root, args)?;
+            return Ok(());
+        }
         _ => {}
     }
     // Канал сообщений (devh msg) не требует .harness/config: хранилище — $DEVH_MSG_HOME.
@@ -495,6 +513,7 @@ pub fn dispatch(cmd: &Cmd, root: &Path) -> anyhow::Result<()> {
         Cmd::About => unreachable!(),
         Cmd::Test { .. } => unreachable!(),
         Cmd::Orch { .. } => unreachable!(),
+        Cmd::Queue { .. } => unreachable!(),
         Cmd::New {
             arg,
             no_red,
@@ -581,6 +600,8 @@ pub fn dispatch(cmd: &Cmd, root: &Path) -> anyhow::Result<()> {
         Cmd::Escapes => escapes::escapes(&store, &cfg, root)?,
         Cmd::Mutate { sub, args } => mutate::mutate(root, sub, args)?,
         Cmd::Rate { sub, args } => rate::rate(root, &sub, args)?,
+        // Единая точка запуска рантайма агента (ditch zed): worktree + лимиты + очередь.
+        Cmd::Launch { args } => launch::run(root, args)?,
         // Git — только через харнесс: ведомый заперт в своём worktree.
         Cmd::Git { args } => gitfacade::git_cmd(root, &args)?,
         // Канал агентов: свой код возврата (0 — ок, иначе ненулевой).
