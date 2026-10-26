@@ -471,6 +471,22 @@ fn safe_from(caller: &str, requested: Option<&str>) -> Result<String, String> {
     Ok(caller_canon)
 }
 
+/// Ящик, который разрешено читать/сторожить (T-489): только свой.
+/// `--agent` чужого агента отклоняется.
+fn own_mailbox(requested: Option<&str>, caller: &str, operation: &str) -> Result<String, String> {
+    let caller_canon = crate::core::identity::canonical(caller);
+    let Some(requested) = requested.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(caller_canon);
+    };
+    let target = crate::core::identity::canonical(requested);
+    if target != caller_canon {
+        return Err(format!(
+            "{operation}: чужой ящик «{requested}» запрещён (ты «{caller_canon}») — T-489"
+        ));
+    }
+    Ok(target)
+}
+
 /// Корень репозитория, где лежит общий реестр (для проверки зарезервированных имён).
 fn repo_root_with_registry() -> Option<PathBuf> {
     let mut cur = std::env::current_dir().ok()?;
@@ -1512,7 +1528,14 @@ pub fn send(args: &[String]) -> i32 {
             0
         }
         "read" => {
-            let agent = me(m.value("agent").as_deref());
+            let caller = me(None);
+            let agent = match own_mailbox(m.value("agent").as_deref(), &caller, "devh msg read") {
+                Ok(agent) => agent,
+                Err(e) => {
+                    eprintln!("{e}");
+                    return 1;
+                }
+            };
             let peek = m.flag("peek");
             let filter = m.value("tag");
             let mut shown = 0usize;
@@ -1571,7 +1594,14 @@ pub fn send(args: &[String]) -> i32 {
             0
         }
         "watch" => {
-            let agent = me(m.value("agent").as_deref());
+            let caller = me(None);
+            let agent = match own_mailbox(m.value("agent").as_deref(), &caller, "devh msg watch") {
+                Ok(agent) => agent,
+                Err(e) => {
+                    eprintln!("{e}");
+                    return 1;
+                }
+            };
             let interval: u64 = m
                 .value("interval")
                 .and_then(|s| s.parse::<u64>().ok())
@@ -2722,5 +2752,17 @@ ID: abcd1234\n\
         assert!(err.contains("T-486"), "ошибка ссылается на T-486: {err}");
         assert_eq!(safe_from("attacker", Some("attacker")).unwrap(), "attacker");
         assert_eq!(safe_from("attacker", None).unwrap(), "attacker");
+    }
+
+    #[test]
+    fn mailbox_cannot_be_read_for_another_agent() {
+        let err =
+            own_mailbox(Some("victim"), "attacker", "read").expect_err("чужой ящик должен падать");
+        assert!(err.contains("T-489"), "ошибка ссылается на T-489: {err}");
+        assert_eq!(
+            own_mailbox(Some("attacker"), "attacker", "read").unwrap(),
+            "attacker"
+        );
+        assert_eq!(own_mailbox(None, "attacker", "read").unwrap(), "attacker");
     }
 }
