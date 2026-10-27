@@ -31,6 +31,15 @@ pub enum LedgerEvent {
     Reassigned,
     /// Worktree сливается в main (`wt merge`).
     Merged,
+    /// Доступ к настройкам уровня агента: потолок/роль/модель (T-553).
+    ///
+    /// Пишется в общий журнал С ТИПОМ (помимо профильного
+    /// `settings_ledger.jsonl`), чтобы selfcheck видел инциденты доступа
+    /// в той же выборке, что и события оркестрации.
+    SettingsAccess,
+    /// Инцидент безопасности: нарушение guard'а, спуф личности, отказ
+    /// авторизации (T-553).
+    SecurityIncident,
 }
 
 impl LedgerEvent {
@@ -43,6 +52,8 @@ impl LedgerEvent {
             LedgerEvent::Revoked => "revoked",
             LedgerEvent::Reassigned => "reassigned",
             LedgerEvent::Merged => "merged",
+            LedgerEvent::SettingsAccess => "settings_access",
+            LedgerEvent::SecurityIncident => "security_incident",
         }
     }
 
@@ -55,6 +66,8 @@ impl LedgerEvent {
             "revoked" => Some(LedgerEvent::Revoked),
             "reassigned" => Some(LedgerEvent::Reassigned),
             "merged" => Some(LedgerEvent::Merged),
+            "settings_access" => Some(LedgerEvent::SettingsAccess),
+            "security_incident" => Some(LedgerEvent::SecurityIncident),
             _ => None,
         }
     }
@@ -104,6 +117,35 @@ impl LedgerEntry {
         self.detail = Some(detail.into());
         self
     }
+}
+
+/// Событие уровня доступа/безопасности (T-553): их selfcheck обязан
+/// показывать отдельной строкой, а не тонуть в событиях оркестрации.
+pub fn is_control_event(event: LedgerEvent) -> bool {
+    matches!(
+        event,
+        LedgerEvent::SettingsAccess | LedgerEvent::SecurityIncident
+    )
+}
+
+/// Отфильтровать события доступа/безопасности из записей журнала.
+pub fn control_events(entries: &[LedgerEntry]) -> Vec<LedgerEntry> {
+    entries
+        .iter()
+        .filter(|e| is_control_event(e.event))
+        .cloned()
+        .collect()
+}
+
+/// Прочитать из JSONL-текста только события доступа/безопасности.
+///
+/// Мусорные строки пропускаются (как и в `line_to_entry`): испорченная
+/// строка не должна ломать выборку инцидентов для selfcheck.
+pub fn control_events_from_text(text: &str) -> Vec<LedgerEntry> {
+    text.lines()
+        .filter_map(line_to_entry)
+        .filter(|e| is_control_event(e.event))
+        .collect()
 }
 
 /// Сериализовать запись в одну строчку JSON (без trailing newline).
@@ -186,9 +228,99 @@ mod tests {
             LedgerEvent::Revoked,
             LedgerEvent::Reassigned,
             LedgerEvent::Merged,
+            LedgerEvent::SettingsAccess,
+            LedgerEvent::SecurityIncident,
         ] {
             assert_eq!(LedgerEvent::parse(ev.as_str()), Some(ev));
         }
+    }
+
+    // --- T-553: события доступа/безопасности -------------------------------
+
+    fn line(who: &str, event: LedgerEvent, ts: u64, detail: &str) -> String {
+        entry_to_line(&LedgerEntry::new(who, event, ts).with_detail(detail))
+    }
+
+    #[test]
+    fn control_events_roundtrip_on_the_wire() {
+        for ev in [LedgerEvent::SettingsAccess, LedgerEvent::SecurityIncident] {
+            let l = line("beam", ev, 100, "потолок C5→C6");
+            let back = line_to_entry(&l).expect("разбор записи");
+            assert_eq!(back.event, ev);
+            assert_eq!(back.who, "beam");
+            assert_eq!(back.detail.as_deref(), Some("потолок C5→C6"));
+        }
+    }
+
+    #[test]
+    fn control_event_labels_are_stable_and_parseable() {
+        assert_eq!(LedgerEvent::SettingsAccess.as_str(), "settings_access");
+        assert_eq!(LedgerEvent::SecurityIncident.as_str(), "security_incident");
+        assert_eq!(
+            LedgerEvent::parse("SETTINGS_ACCESS"),
+            Some(LedgerEvent::SettingsAccess)
+        );
+        assert_eq!(
+            LedgerEvent::parse(" security_incident "),
+            Some(LedgerEvent::SecurityIncident)
+        );
+        assert_eq!(LedgerEvent::parse("audit"), None);
+    }
+
+    #[test]
+    fn security_events_are_marked_control() {
+        assert!(is_control_event(LedgerEvent::SecurityIncident));
+        assert!(is_control_event(LedgerEvent::SettingsAccess));
+        assert!(!is_control_event(LedgerEvent::Started));
+        assert!(!is_control_event(LedgerEvent::Merged));
+    }
+
+    #[test]
+    fn control_events_from_text_filters_incidents_in_order() {
+        let text = format!(
+            "{}\n{}\n{}\n{}\nмусор\n",
+            line(
+                "minimax",
+                LedgerEvent::SettingsAccess,
+                1,
+                "role worker→lead"
+            ),
+            line("beam", LedgerEvent::Started, 2, ""),
+            line(
+                "kilo",
+                LedgerEvent::SecurityIncident,
+                3,
+                "спуф DEVH_AGENT=lead отклонён"
+            ),
+            line("beam", LedgerEvent::Done, 4, ""),
+        );
+        let picked = control_events_from_text(&text);
+        assert_eq!(
+            picked.len(),
+            2,
+            "только события доступа/безопасности: {picked:?}"
+        );
+        assert_eq!(picked[0].event, LedgerEvent::SettingsAccess);
+        assert_eq!(picked[0].detail.as_deref(), Some("role worker→lead"));
+        assert_eq!(picked[1].event, LedgerEvent::SecurityIncident);
+        assert_eq!(picked[1].when, 3);
+    }
+
+    #[test]
+    fn control_events_of_empty_or_junk_is_empty() {
+        assert!(control_events(&[]).is_empty());
+        assert!(control_events_from_text("").is_empty());
+        assert!(control_events_from_text("\n\n{{{{").is_empty());
+        assert!(control_events_from_text(&line("beam", LedgerEvent::Started, 1, "")).is_empty());
+    }
+
+    #[test]
+    fn legacy_entries_without_kind_still_parse() {
+        // старые записи без event (дефолт started) не ломают выборку
+        let legacy = r#"{"who":"beam","when":5}"#;
+        let e = line_to_entry(legacy).expect("legacy-запись читается");
+        assert_eq!(e.event, LedgerEvent::Started);
+        assert!(control_events(&[e]).is_empty());
     }
 
     #[test]
