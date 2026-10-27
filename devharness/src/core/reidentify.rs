@@ -527,6 +527,7 @@ pub fn sweep_expiries(root: &Path, now: u64, ttl_secs: u64) -> anyhow::Result<Ve
     let expired: Vec<String> = load(root)
         .values()
         .filter(|ch| ch.expired)
+        .filter(|ch| crate::core::identity::sanitize_name(&ch.agent).is_ok())
         .map(|ch| ch.agent.clone())
         .collect();
     let mut ids = Vec::new();
@@ -769,6 +770,53 @@ mod tests {
         let reg = crate::commands::orch::load(&root);
         let task = reg.tasks.iter().find(|t| t.id == ids[0]).expect("задача");
         assert_eq!(task.agent, "boss", "без техлида задача уходит ведущему");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// sweep_expiries не создаёт задачи для невалидных имён агентов
+    /// (T-656: фантом-задачи с agent = 'MODEL: <имя>').
+    #[test]
+    fn sweep_skips_invalid_agent_names() {
+        use crate::core::identity::sanitize_name;
+        let root = tmp_root("sweep-filter");
+        registry_with_roles(&root, Some("tech"));
+        // Валидный агент — задача должна создаться.
+        record_answer(&root, "beam", "MODEL: gpt-4o").unwrap();
+        // Невалидный "агент" — имя содержит двоеточие/пробел (как 'MODEL: ...').
+        // Сымитируем запись с невалидным именем прямо в файле identify.json.
+        let raw = std::fs::read_to_string(state_path(&root)).unwrap();
+        let mut map: BTreeMap<String, Challenge> =
+            serde_json::from_str(&raw).unwrap_or_default();
+        let canon_invalid = crate::core::identity::canonical("MODEL: evil");
+        let challenge = Challenge {
+            nonce: "x".to_string(),
+            agent: "MODEL: evil".to_string(),
+            ts: now_secs(),
+            lang: Lang::En,
+            question: question_text(Lang::En).to_string(),
+            answer: Some(Answer {
+                model: "gpt-4o".to_string(),
+                version: None,
+                date: None,
+                ts: now_secs(),
+                raw: "MODEL: gpt-4o".to_string(),
+            }),
+            consumed: false,
+            expired: true,
+        };
+        map.insert(canon_invalid, challenge);
+        save(&root, &map).unwrap();
+        // 'MODEL: evil' не проходит sanitize_name.
+        assert!(sanitize_name("MODEL: evil").is_err());
+        // expire + sweep.
+        let now = now_secs() + IDENTIFY_TTL_SECS + 1;
+        let ids = sweep_expiries(&root, now, IDENTIFY_TTL_SECS).unwrap();
+        // Должна быть ровно ОДНА задача — только для валидного 'beam'.
+        assert_eq!(ids.len(), 1, "фантом-задача для невалидного agent не создана");
+        let reg = crate::commands::orch::load(&root);
+        let task = reg.tasks.iter().find(|t| t.id == ids[0]).expect("задача");
+        assert_eq!(task.agent, "tech", "задача ушла техлиду");
+        assert!(task.title.contains("beam"), "заголовок должен содержать 'beam'");
         let _ = fs::remove_dir_all(&root);
     }
 }
