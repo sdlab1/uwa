@@ -910,6 +910,11 @@ pub enum MergeAction {
     Nothing,
     /// Нужен ручной merge (главное дерево грязное или не fast-forward).
     Manual,
+    /// Слияние ОТЛОЖЕНО (deferred): грязный main и авто-стэш запрещён.
+    ///
+    /// Это НЕ отказ: ветка агента остаётся на месте, работа не теряется,
+    /// слияние уходит в очередь Layer 2 (`devh orch wt merge`).
+    Deferred,
 }
 
 impl MergeAction {
@@ -918,6 +923,7 @@ impl MergeAction {
             MergeAction::Merged => "влито",
             MergeAction::Nothing => "нечего вливать",
             MergeAction::Manual => "нужен ручной merge",
+            MergeAction::Deferred => "отложено",
         }
     }
 }
@@ -928,6 +934,233 @@ pub struct MergeReport {
     pub action: MergeAction,
     pub message: String,
     pub sha: Option<String>,
+    /// Слияние отложено (deferred) — ждёт чистого main (очередь Layer 2).
+    pub deferred: bool,
+    /// Бэкап грязного main (авто-стэш), если он был сделан.
+    pub stash: Option<DirtyMainBackup>,
+}
+
+/// Путь манифеста бэкапов грязного главного дерева (в главном дереве репо).
+///
+/// Каталог `.devh/` добавляется в `.git/info/exclude` — иначе сам манифест
+/// сделал бы main грязным и уехал в следующий авто-стэш (бесконечный цикл).
+pub const DIRTY_MAIN_MANIFEST: &str = ".devh/dirty_main_backups.json";
+
+/// Политика слияния worktree агента в main.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MergePolicy {
+    /// Авто-стэш грязного главного дерева разрешён.
+    ///
+    /// `false` → слияние ОТЛОЖЕНО (`MergeAction::Deferred`), а не отказано:
+    /// ветка агента остаётся, работа не теряется (Layer 2 — очередь слияний).
+    pub allow_stash: bool,
+}
+
+impl Default for MergePolicy {
+    fn default() -> Self {
+        Self { allow_stash: true }
+    }
+}
+
+/// Бэкап грязного главного дерева (авто-стэш) — запись в манифест.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct DirtyMainBackup {
+    /// SHA объекта stash — восстановление: `git stash apply <sha>`.
+    pub stash_sha: String,
+    /// Ссылка на стэш на момент создания (`stash@{0}`).
+    pub stash_ref: String,
+    /// Какие файлы спрятаны (пути из `git status --porcelain`).
+    pub files: Vec<String>,
+    /// Метка времени (`YYYYMMDD-HHMMSS`).
+    pub ts: String,
+    /// Unix-время создания.
+    pub unix_ts: u64,
+    /// Причина авто-стэша (что вызвало).
+    pub reason: String,
+    /// Вывод git stash (диагностика).
+    pub git_output: String,
+}
+
+impl DirtyMainBackup {
+    /// Команда восстановления (одна строка — её можно скопировать).
+    pub fn restore_hint(&self) -> String {
+        format!("git stash apply {}", self.stash_sha)
+    }
+}
+
+/// Манифест бэкапов грязного main (JSON-массив в файле).
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct DirtyMainManifest {
+    #[serde(default)]
+    pub backups: Vec<DirtyMainBackup>,
+}
+
+/// Политика слияния из окружения и конфига.
+///
+/// `HARNESS_ALLOW_STASH=0` (или `ALLOW_STASH=0` в `.harness/config`) запрещает
+/// авто-стэш: слияние откладывается, а не падает.
+pub fn merge_policy(root: &Path) -> MergePolicy {
+    if let Some(v) = flag_value("HARNESS_ALLOW_STASH") {
+        return MergePolicy { allow_stash: v };
+    }
+    if let Some(v) = config_flag(root, "ALLOW_STASH") {
+        return MergePolicy { allow_stash: v };
+    }
+    MergePolicy::default()
+}
+
+/// Разобрать флаг из окружения: `0/false/off/no` → false, `1/true/on/yes` → true.
+fn flag_value(name: &str) -> Option<bool> {
+    let raw = std::env::var(name).ok()?;
+    parse_flag(&raw)
+}
+
+/// Разобрать флаг из строки (мусор → None: берётся дефолт).
+fn parse_flag(raw: &str) -> Option<bool> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "0" | "false" | "off" | "no" | "нет" => Some(false),
+        "1" | "true" | "on" | "yes" | "да" => Some(true),
+        _ => None,
+    }
+}
+
+/// Прочитать `KEY=VALUE` из `.harness/config` главного дерева.
+fn config_flag(root: &Path, key: &str) -> Option<bool> {
+    let text = std::fs::read_to_string(root.join(".harness").join("config")).ok()?;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((k, v)) = line.split_once('=') else {
+            continue;
+        };
+        if k.trim() != key {
+            continue;
+        }
+        let v = v.trim().trim_matches('"').trim_matches('\'');
+        return parse_flag(v);
+    }
+    None
+}
+
+/// Добавить `.devh/` в `.git/info/exclude` (идемпотентно).
+///
+/// Манифест бэкапов не должен попадать в индекс: иначе он сам сделает
+/// главное дерево грязным и уедет в следующий авто-стэш.
+fn ensure_manifest_excluded(root: &Path) -> anyhow::Result<()> {
+    let common = git(root, &["rev-parse", "--git-common-dir"])?;
+    let common = if common.starts_with('/') {
+        PathBuf::from(common)
+    } else {
+        root.join(common)
+    };
+    let exclude = common.join("info").join("exclude");
+    if let Some(parent) = exclude.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    let current = std::fs::read_to_string(&exclude).unwrap_or_default();
+    if current
+        .lines()
+        .any(|l| l.trim() == ".devh/" || l.trim() == ".devh")
+    {
+        return Ok(());
+    }
+    let mut next = current;
+    if !next.is_empty() && !next.ends_with('\n') {
+        next.push('\n');
+    }
+    next.push_str(".devh/\n");
+    std::fs::write(&exclude, next)
+        .map_err(|e| anyhow::anyhow!("не записать {}: {e}", exclude.display()))?;
+    Ok(())
+}
+
+/// Спрятать грязное главное дерево в стэш и записать манифест бэкапа.
+///
+/// Ничего не теряется: стэш + манифест (`.devh/dirty_main_backups.json`) →
+/// восстановление `git stash apply <sha>` в любой момент.
+pub fn auto_stash_dirty_main(root: &Path, reason: &str) -> anyhow::Result<DirtyMainBackup> {
+    ensure_manifest_excluded(root)?;
+    let files = crate::shell::git::status_names(root);
+    let unix_ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let ts = chrono::Utc::now().format("%Y%m%d-%H%M%S").to_string();
+    let label = format!("devh-autostash-{ts}");
+    let before = git(root, &["rev-parse", "--verify", "--quiet", "refs/stash"]).unwrap_or_default();
+    let out = Command::new("git")
+        .args(["stash", "push", "-u", "-m", &label])
+        .current_dir(root)
+        .output()
+        .map_err(|e| anyhow::anyhow!("git stash push: {e}"))?;
+    if !out.status.success() {
+        anyhow::bail!(
+            "авто-стэш грязного main не удался: {} — дерево main не тронуто",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    let after = git(root, &["rev-parse", "--verify", "--quiet", "refs/stash"]).unwrap_or_default();
+    if after.is_empty() || after == before {
+        anyhow::bail!("авто-стэш грязного main не создал стэш ({label}) — дерево main не тронуто");
+    }
+    if crate::shell::git::tree_dirty(root) {
+        // Стэш не всё спрятал — вернём как было и откажемся честно.
+        let _ = git_ok(root, &["stash", "pop"]);
+        anyhow::bail!(
+            "авто-стэш ({label}) не убрал все правки из main — дерево main не тронуто, \
+             копия в стэше {after} (восстановление: git stash apply {after})"
+        );
+    }
+    let stash_ref = git(root, &["stash", "list", "--format=%gd", "-1"]).unwrap_or_default();
+    let backup = DirtyMainBackup {
+        stash_sha: after,
+        stash_ref,
+        files,
+        ts,
+        unix_ts,
+        reason: reason.to_string(),
+        git_output: String::from_utf8_lossy(&out.stdout).trim().to_string(),
+    };
+    write_backup_manifest(root, &backup)?;
+    Ok(backup)
+}
+
+/// Записать манифест бэкапов (атомарно: tmp + rename).
+pub fn write_backup_manifest(root: &Path, backup: &DirtyMainBackup) -> anyhow::Result<PathBuf> {
+    let path = root.join(DIRTY_MAIN_MANIFEST);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| anyhow::anyhow!("создать {}: {e}", parent.display()))?;
+    }
+    let mut manifest: DirtyMainManifest = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default();
+    manifest.backups.push(backup.clone());
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, serde_json::to_string_pretty(&manifest)?)
+        .map_err(|e| anyhow::anyhow!("записать {}: {e}", tmp.display()))?;
+    std::fs::rename(&tmp, &path)
+        .map_err(|e| anyhow::anyhow!("переименовать {}: {e}", tmp.display()))?;
+    Ok(path)
+}
+
+/// Вернуть спрятанное по манифесту (восстановление всегда возможно).
+pub fn restore_dirty_main_backup(root: &Path, stash_sha: &str) -> anyhow::Result<String> {
+    let out = Command::new("git")
+        .args(["stash", "apply", stash_sha])
+        .current_dir(root)
+        .output()
+        .map_err(|e| anyhow::anyhow!("git stash apply: {e}"))?;
+    if !out.status.success() {
+        anyhow::bail!(
+            "git stash apply {stash_sha} не удался: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
 /// Влить ветку worktree агента в главную ветку репозитория.
@@ -938,6 +1171,20 @@ pub struct MergeReport {
 /// * конфликт rebase → `rebase --abort` и отказ;
 /// * грязное главное дерево или не fast-forward → ручной merge, без правок.
 pub fn merge(cfg: &RunConfig, root: &Path, agent: &str) -> anyhow::Result<MergeReport> {
+    merge_with_policy(cfg, root, agent, merge_policy(root))
+}
+
+/// Влить ветку worktree агента в main с ЯВНОЙ политикой.
+///
+/// Политика по умолчанию (`merge_policy`): авто-стэш грязного main разрешён;
+/// `ALLOW_STASH=0` в `.harness/config` (или `HARNESS_ALLOW_STASH=0`) — запрещён,
+/// тогда слияние ОТЛОЖЕНО (`Deferred`), а не отказано.
+pub fn merge_with_policy(
+    cfg: &RunConfig,
+    root: &Path,
+    agent: &str,
+    policy: MergePolicy,
+) -> anyhow::Result<MergeReport> {
     let path = agent_path(cfg, root, agent);
     if !path.exists() {
         anyhow::bail!("worktree агента {agent} не выдан: devh orch wt assign {agent}");
@@ -962,6 +1209,8 @@ pub fn merge(cfg: &RunConfig, root: &Path, agent: &str) -> anyhow::Result<MergeR
                 cfg.main_branch
             ),
             sha: None,
+            deferred: false,
+            stash: None,
         });
     }
     // Сначала подтягиваем главную ветку (remote → origin/main, иначе main),
@@ -976,36 +1225,74 @@ pub fn merge(cfg: &RunConfig, root: &Path, agent: &str) -> anyhow::Result<MergeR
         anyhow::bail!("{e}");
     }
     let sha = crate::shell::git::short_head(&path);
+    // Грязный main: авто-стэш (Layer 1) либо отложенное слияние (Layer 2).
+    let mut backup: Option<DirtyMainBackup> = None;
     if crate::shell::git::tree_dirty(root) {
-        return Ok(MergeReport {
-            action: MergeAction::Manual,
-            message: format!(
-                "главное дерево грязное — влить нельзя (R9: git принадлежит харнессу); \
-                 ветка {branch} готова ({sha}), повтори после коммита чужих правок"
-            ),
-            sha: Some(sha),
-        });
+        let files = crate::shell::git::status_names(root).join(", ");
+        if !policy.allow_stash {
+            return Ok(MergeReport {
+                action: MergeAction::Deferred,
+                message: format!(
+                    "deferred: главное дерево грязное ({files}) — авто-стэш запрещён \
+                     (allow_stash=false); слияние {branch} ОТЛОЖЕНО (очередь Layer 2), \
+                     ветка {branch} готова ({sha}), работа не потеряна"
+                ),
+                sha: Some(sha),
+                deferred: true,
+                stash: None,
+            });
+        }
+        backup = Some(auto_stash_dirty_main(
+            root,
+            &format!("merge {branch} -> {}", cfg.main_branch),
+        )?);
     }
     // Локальная главная ветка могла отстать от upstream — подтягиваем ff.
     if upstream != cfg.main_branch {
         let _ = crate::shell::git::merge_ff_only(root, &upstream);
     }
     if crate::shell::git::merge_ff_only(root, &branch) {
+        let note = match &backup {
+            Some(b) => format!(
+                "; грязный main спрятан в стэш {} (манифест {}), восстановление: {}",
+                b.stash_sha,
+                root.join(DIRTY_MAIN_MANIFEST).display(),
+                b.restore_hint()
+            ),
+            None => String::new(),
+        };
         return Ok(MergeReport {
             action: MergeAction::Merged,
-            message: format!("{branch} влит в {} ({sha})", cfg.main_branch),
+            message: format!("{branch} влит в {}{note}", cfg.main_branch),
             sha: Some(sha),
+            deferred: false,
+            stash: backup,
         });
+    }
+    // ff не вышел: main не тронут — возвращаем чужую работу на место.
+    let mut restored = String::new();
+    if let Some(b) = &backup {
+        if git_ok(root, &["stash", "pop"]) {
+            restored = format!("; спрятанная копия грязного main возвращена на место");
+        } else {
+            restored = format!(
+                "; копия грязного main осталась в стэше {} (восстановление: {})",
+                b.stash_sha,
+                b.restore_hint()
+            );
+        }
     }
     Ok(MergeReport {
         action: MergeAction::Manual,
         message: format!(
             "{} не fast-forward относительно {branch} — нужен ручной merge: \
-             git -C {} merge {branch}",
+             git -C {} merge {branch}{restored}",
             cfg.main_branch,
             root.display()
         ),
         sha: Some(sha),
+        deferred: false,
+        stash: backup,
     })
 }
 
@@ -1750,6 +2037,141 @@ mod tests {
         );
     }
 
+    /// Грязный main + allow_stash -> авто-стэш, merge прошёл, манифест записан,
+    /// восстановление чужой работы возможно.
+    #[test]
+    fn merge_stashes_dirty_main_and_writes_manifest() {
+        let (_d, root) = repo_fixture();
+        let c = cfg();
+        let (p, _) = ensure(&c, &root, "beam").unwrap_or_else(|_| unreachable!());
+        std::fs::write(p.join("c.txt"), "3\n").unwrap_or_else(|_| unreachable!());
+        assert!(git_ok(&p, &["add", "-A"]));
+        assert!(git_ok(&p, &["commit", "-qm", "agent work"]));
+        // Грязный main: изменённый tracked + untracked.
+        std::fs::write(root.join("a.txt"), "dirty\n").unwrap_or_else(|_| unreachable!());
+        std::fs::write(root.join("untracked.txt"), "u\n").unwrap_or_else(|_| unreachable!());
+
+        let rep = merge_with_policy(&c, &root, "beam", MergePolicy { allow_stash: true })
+            .unwrap_or_else(|_| unreachable!());
+        assert_eq!(rep.action, MergeAction::Merged, "{}", rep.message);
+        assert!(!rep.deferred);
+        assert!(root.join("c.txt").exists(), "коммит агента влит в main");
+        assert!(
+            !root.join("untracked.txt").exists(),
+            "чужая работа убрана из дерева (она в стэше)"
+        );
+
+        let manifest = root.join(DIRTY_MAIN_MANIFEST);
+        assert!(
+            manifest.exists(),
+            "манифест записан: {}",
+            manifest.display()
+        );
+        let text = std::fs::read_to_string(&manifest).unwrap_or_else(|_| unreachable!());
+        let parsed: DirtyMainManifest =
+            serde_json::from_str(&text).unwrap_or_else(|_| unreachable!());
+        assert_eq!(parsed.backups.len(), 1, "манифест: {text}");
+        let backup = &parsed.backups[0];
+        assert!(!backup.stash_sha.is_empty(), "ref стэша: {backup:?}");
+        assert!(!backup.stash_ref.is_empty(), "ссылка на стэш: {backup:?}");
+        assert!(!backup.ts.is_empty(), "ts: {backup:?}");
+        assert!(!backup.reason.is_empty(), "причина: {backup:?}");
+        assert!(
+            backup.files.iter().any(|f| f.contains("a.txt")),
+            "tracked в манифесте: {:?}",
+            backup.files
+        );
+        assert!(
+            backup.files.iter().any(|f| f.contains("untracked.txt")),
+            "untracked в манифесте: {:?}",
+            backup.files
+        );
+
+        // Восстановление всегда возможно.
+        let out =
+            restore_dirty_main_backup(&root, &backup.stash_sha).unwrap_or_else(|_| unreachable!());
+        assert!(
+            root.join("untracked.txt").exists(),
+            "восстановление вернуло untracked: {out}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("a.txt")).unwrap_or_default(),
+            "dirty\n",
+            "восстановление вернуло tracked"
+        );
+    }
+
+    /// allow_stash=false -> слияние ОТЛОЖЕНО (deferred), а не отказано:
+    /// ветка агента на месте, чужое дерево не тронуто.
+    #[test]
+    fn merge_defers_when_stash_forbidden() {
+        let (_d, root) = repo_fixture();
+        let c = cfg();
+        let (p, _) = ensure(&c, &root, "beam").unwrap_or_else(|_| unreachable!());
+        std::fs::write(p.join("c.txt"), "3\n").unwrap_or_else(|_| unreachable!());
+        assert!(git_ok(&p, &["add", "-A"]));
+        assert!(git_ok(&p, &["commit", "-qm", "agent work"]));
+        std::fs::write(root.join("a.txt"), "dirty\n").unwrap_or_else(|_| unreachable!());
+
+        let rep = merge_with_policy(&c, &root, "beam", MergePolicy { allow_stash: false })
+            .unwrap_or_else(|_| unreachable!());
+        assert_eq!(rep.action, MergeAction::Deferred, "{}", rep.message);
+        assert!(rep.deferred, "отложено: {}", rep.message);
+        assert!(
+            rep.message.contains("deferred"),
+            "внятная причина отсрочки: {}",
+            rep.message
+        );
+        assert!(rep.stash.is_none(), "без авто-стэша манифест не пишется");
+        assert!(
+            !root.join(DIRTY_MAIN_MANIFEST).exists(),
+            "манифест не создан"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("a.txt")).unwrap_or_default(),
+            "dirty\n",
+            "грязный main не тронут"
+        );
+        assert!(!root.join("c.txt").exists(), "агент не влит (deferred)");
+        assert!(
+            p.join("c.txt").exists(),
+            "работа агента на месте — отложено, а не потеряно"
+        );
+    }
+
+    /// Стек упал (index.lock занят) -> честный отказ с текстом, дерево main не тронуто.
+    #[test]
+    fn merge_refuses_honestly_when_stash_fails() {
+        let (_d, root) = repo_fixture();
+        let c = cfg();
+        let (p, _) = ensure(&c, &root, "beam").unwrap_or_else(|_| unreachable!());
+        std::fs::write(p.join("c.txt"), "3\n").unwrap_or_else(|_| unreachable!());
+        assert!(git_ok(&p, &["add", "-A"]));
+        assert!(git_ok(&p, &["commit", "-qm", "agent work"]));
+        std::fs::write(root.join("a.txt"), "dirty\n").unwrap_or_else(|_| unreachable!());
+        let lock = root.join(".git").join("index.lock");
+        std::fs::write(&lock, "").unwrap_or_else(|_| unreachable!());
+
+        let err =
+            merge_with_policy(&c, &root, "beam", MergePolicy { allow_stash: true }).unwrap_err();
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("стэш") || text.contains("stash"),
+            "внятный отказ: {text}"
+        );
+        assert!(
+            text.contains("main не тронут"),
+            "отказ обещает, что main цел: {text}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("a.txt")).unwrap_or_default(),
+            "dirty\n",
+            "дерево main не тронуто"
+        );
+        assert!(!root.join("c.txt").exists(), "агент не влит");
+        std::fs::remove_file(&lock).ok();
+    }
+
     /// `origin/main` отстал от локального `main` -> база = локальный `main`.
     /// Иначе rebase агента уезжает на древнюю базу, а ff-merge в main
     /// невозможен (main не предок ветки агента).
@@ -1874,14 +2296,7 @@ mod tests {
         // WIP-чекпоинт: откат чужого файла (именно так терялся orch_roles.rs).
         std::fs::write(p.join("other.txt"), "wip\n").unwrap_or_else(|_| unreachable!());
         g(&["add", "-A"], &p);
-        g(
-            &[
-                "commit",
-                "-qm",
-                "wip: beam - 1 файла",
-            ],
-            &p,
-        );
+        g(&["commit", "-qm", "wip: beam - 1 файла"], &p);
         let commits = transfer_commits(&root, "main", &agent_branch("beam"))
             .unwrap_or_else(|e| unreachable!("{e}"));
         assert_eq!(
