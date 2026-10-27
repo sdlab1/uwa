@@ -61,6 +61,140 @@ impl SourceStatus {
     }
 }
 
+/// Окно ТЯЖёЛОГО прогона (cargo-mutants / devh test / eval): это время
+/// принадлежит машине, а не агенту (T-543 — честная метрика скорости).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeavyRun {
+    /// Инструмент: «mutants», «test», «eval».
+    pub tool: String,
+    /// Начало окна (unix-секунды).
+    pub start: u64,
+    /// Конец окна; `None` — прогон ещё идёт (состояние running).
+    pub end: Option<u64>,
+}
+
+impl HeavyRun {
+    /// Конец для расчётов: `None` (в полёте) = «до бесконечности».
+    pub fn end_or_max(&self) -> u64 {
+        self.end.unwrap_or(u64::MAX)
+    }
+}
+
+/// Собрать окна тяжёлых прогонов из журналов/состояния репозитория.
+///
+/// Источники:
+/// * `.harness/mutate/state.json` — текущий/последний аудит cargo-mutants
+///   (`started`/`finished`; состояние `running` без `finished` = открытое окно);
+/// * `.harness/eval/state.json` — окно оценки (тот же формат, если появится);
+/// * `.harness/logs/test-*.log` — запуски полного сьюта (`devh test`):
+///   старт из штаммпы в имени файла (`test-YYYYMMDDTHHMMSSZ.log`), конец —
+///   mtime файла.
+pub fn heavy_runs(root: &Path) -> Vec<HeavyRun> {
+    let mut out = Vec::new();
+    for (rel, tool) in [
+        (".harness/mutate/state.json", "mutants"),
+        (".harness/eval/state.json", "eval"),
+    ] {
+        let path = root.join(rel);
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        let Some(start) = v.get("started").and_then(|x| x.as_u64()) else {
+            continue;
+        };
+        let end = v.get("finished").and_then(|x| x.as_u64());
+        out.push(HeavyRun {
+            tool: tool.to_string(),
+            start,
+            end,
+        });
+    }
+    // Полные сьюты: test-*.log.
+    let logs_dir = root.join(".harness").join("logs");
+    if let Ok(rd) = std::fs::read_dir(&logs_dir) {
+        for entry in rd.flatten() {
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            let Some(stamp) = name
+                .strip_prefix("test-")
+                .and_then(|s| s.strip_suffix(".log"))
+            else {
+                continue;
+            };
+            let Some(start) = parse_log_stamp(stamp) else {
+                continue;
+            };
+            let end = std::fs::metadata(&path)
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .filter(|e| *e >= start);
+            out.push(HeavyRun {
+                tool: "test".to_string(),
+                start,
+                end,
+            });
+        }
+    }
+    out.sort_by_key(|h| h.start);
+    out
+}
+
+/// Разбор штампа имени лога: `20261021T130533Z` → unix-секунды (UTC).
+fn parse_log_stamp(stamp: &str) -> Option<u64> {
+    use chrono::{NaiveDateTime, TimeZone, Utc};
+    let naive = NaiveDateTime::parse_from_str(stamp, "%Y%m%dT%H%M%SZ").ok()?;
+    Some(Utc.from_utc_datetime(&naive).timestamp() as u64)
+}
+
+/// Вычесть тяжёлые окна из рабочих интервалов (чистая функция).
+///
+/// Пересечение режет интервал на части; полностью покрытый интервал
+/// исчезает; открытое окно (`end = None`) считаем идущим до бесконечности.
+/// Нулевые/отрицательные остатки отбрасываются.
+pub fn subtract_heavy(intervals: &[(u64, u64)], heavy: &[HeavyRun]) -> Vec<(u64, u64)> {
+    let mut out: Vec<(u64, u64)> = intervals.iter().copied().filter(|(a, b)| b > a).collect();
+    for run in heavy {
+        let (h0, h1) = (run.start, run.end_or_max());
+        let mut next: Vec<(u64, u64)> = Vec::with_capacity(out.len().saturating_mul(2));
+        for (a, b) in out {
+            if h1 <= a || h0 >= b {
+                next.push((a, b)); // без пересечения — интервал цел
+                continue;
+            }
+            if h0 > a {
+                next.push((a, h0.min(b))); // левая часть
+            }
+            if h1 < b {
+                next.push((h1.max(a), b)); // правая часть
+            }
+        }
+        out = next;
+    }
+    out.into_iter().filter(|(a, b)| b > a).collect()
+}
+
+/// Рабочее время агента БЕЗ тяжёлых прогонов (для честной метрики).
+pub fn working_secs_excluding_heavy(
+    work_intervals: &std::collections::BTreeMap<String, Vec<(u64, u64)>>,
+    heavy: &[HeavyRun],
+) -> std::collections::BTreeMap<String, u64> {
+    work_intervals
+        .iter()
+        .map(|(agent, intervals)| {
+            let clean = subtract_heavy(intervals, heavy);
+            let secs: u64 = clean.iter().map(|(a, b)| b.saturating_sub(*a)).sum();
+            (agent.clone(), secs)
+        })
+        .collect()
+}
+
 /// Данные, собранные для юнита скорости.
 #[derive(Debug, Clone, Default)]
 pub struct Collected {
@@ -891,10 +1025,7 @@ pub fn collect(root: &Path, since: u64) -> Collected {
     // времени — более часто встречающаяся). «Самая частая за всё время» врала:
     // агент переключил модель, а статистика продолжала показывать старую.
     for (agent, models) in observed {
-        if let Some((model, _)) = models
-            .into_iter()
-            .max_by_key(|(_, (n, last))| (*last, *n))
-        {
+        if let Some((model, _)) = models.into_iter().max_by_key(|(_, (n, last))| (*last, *n)) {
             out.observed_model.insert(agent, model);
         }
     }
@@ -945,6 +1076,133 @@ mod tests {
         g(&["add", "-A"]);
         g(&["commit", "-qm", "wip"]);
         (d, root)
+    }
+
+    // --- T-543: окна тяжёлых прогонов вычитаются из рабочего времени ------
+
+    fn run(tool: &str, start: u64, end: Option<u64>) -> HeavyRun {
+        HeavyRun {
+            tool: tool.to_string(),
+            start,
+            end,
+        }
+    }
+
+    #[test]
+    fn full_overlap_removes_interval() {
+        let got = subtract_heavy(&[(100, 200)], &[run("mutants", 100, Some(200))]);
+        assert!(
+            got.is_empty(),
+            "полностью покрытый интервал исчезает: {got:?}"
+        );
+    }
+
+    #[test]
+    fn partial_overlap_splits_interval() {
+        let got = subtract_heavy(&[(100, 200)], &[run("test", 150, Some(250))]);
+        assert_eq!(got, vec![(100, 150)], "пересечение режет на части");
+        let got = subtract_heavy(&[(100, 200)], &[run("test", 50, Some(150))]);
+        assert_eq!(got, vec![(150, 200)]);
+        let got = subtract_heavy(&[(100, 200)], &[run("test", 120, Some(180))]);
+        assert_eq!(got, vec![(100, 120), (180, 200)], "середина вырезана");
+    }
+
+    #[test]
+    fn no_overlap_keeps_interval() {
+        let got = subtract_heavy(&[(100, 200)], &[run("mutants", 300, Some(400))]);
+        assert_eq!(got, vec![(100, 200)]);
+        let got = subtract_heavy(&[(100, 200)], &[]);
+        assert_eq!(got, vec![(100, 200)]);
+    }
+
+    #[test]
+    fn multiple_overlaps_all_cut() {
+        let got = subtract_heavy(
+            &[(100, 500)],
+            &[
+                run("mutants", 100, Some(150)),
+                run("test", 250, Some(300)),
+                run("eval", 400, Some(450)),
+            ],
+        );
+        assert_eq!(got, vec![(150, 250), (300, 400), (450, 500)]);
+    }
+
+    #[test]
+    fn open_run_cuts_to_infinity() {
+        // прогон в полёте: всё после его старта — не рабочее время
+        let got = subtract_heavy(&[(100, 200)], &[run("mutants", 150, None)]);
+        assert_eq!(got, vec![(100, 150)]);
+        let got = subtract_heavy(&[(100, 200)], &[run("mutants", 50, None)]);
+        assert!(got.is_empty(), "прогон начался раньше интервала: {got:?}");
+    }
+
+    #[test]
+    fn degenerate_intervals_dropped() {
+        assert!(subtract_heavy(&[(100, 100), (200, 100)], &[]).is_empty());
+    }
+
+    #[test]
+    fn working_secs_excluding_heavy_sums_per_agent() {
+        let mut work: std::collections::BTreeMap<String, Vec<(u64, u64)>> =
+            std::collections::BTreeMap::new();
+        work.insert("beam".to_string(), vec![(100, 300)]);
+        work.insert("kilo".to_string(), vec![(100, 200)]);
+        let got = working_secs_excluding_heavy(&work, &[run("mutants", 100, Some(200))]);
+        assert_eq!(got.get("beam"), Some(&100), "у beam вычтено 200 из 200");
+        assert_eq!(got.get("kilo"), Some(&0), "у kilo интервал весь под окном");
+    }
+
+    #[test]
+    fn heavy_runs_reads_state_and_logs() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join(".harness/mutate")).unwrap();
+        std::fs::write(
+            root.join(".harness/mutate/state.json"),
+            r#"{"state":"finished","started":100,"finished":250}"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join(".harness/logs")).unwrap();
+        let log = root.join(".harness/logs/test-20261021T130533Z.log");
+        std::fs::write(&log, "PASS").unwrap();
+        // конец окна лога = mtime: ставим явно
+        filetime::set_file_mtime(&log, filetime::FileTime::from_unix_time(2_000_000_000, 0)).unwrap();
+        let runs = heavy_runs(root);
+        assert_eq!(runs.len(), 2, "state.json + test-log: {runs:?}");
+        let mutants = runs
+            .iter()
+            .find(|r| r.tool == "mutants")
+            .expect("окно mutants");
+        assert_eq!((mutants.start, mutants.end), (100, Some(250)));
+        let test_run = runs.iter().find(|r| r.tool == "test").expect("окно test");
+        assert_eq!(test_run.end, Some(2_000_000_000), "конец окна из mtime");
+        assert!(
+            test_run.start > 1_700_000_000,
+            "штамп имени лога разобран: {}",
+            test_run.start
+        );
+    }
+
+    #[test]
+    fn heavy_runs_without_journals_is_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let runs = heavy_runs(dir.path());
+        assert!(runs.is_empty(), "нет журналов — нет и окон: {runs:?}");
+    }
+
+    #[test]
+    fn heavy_runs_running_state_is_open_window() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".harness/mutate")).unwrap();
+        std::fs::write(
+            dir.path().join(".harness/mutate/state.json"),
+            r#"{"state":"running","started":100,"finished":null}"#,
+        )
+        .unwrap();
+        let runs = heavy_runs(dir.path());
+        let r = runs.first().expect("окно mutants");
+        assert_eq!(r.end, None, "running без finished = открытое окно");
     }
 
     #[test]
@@ -1040,7 +1298,8 @@ mod tests {
         // Реальный случай: промпт агента — его worktree, а позже в сессии
         // распечатка `devh orch wt list` со ВСЕМИ агентами. Чужая длинная
         // строка не должна перехватывать сессию.
-        let tsv = "sessA\tРаботай в worktree /tmp/devh-909045283-minimax (ветка devh/agent-minimax)\n\
+        let tsv =
+            "sessA\tРаботай в worktree /tmp/devh-909045283-minimax (ветка devh/agent-minimax)\n\
                    sessA\tагент step5 worktree /tmp/devh-909045283-step5\n";
         let map = parse_session_map(tsv, &known_agents());
         assert_eq!(map.get("sessA").map(String::as_str), Some("minimax"));
@@ -1051,7 +1310,10 @@ mod tests {
         let tsv = "sessB\tAct as worker agent `opencode-d7f20bce` in the devh multi-agent \
                    orchestrator (lead: `minimax`)\n";
         let map = parse_session_map(tsv, &known_agents());
-        assert_eq!(map.get("sessB").map(String::as_str), Some("opencode-d7f20bce"));
+        assert_eq!(
+            map.get("sessB").map(String::as_str),
+            Some("opencode-d7f20bce")
+        );
     }
 
     #[test]
@@ -1060,6 +1322,9 @@ mod tests {
         // лучше не показать, чем показать чужую работу.
         let tsv = "sessC\tотчёт по задачам step5 и minimax\n";
         let map = parse_session_map(tsv, &known_agents());
-        assert!(!map.contains_key("sessC"), "неоднозначная сессия не привязана: {map:?}");
+        assert!(
+            !map.contains_key("sessC"),
+            "неоднозначная сессия не привязана: {map:?}"
+        );
     }
 }
