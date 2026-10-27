@@ -449,6 +449,19 @@ pub fn ensure_expiry_task(
     if open {
         return Ok(None);
     }
+    // T-680: если агент уже имеет подтверждённую модель в реестре (model_source
+    // установлен tech_lead), а ответившая модель НЕ ОТЛИЧАЕТСЯ — задача не нужна.
+    let canon = crate::core::identity::canonical(agent);
+    let current_answer = load(root).get(&canon).and_then(|ch| ch.answer.clone());
+    if let Some(agent_state) = reg.agents.iter().find(|a| a.name == agent) {
+        if let Some(confirmed) = agent_state.model.as_ref() {
+            if let Some(ref ans) = current_answer {
+                if ans.model == *confirmed {
+                    return Ok(None);
+                }
+            }
+        }
+    }
     let (lead, _) = lead_of(&reg);
     let Some(reviewer) = reg
         .agents
@@ -843,5 +856,59 @@ mod tests {
             !zh.contains("不会发放任务"),
             "китайский вопрос не должен говорить, что задача не выдаётся"
         );
+    }
+
+    /// T-680: если модель агента уже подтверждена (в реестре) и ответившая
+    /// модель совпадает — sweep_expiries НЕ создаёт задачу верификации.
+    #[test]
+    fn sweep_skips_verified_model() {
+        let root = tmp_root("sweep-verified");
+        registry_with_roles(&root, Some("tech"));
+        // Агент 'beam' с подтверждённой моделью в реестре.
+        {
+            let mut reg = crate::commands::orch::load(&root);
+            reg.agents.push(crate::commands::orch::AgentState {
+                name: "beam".to_string(),
+                model: Some("gpt-4o".to_string()),
+                ..Default::default()
+            });
+            crate::commands::orch::save(&root, &reg).expect("save");
+        }
+        // Ответ с ТОЙ ЖЕ моделью — истёкший.
+        record_answer(&root, "beam", "MODEL: gpt-4o").unwrap();
+        let now = now_secs() + IDENTIFY_TTL_SECS + 1;
+        // mark_expired + ensure_expiry_task: должна пропустить beam.
+        let ids = sweep_expiries(&root, now, IDENTIFY_TTL_SECS).unwrap();
+        assert!(
+            ids.is_empty(),
+            "модель подтверждена и не изменилась — задача не создаётся: {ids:?}"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// T-680: если подтверждённая модель ОТЛИЧАЕТСЯ от ответившей — задача создаётся.
+    #[test]
+    fn sweep_creates_task_for_changed_model() {
+        let root = tmp_root("sweep-changed");
+        registry_with_roles(&root, Some("tech"));
+        // Подтверждённая модель: gpt-4o.
+        {
+            let mut reg = crate::commands::orch::load(&root);
+            reg.agents.push(crate::commands::orch::AgentState {
+                name: "beam".to_string(),
+                model: Some("gpt-4o".to_string()),
+                ..Default::default()
+            });
+            crate::commands::orch::save(&root, &reg).expect("save");
+        }
+        // Агент ответил ирой моделью (claude) — истёкший ответ.
+        record_answer(&root, "beam", "MODEL: claude-3.5-sonnet").unwrap();
+        let now = now_secs() + IDENTIFY_TTL_SECS + 1;
+        let ids = sweep_expiries(&root, now, IDENTIFY_TTL_SECS).unwrap();
+        assert_eq!(ids.len(), 1, "модель изменилась — должна быть задача верификации");
+        let reg = crate::commands::orch::load(&root);
+        let task = reg.tasks.iter().find(|t| t.id == ids[0]).expect("задача");
+        assert!(task.title.contains("beam"), "заголовок содержит имя агента");
+        let _ = fs::remove_dir_all(&root);
     }
 }
