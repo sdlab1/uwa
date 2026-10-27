@@ -23,6 +23,9 @@ use self::panel::PanelSnapshot;
 /// Вендорённый htmx (чтобы панель работала без интернета).
 const HTMX_JS: &str = include_str!("../core/panel/assets/htmx.min.js");
 
+/// Вендорённое расширение htmx для SSE (версия та же — 1.9.12).
+const SSE_JS: &str = panel::events::SSE_CLIENT_JS;
+
 /// Разделы панели (маршрут → заголовок).
 const SECTIONS: &[(&str, &str)] = &[
     ("summary", "Сводка"),
@@ -106,6 +109,8 @@ fn serve(root: &PathBuf, addr: &str, port: u16) -> i32 {
             return 2;
         }
     };
+    // Событийный слой (T-632): родной inotify → SSE-push клиентам.
+    panel::events::start(root.clone());
     println!("devh panel: ПУ поднята на http://{bind}/");
     println!("devh panel: разделы — /panel/agents | /panel/queue | /panel/git | /panel/plan | /panel/reports");
     for stream in listener.incoming() {
@@ -126,6 +131,8 @@ struct HttpRequest {
     body: String,
     /// Тело больше лимита — запрос отклоняем.
     too_large: bool,
+    /// `Last-Event-ID` — с какого события догружать (SSE-переподключение).
+    last_event_id: u64,
 }
 
 /// Найти подстроку в байтах.
@@ -169,12 +176,16 @@ fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<HttpRequest>> 
         None => (target.clone(), String::new()),
     };
     let mut content_length = 0usize;
+    let mut last_event_id = 0u64;
     for line in lines {
         let Some((k, v)) = line.split_once(':') else {
             continue;
         };
         if k.trim().eq_ignore_ascii_case("content-length") {
             content_length = v.trim().parse().unwrap_or(0);
+        }
+        if k.trim().eq_ignore_ascii_case("last-event-id") {
+            last_event_id = v.trim().parse().unwrap_or(0);
         }
     }
     let too_large = content_length > panel::chat::MAX_BODY_BYTES;
@@ -194,6 +205,7 @@ fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<HttpRequest>> 
         query,
         body,
         too_large,
+        last_event_id,
     }))
 }
 
@@ -206,6 +218,10 @@ fn handle(mut stream: TcpStream, root: &PathBuf) -> std::io::Result<()> {
         stream.write_all(response.as_bytes())?;
         return stream.flush();
     };
+    // Событийный поток (SSE): держим соединение и шлём события (T-632).
+    if req.path == "/panel/events" && (req.method == "GET" || req.method == "HEAD") {
+        return handle_sse(&mut stream, req.last_event_id);
+    }
     let mut extra = String::new();
     let (status, content_type, body) = if req.method == "POST" && req.path == "/panel/chat/send" {
         // Write-контур чата (T-631): отправка каноническим `devh msg send`.
@@ -245,6 +261,11 @@ fn handle(mut stream: TcpStream, root: &PathBuf) -> std::io::Result<()> {
                 "application/javascript; charset=utf-8",
                 HTMX_JS.to_string(),
             ),
+            "/static/sse.js" => (
+                "200 OK",
+                "application/javascript; charset=utf-8",
+                SSE_JS.to_string(),
+            ),
             "/healthz" => ("200 OK", "text/plain; charset=utf-8", "ok\n".to_string()),
             p if p.starts_with("/panel/") => {
                 let section = p.trim_start_matches("/panel/").to_string();
@@ -280,6 +301,55 @@ fn handle(mut stream: TcpStream, root: &PathBuf) -> std::io::Result<()> {
     stream.flush()
 }
 
+/// SSE-поток событий панели (T-632).
+///
+/// Клиент (htmx-расширение sse) держит соединение и получает push-события:
+/// `letter` — новое письмо, `registry` — изменился реестр (новые P0/PS).
+/// При обрыве клиент переподключается сам и присылает `Last-Event-ID` —
+/// пропущенные события догружаются из кольцевого буфера.
+fn handle_sse(stream: &mut TcpStream, last_event_id: u64) -> std::io::Result<()> {
+    let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream; charset=utf-8\r\nCache-Control: no-store\r\nConnection: keep-alive\r\nX-Accel-Buffering: no\r\n\r\n";
+    stream.write_all(head.as_bytes())?;
+    stream.flush()?;
+    let rx = panel::events::subscribe();
+    for ev in panel::events::replay(last_event_id) {
+        if stream
+            .write_all(panel::events::sse_frame(&ev).as_bytes())
+            .is_err()
+        {
+            return Ok(());
+        }
+    }
+    stream.flush()?;
+    loop {
+        match rx.recv_timeout(std::time::Duration::from_secs(15)) {
+            Ok(ev) => {
+                if stream
+                    .write_all(panel::events::sse_frame(&ev).as_bytes())
+                    .is_err()
+                {
+                    return Ok(());
+                }
+                if stream.flush().is_err() {
+                    return Ok(());
+                }
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                if stream
+                    .write_all(panel::events::sse_keepalive().as_bytes())
+                    .is_err()
+                {
+                    return Ok(());
+                }
+                if stream.flush().is_err() {
+                    return Ok(());
+                }
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
+        }
+    }
+}
+
 /// Фрагмент раздела (для `hx-get`).
 pub fn fragment(section: &str, snap: &PanelSnapshot, query: &str) -> Option<String> {
     Some(match section {
@@ -304,6 +374,8 @@ pub fn fragment(section: &str, snap: &PanelSnapshot, query: &str) -> Option<Stri
         }
         "chat" => chat_html(Path::new(&snap.root), query),
         "chat/older" => chat_older_html(query),
+        "chat/list" => chat_list_html(),
+        "chat/tail" => chat_tail_html(query),
         "ledger" => ledger_html(snap),
         "dangling" => dangling_html(snap),
         _ => return None,
@@ -324,10 +396,25 @@ pub fn page_html(snap: &PanelSnapshot, query: &str) -> String {
         esc(&snap.root),
         esc(&stamp(snap.generated_at))
     ));
+    // Событийный слой (T-632): общий источник SSE + «мост» на разделы.
+    out.push_str("<div hx-ext=\"sse\" sse-connect=\"/panel/events\">");
+    out.push_str("<div style=\"display:none\">");
+    for (route, target) in [
+        ("summary", "#sec-summary .body"),
+        ("queue", "#sec-queue .body"),
+        ("incidents", "#sec-incidents .body"),
+        ("agents", "#sec-agents .body"),
+    ] {
+        out.push_str(&format!(
+            "<div hx-get=\"/panel/{route}\" hx-trigger=\"sse:registry\" hx-target=\"{target}\" hx-swap=\"innerHTML\"></div>"
+        ));
+    }
+    out.push_str("</div>");
     for (route, title) in SECTIONS {
-        // Чат после отправки письма обновляется событием (write-контур, T-631).
+        // Чат обновляется СОБЫТИЯМИ (SSE): окно дописывается, а не
+        // перерисовывается; список тредов polls сам (см. chat_html).
         let trigger = if *route == "chat" {
-            "load, every 5s, chatRefresh from:body"
+            "load"
         } else {
             "load, every 5s"
         };
@@ -336,8 +423,10 @@ pub fn page_html(snap: &PanelSnapshot, query: &str) -> String {
             esc(title)
         ));
     }
+    out.push_str("</div>");
     let _ = query;
     out.push_str("<script src=\"/static/htmx.min.js\"></script>");
+    out.push_str("<script src=\"/static/sse.js\"></script>");
     out.push_str("</body></html>");
     out
 }
@@ -766,39 +855,30 @@ fn chat_html(root: &Path, query: &str) -> String {
 </style>");
     out.push_str("<div class=\"chat\">");
     // --- список тредов ---
-    out.push_str("<aside class=\"chat-list\"><div class=\"chat-list-title\">Треды");
-    out.push_str(&format!(" ({})</div>", rows.len()));
-    for r in &rows {
-        let active = selected.as_deref() == Some(r.id.as_str());
-        out.push_str(&format!(
-            "<a class=\"chat-row{}\" href=\"/panel/chat?thread={}\" hx-get=\"/panel/chat?thread={}\" hx-target=\"#chat-panel\" hx-push-url=\"true\" hx-swap=\"innerHTML\"><div class=\"chat-row-subject\">{}</div><div class=\"chat-row-meta\">{} · {}</div><div class=\"chat-row-preview\">{}</div>{}</a>",
-            if active { " active" } else { "" },
-            esc(&r.id),
-            esc(&r.id),
-            esc(&r.subject),
-            esc(&r.participants),
-            esc(&r.last_stamp),
-            esc(&r.preview),
-            if r.unread > 0 {
-                format!("<span class=\"msg-tags\">не прочитано: {}</span>", r.unread)
-            } else {
-                String::new()
-            }
-        ));
-    }
+    // --- список тредов (обновляется сам, список дешёвый) ---
+    out.push_str("<aside class=\"chat-list\" id=\"chat-list\" hx-get=\"/panel/chat/list\" hx-trigger=\"load, every 5s\" hx-swap=\"innerHTML\">");
+    out.push_str(&chat_list_rows(&rows, selected.as_deref()));
     out.push_str("</aside>");
     // --- окно треда ---
     out.push_str("<section class=\"chat-main\" id=\"chat-panel\">");
     match &selected {
         None => out.push_str("<div class=\"chat-empty\">тредов пока нет</div>"),
         Some(id) => {
+            let last_id = win
+                .messages
+                .last()
+                .map(|m| m.id.clone())
+                .unwrap_or_default();
             out.push_str(&format!(
-                "<div class=\"chat-head\"><div class=\"chat-title\">{}</div><div class=\"chat-meta\">{} · всего сообщений: {} · показаны последние {} · непрочитанных в окне: {}</div></div>",
+                "<div class=\"chat-head\"><div class=\"chat-title\">{}</div><div class=\"chat-meta\">{} · всего сообщений: <span id=\"chat-count\" data-total=\"{}\">{}</span> · показаны последние <span id=\"chat-shown\">{}</span> · непрочитанных в окне: {}<span id=\"chat-cursor\" data-after=\"{}\"></span> · <a href=\"#\" hx-get=\"/panel/chat?thread={}\" hx-target=\"#chat-panel\" hx-swap=\"innerHTML\">обновить</a></div></div>",
                 esc(&win.messages.last().map(|m| m.subject.clone()).unwrap_or_else(|| id.clone())),
                 esc(id),
                 win.total,
+                win.total,
                 win.messages.len(),
-                win.unread
+                win.unread,
+                esc(&last_id),
+                esc(id)
             ));
             out.push_str("<div class=\"chat-window\" id=\"chat-window\">");
             for m in &win.messages {
@@ -806,6 +886,7 @@ fn chat_html(root: &Path, query: &str) -> String {
             }
             out.push_str("</div>");
             out.push_str(&chat_more_html(id, limit, before, win.has_more));
+            out.push_str(&chat_tail_trigger(id, &last_id, false));
         }
     }
     // ── композер (write-контур, T-631) ──
@@ -858,6 +939,71 @@ fn chat_sent_html(rep: &panel::chat::SendReport) -> String {
         esc(&rep.recipients),
         esc(sender)
     )
+}
+
+/// Список тредов (внутренняя разметка — для polls и для полной отрисовки).
+fn chat_list_rows(rows: &[panel::chat::ThreadRow], selected: Option<&str>) -> String {
+    let mut out = String::new();
+    out.push_str("<div class=\"chat-list-title\">Треды");
+    out.push_str(&format!(" ({})</div>", rows.len()));
+    for r in rows {
+        let active = selected == Some(r.id.as_str());
+        out.push_str(&format!(
+            "<a class=\"chat-row{}\" href=\"/panel/chat?thread={}\" hx-get=\"/panel/chat?thread={}\" hx-target=\"#chat-panel\" hx-push-url=\"true\" hx-swap=\"innerHTML\"><div class=\"chat-row-subject\">{}</div><div class=\"chat-row-meta\">{} · {}</div><div class=\"chat-row-preview\">{}</div>{}</a>",
+            if active { " active" } else { "" },
+            esc(&r.id),
+            esc(&r.id),
+            esc(&r.subject),
+            esc(&r.participants),
+            esc(&r.last_stamp),
+            esc(&r.preview),
+            if r.unread > 0 {
+                format!("<span class=\"msg-tags\">не прочитано: {}</span>", r.unread)
+            } else {
+                String::new()
+            }
+        ));
+    }
+    out
+}
+
+/// Список тредов отдельным фрагментом (polls раздела «Чат»).
+fn chat_list_html() -> String {
+    chat_list_rows(&panel::chat::threads(), None)
+}
+
+/// Триггер догрузки хвоста треда (SSE-событие «letter»).
+fn chat_tail_trigger(thread: &str, after: &str, oob: bool) -> String {
+    format!(
+        "<div id=\"chat-tail\" hx-get=\"/panel/chat/tail?thread={}&after={}\" hx-trigger=\"sse:letter\" hx-target=\"#chat-window\" hx-swap=\"beforeend\"{}></div>",
+        esc(thread),
+        esc(after),
+        if oob { " hx-swap-oob=\"true\"" } else { "" }
+    )
+}
+
+/// Хвост треда: только НОВЫЕ сообщения (история не перерисовывается).
+fn chat_tail_html(query: &str) -> String {
+    let thread = query_value(query, "thread").unwrap_or_default();
+    let after = query_value(query, "after").unwrap_or_default();
+    let msgs = panel::events::tail_since(&thread, &after, panel::chat::WINDOW_DEFAULT);
+    let mut out = String::new();
+    for m in &msgs {
+        out.push_str(&chat_message_html(m));
+    }
+    let last_id = msgs.last().map(|m| m.id.clone()).unwrap_or(after);
+    let total = panel::chat::window(&thread, 1, 0).total;
+    // OOB: счётчик сообщений, курсор и триггер с новым курсором.
+    out.push_str(&format!(
+        "<span id=\"chat-count\" data-total=\"{}\" hx-swap-oob=\"true\">{}</span>",
+        total, total
+    ));
+    out.push_str(&format!(
+        "<span id=\"chat-cursor\" data-after=\"{}\" hx-swap-oob=\"true\"></span>",
+        esc(&last_id)
+    ));
+    out.push_str(&chat_tail_trigger(&thread, &last_id, true));
+    out
 }
 
 /// Карточка письма.
@@ -1086,6 +1232,32 @@ mod tests {
         );
         assert!(html.contains("name=\"token\""), "поле токена должно быть");
         assert!(!html.contains("секрет"), "токен в HTML не светится");
+    }
+
+    #[test]
+    fn chat_has_sse_tail_trigger() {
+        let root = std::env::temp_dir().join(format!("devh-panel-sse-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(".harness")).unwrap();
+        std::fs::write(root.join(".harness/config"), "PANEL_WRITE=0\n").unwrap();
+        let html = chat_html(root.as_path(), "");
+        assert!(html.contains("id=\"chat-tail\""), "нужен триггер SSE");
+        assert!(
+            html.contains("hx-trigger=\"sse:letter\""),
+            "реакция на событие письма"
+        );
+    }
+
+    #[test]
+    fn page_wires_sse_source_and_asset() {
+        let snap = PanelSnapshot::default();
+        let html = page_html(&snap, "");
+        assert!(
+            html.contains("sse-connect=\"/panel/events\""),
+            "источник SSE"
+        );
+        assert!(html.contains("hx-ext=\"sse\""), "расширение подключено");
+        assert!(html.contains("/static/sse.js"), "вендорённое расширение");
     }
 
     #[test]

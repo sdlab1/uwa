@@ -11,6 +11,7 @@
 
 pub mod agents;
 pub mod chat;
+pub mod events;
 pub mod git;
 pub mod ledger;
 pub mod plan;
@@ -141,6 +142,13 @@ pub fn collect(root: &Path) -> PanelSnapshot {
         *map = Some((now, snap.clone()));
     }
     snap
+}
+
+/// Сбросить кэш снимка (событийный слой: реестр изменился — пересчитать).
+pub fn invalidate_snapshot() {
+    if let Ok(mut map) = snapshot_cache().lock() {
+        *map = None;
+    }
 }
 
 /// Снимок без кэша (полный пересчёт всех источников).
