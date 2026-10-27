@@ -88,7 +88,10 @@ fn role_lead_cannot_take_task() {
 
     let (_out, err, code) = env.run("lead", &["start", "T-1"]);
     assert_ne!(code, 0, "ведущий не может взять задачу в работу");
-    assert!(err.contains("ведущий не берёт задачи"), "внятная причина: {err}");
+    assert!(
+        err.contains("ведущий не берёт задачи"),
+        "внятная причина: {err}"
+    );
 }
 
 #[test]
@@ -138,7 +141,10 @@ fn double_assignment_blocked() {
 
     let (out2, err2, code2) = env.run("worker2", &["start", "T-1"]);
     assert_ne!(code2, 0, "второй start должен падать: {err2}");
-    assert!(err2.contains("закреплена за") || err2.contains("task taken"), "внятная причина отказа: {err2}");
+    assert!(
+        err2.contains("закреплена за") || err2.contains("task taken"),
+        "внятная причина отказа: {err2}"
+    );
 }
 
 #[test]
@@ -151,7 +157,10 @@ fn double_assignment_from_lead_buffer_blocked() {
 
     let (out2, err2, code2) = env.run("worker2", &["start", "T-3"]);
     assert_ne!(code2, 0, "worker2 не может взять уже взятую задачу: {err2}");
-    assert!(err2.contains("закреплена за") || err2.contains("task taken"), "внятная причина: {err2}");
+    assert!(
+        err2.contains("закреплена за") || err2.contains("task taken"),
+        "внятная причина: {err2}"
+    );
 }
 
 #[test]
@@ -166,9 +175,17 @@ fn revocation_marks_task_revoked() {
     assert_eq!(code2, 0, "revoke успешен: {err2}");
 
     let reg = env.read_registry();
-    let task = reg["tasks"].as_array().unwrap().iter().find(|t| t["id"] == "T-1").unwrap();
+    let task = reg["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["id"] == "T-1")
+        .unwrap();
     assert_eq!(task["status"], "revoked", "задача отмечена как отозванная");
-    assert!(task["note"].as_str().unwrap().contains("отзыв"), "причина записана в note");
+    assert!(
+        task["note"].as_str().unwrap().contains("отзыв"),
+        "причина записана в note"
+    );
 }
 
 #[test]
@@ -240,8 +257,7 @@ fn merge_records_commit_sha_requires_worktree() {
 #[test]
 fn reassign_changes_agent_and_preserves_dod() {
     let env = Env::new();
-    env.write_registry(
-        r#"{
+    let reg_active = r#"{
   "seq": 1,
   "tasks": [
     {"id": "T-1", "agent": "worker1", "title": "Task", "complexity": 1, "c_level": 2, "status": "active", "zones": ["zone.rs"], "note": "", "created": 100, "updated": 100, "started_by": "worker1", "started_at": 100, "dod": ["критерий 1", "критерий 2"], "checks": ["true"], "acked": ["критерий 1"], "evidence": []}
@@ -249,9 +265,26 @@ fn reassign_changes_agent_and_preserves_dod() {
   "agents": [{"name": "lead", "role": "lead", "fail_streak": 0}, {"name": "worker1", "role": "worker", "fail_streak": 0}, {"name": "worker2", "role": "worker", "fail_streak": 0}],
   "lead": "lead",
   "plan": {"deps": {}, "prio": {"T-1": 0}}
-}"#,
-    );
+}"#;
+    env.write_registry(reg_active);
 
+    // O16 («task taken»): задача, уже взятая в работу, не переназначается молча —
+    // сначала devh orch done/revoke. Отказ должен быть внятным.
+    let (_out, err, code) = env.run("lead", &["reassign", "T-1", "--agent", "worker2"]);
+    assert_ne!(code, 0, "reassign взятой задачи должен падать: {err}");
+    assert!(
+        err.contains("взята в работу") || err.contains("task taken"),
+        "внятная причина отказа: {err}"
+    );
+    let reg = env.read_registry();
+    assert_eq!(reg["tasks"][0]["agent"], "worker1", "агент не должен смениться");
+    assert_eq!(reg["tasks"][0]["status"], "active", "статус не должен меняться");
+
+    // Задача возвращена в очередь -> переназначение разрешено, DoD/зоны сохраняются.
+    let reg_queued = reg_active
+        .replace("\"status\": \"active\"", "\"status\": \"queued\"")
+        .replace("\"started_by\": \"worker1\", \"started_at\": 100, ", "");
+    env.write_registry(&reg_queued);
     let (_out, err, code) = env.run("lead", &["reassign", "T-1", "--agent", "worker2"]);
     assert_eq!(code, 0, "reassign: {err}");
 
@@ -259,7 +292,11 @@ fn reassign_changes_agent_and_preserves_dod() {
     let task = &reg["tasks"][0];
     assert_eq!(task["agent"], "worker2", "агент изменён");
     assert_eq!(task["dod"].as_array().unwrap().len(), 2, "DoD сохранён");
-    assert_eq!(task["zones"].as_array().unwrap()[0], "zone.rs", "зона сохранена");
+    assert_eq!(
+        task["zones"].as_array().unwrap()[0],
+        "zone.rs",
+        "зона сохранена"
+    );
 }
 
 #[test]
@@ -331,14 +368,31 @@ fn lead_can_degrade_agent() {
     let env = Env::new();
     env.write_registry(base_registry());
 
-    let (_out, err, code) = env.run("lead", &["degrade", "--agent", "worker1", "--to", "P1", "--reason", "test"]);
+    let (_out, err, code) = env.run(
+        "lead",
+        &[
+            "degrade", "--agent", "worker1", "--to", "P1", "--reason", "test",
+        ],
+    );
     assert_eq!(code, 0, "degrade: {err}");
 
     let reg = env.read_registry();
-    let agent = reg["agents"].as_array().unwrap().iter().find(|a| a["name"] == "worker1").unwrap();
+    let agent = reg["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["name"] == "worker1")
+        .unwrap();
     // degrade sets suspicion with the reason
-    assert!(agent["suspicion"].is_string(), "подозрение установлено: {:?}", agent["suspicion"]);
-    assert!(agent["suspicion"].as_str().unwrap().contains("test"), "причина в подозрении");
+    assert!(
+        agent["suspicion"].is_string(),
+        "подозрение установлено: {:?}",
+        agent["suspicion"]
+    );
+    assert!(
+        agent["suspicion"].as_str().unwrap().contains("test"),
+        "причина в подозрении"
+    );
 }
 
 #[test]
