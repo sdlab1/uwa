@@ -1226,7 +1226,7 @@ pub fn claim(raw: &str, takeover: bool) -> Result<Identity, String> {
         if existing.claimed && existing.name == name {
             // Тот же ключ закрепляет то же имя — идемпотентно.
             auto_register_alias(&name);
-            remember_slot(&name, true);
+            remember_slot(&name, false);
             return Ok(finish(name, Source::Stored, key, false));
         }
     }
@@ -1274,7 +1274,11 @@ pub fn claim(raw: &str, takeover: bool) -> Result<Identity, String> {
     write_binding_in(&home, &key, &name, &label, true)
         .map_err(|e| format!("не записать привязку: {e}"))?;
     // Слот: после рестарта рантайма имя восстановится само.
-    remember_slot(&name, true);
+    // claimed=false для слота: claimed-слот не даёт наследования имени
+    // при рестарте (original_key меняется), но создаёт проблему для
+    // identity_guard. Слот просто хранит имя (claimed=false) —
+    // session-привязка с claimed=true и так даёт приоритет.
+    remember_slot(&name, false);
     auto_register_alias(&name);
     Ok(finish(name, Source::Stored, key, false))
 }
