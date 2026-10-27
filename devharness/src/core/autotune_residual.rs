@@ -181,6 +181,74 @@ pub fn self_fix_boost_from_stats(stats: &ModelStats) -> f64 {
     }
 }
 
+// ----------------------------------------------------------------------------
+// Отчёт (визуализация residual): «быстро исчезнувшие» vs «непочиненные»
+// ----------------------------------------------------------------------------
+
+/// Отчёт по residual-сигналу из сэмплов: ОСТАВШИЕСЯ ошибки (штраф) и
+/// БЫСТРО ИСЧЕЗНУВШИЕ (кредит ×[`SELF_FIX_BOOST`]) показаны раздельно.
+///
+/// Пример: `residual: было 15 → осталось 3 (20%, штраф ×0.40), исчезло 12, быстро: 2/5 задач (кредит ×2.5)`.
+pub fn report_from_samples(samples: &[CheckSample]) -> String {
+    report(&from_samples(samples))
+}
+
+/// Отчёт по агрегату модели: попрогонной истории в агрегате нет, поэтому
+/// остаточность берётся из доли НЕпочиненных задач, а «быстро» — из средней
+/// задержки починки ([`self_fix_boost_from_stats`]).
+pub fn report_from_stats(stats: &ModelStats) -> String {
+    if stats.failed_tasks == 0 {
+        return "residual: ошибок не видели — штраф за ошибки не применён".to_string();
+    }
+    let unfixed = stats.unfixed_ratio();
+    let boost = self_fix_boost_from_stats(stats);
+    let factor = residual_factor_from_stats(stats);
+    let fast_part = if boost > 1.0 {
+        format!(
+            ", быстро: {:.0}% задач (кредит ×{:.1})",
+            stats.fix_rate.clamp(0.0, 1.0) * 100.0,
+            boost
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        "residual: непочинено {:.0}% задач (штраф ×{:.2}){}",
+        unfixed * 100.0,
+        factor,
+        fast_part
+    )
+}
+
+/// Отчёт по итоговому сигналу: счётчики «было → осталось» + различие
+/// исчезнувших и быстро исчезнувших задач.
+pub fn report(signal: &ResidualSignal) -> String {
+    if signal.errors_seen == 0 {
+        return "residual: ошибок не видели — штраф за ошибки не применён".to_string();
+    }
+    let ratio = signal.residual_ratio();
+    let factor = residual_factor(signal);
+    let fast_part = if signal.fast_fixed_tasks > 0 {
+        format!(
+            ", быстро: {}/{} задач (кредит ×{:.1})",
+            signal.fast_fixed_tasks,
+            signal.failing_tasks,
+            self_fix_credit(signal)
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        "residual: было {} → осталось {} ({:.0}%, штраф ×{:.2}), исчезло {}{}",
+        signal.errors_seen,
+        signal.errors_left,
+        ratio * 100.0,
+        factor,
+        signal.self_fixed,
+        fast_part
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -299,6 +367,91 @@ mod tests {
             v_fixed[Coefficient::FixBonus.index()] < v_residual[Coefficient::FixBonus.index()],
             "за быструю починку — кредит (отрицательный вклад)"
         );
+    }
+
+    #[test]
+    fn report_distinguishes_residual_and_fast_fixes() {
+        // быстро исчезнувшие: 5 ошибок → 0 за 30с (окно 120с)
+        let fast = from_samples(&[sample("T-1", 100, 5), sample("T-1", 130, 0)]);
+        // непочиненные: те же 5 ошибок остались в финале
+        let residual = from_samples(&[sample("T-1", 100, 5), sample("T-1", 900, 5)]);
+        let fast_text = report(&fast);
+        let residual_text = report(&residual);
+        assert!(fast_text.contains("осталось 0"), "{fast_text}");
+        assert!(
+            fast_text.contains("кредит ×2.5"),
+            "быстрая починка бустится ×2.5: {fast_text}"
+        );
+        assert!(residual_text.contains("осталось 5"), "{residual_text}");
+        assert!(
+            !residual_text.contains("кредит"),
+            "непочиненные не получают кредит: {residual_text}"
+        );
+        assert!(
+            (residual_factor(&residual) - 1.0).abs() < 1e-9,
+            "все ошибки остались → штраф в полную силу"
+        );
+        assert!(
+            residual_factor(&fast) < 0.5,
+            "все ошибки исчезли → штраф почти нет"
+        );
+    }
+
+    #[test]
+    fn report_from_stats_boosts_only_fast_fixes() {
+        let mut fast = stats(10, 5.0);
+        fast.failed_tasks = 4;
+        fast.fix_rate = 1.0;
+        fast.fix_latency_avg = Some(10.0);
+        let t_fast = report_from_stats(&fast);
+        assert!(t_fast.contains("кредит ×2.5"), "{t_fast}");
+        assert!(t_fast.contains("непочинено 0%"), "{t_fast}");
+        let mut slow = stats(10, 5.0);
+        slow.failed_tasks = 4;
+        slow.fix_rate = 1.0;
+        slow.fix_latency_avg = Some(600.0);
+        let t_slow = report_from_stats(&slow);
+        assert!(
+            !t_slow.contains("кредит"),
+            "медленная починка без буста: {t_slow}"
+        );
+        let mut broken = stats(10, 5.0);
+        broken.failed_tasks = 4;
+        broken.fix_rate = 0.0;
+        broken.fix_latency_avg = None;
+        let t_broken = report_from_stats(&broken);
+        assert!(t_broken.contains("непочинено 100%"), "{t_broken}");
+        assert!(!t_broken.contains("кредит"), "{t_broken}");
+    }
+
+    #[test]
+    fn report_without_errors_is_neutral() {
+        let empty = from_samples(&[sample("T-1", 100, 0)]);
+        assert!(
+            report(&empty).contains("ошибок не видели"),
+            "{}",
+            report(&empty)
+        );
+        assert!(report_from_stats(&stats(10, 0.0)).contains("ошибок не видели"));
+    }
+
+    #[test]
+    fn report_from_samples_groups_by_task() {
+        // две задачи: одна быстро починена, другая с остатком
+        let samples = vec![
+            sample("T-1", 100, 4),
+            sample("T-1", 110, 0),
+            sample("T-2", 100, 6),
+            sample("T-2", 900, 2),
+        ];
+        let text = report_from_samples(&samples);
+        assert!(
+            text.contains("было 10"),
+            "сумма максимумов по задачам: {text}"
+        );
+        assert!(text.contains("осталось 2"), "{text}");
+        assert!(text.contains("исчезло 8"), "{text}");
+        assert!(text.contains("быстро: 1/2 задач"), "{text}");
     }
 
     #[test]
