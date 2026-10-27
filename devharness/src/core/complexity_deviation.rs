@@ -214,6 +214,56 @@ pub fn zone_cyclomatic(root: &Path, task_id: &str) -> Option<u32> {
     }
 }
 
+/// Замаскировать string-литералы в строке (содержимое кавычек убирается).
+fn mask_literals(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut in_str = false;
+    let mut escaped = false;
+    for ch in line.chars() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' if in_str => escaped = true,
+            '"' => in_str = !in_str,
+            _ if !in_str => out.push(ch),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Операции хранения (файловый I/O + сериализация): РЕАЛЬНЫЕ вызовы.
+///
+/// Считаются по строкам кода: комментарий-only строки и string-литералы
+/// маскируются, документация про «fs:: и json» фактор не накручивает.
+/// Один токен считается максимум один раз на строку.
+fn storage_calls(source: &str) -> usize {
+    const TOKENS: &[&str] = &[
+        "fs::",
+        "File::",
+        "OpenOptions",
+        "read_to_string",
+        "read_to_end",
+        "BufReader",
+        "BufWriter",
+        "write_all",
+        "serde_json::to_",
+        "serde_json::from_",
+        "io::Read",
+        "io::Write",
+        "path::Path",
+    ];
+    source
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with("//"))
+        .map(mask_literals)
+        .map(|code| TOKENS.iter().filter(|t| code.contains(**t)).count())
+        .sum()
+}
+
 /// Разобрать ИСХОДНЫЙ КОД в факторы сложности.
 ///
 /// Цикломатичность — из `core::cyclomatic` (T-505), остальные факторы —
@@ -230,13 +280,9 @@ pub fn analyze_source(source: &str) -> ComplexityFactors {
         + count(source, "trait ");
     let lets = count(source, "let ");
     let hardcoded = count(source, "\"") / 2 + count(source, " = ");
-    let storage_hits = count(source, "File::")
-        + count(source, "fs::")
-        + count(source, "read_to_string")
-        + count(source, "write_all")
-        + count(source, "OpenOptions")
-        + count(source, "serde")
-        + count(source, "json");
+    // T-521: хранение = реальные вызовы I/O, а не упоминания подстрок в
+    // комментариях/строках (прежде «json» в тексте накручивал фактор).
+    let storage_hits = storage_calls(source);
     let functions = count(source, "fn ");
     let graph_hits = count(source, "->")
         + count(source, ".await")
@@ -254,7 +300,7 @@ pub fn analyze_source(source: &str) -> ComplexityFactors {
     ComplexityFactors {
         cyclomatic: scaled(branches, 24.0),
         shape: scaled(shape_raw.ceil() as u32, 14.0),
-        storage: scaled(storage_hits, 10.0),
+        storage: scaled(storage_hits as u32, 10.0),
         functions: scaled(functions, 12.0),
         exec_graph: scaled(graph_hits, 20.0),
         decompose: scaled(decompose_hits, 8.0),
@@ -340,6 +386,58 @@ mod tests {
 
     /// T-505: цикломатичность берётся из реального анализатора: текст
     /// документации (комментарий со словом «if») сложность не накручивает.
+    #[test]
+    fn storage_counts_real_io_not_mentions() {
+        let real = analyze_source("fn load() { let t = std::fs::read_to_string(\"a\")?; }");
+        let doc = analyze_source("// документ про fs:: и json и serde\nfn doc() {}");
+        assert!(
+            real.storage > 0.0,
+            "реальный вызов хранения считается: {}",
+            real.storage
+        );
+        assert!(
+            (doc.storage).abs() < 1e-9,
+            "упоминания в комментарии не накручивают хранение: {}",
+            doc.storage
+        );
+    }
+
+    #[test]
+    fn storage_ignores_string_literals_mentions() {
+        let f = analyze_source("fn e() { let s = format!(\"не читаю fs:: и json\"); }");
+        assert!(
+            (f.storage).abs() < 1e-9,
+            "строка-мessage не считается I/O: {}",
+            f.storage
+        );
+    }
+
+    #[test]
+    fn storage_detects_file_write_and_json_calls() {
+        let f = analyze_source(
+            "fn w() -> std::io::Result<()> { let mut f = File::create(\"x\")?; f.write_all(b\"y\")?; Ok(()) }\n             fn j() { let v = serde_json::to_string(&1)?; }",
+        );
+        assert!(
+            f.storage > 0.0,
+            "File::/write_all/serde_json::to_ детектятся: {}",
+            f.storage
+        );
+    }
+
+    #[test]
+    fn storage_factor_saturates_at_cap() {
+        let mut src = String::new();
+        for i in 0..15 {
+            src.push_str(&format!("let v{i} = std::fs::read_to_string(\"f{i}\")?;\n"));
+        }
+        let f = analyze_source(&src);
+        assert!(
+            (f.storage - 1.0).abs() < 1e-9,
+            "хранение упирается в потолок 1.0: {}",
+            f.storage
+        );
+    }
+
     #[test]
     fn cyclomatic_uses_real_analyzer_not_text_count() {
         let real = "fn f(x: u8) -> u8 {\n  if x > 1 {\n    x\n  } else {\n    0\n  }\n}\n";
