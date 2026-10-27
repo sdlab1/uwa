@@ -181,22 +181,49 @@ pub fn analyze_task(root: &Path, task_id: &str, diff: &str) -> ComplexityFactors
     f.decompose = f
         .decompose
         .max(parts_factor(decomposed_parts(root, task_id)));
+    // T-505: цикломатичность задачи — из РЕАЛЬНОГО анализатора по её зоне
+    // (файлы задачи), а не из подсчёта подстрок в диффе. Дифф остаётся
+    // нижайшей границей: зона может быть без изменений, но сложной.
+    if let Some(zone_c) = zone_cyclomatic(root, task_id) {
+        f.cyclomatic = f.cyclomatic.max(scaled(zone_c, 24.0));
+    }
     f
+}
+
+/// Цикломатичность ЗОНЫ задачи (сумма по файлам зоны, `core::cyclomatic`).
+///
+/// `None` — задача без зон или файлы зоны недоступны (не репозиторий на
+/// диске): вызывающий сохраняет прежнее значение из диффа.
+pub fn zone_cyclomatic(root: &Path, task_id: &str) -> Option<u32> {
+    let reg = crate::commands::orch::load(root);
+    let task = reg.tasks.iter().find(|t| t.id == task_id)?;
+    if task.zones.is_empty() {
+        return None;
+    }
+    let mut total: u32 = 0;
+    for zone in task.zones.iter() {
+        let path = root.join(zone);
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            total = total.saturating_add(crate::core::cyclomatic::cyclomatic_complexity(&text));
+        }
+    }
+    if total == 0 {
+        None
+    } else {
+        Some(total)
+    }
 }
 
 /// Разобрать ИСХОДНЫЙ КОД в факторы сложности.
 ///
-/// Эвристика «на глаз» (задача C-эталона строится предварительно): считаем
-/// конструкции и нормируем по потолку, чтобы индекс был в 0..=1.
+/// Цикломатичность — из `core::cyclomatic` (T-505), остальные факторы —
+/// структурные счётчики с нормировкой по потолку (индекс в 0..=1).
 pub fn analyze_source(source: &str) -> ComplexityFactors {
-    let branches = count(source, "if ")
-        + count(source, "match ")
-        + count(source, "for ")
-        + count(source, "while ")
-        + count(source, "loop ")
-        + count(source, "&&")
-        + count(source, "||")
-        + count(source, "?;");
+    // T-505: ветвление считает РЕАЛЬНЫЙ анализатор (core::cyclomatic):
+    // он маскирует комментарии и строки, поэтому текст документации
+    // («if в примере») не накручивает сложность, как было при подсчёте
+    // подстрок. Потолок нормировки прежний (24 — как в C-эталонах).
+    let branches = crate::core::cyclomatic::cyclomatic_complexity(source).saturating_sub(1);
     let structs = count(source, "struct ")
         + count(source, "enum ")
         + count(source, "impl ")
@@ -286,6 +313,7 @@ use std::path::Path;
 mod tests {
     use super::*;
     use crate::core::calibration::Reference;
+    use std::fs;
 
     fn reference() -> Reference {
         Reference {
@@ -308,6 +336,95 @@ mod tests {
                 score: 0.8,
             },
         }
+    }
+
+    /// T-505: цикломатичность берётся из реального анализатора: текст
+    /// документации (комментарий со словом «if») сложность не накручивает.
+    #[test]
+    fn cyclomatic_uses_real_analyzer_not_text_count() {
+        let real = "fn f(x: u8) -> u8 {\n  if x > 1 {\n    x\n  } else {\n    0\n  }\n}\n";
+        let with_doc = "/// если if if match loop while\n// if if if\n".to_string() + real;
+        let f_real = analyze_source(real);
+        let f_doc = analyze_source(&with_doc);
+        assert!(
+            (f_real.cyclomatic - f_doc.cyclomatic).abs() < 1e-9,
+            "документация не должна менять цикломатичность: {} vs {}",
+            f_real.cyclomatic,
+            f_doc.cyclomatic
+        );
+        // Совпадает с анализатором 1:1 (2 ветвления -> тот же нормированный балл).
+        let expected = scaled(
+            crate::core::cyclomatic::cyclomatic_complexity(real).saturating_sub(1),
+            24.0,
+        );
+        assert!((f_real.cyclomatic - expected).abs() < 1e-9);
+        assert!(f_real.cyclomatic > 0.0, "ветвление найдено");
+    }
+
+    /// T-505: цикломатичность ЗАДАЧИ берётся из файлов её зоны.
+    #[test]
+    fn zone_cyclomatic_reads_task_zone_files() {
+        let root = std::env::temp_dir().join(format!("devh-cxdev-zone-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join(".harness").join("orch")).unwrap_or_else(|_| unreachable!());
+        fs::create_dir_all(root.join("src")).unwrap_or_else(|_| unreachable!());
+        // Зона задачи: файл с тремя ветвлениями.
+        fs::write(
+            root.join("src").join("zone.rs"),
+            "fn z(a: u8, b: u8) -> u8 {\n if a > 1 { 1 } else if b > 2 { 2 } else { 0 } }\n",
+        )
+        .unwrap_or_else(|_| unreachable!());
+        // Реестр строим структурой (а не JSON-строкой): состав полей Task —
+        // контракт orch, тест не должен ломаться от новых полей.
+        let mut reg = crate::commands::orch::Registry::default();
+        reg.tasks.push(crate::commands::orch::Task {
+            id: "T-1".to_string(),
+            agent: "ag-8a037fc3".to_string(),
+            title: "зона".to_string(),
+            complexity: 2,
+            status: crate::commands::orch::Status::Queued,
+            zones: vec!["src/zone.rs".to_string()],
+            dod: vec!["доклад".to_string()],
+            c_level: None,
+            model: None,
+            model_source: None,
+            started_by: None,
+            started_at: None,
+            started_key: None,
+            checks: vec![],
+            acked: vec![],
+            evidence: vec![],
+            commit_sha: None,
+            main_sha: None,
+            override_reason: None,
+            fail_level: None,
+            note: String::new(),
+            created: 1,
+            updated: 1,
+        });
+        fs::write(
+            root.join(".harness").join("orch").join("registry.json"),
+            serde_json::to_string(&reg).unwrap_or_default(),
+        )
+        .unwrap_or_else(|_| unreachable!());
+        let total = zone_cyclomatic(&root, "T-1").expect("зона читается");
+        assert_eq!(
+            total,
+            crate::core::cyclomatic::cyclomatic_complexity(
+                &fs::read_to_string(root.join("src").join("zone.rs")).unwrap_or_default()
+            ),
+            "ровно значение анализатора по файлу зоны"
+        );
+        // Задача без зон и несуществующая — None (прежнее поведение).
+        assert_eq!(zone_cyclomatic(&root, "T-нет"), None);
+        // analyze_task подтягивает зону в фактор (не ниже диффа).
+        let f = analyze_task(&root, "T-1", "+++ b/src/zone.rs\n+fn q() {}\n");
+        assert!(
+            (f.cyclomatic - scaled(total, 24.0)).abs() < 1e-9 || f.cyclomatic > scaled(2, 24.0),
+            "фактор задачи учитывает зону: {}",
+            f.cyclomatic
+        );
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
