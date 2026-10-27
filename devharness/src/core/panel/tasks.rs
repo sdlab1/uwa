@@ -1,8 +1,12 @@
 //! Проекции задач реестра для панели: что в работе, что ждёт, что сделано.
+//!
+//! Каноничная проекция очереди/буфера/предупреждений — через `core::board_view::project`.
+//! Это гарантирует расхождение панели с `devh orch board` = 0.
 
 use std::collections::BTreeMap;
 
 use crate::commands::orch::{Registry, Status, Task};
+use crate::core::board_view::{BoardView, BoardTask, TaskStatus as BoardTaskStatus, WarningSeverity};
 use super::FeaturePanel;
 
 /// Проекция задачи для панели.
@@ -48,6 +52,44 @@ pub struct TaskPanel {
     pub above_ceiling: bool,
     /// Кто решает: `lead` | `tech_lead`.
     pub decision_owner: String,
+}
+
+/// Преобразовать BoardTask (из board_view) в TaskPanel (для панели).
+pub fn from_board_task(bt: &BoardTask, bug_class: &BTreeMap<String, String>, now: u64) -> TaskPanel {
+    let is_ps = bug_class
+        .get(&bt.id)
+        .map(|c| c.eq_ignore_ascii_case("ps"))
+        .unwrap_or(false)
+        || bt.id.to_uppercase().contains("БЕЗОПАСНОСТЬ")
+        || bt.id.to_uppercase().contains("[PS ");
+    TaskPanel {
+        id: bt.id.clone(),
+        title: bt.id.clone(), // BoardTask не хранит title — подставим позже
+        agent: bt.agent.clone(),
+        priority: bt.priority,
+        c_level: Some(bt.complexity),
+        status: match bt.status {
+            BoardTaskStatus::Queued => "Queued".to_string(),
+            BoardTaskStatus::Active => "Active".to_string(),
+            BoardTaskStatus::Done => "Done".to_string(),
+            BoardTaskStatus::Failed => "Failed".to_string(),
+            BoardTaskStatus::Revoked => "Revoked".to_string(),
+        },
+        zones: vec![bt.zone.clone()],
+        age_secs: 0, // BoardTask не хранит created — подставим позже
+        idle_secs: 0,
+        started_at: None,
+        duration_secs: None,
+        feature: "—".to_string(),
+        is_bug: is_ps,
+        is_ps,
+        fail_level: None,
+        commit_sha: None,
+        main_sha: bt.main_sha.clone(),
+        blocked_by: Vec::new(),
+        above_ceiling: false,
+        decision_owner: bt.agent.clone(),
+    }
 }
 
 /// Заголовок выглядит как баг/инцидент?
@@ -118,39 +160,58 @@ pub fn project_full(
     }
 }
 
-/// Что работается сейчас.
+/// Что работается сейчас — через каноничную проекцию board_view.
 pub fn active(reg: &Registry, now: u64) -> Vec<TaskPanel> {
-    let mut out: Vec<TaskPanel> = reg
-        .tasks
-        .iter()
-        .filter(|t| t.status == Status::Active)
-        .map(|t| project(t, &reg.plan.bug_class, now))
-        .collect();
+    let board = crate::core::board_view::project(reg);
+    let mut out: Vec<TaskPanel> = Vec::new();
+
+    // Активные задачи — из in_progress (все активные задачи всех агентов)
+    for bt in &board.in_progress {
+        if let Some(t) = reg.tasks.iter().find(|t| t.id == bt.id) {
+            let mut p = project_full(t, &reg.plan.bug_class, &reg.plan.deps, now);
+            p.status = "Active".to_string();
+            out.push(p);
+        }
+    }
     out.sort_by(|a, b| a.priority.cmp(&b.priority).then(a.id.cmp(&b.id)));
     out
 }
 
-/// Очередь: P0/P1 первыми, дальше по сложности и возрасту.
+/// Очередь: P0/P1 первыми, дальше по сложности и возрасту — через каноничную проекцию.
 pub fn queue(reg: &Registry, now: u64, limit: usize) -> Vec<TaskPanel> {
-    let done: BTreeMap<&str, bool> = reg
-        .tasks
-        .iter()
-        .map(|t| (t.id.as_str(), t.status == Status::Done))
-        .collect();
-    let mut out: Vec<TaskPanel> = reg
-        .tasks
-        .iter()
-        .filter(|t| t.status == Status::Queued)
-        .map(|t| {
+    let board = crate::core::board_view::project(reg);
+    let mut out: Vec<TaskPanel> = Vec::new();
+
+    // Очередь: lead buffer + tech-lead buffer + agent_queues (queued only)
+    let mut all_queued: Vec<BoardTask> = Vec::new();
+    all_queued.extend(board.leader_buffer.clone());
+    all_queued.extend(board.tech_lead_buffer.clone());
+    for aq in board.agent_queues.values() {
+        for bt in &aq.tasks {
+            // BoardTask doesn't have status, but all tasks in agent_queues are queued or active
+            // We only want queued ones — filter by finding in registry
+            if let Some(t) = reg.tasks.iter().find(|t| t.id == bt.id) {
+                if t.status == Status::Queued {
+                    all_queued.push(bt.clone());
+                }
+            }
+        }
+    }
+
+    // Deduplicate by ID
+    let mut seen = BTreeMap::new();
+    for bt in all_queued {
+        seen.insert(bt.id.clone(), bt);
+    }
+
+    // Enrich from registry
+    for bt in seen.values() {
+        if let Some(t) = reg.tasks.iter().find(|t| t.id == bt.id) {
             let mut p = project_full(t, &reg.plan.bug_class, &reg.plan.deps, now);
-            p.blocked_by = p
-                .blocked_by
-                .into_iter()
-                .filter(|d| done.get(d.as_str()).copied().unwrap_or(false) == false)
-                .collect();
-            p
-        })
-        .collect();
+            out.push(p);
+        }
+    }
+
     out.sort_by(|a, b| {
         a.priority
             .cmp(&b.priority)
@@ -176,15 +237,38 @@ pub fn done_recent(reg: &Registry, now: u64, window_secs: u64, limit: usize) -> 
     out
 }
 
-/// Инциденты/баги, которые ждут решения (queued/active/failed).
+/// Инциденты/баги, которые ждут решения (queued/active/failed) — через каноничную проекцию.
 pub fn incidents(reg: &Registry, now: u64) -> Vec<TaskPanel> {
-    let mut out: Vec<TaskPanel> = reg
-        .tasks
-        .iter()
-        .filter(|t| matches!(t.status, Status::Queued | Status::Active | Status::Failed))
-        .map(|t| project(t, &reg.plan.bug_class, now))
-        .filter(|t| t.is_bug)
-        .collect();
+    let board = crate::core::board_view::project(reg);
+    let mut out: Vec<TaskPanel> = Vec::new();
+
+    // Все задачи из board: in_progress + agent_queues (queued+active) + leader_buffer + tech_lead_buffer
+    let mut all_tasks: Vec<BoardTask> = Vec::new();
+    all_tasks.extend(board.in_progress.clone());
+    all_tasks.extend(board.leader_buffer.clone());
+    all_tasks.extend(board.tech_lead_buffer.clone());
+    for aq in board.agent_queues.values() {
+        all_tasks.extend(aq.tasks.clone());
+    }
+
+    // Deduplicate by ID
+    let mut seen = BTreeMap::new();
+    for bt in all_tasks {
+        seen.insert(bt.id.clone(), bt);
+    }
+
+    // Enrich from registry, filter for bugs/incidents
+    for bt in seen.values() {
+        if let Some(t) = reg.tasks.iter().find(|t| t.id == bt.id) {
+            if matches!(t.status, Status::Queued | Status::Active | Status::Failed) {
+                let mut p = project(t, &reg.plan.bug_class, now);
+                if p.is_bug {
+                    out.push(p);
+                }
+            }
+        }
+    }
+
     out.sort_by(|a, b| {
         b.is_ps
             .cmp(&a.is_ps)

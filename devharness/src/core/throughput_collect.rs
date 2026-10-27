@@ -885,6 +885,9 @@ fn opencode_data(
         );
     }
     let since_ms = since.saturating_mul(1000);
+    // Сначала пробуем читать токены из message (старый формат),
+    // затем дополняем из step-finish parts (новый формат opencode),
+    // где токены могут лежать в части, а не в сообщении.
     let sql = format!(
         "select session_id, time_created, \
          coalesce(json_extract(data,'$.modelID'),''), \
@@ -896,13 +899,60 @@ fn opencode_data(
          from message where json_extract(data,'$.role')='assistant' \
          and time_created >= {since_ms} order by time_created;"
     );
-    let Some(rows) = sqlite_query(&db, &sql) else {
+    let Some(mut rows) = sqlite_query(&db, &sql) else {
         return (
             Vec::new(),
             BTreeMap::new(),
             SourceStatus::skip("opencode", "ошибка чтения message"),
         );
     };
+    // Если в message нет токенов, но есть в step-finish parts - читаем оттуда
+    let part_sql = format!(
+        "select m.session_id, p.time_created, \
+         coalesce(json_extract(p.data,'$.modelID'), json_extract(m.data,'$.modelID'), ''), \
+         coalesce(json_extract(p.data,'$.tokens.input'),0), \
+         coalesce(json_extract(p.data,'$.tokens.output'),0), \
+         coalesce(json_extract(p.data,'$.tokens.reasoning'),0), \
+         coalesce(json_extract(p.data,'$.tokens.cache.read'),0), \
+         coalesce(json_extract(p.data,'$.tokens.cache.write'),0) \
+         from part p join message m on m.id = p.message_id \
+         where json_extract(p.data,'$.type')='step-finish' \
+         and p.time_created >= {since_ms} order by p.time_created;"
+    );
+    if let Some(part_rows) = sqlite_query(&db, &part_sql) {
+        // Объединяем: если в строках из message все токены нулевые, заменяем на данные из parts
+        let mut part_map: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+        for line in part_rows.lines() {
+            let f: Vec<&str> = line.split('\t').collect();
+            if f.len() < 8 {
+                continue;
+            }
+            let key = format!("{}|{}", f[0], f[1]); // session_id|time_created
+            part_map.insert(key, line.to_string());
+        }
+        let mut new_rows = String::new();
+        for line in rows.lines() {
+            let f: Vec<&str> = line.split('\t').collect();
+            if f.len() >= 8 {
+                let inp: u64 = f[3].parse().unwrap_or(0);
+                let out: u64 = f[4].parse().unwrap_or(0);
+                let reas: u64 = f[5].parse().unwrap_or(0);
+                let cr: u64 = f[6].parse().unwrap_or(0);
+                let cw: u64 = f[7].parse().unwrap_or(0);
+                if inp + out + reas + cr + cw == 0 {
+                    let key = format!("{}|{}", f[0], f[1]);
+                    if let Some(p) = part_map.get(&key) {
+                        new_rows.push_str(p);
+                        new_rows.push('\n');
+                        continue;
+                    }
+                }
+            }
+            new_rows.push_str(line);
+            new_rows.push('\n');
+        }
+        rows = new_rows;
+    }
     let reqs = parse_opencode_rows(&rows);
     let mut map: BTreeMap<String, String> = BTreeMap::new();
     // ТОЛЬКО пользовательские текстовые части: в промпте оркестратор прямо
