@@ -1894,9 +1894,13 @@ fn close(root: &Path, args: &[String], status: Status) -> anyhow::Result<()> {
         let cur = reg.tasks.get(idx).expect("индекс найден");
         require_task_owner(&reg, cur, if status == Status::Done { "done" } else { "fail" })?;
         if status == Status::Done && cur.status == Status::Queued {
-            return Err(anyhow!(
-                "devh orch done: {id} ещё не взята (queued) — сначала devh orch start {id} (T-485)"
-            ));
+            // T-678: дедлок start/commit/done при занятом реестре (лок соседа).
+            // Если коммит уже привязан (commit_sha) — разрешить закрытие.
+            if cur.commit_sha.is_none() {
+                return Err(anyhow!(
+                    "devh orch done: {id} ещё не взята (queued) — сначала devh orch start {id} (T-485)"
+                ));
+            }
         }
     }
     // ИДЕМПОТЕНТНОСТЬ сдачи: повторный `done` по уже сданной задаче — no-op
