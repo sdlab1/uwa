@@ -1,4 +1,5 @@
 pub mod about;
+pub mod autowip;
 pub mod auto;
 pub mod autoassign;
 pub mod bg;
@@ -155,7 +156,7 @@ pub fn classify_error(e: &anyhow::Error) -> ExitCode {
     ExitCode::ActionError
 }
 
-pub const CONFIG_KEYS: [&str; 62] = [
+pub const CONFIG_KEYS: [&str; 63] = [
     "VERIFY",
     "BOOTSTRAP",
     "AGENT",
@@ -218,6 +219,7 @@ pub const CONFIG_KEYS: [&str; 62] = [
     "RESOURCE_MAX_ACTIVE",
     "RESOURCE_LOAD_MAX",
     "RESOURCE_NICE",
+    "WIP_INTERVAL_MIN",
 ];
 
 pub fn load_config(root: &Path) -> anyhow::Result<RunConfig> {
@@ -401,6 +403,8 @@ pub fn load_config(root: &Path) -> anyhow::Result<RunConfig> {
         autotune_fix_latency_ref_secs: f64v("AUTOTUNE_FIX_LATENCY_REF_SECS", 300.0),
         autotune_fix_bonus: f64v("AUTOTUNE_FIX_BONUS", 0.5),
         autotune_neatness_weight: f64v("AUTOTUNE_NEATNESS_WEIGHT", 0.2),
+        // AUTOWIP: период WIP-сохранения (off = выключить, мусор = дефолт).
+        wip_interval_min: crate::core::types::parse_wip_interval(g("WIP_INTERVAL_MIN").as_deref()),
     })
 }
 

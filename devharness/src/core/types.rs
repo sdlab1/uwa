@@ -203,6 +203,32 @@ pub struct RunConfig {
     pub autotune_fix_bonus: f64,
     /// Вес «грязных» сборок (успешных, но с предупреждениями, 0.2).
     pub autotune_neatness_weight: f64,
+    /// AUTOWIP (T-321/T-643): период автоматического WIP-сохранения работы
+    /// агента, минут. `None` = выключено (`WIP_INTERVAL_MIN=off`).
+    ///
+    /// Правила разбора: пусто/нет ключа/0/мусор → дефолт 10 минут;
+    /// `off` → выключено; иначе число минут (>0).
+    pub wip_interval_min: Option<u32>,
+}
+
+/// AUTOWIP: период по умолчанию (минут).
+pub const DEFAULT_WIP_INTERVAL_MIN: u32 = 10;
+
+/// Разобрать настройку `WIP_INTERVAL_MIN`.
+///
+/// `None`/пусто → дефолт 10 минут; `off` → выключено (`None`); `0` и мусор →
+/// дефолт (включение НЕ ломается мусором — как у прочих гейтов).
+pub fn parse_wip_interval(raw: Option<&str>) -> Option<u32> {
+    let Some(v) = raw.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Some(DEFAULT_WIP_INTERVAL_MIN);
+    };
+    if v.eq_ignore_ascii_case("off") || v.eq_ignore_ascii_case("выкл") {
+        return None;
+    }
+    match v.parse::<u32>() {
+        Ok(n) if n > 0 => Some(n),
+        _ => Some(DEFAULT_WIP_INTERVAL_MIN),
+    }
 }
 
 impl Default for RunConfig {
@@ -256,6 +282,7 @@ impl Default for RunConfig {
                 .autotune_fix_latency_ref_secs,
             autotune_fix_bonus: crate::core::eval_config::DEFAULTS.autotune_fix_bonus,
             autotune_neatness_weight: crate::core::eval_config::DEFAULTS.autotune_neatness_weight,
+            wip_interval_min: Some(DEFAULT_WIP_INTERVAL_MIN),
         }
     }
 }

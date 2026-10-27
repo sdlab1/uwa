@@ -141,10 +141,27 @@ pub fn checkpoint(cfg: &RunConfig, root: &Path, agent: &str) -> anyhow::Result<S
 /// Путь берётся из реестра (у агента он может отличаться от вычисленного
 /// по конфигу): чекпоинтим именно тот worktree, который видит харнесс.
 pub fn checkpoint_at(path: &Path, agent: &str) -> anyhow::Result<String> {
+    checkpoint_at_for(path, agent, None)
+}
+
+/// Чекпоинт с указанием задачи: сообщение коммита — ЕДИНЫЙ формат
+/// `wip: <агент> <T-ID|-> <n> файлов` (его же читает reclaim при спасении).
+pub fn checkpoint_at_for(
+    path: &Path,
+    agent: &str,
+    task_ref: Option<&str>,
+) -> anyhow::Result<String> {
     if !path.exists() {
         anyhow::bail!("worktree агента {agent} не выдан — нечего сохранять");
     }
-    let idx = std::env::temp_dir().join(format!("devh-wip-index-{}", sanitize(agent)));
+    let n_files = crate::shell::git::changed_files(path).len();
+    // pid в имени: две сессии одного агента (или параллельные тесты) не
+    // делят один GIT_INDEX_FILE — иначе чекпоинты бьют друг по другу.
+    let idx = std::env::temp_dir().join(format!(
+        "devh-wip-index-{}-{}",
+        std::process::id(),
+        sanitize(agent)
+    ));
     let _ = std::fs::remove_file(&idx);
     let idx_s = idx.to_string_lossy().to_string();
     let env = vec![
@@ -158,7 +175,7 @@ pub fn checkpoint_at(path: &Path, agent: &str) -> anyhow::Result<String> {
         git_env(&path, &env, &["read-tree", "HEAD"])?;
         git_env(&path, &env, &["add", "-A"])?;
         let tree = git_env(&path, &env, &["write-tree"])?;
-        let msg = format!("WIP({agent}): чекпоинт незакоммиченной работы");
+        let msg = wip_commit_msg(agent, task_ref, n_files);
         let commit = git_env(
             &path,
             &env,
@@ -196,7 +213,8 @@ pub fn wip_pass(cfg: &RunConfig, root: &Path, agent: &str) -> anyhow::Result<Wip
     if !crate::shell::git::tree_dirty(&wt_path) {
         return Ok(WipReport::SkipClean);
     }
-    let sha = checkpoint(cfg, root, agent)?;
+    let task_ref = active_task_ref(root, agent);
+    let sha = checkpoint_at_for(&wt_path, agent, task_ref.as_deref())?;
     if sha.is_empty() {
         return Ok(WipReport::SkipClean);
     }
@@ -205,6 +223,23 @@ pub fn wip_pass(cfg: &RunConfig, root: &Path, agent: &str) -> anyhow::Result<Wip
         n_files,
         commit_sha: sha,
     })
+}
+
+/// T-ID активной задачи агента (для WIP-коммита) — `None`, если активных задач нет.
+pub fn active_task_ref(root: &Path, agent: &str) -> Option<String> {
+    let canon = crate::core::identity::canonical(agent);
+    let reg = crate::commands::orch::load(root);
+    let mut ids: Vec<&String> = reg
+        .tasks
+        .iter()
+        .filter(|t| {
+            t.status == crate::commands::orch::Status::Active
+                && crate::core::identity::canonical(&t.agent) == canon
+        })
+        .map(|t| &t.id)
+        .collect();
+    ids.sort();
+    ids.first().map(|s| (*s).clone())
 }
 
 /// Сформировать единый WIP-коммит сообщения: `wip: <агент> <T-ID|-> <n> файлов`.
@@ -408,7 +443,7 @@ pub fn transfer_commits(
 fn is_wip_checkpoint(main_root: &Path, sha: &str) -> bool {
     let subject = git_out(main_root, &["log", "-1", "--format=%s", sha]);
     let subject = subject.trim();
-    subject.starts_with("WIP(") || subject.starts_with("WIP:")
+    subject.starts_with("WIP(") || subject.starts_with("WIP:") || subject.starts_with("wip: ")
 }
 
 /// Влить ветку агента в главную, не трогая его worktree.
@@ -1837,7 +1872,7 @@ mod tests {
             &[
                 "commit",
                 "-qm",
-                "WIP(beam): чекпоинт незакоммиченной работы",
+                "wip: beam - 1 файла",
             ],
             &p,
         );

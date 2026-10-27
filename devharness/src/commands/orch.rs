@@ -870,6 +870,7 @@ pub fn orch(root: &Path, sub: &str, args: &[String]) -> anyhow::Result<()> {
         "speed" => crate::commands::speed::run(root, args),
         "wt" => wt(root, args),
         "wip" => wip_cmd(root, args),
+        "autowip" => crate::commands::autowip::run(root, args),
         "models" => models(root),
         "review" => review_cmd(root, args),
         "ceiling" => ceiling_cmd(root, args),

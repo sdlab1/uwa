@@ -209,6 +209,10 @@ pub fn init(root: &Path) -> anyhow::Result<()> {
     c += "#   уровень не даёт ('устарел 48д > 14'). Референс — дата последней сессии\n";
     c += "#   в .harness/log.md, НЕ wall clock (уровень зависит от дел, не от захода).\n";
     c += "CORPUS_FRESH_DAYS=14\n";
+    c += "# AUTOWIP (T-321): период автоматического WIP-сохранения работы агента,\n";
+    c += "#   минут. off = выключить; 0/мусор = дефолт 10. Команды:\n";
+    c += "#   devh orch autowip --once | --watch | --status | --stop\n";
+    c += "WIP_INTERVAL_MIN=10\n";
 
     std::fs::create_dir_all(root.join(".harness/items"))?;
     std::fs::create_dir_all(root.join(".harness/summaries"))?;
