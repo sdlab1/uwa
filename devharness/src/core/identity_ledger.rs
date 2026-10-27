@@ -358,6 +358,108 @@ pub fn log_identify(
     });
 }
 
+// ----------------------------------------------------------------------------
+// TTL привязки сессии (T-547): просроченная привязка ≠ доказанная
+// ----------------------------------------------------------------------------
+
+/// TTL привязки сессии по умолчанию — сутки.
+///
+/// Привязка сессии (`$DEVH_MSG_HOME/agents/<hash>.json`, поле `updated`) —
+/// доказательство личности ровно пока она СВЕЖАЯ. Просроченная привязка
+/// fail-closed = «не подтверждена», а не «истёкла, но верим».
+pub const BINDING_TTL_DEFAULT_SECS: u64 = 24 * 60 * 60;
+
+/// Допуск метки из будущего (секунды): часы машины могут врать на минуты,
+/// но привязка, «обновлённая» на завтра, — подделка (fail-closed).
+pub const BINDING_FUTURE_SKEW_SECS: u64 = 300;
+
+/// Ключ окружения для TTL привязки (в ЧАСАХ): `HARNESS_BINDING_TTL_HOURS`.
+///
+/// Пусто/мусор/0 → [`BINDING_TTL_DEFAULT_SECS`]: TTL обязателен, отключить
+/// его нельзя (fail-open по возрасту = дыра).
+pub const BINDING_TTL_ENV: &str = "HARNESS_BINDING_TTL_HOURS";
+
+/// TTL привязки из текстового значения окружения (часы).
+pub fn binding_ttl_secs_from(value: Option<&str>) -> u64 {
+    match value.map(str::trim) {
+        Some(v) if !v.is_empty() => match v.parse::<u64>() {
+            Ok(h) if h > 0 => h.saturating_mul(60 * 60),
+            _ => BINDING_TTL_DEFAULT_SECS, // мусор/0 → дефолт, НЕ выключение
+        },
+        _ => BINDING_TTL_DEFAULT_SECS,
+    }
+}
+
+/// TTL привязки из окружения.
+pub fn binding_ttl_secs() -> u64 {
+    binding_ttl_secs_from(std::env::var(BINDING_TTL_ENV).ok().as_deref())
+}
+
+/// Свежесть привязки по её штампу обновления.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BindingFreshness {
+    /// Свежая — доказательство личности действует.
+    Fresh,
+    /// Просрочена — доказательство НЕ действует (fail-closed).
+    Stale,
+    /// Штамп из будущего (сверх допуска) — подделка, тоже НЕ доказательство.
+    FromFuture,
+    /// Штампа нет — читать нечего, fail-closed.
+    Missing,
+}
+
+/// Свежесть привязки со явным TTL (чистая функция — тестируется без env).
+pub fn binding_freshness_with_ttl(
+    updated: Option<u64>,
+    now: u64,
+    ttl_secs: u64,
+) -> BindingFreshness {
+    let Some(ts) = updated else {
+        return BindingFreshness::Missing;
+    };
+    if ts > now.saturating_add(BINDING_FUTURE_SKEW_SECS) {
+        return BindingFreshness::FromFuture;
+    }
+    if now.saturating_sub(ts) > ttl_secs {
+        return BindingFreshness::Stale;
+    }
+    BindingFreshness::Fresh
+}
+
+/// Свежесть привязки (TTL из окружения).
+pub fn binding_freshness(updated: Option<u64>, now: u64) -> BindingFreshness {
+    binding_freshness_with_ttl(updated, now, binding_ttl_secs())
+}
+
+/// Просроченная/подделанная/безштамная привязка НЕ доказывает личность.
+pub fn binding_proven(updated: Option<u64>, now: u64) -> bool {
+    matches!(binding_freshness(updated, now), BindingFreshness::Fresh)
+}
+
+/// Разбор ЗАПИСИ привязки (JSON из хранилища `identity`) и проверка прав.
+///
+/// Запись чужого ключа (поле `key` ≠ `for_key`) права НЕ даёт: подложенная
+/// под наш ключ запись — не доказательство. Пустые `name`/мусор → тем более.
+pub fn binding_record_proven(text: &str, now: u64, for_key: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+        return false;
+    };
+    let Some(name) = value.get("name").and_then(|n| n.as_str()).map(str::trim) else {
+        return false;
+    };
+    if name.is_empty() {
+        return false;
+    }
+    let record_key = value
+        .get("key")
+        .and_then(|k| k.as_str())
+        .unwrap_or_default();
+    if record_key != for_key {
+        return false;
+    }
+    binding_proven(value.get("updated").and_then(|u| u.as_u64()), now)
+}
+
 /// Текущее unix время.
 fn unix_now() -> u64 {
     SystemTime::now()
@@ -481,6 +583,133 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::tempdir;
+
+    // --- T-547: TTL привязки сессии ----------------------------------------
+
+    fn now_plus(offset: u64) -> u64 {
+        unix_now().saturating_add(offset)
+    }
+
+    fn record(name: &str, key: &str, updated: u64) -> String {
+        serde_json::json!({
+            "key": key,
+            "name": name,
+            "label": "claim",
+            "claimed": true,
+            "updated": updated,
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn fresh_binding_is_proven() {
+        assert_eq!(
+            binding_freshness(Some(1_000), 1_000 + 100),
+            BindingFreshness::Fresh
+        );
+        assert!(binding_proven(Some(1_000), 1_000 + 100));
+    }
+
+    #[test]
+    fn stale_binding_is_not_proven() {
+        let ttl = binding_ttl_secs();
+        assert_eq!(
+            binding_freshness(Some(1_000), 1_000 + ttl + 1),
+            BindingFreshness::Stale
+        );
+        assert!(
+            !binding_proven(Some(1_000), 1_000 + ttl + 1),
+            "просроченная привязка fail-closed, а не «истекла, но верим»"
+        );
+    }
+
+    #[test]
+    fn ttl_boundary_is_inclusive() {
+        let ttl = binding_ttl_secs();
+        assert!(
+            binding_proven(Some(1_000), 1_000 + ttl),
+            "ровно TTL — ещё свежая"
+        );
+        assert!(
+            !binding_proven(Some(1_000), 1_000 + ttl + 1),
+            "секунда сверх — уже нет"
+        );
+    }
+
+    #[test]
+    fn future_stamp_is_not_proven() {
+        assert_eq!(
+            binding_freshness(Some(now_plus(BINDING_FUTURE_SKEW_SECS + 60)), now_plus(0)),
+            BindingFreshness::FromFuture
+        );
+        assert!(
+            !binding_proven(Some(now_plus(BINDING_FUTURE_SKEW_SECS + 60)), now_plus(0)),
+            "привязка «на завтра» — подделка"
+        );
+    }
+
+    #[test]
+    fn missing_stamp_is_not_proven() {
+        assert_eq!(binding_freshness(None, 5_000), BindingFreshness::Missing);
+        assert!(!binding_proven(None, 5_000), "штампа нет — читать нечего");
+    }
+
+    #[test]
+    fn ttl_from_env_text_is_validated() {
+        assert_eq!(binding_ttl_secs_from(Some("2")), 2 * 60 * 60);
+        assert_eq!(binding_ttl_secs_from(Some("0")), BINDING_TTL_DEFAULT_SECS);
+        assert_eq!(
+            binding_ttl_secs_from(Some("мусор")),
+            BINDING_TTL_DEFAULT_SECS
+        );
+        assert_eq!(binding_ttl_secs_from(Some("")), BINDING_TTL_DEFAULT_SECS);
+        assert_eq!(binding_ttl_secs_from(None), BINDING_TTL_DEFAULT_SECS);
+    }
+
+    #[test]
+    fn short_ttl_treats_two_hour_binding_as_stale() {
+        // явный короткий TTL (1 час) через чистую функцию с ttl-параметром
+        let ttl = 60 * 60;
+        assert_eq!(
+            binding_freshness_with_ttl(Some(1_000), 1_000 + 2 * 3600, ttl),
+            BindingFreshness::Stale
+        );
+        assert_eq!(
+            binding_freshness_with_ttl(Some(1_000), 1_000 + 30 * 60, ttl),
+            BindingFreshness::Fresh
+        );
+    }
+
+    #[test]
+    fn record_parser_rejects_foreign_key_record() {
+        let now = 1_000_000;
+        let forged = record("victim", "session:attacker", now);
+        assert!(
+            !binding_record_proven(&forged, now, "session:victim"),
+            "запись ЧУЖОГО ключа не даёт прав (подделка под нашего)"
+        );
+    }
+
+    #[test]
+    fn record_parser_accepts_own_fresh_record() {
+        let now = 1_000_000;
+        let own = record("beam", "session:123", now - 60);
+        assert!(binding_record_proven(&own, now, "session:123"));
+    }
+
+    #[test]
+    fn record_parser_rejects_stale_and_garbage() {
+        let now = 1_000_000;
+        let old = record("beam", "session:123", now - binding_ttl_secs() - 10);
+        assert!(!binding_record_proven(&old, now, "session:123"));
+        assert!(!binding_record_proven("не json", now, "session:123"));
+        assert!(!binding_record_proven("{}", now, "session:123"));
+        assert!(!binding_record_proven(
+            &record("  ", "session:123", now),
+            now,
+            "session:123"
+        ));
+    }
 
     fn test_journal_path(dir: &Path) -> PathBuf {
         dir.join("orch").join("identities.jsonl")
