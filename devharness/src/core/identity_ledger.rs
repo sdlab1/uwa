@@ -85,8 +85,10 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
+/// Переопределить хранилище журнала (только в тестах): изолирует записи
+/// юнит-тестов от живого журнала идентичностей.
 #[cfg(test)]
-fn use_home(dir: &Path) {
+pub(crate) fn use_home(dir: &Path) {
     JOURNAL_OVERRIDE.with(|cell| *cell.borrow_mut() = Some(dir.to_path_buf()));
 }
 

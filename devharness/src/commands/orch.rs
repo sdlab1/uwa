@@ -1126,6 +1126,7 @@ fn apply_identification(
     reg: &mut Registry,
     agent: &str,
     ans: &crate::core::reidentify::Answer,
+    session_key: &str,
 ) -> Option<String> {
     let ts = now();
     let canon = crate::core::identity::canonical(agent);
@@ -1147,7 +1148,7 @@ fn apply_identification(
     }
     crate::core::identity_ledger::log_identify(
         &canon,
-        &crate::core::identity::current().key,
+        session_key,
         &ans.model,
         ans.version.as_deref(),
         ans.date.as_deref(),
@@ -1817,7 +1818,7 @@ fn start(root: &Path, args: &[String]) -> anyhow::Result<()> {
     // задачу техлиду на проверку имени модели.
     let verify_task = ident
         .as_ref()
-        .and_then(|a| apply_identification(&mut reg, &caller, a));
+        .and_then(|a| apply_identification(&mut reg, &caller, a, &me_key));
     save(root, &reg)?;
     // Ответ израсходован: следующая выдача потребует нового ответа (R24).
     if ident.is_some() {
@@ -3818,6 +3819,62 @@ fn models(root: &Path) -> anyhow::Result<()> {
 }
 
 /// `devh orch identify <агент> [--set <модель>]` — кто какая модель.
+/// Применение ответа на вопрос идентификации (T-477/T-492/T-652).
+///
+/// Гейты:
+///   * отвечать можно ТОЛЬКО за свой адрес (канон вызывающего);
+///   * источник идентичности — привязка/слот (Stored|Slot), а не env/--agent:
+///     «caller == canon» проходит и при подмене личности (DEVH_AGENT);
+///   * ключ привязки совпадает с ключом сессии агента в реестре (если записан);
+///   * агент существует в реестре — фантом-агентов не создаём.
+///
+/// Идентичность передаётся параметром: юнит-тест подставляет синтетическую
+/// `Identity` и не зависит от окружения процесса.
+fn apply_identify_reply(
+    root: &Path,
+    reg: &mut Registry,
+    canon: &str,
+    caller: &str,
+    ident: &crate::core::identity::Identity,
+    replies: &[String],
+) -> anyhow::Result<(crate::core::reidentify::Answer, Option<String>)> {
+    if canon != caller {
+        return Err(anyhow!(
+            "devh orch identify --reply: отвечать можно только за свой адрес \
+             (вызывающий: {caller}, в ответе: {canon})"
+        ));
+    }
+    if !matches!(
+        ident.source,
+        crate::core::identity::Source::Stored | crate::core::identity::Source::Slot
+    ) {
+        return Err(anyhow!(
+            "devh orch identify --reply: ответ принимается только при привязке сессии \
+             (DEVH_AGENT/--agent — не доказательство; источник: {})",
+            ident.source.as_str()
+        ));
+    }
+    let Some(rec) = find_agent(reg, canon) else {
+        return Err(anyhow!(
+            "devh orch identify --reply: агент {canon} не зарегистрирован в реестре — \
+             ответ отклонён (фантом-агентов не создаём)"
+        ));
+    };
+    if let Some(sk) = rec.session_key.as_ref().filter(|s| !s.trim().is_empty()) {
+        if sk.trim() != ident.key.trim() {
+            return Err(anyhow!(
+                "devh orch identify --reply: привязка сессии не совпадает с записанной \
+                 для {canon} (вызывающий: {}, в реестре: {})",
+                ident.key, sk
+            ));
+        }
+    }
+    let raw = replies.join("\n");
+    let ans = crate::core::reidentify::record_answer(root, canon, &raw)?;
+    let task = apply_identification(reg, canon, &ans, &ident.key);
+    Ok((ans, task))
+}
+
 fn identify(root: &Path, args: &[String]) -> anyhow::Result<()> {
     let _lock =
         crate::shell::lock::OutputLock::try_acquire(root, &path(root), "devh orch identify")
@@ -3850,44 +3907,12 @@ fn identify(root: &Path, args: &[String]) -> anyhow::Result<()> {
                  (вызывающий: {caller}, в ответе: {canon})"
             ));
         }
-        // Совпадение канонов НЕ достаточно: «caller == canon» проходит и при
-        // подмене личности (DEVH_AGENT) и при алиасе/claim (T-477, ретест).
-        // Нужна ПРИВЯЗКА СЕССИИ:
-        //   * источник идентичности — привязка/слот, а не env/--agent;
-        //   * ключ привязки совпадает с ключом сессии агента в реестре
-        //     (если он записан) — иначе это ЧУЖАЯ сессия;
-        //   * агент существует в реестре — фантом-агентов не создаём.
+        // Гейты привязки сессии и VERBATIM-ответ вынесены в
+        // apply_identify_reply (T-652): их можно проверить юнит-тестом без
+        // глобального окружения (DEVH_AGENT/AGENT_SESSION_ID).
         let ident = crate::core::identity::current();
-        if !matches!(
-            ident.source,
-            crate::core::identity::Source::Stored | crate::core::identity::Source::Slot
-        ) {
-            return Err(anyhow!(
-                "devh orch identify --reply: ответ принимается только при привязке сессии \
-                 (DEVH_AGENT/--agent — не доказательство; источник: {})",
-                ident.source.as_str()
-            ));
-        }
-        let rec = find_agent(&reg, &canon);
-        let Some(rec) = rec else {
-            return Err(anyhow!(
-                "devh orch identify --reply: агент {canon} не зарегистрирован в реестре — \
-                 ответ отклонён (фантом-агентов не создаём)"
-            ));
-        };
-        if let Some(sk) = rec.session_key.as_ref().filter(|s| !s.trim().is_empty()) {
-            if sk.trim() != ident.key.trim() {
-                return Err(anyhow!(
-                    "devh orch identify --reply: привязка сессии не совпадает с записанной \
-                     для {canon} (вызывающий: {}, в реестре: {})",
-                    ident.key, sk
-                ));
-            }
-        }
-        let raw = replies.join("\n");
-        let ans = crate::core::reidentify::record_answer(root, &canon, &raw)?;
         let mut reg = reg;
-        let task = apply_identification(&mut reg, &canon, &ans);
+        let (ans, task) = apply_identify_reply(root, &mut reg, &canon, &caller, &ident, &replies)?;
         save(root, &reg)?;
         println!(
             "devh orch identify: {canon} — ответ принят VERBATIM (модель: {}{})",
@@ -7374,34 +7399,59 @@ mod tests {
     }
 
     /// Ответ сохраняется VERBATIM и заводит задачу техлиду (дедуп по заголовку).
+    ///
+    /// T-652: после T-492 гейт требует ДОКАЗАННОЙ привязки сессии
+    /// (Stored|Slot) — идентичность по env/DEVH_AGENT больше не доказательство.
+    /// Поэтому юнит-тест подставляет синтетическую `Identity` (без глобального
+    /// окружения) и проверяет прикладную часть команды.
     #[test]
     fn identify_reply_stores_verbatim_and_creates_verification_task() {
         let tmp = tempdir().expect("tmp");
         let root = tmp.path();
+        let agent = "unit-ident";
+        let key = "session:unit-ident-1";
         let mut reg = load(root);
+        reg.agents.push(AgentState {
+            name: agent.into(),
+            role: Some(ROLE_WORKER.into()),
+            session_key: Some(key.into()),
+            ..Default::default()
+        });
         reg.agents.push(AgentState {
             name: "step5".into(),
             role: Some(ROLE_TECH_LEAD.into()),
             ..Default::default()
         });
         save(root, &reg).expect("save");
-        run(
+        // Журнал идентичностей — в изоляцию, чтобы тест не писал в живой.
+        crate::core::identity_ledger::use_home(tmp.path());
+        let ident = crate::core::identity::Identity {
+            name: agent.into(),
+            aliases: Vec::new(),
+            source: crate::core::identity::Source::Stored,
+            key: key.into(),
+            fresh: false,
+        };
+        let (ans, _task) = apply_identify_reply(
             root,
-            "identify",
+            &mut reg,
+            agent,
+            agent,
+            &ident,
             &[
-                me().as_str(),
-                "--reply",
-                "MODEL: deepseek-4.1-2026-03-01",
-                "--reply",
-                "DATE: 2026-03-01",
+                "MODEL: deepseek-4.1-2026-03-01".to_string(),
+                "DATE: 2026-03-01".to_string(),
             ],
         )
-        .expect("identify");
+        .expect("ответ принят");
+        assert_eq!(ans.model, "deepseek-4.1-2026-03-01");
+        assert_eq!(ans.date.as_deref(), Some("2026-03-01"));
+        save(root, &reg).expect("save");
         let reg = load(root);
         let a = reg
             .agents
             .iter()
-            .find(|a| a.name == me())
+            .find(|a| a.name == agent)
             .expect("агент в реестре");
         assert_eq!(a.model.as_deref(), Some("deepseek-4.1-2026-03-01"));
         assert_eq!(a.model_date.as_deref(), Some("2026-03-01"));
@@ -7417,13 +7467,16 @@ mod tests {
         assert_eq!(vtasks.first().map(|t| t.c_level), Some(Some(2)));
         assert_eq!(vtasks.first().map(|t| t.complexity), Some(0), "P0 — высший приоритет");
         // Повторный ответ — дедуп: вторая задача не создаётся.
-        run(
+        let mut reg = load(root);
+        let (_ans, _task) = apply_identify_reply(
             root,
-            "identify",
-            &[me().as_str(), "--reply", "MODEL: deepseek-4.1-2026-03-01"],
+            &mut reg,
+            agent,
+            agent,
+            &ident,
+            &["MODEL: deepseek-4.1-2026-03-01".to_string()],
         )
         .expect("identify 2");
-        let reg = load(root);
         assert_eq!(
             reg.tasks
                 .iter()
@@ -7431,6 +7484,77 @@ mod tests {
                 .count(),
             1,
             "дедуп: задача верификации одна"
+        );
+    }
+
+    /// T-652: спуф личности (DEVH_AGENT/--agent) — ответ не принимается.
+    #[test]
+    fn identify_reply_without_session_binding_is_refused() {
+        let tmp = tempdir().expect("tmp");
+        let root = tmp.path();
+        let agent = "unit-ident-env";
+        let mut reg = load(root);
+        reg.agents.push(AgentState {
+            name: agent.into(),
+            role: Some(ROLE_WORKER.into()),
+            ..Default::default()
+        });
+        save(root, &reg).expect("save");
+        let ident = crate::core::identity::Identity {
+            name: agent.into(),
+            aliases: Vec::new(),
+            source: crate::core::identity::Source::Env,
+            key: "env".into(),
+            fresh: false,
+        };
+        let err = apply_identify_reply(
+            root,
+            &mut reg,
+            agent,
+            agent,
+            &ident,
+            &["MODEL: spoofed".to_string()],
+        )
+        .expect_err("ответ без привязки сессии должен быть отказом");
+        assert!(
+            err.to_string().contains("привязк"),
+            "сообщение: {err}"
+        );
+    }
+
+    /// T-652: чужая привязка сессии (ключ не совпадает с реестром) — отказ.
+    #[test]
+    fn identify_reply_with_foreign_session_key_is_refused() {
+        let tmp = tempdir().expect("tmp");
+        let root = tmp.path();
+        let agent = "unit-ident-foreign";
+        let mut reg = load(root);
+        reg.agents.push(AgentState {
+            name: agent.into(),
+            role: Some(ROLE_WORKER.into()),
+            session_key: Some("session:owner".into()),
+            ..Default::default()
+        });
+        save(root, &reg).expect("save");
+        let ident = crate::core::identity::Identity {
+            name: agent.into(),
+            aliases: Vec::new(),
+            source: crate::core::identity::Source::Stored,
+            key: "session:intruder".into(),
+            fresh: false,
+        };
+        let err = apply_identify_reply(
+            root,
+            &mut reg,
+            agent,
+            agent,
+            &ident,
+            &["MODEL: spoofed".to_string()],
+        )
+        .expect_err("чужая сессия должна быть отказом");
+        assert!(
+            err.to_string().contains("не совпадает"),
+            "сообщение: {err}"
         );
     }
 
