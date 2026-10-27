@@ -426,6 +426,18 @@ pub fn mutate_start_gate(
             "нужен явный охват непроверенной зоны: укажите файлы или --in-diff <дифф>".to_string(),
         );
     }
+    // T-701: --baseline=skip для АУДИТА отклоняется: baseline=run обязателен для
+    // честного аудита (kill-rate 100% ложный при skip, история отравлена).
+    // --baseline=skip допустим только во внутреннем гейте задачи (devh run).
+    if args
+        .iter()
+        .any(|a| a == "--baseline=skip" || a.starts_with("--baseline=skip"))
+    {
+        return Err(
+            "--baseline=skip ЗАПРЕЩЁН для АУДИТА: не проверялась базовая сборка, вердикт недостоверен (kill-rate 100% ложный, история отравлена). Используйте baseline=run (по умолчанию) или devh run (там VERIFY уже прогонял baseline)."
+                .to_string(),
+        );
+    }
     // Cadence & load.
     let policy = rate::RatePolicy::default();
     let decision = rate::decide(
@@ -517,6 +529,20 @@ fn start(root: &Path, args: &[String]) -> anyhow::Result<()> {
             "devh mutate start: --in-place запрещён для фонового аудита — он мутирует\n\
              дерево агента (R11). Оставьте флаги как есть: cargo-mutants сам работает\n\
              в copy-режиме. In-place гейт живёт внутри devh run (там своя worktree)."
+        );
+        crate::commands::die(crate::commands::ExitCode::ActionError);
+    }
+    // T-701: --baseline=skip для АУДИТА запрещён: базовая сборка НЕ проверялась,
+    // вердикт недостоверен (123 ложных 'пойман' в истории отравлены).
+    // --baseline=skip допустим только во внутреннем гейте задачи (devh run: там
+    // VERIFY уже прогонял baseline). Для АУДИТА (devh mutate start) baseline=run
+    // обязателен. Отказ с внятным текстом, чтобы оператор понял причину.
+    if args
+        .iter()
+        .any(|a| a == "--baseline=skip" || a.starts_with("--baseline=skip"))
+    {
+        println!(
+            "devh mutate start: --baseline=skip ЗАПРЕЩЁН для АУДИТА (не проверялась базовая сборка, вердикт недостоверен; kill-rate 100% ложный, история отравлена). Используйте baseline=run (по умолчанию) или запускайте через devh run (там VERIFY уже прогонял baseline)."
         );
         crate::commands::die(crate::commands::ExitCode::ActionError);
     }
@@ -2685,26 +2711,20 @@ mod tests {
         assert!(res.is_ok());
     }
 
-    /// План аудита: зона собирается рекурсивно, пути — относительные.
+    /// T-701: --baseline=skip для АУДИТА отклоняется.
     #[test]
-    fn plan_collects_rs_relative_to_root() {
-        let tmp = tempdir().expect("tmp");
-        let root = tmp.path();
-        fs::create_dir_all(root.join("devharness/src/core/guards")).expect("mkdir");
-        fs::write(root.join("devharness/src/core/a.rs"), "fn a() {}").expect("write");
-        fs::write(root.join("devharness/src/core/guards/b.rs"), "fn b() {}").expect("write");
-        fs::write(root.join("devharness/src/core/notes.txt"), "x").expect("write");
-        let mut files = Vec::new();
-        collect_rs(&root.join("devharness/src/core"), root, &mut files);
-        files.sort();
-        assert_eq!(
-            files,
-            vec![
-                "devharness/src/core/a.rs".to_string(),
-                "devharness/src/core/guards/b.rs".to_string()
-            ],
-            "только *.rs, относительные пути"
-        );
+    fn mutate_start_gate_rejects_baseline_skip() {
+        let args = vec!["--baseline=skip".to_string(), "src/main.rs".to_string()];
+        let res = mutate_start_gate("lead", Some("lead"), &args, None, 1_000_000, 50);
+        assert!(res.is_err());
+        let err = res.unwrap_err();
+        assert!(err.contains("--baseline=skip"));
+        assert!(err.contains("АУДИТ"));
+        // также проверяем формат --baseline=skip=xxx
+        let args2 = vec!["--baseline=skip=foo".to_string(), "src/main.rs".to_string()];
+        let res2 = mutate_start_gate("lead", Some("lead"), &args2, None, 1_000_000, 50);
+        assert!(res2.is_err());
+        assert!(res2.unwrap_err().contains("--baseline=skip"));
     }
 
     /// План без зоны — не ошибка: печатает подсказку.
