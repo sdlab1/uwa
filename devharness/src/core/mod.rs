@@ -113,6 +113,7 @@ pub mod complexity_reference;
 pub mod eval_report;
 pub mod calibration_compare;
 pub mod complexity_deviation;
+pub mod complexity_adjust;
 pub mod calibration_report;
 pub mod throughput;
 pub mod throughput_collect;
