@@ -7,7 +7,10 @@
 //!   эталон и пишет его в `calibration.jsonl`;
 //! * `devh orch calibrate` — по всем уровням сразу (C1..C4);
 //! * `--agent NAME` — кто снимает эталон (по умолчанию ведущий);
-//! * `--dry-run` — показать, что будет построено, ничего не писать.
+//! * `--dry-run` — показать, что будет построено, ничего не писать;
+//! * `--export` — единый снимок оценки (`ledger_export`): сводка по трём
+//!   ledger'ам + `eval_snapshot.json` (унести снимок за пределы машины).
+//!   Битая строка ledger'а — отказ экспорта (fail-closed, rc=2).
 //!
 //! Недостаток замеров — не «ошибка программы», а «среда не готова»
 //! (код возврата 2): честно говорим, что эталон уровня ещё не собран.
@@ -29,6 +32,8 @@ pub struct Args {
     pub agent: String,
     /// Только показать, ничего не писать.
     pub dry_run: bool,
+    /// Экспорт единого снимка оценки вместо построения эталона.
+    pub export: bool,
 }
 
 /// Разобрать аргументы `devh orch calibrate`.
@@ -36,6 +41,7 @@ pub fn parse_args(args: &[String]) -> anyhow::Result<Args> {
     let mut level: Option<u8> = None;
     let mut agent = DEFAULT_AGENT.to_string();
     let mut dry_run = false;
+    let mut export = false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -69,6 +75,10 @@ pub fn parse_args(args: &[String]) -> anyhow::Result<Args> {
                 dry_run = true;
                 i += 1;
             }
+            "--export" => {
+                export = true;
+                i += 1;
+            }
             other => {
                 return Err(DevhError::action(format!(
                     "devh orch calibrate: неизвестный аргумент '{other}'"
@@ -81,6 +91,7 @@ pub fn parse_args(args: &[String]) -> anyhow::Result<Args> {
         level,
         agent,
         dry_run,
+        export,
     })
 }
 
@@ -122,8 +133,33 @@ fn level_line(root: &Path, agent: &str, level: u8) -> (String, Option<calibratio
 }
 
 /// Выполнить команду.
+/// Экспорт единого снимка оценки (T-511): сводка ledger'ов + файл снимка.
+fn export_snapshot(root: &Path) -> anyhow::Result<()> {
+    let (exports, snap) = crate::core::ledger_export::export_bundle(root).map_err(|e| {
+        anyhow::Error::new(DevhError::env(format!(
+            "devh orch calibrate --export: снимок оценки не собран: {e}"
+        )))
+    })?;
+    for e in exports.iter() {
+        println!("  {}", e.summary());
+    }
+    println!("  снимок: записей={}", snap.total());
+    let path = crate::core::ledger_export::write_snapshot(root, &snap).map_err(|e| {
+        anyhow::Error::new(DevhError::env(format!(
+            "devh orch calibrate --export: не записать снимок: {e}"
+        )))
+    })?;
+    println!("  → снимок записан: {}", path.display());
+    Ok(())
+}
+
+/// Выполнить команду.
 pub fn run(root: &Path, args: &[String]) -> anyhow::Result<()> {
     let parsed = parse_args(args)?;
+    // T-511: экспорт снимка — отдельный режим, эталон не строим и не пишем.
+    if parsed.export {
+        return export_snapshot(root);
+    }
     let levels: Vec<u8> = match parsed.level {
         Some(level) => vec![level],
         None => calibration_guard::LEVELS.to_vec(),
@@ -235,6 +271,63 @@ mod tests {
         assert_eq!(b.agent, DEFAULT_AGENT);
         let c = parse_args(&args(&["--dry-run"])).expect("args");
         assert!(c.dry_run);
+        assert!(!c.export);
+    }
+
+    #[test]
+    fn parse_export_flag() {
+        assert!(parse_args(&args(&["--export"])).expect("args").export);
+        assert!(!parse_args(&args(&[])).expect("args").export);
+    }
+
+    #[test]
+    fn export_writes_snapshot_file() {
+        let root = tmp_root("export");
+        for i in 1..=4 {
+            crate::core::quality::append_sample(&root, &sample(&format!("T-{i}"), 1)).unwrap();
+        }
+        let reference = calibration::build_reference(&root, "minimax", 1).expect("эталон");
+        calibration::append_reference(&root, &reference).unwrap();
+        run(&root, &args(&["--export"])).expect("экспорт снимка");
+        let snap_path = root
+            .join(".harness")
+            .join("orch")
+            .join("export")
+            .join("eval_snapshot.json");
+        assert!(
+            snap_path.exists(),
+            "снимок записан: {}",
+            snap_path.display()
+        );
+        let text = fs::read_to_string(&snap_path).unwrap_or_default();
+        assert!(
+            text.contains("\"quality\""),
+            "снимок содержит quality: {text}"
+        );
+        assert!(
+            text.contains("\"calibration\""),
+            "снимок содержит calibration: {text}"
+        );
+        // Экспорт не строит и не добавляет эталоны.
+        assert_eq!(calibration::load_references(&root).len(), 1);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn broken_ledger_is_export_env_error() {
+        let root = tmp_root("export-broken");
+        // Битая строка quality.jsonl — экспорт невозможен (fail-closed).
+        let dir = root.join(".harness").join("orch");
+        fs::create_dir_all(&dir).unwrap_or_else(|_| unreachable!());
+        fs::write(dir.join("quality.jsonl"), "{это не json}\n").unwrap_or_else(|_| unreachable!());
+        let err = run(&root, &args(&["--export"])).expect_err("битый ledger — отказ");
+        let devh = err.downcast_ref::<DevhError>().expect("DevhError");
+        assert_eq!(devh.code, crate::commands::ExitCode::EnvError);
+        assert!(
+            format!("{err}").contains("снимок оценки не собран"),
+            "{err}"
+        );
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
