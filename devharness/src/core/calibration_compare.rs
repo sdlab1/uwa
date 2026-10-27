@@ -81,31 +81,45 @@ pub fn compare_measurements(
     measurements: &[TaskMeasurement],
     top_k: usize,
 ) -> Option<AgentComparison> {
-    if measurements.is_empty() {
+    // T-514: агент-эталон не сравнивается сам с собой — его замеры и есть
+    // эталон, ratio всегда ~1.0, «рейтинг» тавтология.
+    let canon = crate::core::identity::canonical(agent);
+    if canon == reference.agent {
         return None;
     }
-    let metrics = calibration::aggregate(measurements);
+    // Замеры автора эталона (в т.ч. алиас, не покрытый canonical()) не входят
+    // в сравнение другого агента: иначе эталонная работа lead'а засчитывается
+    // остальным как их работа.
+    let own: Vec<TaskMeasurement> = measurements
+        .iter()
+        .filter(|m| crate::core::identity::canonical(&m.agent) != reference.agent)
+        .cloned()
+        .collect();
+    if own.is_empty() {
+        return None;
+    }
+    let metrics = calibration::aggregate(&own);
     let ratio = if reference.metrics.score > 0.0 {
         metrics.score / reference.metrics.score
     } else {
         1.0
     };
     let rating = calibration::rating_by_ratio(ratio);
-    let deviation = measurements
+    let deviation = own
         .iter()
         .map(|m| calibration::deviation_float(m, reference))
         .sum::<f64>()
-        / measurements.len() as f64;
+        / own.len() as f64;
     Some(AgentComparison {
-        agent: crate::core::identity::canonical(agent),
+        agent: canon,
         c_level: reference.c_level,
-        tasks: measurements.len(),
+        tasks: own.len(),
         score: metrics.score,
         reference_score: reference.metrics.score,
         ratio,
         rating,
         deviation,
-        top: top_deviations(measurements, reference, top_k),
+        top: top_deviations(&own, reference, top_k),
     })
 }
 
@@ -149,6 +163,42 @@ pub fn compare_all(root: &Path, reference: &Reference, top_k: usize) -> Vec<Agen
 mod tests {
     use super::*;
     use crate::core::calibration::TaskMeasurement;
+    use crate::core::quality::{self, QualitySample};
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn tmp_root(tag: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("devh-calcompare-{}-{}", tag, std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("создать tmp");
+        dir
+    }
+
+    fn quality_sample(task: &str, agent: &str) -> QualitySample {
+        QualitySample {
+            ts: 1,
+            agent: agent.to_string(),
+            model: "test".to_string(),
+            task_id: Some(task.to_string()),
+            c_level: 2,
+            added_lines: 100,
+            comment_lines: 20,
+            code_lines: 80,
+            check_runs: 1,
+            errors_final: 0,
+            warnings_final: 4,
+            errors_weighted: 0.0,
+            warnings_weighted: 4.0,
+            error_categories: std::collections::BTreeMap::new(),
+            warning_categories: std::collections::BTreeMap::new(),
+            build_ok: true,
+            duration_secs: Some(60.0),
+            deliberation_actions: 5,
+            rework_rounds: 0,
+            identified: true,
+        }
+    }
 
     /// Эталон строим из тех же замеров, что и у агента, — тогда «равная работа»
     /// даёт ровно ratio = 1.0 (иначе сравниваются два разных балла).
@@ -215,5 +265,50 @@ mod tests {
     fn empty_measurements_give_no_comparison() {
         let r = reference();
         assert!(compare_measurements("beam", &r, &[], 3).is_none());
+    }
+
+    #[test]
+    fn reference_author_is_not_compared_to_self() {
+        let r = reference();
+        // агент-эталон vs его же эталон — тавтология, сравнение не строим
+        assert!(compare_measurements("minimax", &r, &[measurement(4, 1)], 3).is_none());
+    }
+
+    #[test]
+    fn reference_author_tasks_do_not_count_for_other_agent() {
+        let r = reference();
+        let clean =
+            compare_measurements("beam", &r, &[measurement(4, 1)], 3).expect("сравнение beam");
+        let mut owned = measurement(40, 5);
+        owned.agent = "minimax".into();
+        owned.task_id = "T-own".into();
+        let mixed = compare_measurements("beam", &r, &[measurement(4, 1), owned], 3)
+            .expect("смешанное сравнение");
+        assert_eq!(
+            mixed.tasks, 1,
+            "замер автора эталона не должен считаться задачей beam"
+        );
+        assert!(
+            (mixed.score - clean.score).abs() < 1e-9,
+            "эталонная работа lead'а не должна тащить балл beam: got {} want {}",
+            mixed.score,
+            clean.score
+        );
+    }
+
+    #[test]
+    fn compare_agent_of_reference_author_is_none_on_real_samples() {
+        let root = tmp_root("selfref");
+        for i in 1..=4 {
+            quality::append_sample(&root, &quality_sample(&format!("R-{i}"), "minimax")).unwrap();
+        }
+        let r = calibration::build_reference(&root, "minimax", 2).expect("эталон");
+        // замеры lead'а лежат в quality.jsonl на уровне эталона — compare_agent(minimax) отказ
+        assert!(compare_agent(&root, "minimax", &r, 3).is_none());
+        // и compare_all не показывает автора эталона как отдельного агента
+        assert!(compare_all(&root, &r, 3)
+            .iter()
+            .all(|c| c.agent != "minimax"));
+        let _ = fs::remove_dir_all(&root);
     }
 }
