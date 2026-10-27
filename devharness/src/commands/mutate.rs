@@ -108,6 +108,7 @@ pub fn mutate(root: &Path, sub: &str, args: &[String]) -> anyhow::Result<()> {
         "recheck" => recheck(root, args),
         "history" => history(root),
         "plan" => plan(root, args),
+        "shard" => shard(root, args),
         "verdict" => verdict(root),
         "stop" => stop(root),
         // Внутренняя подкоманда: её запускает `start` (супервизор).
@@ -1680,6 +1681,124 @@ fn history(root: &Path) -> anyhow::Result<()> {
 /// Зона задаётся файлами или каталогами (рекурсивно, *.rs). Ответ — три
 /// списка: никогда не проверялись, менялись после аудита (нужна дельта),
 /// уже проверено и не менялось (перепроверка НЕ нужна).
+/// `devh mutate shard --plan|--run` — разбиение аудита на шарды (T-644).
+///
+/// `--plan` печатает план (файлы, ожидаемое число мутантов, оценка времени);
+/// `--run` гоняет шарды ПОСЛЕДОВАТЕЛЬНО (каждый — отдельный прогон с общей
+/// историей покрытия). Покрытые файлы (аудит был, не менялись) в план не
+/// входят — «не проверять опять всё заново».
+fn shard(root: &Path, args: &[String]) -> anyhow::Result<()> {
+    let mut files: Vec<String> = Vec::new();
+    let mut base: Vec<String> = Vec::new();
+    let mut max_files = crate::core::mutate_shard::DEFAULT_MAX_FILES_PER_SHARD;
+    let mut max_shards = crate::core::mutate_shard::DEFAULT_MAX_SHARDS;
+    let mut run = false;
+    let mut plan_only = false;
+    let mut i = 0usize;
+    while i < args.len() {
+        let a = args[i].clone();
+        match a.as_str() {
+            "--plan" => plan_only = true,
+            "--run" => run = true,
+            "--max-files" => {
+                i = i.saturating_add(1);
+                max_files = args
+                    .get(i)
+                    .and_then(|v| v.trim().parse::<usize>().ok())
+                    .filter(|n| *n > 0)
+                    .unwrap_or(crate::core::mutate_shard::DEFAULT_MAX_FILES_PER_SHARD);
+            }
+            "--max-shards" => {
+                i = i.saturating_add(1);
+                max_shards = args
+                    .get(i)
+                    .and_then(|v| v.trim().parse::<usize>().ok())
+                    .filter(|n| *n > 0)
+                    .unwrap_or(crate::core::mutate_shard::DEFAULT_MAX_SHARDS);
+            }
+            "--" => {
+                base.extend(args.iter().skip(i.saturating_add(1)).cloned());
+                break;
+            }
+            other if other.starts_with('-') => base.push(other.to_string()),
+            other => files.push(other.to_string()),
+        }
+        i = i.saturating_add(1);
+    }
+    // Зона: файлы/каталоги из аргументов (как у `devh mutate plan`).
+    let mut scope_files: Vec<String> = Vec::new();
+    for f in &files {
+        let p = if Path::new(f).is_absolute() {
+            Path::new(f).to_path_buf()
+        } else {
+            root.join(f)
+        };
+        if p.is_dir() {
+            collect_rs(&p, root, &mut scope_files);
+        } else if p.is_file() {
+            push_rel(root, &p, &mut scope_files);
+        }
+    }
+    scope_files.sort();
+    scope_files.dedup();
+    if scope_files.is_empty() {
+        println!("devh mutate shard: зона не задана — укажи файлы или каталог:");
+        println!("    devh mutate shard --plan devharness/src/core");
+        return Ok(());
+    }
+    let opts = crate::core::mutate_shard::PlanOpts {
+        max_files_per_shard: max_files,
+        max_shards,
+        ..Default::default()
+    };
+    let plan = crate::core::mutate_shard::plan(root, &scope_files, &opts);
+    print!("{}", crate::core::mutate_shard::render_plan(&plan));
+    if plan_only || !run {
+        return Ok(());
+    }
+    if plan.shards.is_empty() {
+        println!("devh mutate shard: нечего гонять (всё покрыто или зона пуста)");
+        return Ok(());
+    }
+    // Шарды — последовательно: параллельные прогоны на одной машине ×2–4
+    // медленнее и мешают соседним агентам.
+    for shard in &plan.shards {
+        let out_dir = work_dir(root).join("out").join(format!("shard-{}", shard.index));
+        let mut shard_args = base.clone();
+        shard_args.push(format!("--output={}", out_dir.display()));
+        shard_args.extend(shard.files.clone());
+        println!(
+            "devh mutate shard: шард {}/{} — файлов {}, ожидается мутантов ~{}",
+            shard.index,
+            plan.shards.len(),
+            shard.files.len(),
+            shard.expected_mutants
+        );
+        start(root, &shard_args)?;
+        // Ждём конца шарда (состояние пишет супервизор).
+        loop {
+            let st = read_state(root);
+            match st {
+                Some(s) if s.state == "running" => {
+                    std::thread::sleep(std::time::Duration::from_secs(5));
+                }
+                Some(s) => {
+                    let code = s.exit.unwrap_or(-1);
+                    println!("devh mutate shard: шард {} завершён (код {})", shard.index, code);
+                    if code != 0 {
+                        anyhow::bail!("devh mutate shard: шард {} упал (код {})", shard.index, code);
+                    }
+                    break;
+                }
+                None => {
+                    std::thread::sleep(std::time::Duration::from_secs(5));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn plan(root: &Path, args: &[String]) -> anyhow::Result<()> {
     let mut files: Vec<String> = Vec::new();
     for a in args.iter().filter(|a| !a.starts_with('-')) {

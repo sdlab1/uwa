@@ -155,11 +155,14 @@ pub fn checkpoint_at_for(
         anyhow::bail!("worktree агента {agent} не выдан — нечего сохранять");
     }
     let n_files = crate::shell::git::changed_files(path).len();
-    // pid в имени: две сессии одного агента (или параллельные тесты) не
-    // делят один GIT_INDEX_FILE — иначе чекпоинты бьют друг по другу.
+    // pid + хэш пути в имени: две сессии одного агента (или параллельные
+    // тесты) не делят один GIT_INDEX_FILE — иначе чекпоинты бьют друг по
+    // другу (тест-дерево и рабочее дерево агента — разные пути).
+    let path_key = crate::core::digest::sha256_hex(path.to_string_lossy().as_bytes());
     let idx = std::env::temp_dir().join(format!(
-        "devh-wip-index-{}-{}",
+        "devh-wip-index-{}-{}-{}",
         std::process::id(),
+        &path_key[..12],
         sanitize(agent)
     ));
     let _ = std::fs::remove_file(&idx);
