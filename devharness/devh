@@ -21,4 +21,4 @@ if [ -x "$BIN" ] &&
   exec "$BIN" "$@"
 fi
 export CARGO_TARGET_DIR="$TDIR"
-exec cargo run --quiet --manifest-path "$HERE/Cargo.toml" -- "$@"
+exec cargo run --quiet --bin devh --manifest-path "$HERE/Cargo.toml" -- "$@"
