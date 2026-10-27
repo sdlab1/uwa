@@ -687,11 +687,16 @@ fn find_agent_mut<'a>(reg: &'a mut Registry, name: &str) -> Option<&'a mut Agent
 /// файлы его других задач выглядят как «путь вне зоны задачи» (T-495).
 fn agent_task_zones(reg: &Registry, agent: &str, task_id: &str) -> Vec<String> {
     let canon = crate::core::identity::canonical(agent);
+    // Если сдаваемая задача не имеет зон — ограничений нет (T-667).
+    let cur = reg.tasks.iter().find(|t| t.id == task_id);
+    if cur.map(|t| t.zones.is_empty()).unwrap_or(true) {
+        return Vec::new();
+    }
     let mut out: Vec<String> = Vec::new();
     for t in reg.tasks.iter() {
         let same = t.id == task_id
-            || (t.status == Status::Done
-                && crate::core::identity::canonical(&t.agent) == canon);
+            || (crate::core::identity::canonical(&t.agent) == canon
+                && (t.status == Status::Done || t.status == Status::Active));
         if !same {
             continue;
         }
