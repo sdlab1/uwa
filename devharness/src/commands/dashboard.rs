@@ -351,18 +351,24 @@ fn handle_sse(stream: &mut TcpStream, last_event_id: u64) -> std::io::Result<()>
 }
 
 /// Фрагмент раздела (для `hx-get`).
+///
+/// Фильтры: `?q=` (поиск по задачам) и `?agent=` (один агент) — из верхней
+/// панели. Фильтрация happens на сервере: один источник правды, клиент
+/// ничего не додумывает.
 pub fn fragment(section: &str, snap: &PanelSnapshot, query: &str) -> Option<String> {
+    let q = query_value(query, "q").unwrap_or_default();
+    let agent = query_value(query, "agent").unwrap_or_default();
     Some(match section {
         "summary" => summary_html(snap),
-        "agents" => agents_html(snap),
-        "active" => active_html(snap),
-        "queue" => queue_html(snap),
-        "features" => features_html(snap),
+        "agents" => agents_html(snap, &agent),
+        "active" => active_html(snap, &q, &agent),
+        "queue" => queue_html(snap, &q, &agent),
+        "features" => features_html(snap, &q, &agent),
         "git" => git_html(snap),
         "plan" => plan_html(snap, query),
         "reports" => reports_html(snap),
         "incidents" => incidents_html(snap),
-        "done" => done_html(snap),
+        "done" => done_html(snap, &q, &agent),
         "speed" => {
             let since = panel::now_secs().saturating_sub(7 * 86_400);
             let rows = panel::speed::cached(std::path::Path::new(&snap.root), since);
@@ -370,7 +376,7 @@ pub fn fragment(section: &str, snap: &PanelSnapshot, query: &str) -> Option<Stri
                 // Пересчёт идёт в фоне — поток HTTP не держим.
                 return Some("<p>считается… (пересчёт скорости идёт в фоне)</p>".to_string());
             }
-            speed_html(&rows)
+            speed_html(&rows, &agent)
         }
         "chat" => chat_html(Path::new(&snap.root), query),
         "chat/older" => chat_older_html(query),
@@ -382,8 +388,16 @@ pub fn fragment(section: &str, snap: &PanelSnapshot, query: &str) -> Option<Stri
     })
 }
 
-/// Полная страница панели.
+/// Полная страница панели — оболочка приложения (T-633).
+///
+/// Раскладка как у референса nimstats: слева меню-вкладки, сверху панель
+/// (поиск, выбор агента, индикатор live), справа контент ОДНОГО раздела.
+/// Состояние раздела живёт в URL (`?section=…`), поэтому ссылку можно
+/// переслать и по ней открыть нужный раздел.
 pub fn page_html(snap: &PanelSnapshot, query: &str) -> String {
+    let active = active_section(query);
+    let q = query_value(query, "q").unwrap_or_default();
+    let agent = query_value(query, "agent").unwrap_or_default();
     let mut out = String::new();
     out.push_str("<!doctype html><html lang=\"ru\"><head><meta charset=\"utf-8\">");
     out.push_str("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">");
@@ -391,44 +405,174 @@ pub fn page_html(snap: &PanelSnapshot, query: &str) -> String {
     out.push_str("<style>");
     out.push_str(include_str!("../core/panel/assets/panel.css"));
     out.push_str("</style></head><body>");
+    out.push_str(&topbar_html(snap, &active, &q, &agent));
+    // Оболочка — общий источник SSE: события «letter»/«registry» долетают
+    // до всех потомков (включая триггер хвоста чата).
+    out.push_str("<div hx-ext=\"sse\" sse-connect=\"/panel/events\" class=\"shell\">");
+    out.push_str(&sidebar_html(snap, &active, &q, &agent));
+    out.push_str("<main class=\"content\" id=\"content\"");
+    // Чат живёт на событиях (окно дописывается, а не перерисовывается).
+    let trigger = if active == "chat" {
+        "load"
+    } else {
+        "load, every 5s, sse:registry"
+    };
     out.push_str(&format!(
-        "<header><h1>ПУ — панель управления оркестратором</h1><div class=\"meta\">{} · {}</div></header>",
-        esc(&snap.root),
-        esc(&stamp(snap.generated_at))
+        " hx-get=\"{}\" hx-trigger=\"{trigger}\" hx-swap=\"innerHTML\">",
+        esc(&section_url(&active, &q, &agent))
     ));
-    // Событийный слой (T-632): общий источник SSE + «мост» на разделы.
-    out.push_str("<div hx-ext=\"sse\" sse-connect=\"/panel/events\">");
-    out.push_str("<div style=\"display:none\">");
-    for (route, target) in [
-        ("summary", "#sec-summary .body"),
-        ("queue", "#sec-queue .body"),
-        ("incidents", "#sec-incidents .body"),
-        ("agents", "#sec-agents .body"),
-    ] {
-        out.push_str(&format!(
-            "<div hx-get=\"/panel/{route}\" hx-trigger=\"sse:registry\" hx-target=\"{target}\" hx-swap=\"innerHTML\"></div>"
-        ));
-    }
-    out.push_str("</div>");
-    for (route, title) in SECTIONS {
-        // Чат обновляется СОБЫТИЯМИ (SSE): окно дописывается, а не
-        // перерисовывается; список тредов polls сам (см. chat_html).
-        let trigger = if *route == "chat" {
-            "load"
-        } else {
-            "load, every 5s"
-        };
-        out.push_str(&format!(
-            "<section class=\"card\" id=\"sec-{route}\" hx-get=\"/panel/{route}\" hx-trigger=\"{trigger}\" hx-swap=\"innerHTML\"><h2>{}</h2><div class=\"body\">загрузка…</div></section>",
-            esc(title)
-        ));
-    }
+    out.push_str(
+        &fragment(&active, snap, query).unwrap_or_else(|| "<p>нет раздела</p>".to_string()),
+    );
+    out.push_str("</main>");
     out.push_str("</div>");
     let _ = query;
     out.push_str("<script src=\"/static/htmx.min.js\"></script>");
     out.push_str("<script src=\"/static/sse.js\"></script>");
+    out.push_str(LIVE_SCRIPT);
     out.push_str("</body></html>");
     out
+}
+
+/// Индикатор «live» (открыт/оборван SSE) — обновляется событиями htmx.
+const LIVE_SCRIPT: &str = r#"<script>(function(){
+  var dot=document.getElementById('live-dot');
+  function set(on){ if(!dot) return; dot.classList.toggle('on',!!on); dot.classList.toggle('off',!on); dot.textContent=on?'live':'offline'; }
+  document.body.addEventListener('htmx:sseOpen',function(){set(true);});
+  document.body.addEventListener('htmx:sseError',function(){set(false);});
+  document.body.addEventListener('htmx:sseClose',function(){set(false);});
+})();</script>"#;
+
+/// Активный раздел из URL (?section=).
+fn active_section(query: &str) -> String {
+    let want = query_value(query, "section").unwrap_or_default();
+    if SECTIONS.iter().any(|(r, _)| *r == want) {
+        want
+    } else {
+        "summary".to_string()
+    }
+}
+
+/// URL раздела с фильтрами.
+fn section_url(route: &str, q: &str, agent: &str) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if !q.trim().is_empty() {
+        parts.push(format!("q={}", url_encode(q)));
+    }
+    if !agent.trim().is_empty() {
+        parts.push(format!("agent={}", url_encode(agent)));
+    }
+    if parts.is_empty() {
+        format!("/panel/{route}")
+    } else {
+        format!("/panel/{route}?{}", parts.join("&"))
+    }
+}
+
+/// URL страницы (для push-url): раздел + фильтры.
+fn page_url(route: &str, q: &str, agent: &str) -> String {
+    let mut parts: Vec<String> = vec![format!("section={route}")];
+    if !q.trim().is_empty() {
+        parts.push(format!("q={}", url_encode(q)));
+    }
+    if !agent.trim().is_empty() {
+        parts.push(format!("agent={}", url_encode(agent)));
+    }
+    format!("/?{}", parts.join("&"))
+}
+
+/// Percent-encode значения для URL.
+fn url_encode(text: &str) -> String {
+    let mut out = String::new();
+    for b in text.as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(*b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+/// Верхняя панель: поиск, выбор агента, индикатор live.
+fn topbar_html(snap: &PanelSnapshot, active: &str, q: &str, agent: &str) -> String {
+    let mut out = String::from("<header class=\"topbar\">");
+    out.push_str(
+        "<div class=\"brand\">ПУ<span class=\"sub\">панель управления оркестратором</span></div>",
+    );
+    // Поиск: htmx сам добавит `q=<значение>` (поле name=q).
+    let mut search_url = format!("/panel/{active}");
+    if !agent.trim().is_empty() {
+        search_url.push_str(&format!("?agent={}", url_encode(agent)));
+    }
+    out.push_str(&format!(
+        "<input class=\"search\" type=\"search\" name=\"q\" value=\"{}\" placeholder=\"поиск: задача, агент, инцидент\" hx-get=\"{}\" hx-trigger=\"keyup changed delay:300ms\" hx-target=\"#content\" hx-swap=\"innerHTML\">",
+        esc(q),
+        esc(&search_url)
+    ));
+    // Выбор агента: htmx добавит `agent=<значение>`.
+    let mut sel_url = format!("/panel/{active}");
+    if !q.trim().is_empty() {
+        sel_url.push_str(&format!("?q={}", url_encode(q)));
+    }
+    out.push_str(&format!(
+        "<select class=\"agent-pick\" name=\"agent\" hx-get=\"{}\" hx-trigger=\"change\" hx-target=\"#content\" hx-swap=\"innerHTML\">",
+        esc(&sel_url)
+    ));
+    out.push_str("<option value=\"\">все агенты</option>");
+    for a in &snap.agents {
+        let sel = if a.name == agent { " selected" } else { "" };
+        out.push_str(&format!(
+            "<option value=\"{}\"{}>{}</option>",
+            esc(&a.name),
+            sel,
+            esc(&a.name)
+        ));
+    }
+    out.push_str("</select>");
+    out.push_str("<span id=\"live-dot\" class=\"live off\">offline</span>");
+    out.push_str(&format!(
+        "<span class=\"sub top-meta\">{} · {}</span>",
+        esc(&snap.root),
+        esc(&stamp(snap.generated_at))
+    ));
+    out.push_str("</header>");
+    out
+}
+
+/// Боковое меню-вкладки: раздел + счётчики.
+fn sidebar_html(snap: &PanelSnapshot, active: &str, q: &str, agent: &str) -> String {
+    let mut out = String::from("<nav class=\"sidebar\">");
+    for (route, title) in SECTIONS {
+        out.push_str(&format!(
+            "<a class=\"tab{}\" href=\"{}\" hx-get=\"{}\" hx-target=\"#content\" hx-push-url=\"{}\" hx-swap=\"innerHTML\"><span>{}</span>{}</a>",
+            if *route == active { " active" } else { "" },
+            esc(&page_url(route, q, agent)),
+            esc(&section_url(route, q, agent)),
+            esc(&page_url(route, q, agent)),
+            esc(title),
+            sidebar_badge(snap, route)
+        ));
+    }
+    out.push_str("</nav>");
+    out
+}
+
+/// Счётчик у вкладки (P0/PS/в работе).
+fn sidebar_badge(snap: &PanelSnapshot, route: &str) -> String {
+    let s = &snap.summary;
+    let (n, cls) = match route {
+        "active" => (s.tasks_active, "ok"),
+        "queue" => (s.p0_open, "bad"),
+        "incidents" => (s.ps_open, "bad"),
+        "done" => (s.tasks_done, ""),
+        _ => (0, ""),
+    };
+    if n == 0 {
+        return String::new();
+    }
+    format!("<span class=\"badge {cls}\">{n}</span>")
 }
 
 /// Сводка.
@@ -457,39 +601,115 @@ fn summary_html(snap: &PanelSnapshot) -> String {
 }
 
 /// Агенты и модели.
-fn agents_html(snap: &PanelSnapshot) -> String {
-    let mut out = String::from("<table><thead><tr><th>агент</th><th>роль</th><th>модель</th><th>рантайм</th><th>C</th><th>в работе</th><th>очередь</th><th>done/7д</th><th>LOC</th><th>мин/7д</th><th>скорость LOC/ч</th><th>присутствие</th><th>ветка</th><th>merge</th></tr></thead><tbody>");
-    for a in &snap.agents {
+fn agents_html(snap: &PanelSnapshot, agent: &str) -> String {
+    let agent = agent.trim();
+    let rows: Vec<&panel::agents::AgentPanel> = snap
+        .agents
+        .iter()
+        .filter(|a| agent.is_empty() || a.name == agent)
+        .collect();
+    if rows.is_empty() {
+        return "<p>агентов нет</p>".to_string();
+    }
+    // Лидер по скорости — нормируем полосу (виджет, а не таблица).
+    let max_speed = rows
+        .iter()
+        .map(|a| a.speed_loc_per_hour)
+        .fold(0.0f64, |acc, v| acc.max(v));
+    let mut out = String::from("<div class=\"cards\">");
+    for a in rows {
         let presence = match a.presence_age_secs {
             Some(sec) if sec < 600 => "активен".to_string(),
             Some(sec) => format!("{} назад", age(sec)),
             None => "—".to_string(),
         };
+        let share = if max_speed > 0.0 {
+            (a.speed_loc_per_hour / max_speed * 100.0).clamp(0.0, 100.0)
+        } else {
+            0.0
+        };
+        let mut badges = String::new();
+        badges.push_str(&format!("<span class=\"badge\">{}</span>", esc(&a.role)));
+        if !a.model.is_empty() {
+            badges.push_str(&format!(
+                "<span class=\"badge model\">{}</span>",
+                esc(&a.model)
+            ));
+        }
+        if let Some(c) = a.ceiling {
+            badges.push_str(&format!("<span class=\"badge c\">C{c}</span>"));
+        }
+        if a.active > 0 {
+            badges.push_str(&format!(
+                "<span class=\"badge ok\">в работе: {}</span>",
+                a.active
+            ));
+        }
+        if a.queued > 0 {
+            badges.push_str(&format!(
+                "<span class=\"badge warn\">очередь: {}</span>",
+                a.queued
+            ));
+        }
+        if let Some(f) = a.last_fail {
+            if f >= 3 {
+                badges.push_str(&format!("<span class=\"badge bad\">F{f}</span>"));
+            }
+        }
+        if a.dirty {
+            badges.push_str("<span class=\"badge warn\">грязный worktree</span>");
+        }
+        if a.pending_welcome {
+            badges.push_str("<span class=\"badge\">ждёт онбординга</span>");
+        }
+        if let Some(s) = &a.suspicion {
+            badges.push_str(&format!("<span class=\"badge bad\">{}</span>", esc(s)));
+        }
         out.push_str(&format!(
-            "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{:.1}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+            "<div class=\"card agent\"><div class=\"agent-head\"><b>{}</b><span class=\"sub\">{}</span></div><div class=\"badges\">{}</div><div class=\"bar\" title=\"скорость {speed:.1} LOC/ч\"><i style=\"width:{share:.0}%\"></i></div><div class=\"agent-meta\"><span>LOC/ч: {speed:.1}</span><span>взвеш. LOC: {loc}</span><span>мин/7д: {min}</span><span>done/7д: {done}</span><span>присутствие: {pres}</span></div><div class=\"agent-meta sub\"><span>ветка: {branch}</span><span>merge: {merge}</span></div></div>",
             esc(&a.name),
-            esc(&a.role),
-            esc(&a.model),
-            esc(&a.runtime),
-            a.ceiling.map(|c| c.to_string()).unwrap_or_else(|| "—".into()),
-            a.active,
-            a.queued,
-            a.done_7d,
-            a.loc_pending,
-            a.minutes_7d,
-            a.speed_loc_per_hour,
             esc(&presence),
-            esc(a.branch.as_deref().unwrap_or("—")),
-            esc(a.merge_state.as_deref().unwrap_or("—"))
+            badges,
+            speed = a.speed_loc_per_hour,
+            share = share,
+            loc = a.loc_pending,
+            min = a.minutes_7d,
+            done = a.done_7d,
+            pres = esc(&presence),
+            branch = esc(a.branch.as_deref().unwrap_or("—")),
+            merge = esc(a.merge_state.as_deref().unwrap_or("—"))
         ));
     }
-    out.push_str("</tbody></table>");
+    out.push_str("</div>");
     out
 }
 
+/// Фильтр задач: поиск по тексту + один агент.
+fn filter_tasks(
+    rows: &[panel::tasks::TaskPanel],
+    q: &str,
+    agent: &str,
+) -> Vec<panel::tasks::TaskPanel> {
+    let needle = q.trim().to_lowercase();
+    let agent = agent.trim();
+    rows.iter()
+        .filter(|t| {
+            if !agent.is_empty() && t.agent != agent {
+                return false;
+            }
+            if needle.is_empty() {
+                return true;
+            }
+            let hay = format!("{} {} {} {}", t.id, t.title, t.agent, t.feature).to_lowercase();
+            hay.contains(&needle)
+        })
+        .cloned()
+        .collect()
+}
+
 /// Что работается сейчас: активные задачи + WIP-ветки + грязные worktree.
-fn active_html(snap: &PanelSnapshot) -> String {
-    let mut out = task_table(&snap.active_tasks, true);
+fn active_html(snap: &PanelSnapshot, q: &str, agent: &str) -> String {
+    let mut out = task_table(&filter_tasks(&snap.active_tasks, q, agent), true);
     out.push_str("<h3>WIP-ветки (несохранённая работа)</h3><table><thead><tr><th>ветка</th><th>агент</th><th>ahead</th><th>последний коммит</th></tr></thead><tbody>");
     for b in &snap.git.wip_branches {
         out.push_str(&format!(
@@ -515,9 +735,9 @@ fn active_html(snap: &PanelSnapshot) -> String {
 }
 
 /// Очередь решений: кто решает и что блокирует.
-fn queue_html(snap: &PanelSnapshot) -> String {
+fn queue_html(snap: &PanelSnapshot, q: &str, agent: &str) -> String {
     let mut out = String::from("<table><thead><tr><th>ID</th><th>P</th><th>C</th><th>решает</th><th>агент</th><th>задача</th><th>ждёт</th><th>блокеры</th></tr></thead><tbody>");
-    for t in &snap.queue {
+    for t in &filter_tasks(&snap.queue, q, agent) {
         let blockers = if t.blocked_by.is_empty() {
             "—".to_string()
         } else {
@@ -540,9 +760,9 @@ fn queue_html(snap: &PanelSnapshot) -> String {
 }
 
 /// Выполненные задачи (последние N).
-fn done_html(snap: &PanelSnapshot) -> String {
+fn done_html(snap: &PanelSnapshot, q: &str, agent: &str) -> String {
     let mut out = String::from("<table><thead><tr><th>ID</th><th>агент</th><th>задача</th><th>F</th><th>длит.</th><th>commit</th><th>в main</th></tr></thead><tbody>");
-    for t in &snap.done_recent {
+    for t in &filter_tasks(&snap.done_recent, q, agent) {
         out.push_str(&format!(
             "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
             esc(&t.id),
@@ -619,9 +839,20 @@ fn task_table(tasks: &[panel::tasks::TaskPanel], with_agent: bool) -> String {
 }
 
 /// Рабочие фичи.
-fn features_html(snap: &PanelSnapshot) -> String {
+fn features_html(snap: &PanelSnapshot, q: &str, agent: &str) -> String {
+    let needle = q.trim().to_lowercase();
+    let agent = agent.trim();
     let mut out = String::from("<table><thead><tr><th>фича</th><th>состояние</th><th>в работе</th><th>в очереди</th><th>выполнено</th><th>агенты</th><th>задачи</th></tr></thead><tbody>");
     for f in &snap.features {
+        if !agent.is_empty() && !f.agents.iter().any(|a| a == agent) {
+            continue;
+        }
+        if !needle.is_empty() {
+            let hay = format!("{} {} {}", f.tag, f.title, f.agents.join(" ")).to_lowercase();
+            if !hay.contains(&needle) {
+                continue;
+            }
+        }
         out.push_str(&format!(
             "<tr><td><b>{}</b><div class=\"sub\">{}</div></td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
             esc(&f.tag),
@@ -747,29 +978,43 @@ fn reports_html(snap: &PanelSnapshot) -> String {
 }
 
 /// Скорость агентов (взвешенный LOC, WIP, thinking, токены, эффективность).
-fn speed_html(rows: &[panel::speed::SpeedRow]) -> String {
+fn speed_html(rows: &[panel::speed::SpeedRow], agent: &str) -> String {
+    let agent = agent.trim();
+    let rows: Vec<&panel::speed::SpeedRow> = rows
+        .iter()
+        .filter(|r| agent.is_empty() || r.agent == agent)
+        .collect();
     if rows.is_empty() {
         return "<p>данных о скорости пока нет (нужна идентификация модели и коммиты)</p>"
             .to_string();
     }
-    let mut out = String::from("<table><thead><tr><th>агент</th><th>модель</th><th>LOC</th><th>WIP</th><th>взвеш. LOC</th><th>thinking</th><th>токены</th><th>мин</th><th>LOC/ч</th><th>эффективность</th><th>доля размышлений</th></tr></thead><tbody>");
+    // Полоса-«спарклайн»: вклад агента в общий взвешенный LOC.
+    let max = rows
+        .iter()
+        .map(|r| r.weighted_loc)
+        .fold(0.0f64, |acc, v| acc.max(v));
+    let mut out = String::from("<div class=\"cards\">");
     for r in rows {
+        let share = if max > 0.0 {
+            (r.weighted_loc / max * 100.0).clamp(0.0, 100.0)
+        } else {
+            0.0
+        };
+        let think = (r.thinking_share * 100.0).clamp(0.0, 100.0);
         out.push_str(&format!(
-            "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{:.1}</td><td>{}</td><td>{}</td><td>{}</td><td>{:.1}</td><td>{:.2}</td><td>{:.0}%</td></tr>",
+            "<div class=\"card agent\"><div class=\"agent-head\"><b>{}</b><span class=\"sub\">{}</span></div><div class=\"bar\" title=\"взвешенный LOC {w:.1}\"><i style=\"width:{share:.0}%\"></i></div><div class=\"agent-meta\"><span>LOC/ч: {sph:.1}</span><span>взвеш. LOC: {w:.1}</span><span>WIP: {wip}</span><span>токены: {tok}</span><span>эффективность: {eff:.2}</span></div><div class=\"bar think\" title=\"доля размышлений {think:.0}%\"><i style=\"width:{think:.0}%\"></i></div></div>",
             esc(&r.agent),
             esc(if r.model.is_empty() { "—" } else { &r.model }),
-            r.loc,
-            r.wip_loc,
-            r.weighted_loc,
-            r.thinking,
-            r.total_tokens,
-            r.work_minutes,
-            r.speed_per_hour,
-            r.efficiency,
-            r.thinking_share * 100.0
+            share = share,
+            sph = r.speed_per_hour,
+            w = r.weighted_loc,
+            wip = r.wip_loc,
+            tok = r.total_tokens,
+            eff = r.efficiency,
+            think = think
         ));
     }
-    out.push_str("</tbody></table>");
+    out.push_str("</div>");
     out
 }
 
@@ -1258,6 +1503,62 @@ mod tests {
         );
         assert!(html.contains("hx-ext=\"sse\""), "расширение подключено");
         assert!(html.contains("/static/sse.js"), "вендорённое расширение");
+    }
+
+    #[test]
+    fn page_has_shell_sidebar_and_topbar() {
+        let snap = PanelSnapshot::default();
+        let html = page_html(&snap, "");
+        assert!(html.contains("class=\"sidebar\""), "нужен сайдбар");
+        assert!(html.contains("class=\"topbar\""), "нужна верхняя панель");
+        assert!(html.contains("class=\"search\""), "нужен поиск");
+        assert!(html.contains("class=\"agent-pick\""), "нужен выбор агента");
+        assert!(html.contains("id=\"live-dot\""), "нужен индикатор live");
+        assert!(html.contains("id=\"content\""), "нужна область контента");
+        assert!(
+            html.contains("sse-connect=\"/panel/events\""),
+            "источник SSE"
+        );
+    }
+
+    #[test]
+    fn active_section_reads_url_and_falls_back() {
+        assert_eq!(active_section("section=queue"), "queue");
+        assert_eq!(active_section(""), "summary");
+        assert_eq!(active_section("section=нет-такого"), "summary");
+    }
+
+    #[test]
+    fn section_and_page_urls_keep_filters() {
+        assert_eq!(section_url("queue", "", ""), "/panel/queue");
+        assert_eq!(
+            section_url("queue", "ПУ", "minimax"),
+            "/panel/queue?q=%D0%9F%D0%A3&agent=minimax"
+        );
+        assert_eq!(page_url("chat", "", ""), "/?section=chat");
+        assert!(page_url("chat", "a b", "x").contains("q=a%20b"));
+    }
+
+    #[test]
+    fn filters_tasks_by_text_and_agent() {
+        let rows = vec![
+            panel::tasks::TaskPanel {
+                id: "T-1".into(),
+                title: "починить панель".into(),
+                agent: "minimax".into(),
+                ..Default::default()
+            },
+            panel::tasks::TaskPanel {
+                id: "T-2".into(),
+                title: "другая задача".into(),
+                agent: "beam".into(),
+                ..Default::default()
+            },
+        ];
+        assert_eq!(filter_tasks(&rows, "", "").len(), 2);
+        assert_eq!(filter_tasks(&rows, "панель", "").len(), 1);
+        assert_eq!(filter_tasks(&rows, "", "beam").len(), 1);
+        assert_eq!(filter_tasks(&rows, "T-2", "minimax").len(), 0);
     }
 
     #[test]
