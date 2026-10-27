@@ -2555,6 +2555,8 @@ fn section00h_native_mutate_blocks_succeeded_mutant() {
 #[test]
 fn section00e_native_mutate_supervisor_end_to_end() {
     let sb = MutateSandbox::new("e2e");
+    // Create a dummy .rs file for scope
+    fs::write(sb.root.join("dummy.rs"), "fn dummy() {}").unwrap();
     let (rc, out) = sb.run_env(
         &[
             "mutate",
@@ -2562,6 +2564,7 @@ fn section00e_native_mutate_supervisor_end_to_end() {
             "--",
             "--config",
             "devharness/cargo-mutants.toml",
+            "dummy.rs",
         ],
         &[
             ("STUB_CAUGHT", "4"),
@@ -2614,6 +2617,8 @@ fn section00e_native_mutate_supervisor_end_to_end() {
 #[test]
 fn section00f_native_mutate_stop_is_event_driven() {
     let sb = MutateSandbox::new("stop");
+    // Create a dummy .rs file for scope
+    fs::write(sb.root.join("dummy.rs"), "fn dummy() {}").unwrap();
     let (rc, out) = sb.run_env(
         &[
             "mutate",
@@ -2621,6 +2626,7 @@ fn section00f_native_mutate_stop_is_event_driven() {
             "--",
             "--config",
             "devharness/cargo-mutants.toml",
+            "dummy.rs",
         ],
         &[("STUB_CAUGHT", "1"), ("STUB_SLEEP", "60")],
     );
