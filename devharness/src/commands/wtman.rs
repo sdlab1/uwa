@@ -876,6 +876,9 @@ pub fn sync(cfg: &RunConfig, root: &Path, agent: &str) -> anyhow::Result<SyncRep
     let ok = out.as_ref().map(|o| o.status.success()).unwrap_or(false);
     if !ok {
         let _ = git_ok(&path, &["rebase", "--abort"]);
+        // T-614: rebase --abort может оставить изменения из upstream в рабочем
+        // дереве (unstaged) — принудительно чистим до HEAD.
+        let _ = git_ok(&path, &["reset", "--hard", "HEAD"]);
         let err = out
             .as_ref()
             .map(|o| String::from_utf8_lossy(&o.stderr).to_string())
