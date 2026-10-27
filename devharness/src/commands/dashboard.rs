@@ -11,7 +11,7 @@
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Модуль данных панели живёт в `core/panel/`, но подключается отсюда:
 /// `core/mod.rs` находится вне зон задачи T-571, лишней правки не делаем.
@@ -118,43 +118,162 @@ fn serve(root: &PathBuf, addr: &str, port: u16) -> i32 {
     0
 }
 
-/// Обработать один HTTP-запрос.
-fn handle(mut stream: TcpStream, root: &PathBuf) -> std::io::Result<()> {
-    let mut buf = [0u8; 16_384];
-    let n = stream.read(&mut buf)?;
-    let request = String::from_utf8_lossy(&buf[..n]).to_string();
-    let mut parts = request.split_whitespace();
-    let _method = parts.next().unwrap_or("GET");
-    let target = parts.next().unwrap_or("/");
+/// Разобранный HTTP-запрос.
+struct HttpRequest {
+    method: String,
+    path: String,
+    query: String,
+    body: String,
+    /// Тело больше лимита — запрос отклоняем.
+    too_large: bool,
+}
+
+/// Найти подстроку в байтах.
+fn find_bytes(hay: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || hay.len() < needle.len() {
+        return None;
+    }
+    hay.windows(needle.len()).position(|w| w == needle)
+}
+
+/// Прочитать запрос: заголовки + тело (POST).
+fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<HttpRequest>> {
+    let mut buf: Vec<u8> = Vec::with_capacity(8192);
+    let mut chunk = [0u8; 4096];
+    let header_end = loop {
+        let n = stream.read(&mut chunk)?;
+        if n == 0 {
+            break None;
+        }
+        buf.extend_from_slice(&chunk[..n]);
+        if let Some(p) = find_bytes(&buf, b"\r\n\r\n") {
+            break Some(p + 4);
+        }
+        if buf.len() > 32 * 1024 {
+            break None;
+        }
+    };
+    let Some(header_end) = header_end else {
+        return Ok(None);
+    };
+    let head = String::from_utf8_lossy(&buf[..header_end]).to_string();
+    let mut lines = head.lines();
+    let Some(request_line) = lines.next() else {
+        return Ok(None);
+    };
+    let mut parts = request_line.split_whitespace();
+    let method = parts.next().unwrap_or("GET").to_string();
+    let target = parts.next().unwrap_or("/").to_string();
     let (path, query) = match target.split_once('?') {
         Some((p, q)) => (p.to_string(), q.to_string()),
-        None => (target.to_string(), String::new()),
+        None => (target.clone(), String::new()),
     };
+    let mut content_length = 0usize;
+    for line in lines {
+        let Some((k, v)) = line.split_once(':') else {
+            continue;
+        };
+        if k.trim().eq_ignore_ascii_case("content-length") {
+            content_length = v.trim().parse().unwrap_or(0);
+        }
+    }
+    let too_large = content_length > panel::chat::MAX_BODY_BYTES;
+    let mut body_bytes: Vec<u8> = buf.get(header_end..).unwrap_or_default().to_vec();
+    while body_bytes.len() < content_length {
+        let n = stream.read(&mut chunk)?;
+        if n == 0 {
+            break;
+        }
+        body_bytes.extend_from_slice(&chunk[..n]);
+    }
+    let take = content_length.min(body_bytes.len());
+    let body = String::from_utf8_lossy(body_bytes.get(..take).unwrap_or_default()).to_string();
+    Ok(Some(HttpRequest {
+        method,
+        path,
+        query,
+        body,
+        too_large,
+    }))
+}
 
-    let (status, content_type, body) = match path.as_str() {
-        "/" => {
-            let snap = panel::collect(root);
+/// Обработать один HTTP-запрос.
+fn handle(mut stream: TcpStream, root: &PathBuf) -> std::io::Result<()> {
+    let Some(req) = read_request(&mut stream)? else {
+        let response = format!(
+            "HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 11\r\nCache-Control: no-store\r\nConnection: close\r\n\r\nплохой запрос\n"
+        );
+        stream.write_all(response.as_bytes())?;
+        return stream.flush();
+    };
+    let mut extra = String::new();
+    let (status, content_type, body) = if req.method == "POST" && req.path == "/panel/chat/send" {
+        // Write-контур чата (T-631): отправка каноническим `devh msg send`.
+        if req.too_large {
             (
                 "200 OK",
                 "text/html; charset=utf-8",
-                page_html(&snap, &query),
+                chat_status_html("bad", "сообщение слишком велико (максимум 64 КБ)"),
             )
-        }
-        "/static/htmx.min.js" => ("200 OK", "application/javascript; charset=utf-8", HTMX_JS.to_string()),
-        "/healthz" => ("200 OK", "text/plain; charset=utf-8", "ok\n".to_string()),
-        p if p.starts_with("/panel/") => {
-            let section = p.trim_start_matches("/panel/").to_string();
-            let snap = panel::collect(root);
-            match fragment(&section, &snap, &query) {
-                Some(html) => ("200 OK", "text/html; charset=utf-8", html),
-                None => ("404 Not Found", "text/plain; charset=utf-8", "нет такого раздела\n".to_string()),
+        } else {
+            let composer = panel::chat::parse_form(&req.body);
+            match panel::chat::send_letter(root, &composer) {
+                Ok(rep) => {
+                    // После отправки обновляем раздел «Чат» (новое письмо сразу видно).
+                    extra = "HX-Trigger: chatRefresh\r\n".to_string();
+                    ("200 OK", "text/html; charset=utf-8", chat_sent_html(&rep))
+                }
+                Err(e) => (
+                    "200 OK",
+                    "text/html; charset=utf-8",
+                    chat_status_html("bad", &format!("Не отправлено: {e}")),
+                ),
             }
         }
-        _ => ("404 Not Found", "text/plain; charset=utf-8", "нет такого пути\n".to_string()),
+    } else if req.method == "GET" || req.method == "HEAD" {
+        match req.path.as_str() {
+            "/" => {
+                let snap = panel::collect(root);
+                (
+                    "200 OK",
+                    "text/html; charset=utf-8",
+                    page_html(&snap, &req.query),
+                )
+            }
+            "/static/htmx.min.js" => (
+                "200 OK",
+                "application/javascript; charset=utf-8",
+                HTMX_JS.to_string(),
+            ),
+            "/healthz" => ("200 OK", "text/plain; charset=utf-8", "ok\n".to_string()),
+            p if p.starts_with("/panel/") => {
+                let section = p.trim_start_matches("/panel/").to_string();
+                let snap = panel::collect(root);
+                match fragment(&section, &snap, &req.query) {
+                    Some(html) => ("200 OK", "text/html; charset=utf-8", html),
+                    None => (
+                        "404 Not Found",
+                        "text/plain; charset=utf-8",
+                        "нет такого раздела\n".to_string(),
+                    ),
+                }
+            }
+            _ => (
+                "404 Not Found",
+                "text/plain; charset=utf-8",
+                "нет такого пути\n".to_string(),
+            ),
+        }
+    } else {
+        (
+            "405 Method Not Allowed",
+            "text/plain; charset=utf-8",
+            "метод не поддерживается\n".to_string(),
+        )
     };
 
     let response = format!(
-        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n{body}",
+        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n{extra}\r\n{body}",
         body.as_bytes().len()
     );
     stream.write_all(response.as_bytes())?;
@@ -183,7 +302,7 @@ pub fn fragment(section: &str, snap: &PanelSnapshot, query: &str) -> Option<Stri
             }
             speed_html(&rows)
         }
-        "chat" => chat_html(query),
+        "chat" => chat_html(Path::new(&snap.root), query),
         "chat/older" => chat_older_html(query),
         "ledger" => ledger_html(snap),
         "dangling" => dangling_html(snap),
@@ -206,8 +325,14 @@ pub fn page_html(snap: &PanelSnapshot, query: &str) -> String {
         esc(&stamp(snap.generated_at))
     ));
     for (route, title) in SECTIONS {
+        // Чат после отправки письма обновляется событием (write-контур, T-631).
+        let trigger = if *route == "chat" {
+            "load, every 5s, chatRefresh from:body"
+        } else {
+            "load, every 5s"
+        };
         out.push_str(&format!(
-            "<section class=\"card\" id=\"sec-{route}\" hx-get=\"/panel/{route}\" hx-trigger=\"load, every 5s\" hx-swap=\"innerHTML\"><h2>{}</h2><div class=\"body\">загрузка…</div></section>",
+            "<section class=\"card\" id=\"sec-{route}\" hx-get=\"/panel/{route}\" hx-trigger=\"{trigger}\" hx-swap=\"innerHTML\"><h2>{}</h2><div class=\"body\">загрузка…</div></section>",
             esc(title)
         ));
     }
@@ -377,7 +502,11 @@ fn task_table(tasks: &[panel::tasks::TaskPanel], with_agent: bool) -> String {
         out.push_str("</td><td>P");
         out.push_str(&t.priority.to_string());
         out.push_str("</td><td>");
-        out.push_str(&t.c_level.map(|c| c.to_string()).unwrap_or_else(|| "—".into()));
+        out.push_str(
+            &t.c_level
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "—".into()),
+        );
         out.push_str("</td><td>");
         out.push_str(&esc(&t.status));
         out.push_str("</td>");
@@ -531,7 +660,8 @@ fn reports_html(snap: &PanelSnapshot) -> String {
 /// Скорость агентов (взвешенный LOC, WIP, thinking, токены, эффективность).
 fn speed_html(rows: &[panel::speed::SpeedRow]) -> String {
     if rows.is_empty() {
-        return "<p>данных о скорости пока нет (нужна идентификация модели и коммиты)</p>".to_string();
+        return "<p>данных о скорости пока нет (нужна идентификация модели и коммиты)</p>"
+            .to_string();
     }
     let mut out = String::from("<table><thead><tr><th>агент</th><th>модель</th><th>LOC</th><th>WIP</th><th>взвеш. LOC</th><th>thinking</th><th>токены</th><th>мин</th><th>LOC/ч</th><th>эффективность</th><th>доля размышлений</th></tr></thead><tbody>");
     for r in rows {
@@ -592,12 +722,11 @@ fn dangling_html(snap: &PanelSnapshot) -> String {
     out
 }
 
-
 /// Чат: список тредов (слева) + окно последних сообщений (справа).
 ///
 /// Окно — последние 20 сообщений снизу; история подгружается порциями
 /// по 20 («показать ещё 20»), чтение лога треда идёт с конца файла.
-fn chat_html(query: &str) -> String {
+fn chat_html(root: &Path, query: &str) -> String {
     let rows = panel::chat::threads();
     let selected = query_value(query, "thread").or_else(panel::chat::latest_thread);
     let limit = panel::chat::WINDOW_DEFAULT;
@@ -627,7 +756,15 @@ fn chat_html(query: &str) -> String {
 .msg-tags{border:1px solid #444;border-radius:4px;padding:0 4px}.msg-subject{font-weight:600;margin-top:2px}\
 .msg-place{font-size:12px;opacity:.7;font-family:monospace}.msg-body{word-wrap:break-word;margin-top:4px}\
 .chat-more{margin:6px 0;padding:6px 10px}.chat-hint{font-size:12px;opacity:.6;padding-top:6px}.chat-empty{opacity:.6}\
-</style>");    out.push_str("<div class=\"chat\">");
+.chat-compose{margin-top:10px;border-top:1px solid #333;padding-top:8px;display:flex;flex-direction:column;gap:6px}\
+.chat-compose-title{font-weight:600;font-size:13px}.chat-compose-row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}\
+.chat-compose input,.chat-compose textarea{background:#111;border:1px solid #333;border-radius:6px;color:inherit;padding:5px 7px;font:inherit}\
+.chat-compose input{min-width:140px}.chat-compose textarea{width:100%;resize:vertical}\
+.chat-compose label{font-size:12px;opacity:.8;display:flex;flex-direction:column;gap:2px}\
+.chat-compose button{padding:6px 14px;border-radius:6px;cursor:pointer}\
+.chat-status{font-size:12px}.chat-status.ok{color:#7ee787}.chat-status.bad{color:#ff7b72}\
+</style>");
+    out.push_str("<div class=\"chat\">");
     // --- список тредов ---
     out.push_str("<aside class=\"chat-list\"><div class=\"chat-list-title\">Треды");
     out.push_str(&format!(" ({})</div>", rows.len()));
@@ -671,10 +808,56 @@ fn chat_html(query: &str) -> String {
             out.push_str(&chat_more_html(id, limit, before, win.has_more));
         }
     }
-    out.push_str("<div class=\"chat-hint\">Чат пока только для чтения: отправка писем из панели — задача T-631 (через канонический devh msg send).</div>");
+    // ── композер (write-контур, T-631) ──
+    match panel::chat::write_gate(root) {
+        panel::chat::WriteGate::Disabled => out.push_str(
+            "<div class=\"chat-hint\">Панель read-only: отправка писем выключена (PANEL_WRITE=0). Включение — PANEL_WRITE=1 + токен оператора (PANEL_TOKEN / PANEL_TOKEN_FILE) в .harness/config.</div>",
+        ),
+        panel::chat::WriteGate::NoToken => out.push_str(
+            "<div class=\"chat-hint\">Панель read-only: PANEL_WRITE=1, но токен оператора не задан (PANEL_TOKEN / PANEL_TOKEN_FILE).</div>",
+        ),
+        panel::chat::WriteGate::Enabled => {
+            let me = panel::chat::sender_identity(root);
+            let who = if me.is_empty() { "оператор".to_string() } else { me };
+            out.push_str("<form class=\"chat-compose\" hx-post=\"/panel/chat/send\" hx-target=\"#chat-status\" hx-swap=\"innerHTML\">");
+            out.push_str(&format!(
+                "<div class=\"chat-compose-title\">Отправить письмо — канонический <code>devh msg send</code> · подпишется: <b>{}</b></div>",
+                esc(&who)
+            ));
+            out.push_str("<div class=\"chat-compose-row\"><label>Кому<input name=\"to\" placeholder=\"агент или all\" value=\"\"></label><label>Тема<input name=\"subject\" placeholder=\"тема письма\"></label></div>");
+            out.push_str(&format!(
+                "<div class=\"chat-compose-row\"><label>Тред<input name=\"thread\" value=\"{}\"></label><label>Токен<input type=\"password\" name=\"token\" autocomplete=\"off\"></label></div>",
+                esc(selected.as_deref().unwrap_or_default())
+            ));
+            out.push_str("<textarea name=\"body\" rows=\"3\" placeholder=\"текст письма\"></textarea>");
+            out.push_str("<div class=\"chat-compose-row\"><button type=\"submit\">Отправить</button><span id=\"chat-status\" class=\"chat-status\"></span></div>");
+            out.push_str("</form>");
+        }
+    }
     out.push_str("</section></div>");
     out.push_str("<script>(function(){document.querySelectorAll('.chat-window').forEach(function(e){e.scrollTop=e.scrollHeight;});})();</script>");
     out
+}
+
+/// Статус операции отправки (фрагмент для hx-swap).
+fn chat_status_html(cls: &str, text: &str) -> String {
+    format!("<div class=\"chat-status {cls}\">{}</div>", esc(text))
+}
+
+/// Ответ об успешной отправке.
+fn chat_sent_html(rep: &panel::chat::SendReport) -> String {
+    let sender = if rep.sender.is_empty() {
+        "оператор"
+    } else {
+        rep.sender.as_str()
+    };
+    format!(
+        "<div class=\"chat-status ok\">Отправлено: <b>ID {}</b> · тред <code>{}</code> · получатели: {} · отправитель: {}</div>",
+        esc(&rep.id),
+        esc(&rep.thread),
+        esc(&rep.recipients),
+        esc(sender)
+    )
 }
 
 /// Карточка письма.
@@ -709,10 +892,7 @@ fn chat_message_html(m: &panel::chat::ChatMessage) -> String {
         ));
     }
     if let Some(p) = &m.place {
-        out.push_str(&format!(
-            "<div class=\"msg-place\">{}</div>",
-            esc(p)
-        ));
+        out.push_str(&format!("<div class=\"msg-place\">{}</div>", esc(p)));
     }
     out.push_str(&format!(
         "<div class=\"msg-body\">{}</div>",
@@ -850,7 +1030,10 @@ mod tests {
     fn fragment_routes_resolve() {
         let snap = PanelSnapshot::default();
         for (route, _) in SECTIONS {
-            assert!(fragment(route, &snap, "").is_some(), "нет фрагмента {route}");
+            assert!(
+                fragment(route, &snap, "").is_some(),
+                "нет фрагмента {route}"
+            );
         }
         assert!(fragment("нет-такого", &snap, "").is_none());
     }
@@ -873,8 +1056,44 @@ mod tests {
     }
 
     #[test]
+    fn chat_is_read_only_by_default() {
+        let root = std::env::temp_dir().join(format!("devh-panel-ro-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(".harness")).unwrap();
+        std::fs::write(root.join(".harness/config"), "PANEL_WRITE=0\n").unwrap();
+        let html = chat_html(root.as_path(), "");
+        assert!(html.contains("read-only"), "панель должна быть read-only");
+        assert!(
+            !html.contains("hx-post=\"/panel/chat/send\""),
+            "композера быть не должно"
+        );
+    }
+
+    #[test]
+    fn chat_shows_composer_when_write_enabled() {
+        let root = std::env::temp_dir().join(format!("devh-panel-rw-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(".harness")).unwrap();
+        std::fs::write(
+            root.join(".harness/config"),
+            "PANEL_WRITE=1\nPANEL_TOKEN=секрет\n",
+        )
+        .unwrap();
+        let html = chat_html(root.as_path(), "");
+        assert!(
+            html.contains("hx-post=\"/panel/chat/send\""),
+            "композер должен быть"
+        );
+        assert!(html.contains("name=\"token\""), "поле токена должно быть");
+        assert!(!html.contains("секрет"), "токен в HTML не светится");
+    }
+
+    #[test]
     fn query_values_decoded() {
-        assert_eq!(query_value("file=docs%2Fplan.md", "file").as_deref(), Some("docs/plan.md"));
+        assert_eq!(
+            query_value("file=docs%2Fplan.md", "file").as_deref(),
+            Some("docs/plan.md")
+        );
         assert!(query_value("", "file").is_none());
     }
 }
