@@ -5,7 +5,7 @@
 //! командой `devh orch identify --reply "MODEL: ..." ...`; ответ ложится в
 //! состояние (`.harness/orch/identify.json`) и ЖИВЁТ РОВНО ДО ОДНОЙ выдачи:
 //! после успешного `devh orch start` ответ помечается израсходованным, и
-//! следующая выдача требует НОВОГО ответа (fail-closed).
+//! следующая выдача требует НОВОГО ответа (модельная идентификация ОТЛОЖЕНА).
 //!
 //! Язык вопроса: английский — по умолчанию; китайский — если известная
 //! модель агента принадлежит китайскому семейству (Qwen/DeepSeek/GLM/Kimi/…).
@@ -74,7 +74,7 @@ Reply command (run it yourself, exactly as written):
 
   devh orch identify --reply \"MODEL: <name>\" --reply \"VERSION: <version>\" --reply \"DATE: <YYYY-MM-DD>\"
 
-The task is NOT assigned until this answer is received (fail-closed).";
+The task is already assigned to you; please answer now so your model quality is attributed correctly.";
 
 const QUESTION_ZH: &str = "\
 停。最高优先级。先回答这个问题，再做任何其他事情。
@@ -98,7 +98,7 @@ DATE: <当前日期，YYYY-MM-DD>
 
   devh orch identify --reply \"MODEL: <名称>\" --reply \"VERSION: <版本>\" --reply \"DATE: <YYYY-MM-DD>\"
 
-在收到回答之前不会发放任务（fail-closed）。";
+任务已经分配给你了；请立即回答，以便正确统计你的模型质量。";
 
 /// Текст вопроса для языка.
 pub fn question_text(lang: Lang) -> &'static str {
@@ -818,5 +818,30 @@ mod tests {
         assert_eq!(task.agent, "tech", "задача ушла техлиду");
         assert!(task.title.contains("beam"), "заголовок должен содержать 'beam'");
         let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Вопрос идентификации не обещает блокировку задачи (R24 / T-648).
+    /// Текст должен говорить об отложенной модельной идентификации,
+    /// а не о fail-closed.
+    #[test]
+    fn identify_question_does_not_promise_blocking() {
+        let en = question_text(Lang::En);
+        assert!(
+            !en.contains("fail-closed"),
+            "английский вопрос не должен обещать fail-closed"
+        );
+        assert!(
+            en.contains("model quality") || en.contains("коррект"),
+            "английский вопрос должен объяснять цель — учёт качества модели"
+        );
+        let zh = question_text(Lang::Zh);
+        assert!(
+            !zh.contains("fail-closed"),
+            "китайский вопрос не должен обещать fail-closed"
+        );
+        assert!(
+            !zh.contains("不会发放任务"),
+            "китайский вопрос не должен говорить, что задача не выдаётся"
+        );
     }
 }
