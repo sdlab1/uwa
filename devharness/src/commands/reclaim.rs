@@ -292,6 +292,14 @@ fn find_worktree_candidate(
     ))
 }
 
+/// Стабильный маркер спасённой работы: `reclaim:<ветка>@<sha>`.
+///
+/// Маркер НЕ содержит времени — по нему повторный прогон не плодит задачи
+/// (идемпотентность полного цикла, T-645).
+pub fn reclaim_marker(branch: &str, sha: &str) -> String {
+    format!("reclaim:{branch}@{}", short_sha(sha))
+}
+
 /// T-ID из текста сообщения коммита (`wip: beam T-123 7 файлов` → `T-123`).
 fn task_ref_from_msg(msg: &str) -> Option<String> {
     msg.split_whitespace().find_map(|w| {
@@ -519,7 +527,10 @@ fn cmd_redistribute(root: &Path, apply: bool) -> anyhow::Result<()> {
     let mut reg = orch::load(root);
     let branches: Vec<String> = git_out(root, &["branch", "--list", "devh/reclaim-*"])
         .lines()
-        .map(|l| l.trim().trim_start_matches('*').trim().to_string())
+        // '*' — текущая ветка, '+' — ветка ЗАНЯТА в другом worktree (salvage
+        // переключает покинутое дерево на rescue-ветку). Без снятия '+' имя
+        // ветки не парсилось → задача не создавалась (T-645).
+        .map(|l| l.trim().trim_start_matches(|c| c == '*' || c == '+').trim().to_string())
         .filter(|l| !l.is_empty())
         .collect();
     let mut created = 0usize;
@@ -530,7 +541,7 @@ fn cmd_redistribute(root: &Path, apply: bool) -> anyhow::Result<()> {
             continue;
         };
         let sha = rev_parse(root, &branch)?;
-        let marker = format!("reclaim:{branch}@{}", short_sha(&sha));
+        let marker = reclaim_marker(&branch, &sha);
         // Дедуп по rescue-имени: повторный прогон не плодит задачи.
         if reg.tasks.iter().any(|t| t.note.contains(&marker)) {
             skipped += 1;
@@ -1036,7 +1047,7 @@ fn cmd_auto(root: &Path, apply: bool) -> anyhow::Result<()> {
     let mut patched = 0usize;
     let mut clean = 0usize;
     let mut failed = 0usize;
-    let mut patch_tasks: Vec<(String, String, Vec<String>)> = Vec::new();
+    let mut patch_tasks: Vec<(String, String, Vec<String>, String)> = Vec::new();
     let mut items: Vec<serde_json::Value> = Vec::new();
     for cand in &cands {
         let Some(agent) = cand.agent.clone() else {
@@ -1063,6 +1074,16 @@ fn cmd_auto(root: &Path, apply: bool) -> anyhow::Result<()> {
                 // Ветку не создать (конфликты/битый индекс) — спасаем патчем.
                 match save_patch(root, &agent, &path) {
                     Ok((patch_path, files)) => {
+                        // Стабильный маркер: ветка + SHA коммита (без времени) —
+                        // повторный прогон не создаёт дубль задачи (T-645).
+                        let branch = git_out(&path, &["rev-parse", "--abbrev-ref", "HEAD"]);
+                        let branch = if branch.trim().is_empty() {
+                            format!("devh/agent-{agent}")
+                        } else {
+                            branch.trim().to_string()
+                        };
+                        let sha = git_out(&path, &["rev-parse", "HEAD"]);
+                        let marker = reclaim_marker(&branch, sha.trim());
                         patched += 1;
                         items.push(serde_json::json!({
                             "agent": agent,
@@ -1076,7 +1097,7 @@ fn cmd_auto(root: &Path, apply: bool) -> anyhow::Result<()> {
                             patch_path,
                             files.len()
                         );
-                        patch_tasks.push((agent, patch_path, files));
+                        patch_tasks.push((agent, patch_path, files, marker));
                     }
                     Err(e2) => {
                         failed += 1;
@@ -1162,7 +1183,7 @@ fn save_patch(root: &Path, agent: &str, wt: &Path) -> anyhow::Result<(String, Ve
 /// Создать incomplete-задачи P2 для спасённых патчей.
 fn create_patch_tasks(
     root: &Path,
-    patch_tasks: &[(String, String, Vec<String>)],
+    patch_tasks: &[(String, String, Vec<String>, String)],
 ) -> anyhow::Result<()> {
     let _lock = crate::shell::lock::OutputLock::try_acquire(
         root,
@@ -1174,9 +1195,8 @@ fn create_patch_tasks(
     })?;
     let mut reg = orch::load(root);
     let mut created = 0usize;
-    for (agent, patch, files) in patch_tasks {
-        let marker = format!("reclaim-patch:{patch}");
-        if reg.tasks.iter().any(|t| t.note.contains(&marker)) {
+    for (agent, patch, files, marker) in patch_tasks {
+        if reg.tasks.iter().any(|t| t.note.contains(marker.as_str())) {
             println!("пропуск (уже есть задача): {agent} ({patch})");
             continue;
         }
@@ -1758,6 +1778,79 @@ mod tests {
             crate::shell::git::show_ref(&root, "devh/reclaim-ghost"),
             "rescue-ветка сохранена после снятия worktree"
         );
+    }
+
+    /// Полный цикл T-645: discover → salvage (rescue-ветка) → re-attach
+    /// (P2, зоны из изменённых путей) → повторный прогон БЕЗ дублей.
+    #[test]
+    fn full_cycle_salvages_abandoned_worktree_and_reattaches_once() {
+        let d = tempfile::tempdir().unwrap();
+        let root = init_repo_committed(d.path());
+        // Покинутый worktree агента (в реестре его нет).
+        let wt = d.path().join("wt-ghost");
+        let wt_s = wt.to_string_lossy().to_string();
+        assert!(
+            git_ok(
+                &root,
+                &["worktree", "add", "-b", "devh/agent-ghost", &wt_s, "HEAD"]
+            ),
+            "worktree не создан"
+        );
+        // Грязная работа в покинутом дереве.
+        std::fs::write(wt.join("ghost.rs"), "fn ghost() {}\n").unwrap();
+        let mut reg = lead_registry();
+        orch::save(&root, &reg).unwrap();
+
+        // 1) discover: покинутое дерево — кандидат.
+        let cands = crate::commands::wtman::discover(&root);
+        let cand = cands
+            .iter()
+            .find(|c| c.path.as_ref().map(|p| p == &wt).unwrap_or(false))
+            .expect("покинутое дерево найдено");
+        assert_eq!(cand.agent.as_deref(), Some("ghost"));
+
+        // 2) salvage: rescue-ветка на том же месте.
+        let sha = crate::commands::wtman::salvage(&root, cand).expect("salvage");
+        assert!(!sha.trim().is_empty(), "rescue-ветка создана");
+        assert!(
+            crate::shell::git::show_ref(&root, "devh/reclaim-ghost"),
+            "ветка devh/reclaim-ghost есть"
+        );
+
+        // 3) re-attach: incomplete-задача P2 с зонами из изменённых путей.
+        cmd_redistribute(&root, true).expect("redistribute");
+        let reg2 = orch::load(&root);
+        let t = reg2
+            .tasks
+            .iter()
+            .find(|t| t.note.contains("reclaim:devh/reclaim-ghost"))
+            .expect("задача создана");
+        assert_eq!(t.status, Status::Queued);
+        assert_eq!(t.complexity, 2, "приоритет P2");
+        assert!(
+            t.zones.iter().any(|z| z.ends_with("ghost.rs")),
+            "зоны = изменённые пути: {:?}",
+            t.zones
+        );
+
+        // 4) повторный прогон — дедуп по маркеру reclaim:<ветка>@<sha>.
+        let n = reg2.tasks.len();
+        cmd_redistribute(&root, true).expect("повторный прогон");
+        assert_eq!(
+            orch::load(&root).tasks.len(),
+            n,
+            "повторный прогон не плодит задачи"
+        );
+    }
+
+    /// Стабильный маркер: без времени — по нему дедуп работает между прогонами.
+    #[test]
+    fn reclaim_marker_is_stable() {
+        let m1 = reclaim_marker("devh/reclaim-ghost", "abcdef1234567890");
+        let m2 = reclaim_marker("devh/reclaim-ghost", "abcdef1234567890");
+        assert_eq!(m1, m2, "маркер детерминирован");
+        assert!(m1.starts_with("reclaim:devh/reclaim-ghost@"), "маркер: {m1}");
+        assert!(!m1.contains(" "), "маркер без пробелов: {m1}");
     }
 
     #[test]
