@@ -1860,6 +1860,17 @@ pub fn send(args: &[String]) -> i32 {
             // Проверка: вызывающий должен быть ведущим (lead).
             let caller = crate::core::identity::current().name;
             let canon_caller = crate::core::identity::canonical(&caller);
+            // T-650: личность ведущего должна быть ПОДТВЕРЖДЕНА (привязка
+            // сессии/слот). Окружение (DEVH_AGENT) — не доказательство: без
+            // этой проверки один env выдавал takeover-авторизации на любое
+            // имя (воспроизведено: DEVH_AGENT=minimax claim-authorize -> rc=0).
+            if !crate::core::identity::identity_proven() {
+                eprintln!(
+                    "devh msg claim-authorize: личность не подтверждена (нужна привязка сессии: \
+                     devh msg claim <имя>) — окружение не доказательство прав (T-650)"
+                );
+                return 1;
+            }
             let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
             // Ищем .harness/orch/registry.json от текущей директории вверх.
             let mut harness_path: Option<PathBuf> = None;
@@ -2914,5 +2925,24 @@ ID: abcd1234\n\
         let inbox = dir.path().join("inbox");
         let entries = std::fs::read_dir(&inbox).map(|d| d.count()).unwrap_or(0);
         assert_eq!(entries, 0, "пустой broadcast не создал писем: {entries}");
+    }
+
+    /// T-650: env-спуф (DEVH_AGENT=minimax) без привязки сессии НЕ является
+    /// подтверждённой личностью — claim-authorize на такой личности запрещён.
+    #[test]
+    fn env_spoof_is_not_proven_identity() {
+        let dir = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let home = dir.path();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        std::env::set_var("DEVH_MSG_HOME", home);
+        std::env::set_var("DEVH_AGENT", "minimax");
+        let unproven = !crate::core::identity::identity_proven();
+        std::env::remove_var("DEVH_AGENT");
+        std::env::remove_var("DEVH_MSG_HOME");
+        drop(_guard);
+        assert!(
+            unproven,
+            "env без привязки не должен считаться доказательством личности"
+        );
     }
 }

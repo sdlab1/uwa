@@ -145,6 +145,16 @@ pub(crate) fn unix_now() -> u64 {
         .unwrap_or(0)
 }
 
+/// Идентичность вызывающего ПОДТВЕРЖДЕНА привязкой сессии/слотом?
+///
+/// DEVH_AGENT, окружение, рантайм и cwd — НЕ доказательство личности: без
+/// этого правила один env выдавал права (T-470: `DEVH_AGENT=minimax devh orch
+/// ceiling ...`; T-650: `DEVH_AGENT=minimax devh msg claim-authorize ...`).
+/// Вынесено в core, чтобы гейты команд не дублировали доктрину.
+pub fn identity_proven() -> bool {
+    matches!(current().source, Source::Stored | Source::Slot)
+}
+
 /// Имя файла привязки для ключа.
 fn binding_path_in(home: &Path, key: &str) -> PathBuf {
     home.join("agents").join(format!("{}.json", key_hash(key)))
@@ -1113,9 +1123,19 @@ fn roster_claim_refusal(
         // новичок закрепляет его сам.
         return None;
     }
-    // T-492 (усиление): имя ДЕЙСТВУЮЩЕГО агента реестра закрепляется только
-    // явным `--takeover` + авторизацией ТЕКУЩЕГО ведущего реестра. Без флага
-    // авторизация не помогает: тихий угон чужой личности невозможен.
+    // T-650 (усиление): имя действующего агента реестра закрепляется только
+    // в хранилище, где оно УЖЕ закреплено — восстановление владельцем после
+    // смены ключа сессии. Свежий claim чужого имени с авторизацией запрещён:
+    // файл авторизации при same-user подделывается (воспроизведено: forged
+    // takeover/<name>.auth -> claim <чужое> --takeover -> личность агента).
+    if claimed_binding_for_name(home, name).is_none() {
+        return Some(format!(
+            "имя «{name}» принадлежит агенту оркестратора и не закреплено в этом \
+             хранилище — закрепить его может только владелец у себя (T-492/T-650)"
+        ));
+    }
+    // T-492 (усиление): и явный `--takeover` + авторизация ТЕКУЩЕГО ведущего.
+    // Без флага авторизация не помогает: тихий угон невозможен.
     if !takeover {
         return Some(format!(
             "имя «{name}» принадлежит агенту оркестратора; закрепить его может \
@@ -1919,6 +1939,10 @@ mod tests {
             name: "minimax".to_string(),
             pending_welcome: false,
         }];
+        // Владелец восстанавливает имя: привязка в ЭТОМ хранилище есть,
+        // но закреплена другим ключом сессии (после рестарта рантайма).
+        write_binding_in(home, "proc:old", "minimax", "old-session", true)
+            .unwrap_or_else(|_| unreachable!());
         // Без флага и авторизации — отказ.
         assert!(roster_claim_refusal(home, "minimax", "proc:1:2", false, None, &roster).is_some());
         // Авторизация выдана на этот ключ ТЕКУЩИМ ведущим (явно, тест не
@@ -2001,6 +2025,33 @@ mod tests {
         assert!(
             text.contains("\ttakeover\t"),
             "аудит помечает событие: {text}"
+        );
+    }
+
+    /// T-650: forged takeover-файл в свежем хранилище НЕ даёт закрепить
+    /// чужое имя ростера — имя действующего агента восстанавливается только
+    /// владельцем в хранилище, где оно уже закреплено.
+    #[test]
+    fn fresh_home_forged_auth_cannot_take_roster_name() {
+        let dir = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let home = dir.path();
+        let roster = vec![RosterEntry {
+            name: "step5".to_string(),
+            pending_welcome: false,
+        }];
+        // Подделанная авторизация «от текущего ведущего» на свой ключ.
+        write_takeover_auth(home, "step5", "proc:1:2", "lead").unwrap_or_else(|_| unreachable!());
+        // Привязки step5 в этом хранилище нет — угон отклоняется.
+        let err = roster_claim_refusal(home, "step5", "proc:1:2", true, Some("lead"), &roster)
+            .unwrap_or_else(|| panic!("свежее хранилище + forged auth не должно давать чужое имя"));
+        assert!(err.contains("T-650"), "отказ ссылается на T-650: {err}");
+        // А вот владелец (привязка есть, другой ключ) с авторизацией — может.
+        write_binding_in(home, "proc:old", "step5", "old-session", true)
+            .unwrap_or_else(|_| unreachable!());
+        assert_eq!(
+            roster_claim_refusal(home, "step5", "proc:1:2", true, Some("lead"), &roster),
+            None,
+            "владелец с авторизацией восстанавливает имя"
         );
     }
 

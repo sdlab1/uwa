@@ -8,6 +8,10 @@
 //!
 //! Уровни по умолчанию: C1..C4 (четыре замера на уровень — как и просил
 //! пользователь: «твои 4 (четыре!) задачи каждого уровня»).
+//!
+//! Свежесть (T-512): эталон имеет срок — «не старше N дней» ([`fresh_days`]).
+//! Собранный, но устаревший эталон тоже FAIL: оценка агентов по старому
+//! базису молча становится нечестной.
 
 use crate::core::calibration::{self, Reference};
 use crate::core::guards::{Guard, GuardContext, GuardVerdict};
@@ -21,6 +25,33 @@ pub const LEVELS: [u8; 4] = crate::core::eval_config::DEFAULTS.cal_reference_lev
 
 /// Верхний уровень, для которого проверяется эталон.
 pub const LEVELS_MAX: u8 = 4;
+
+/// Допустимый возраст эталона в сутках (эталон «не старше N дней», T-512).
+/// Переопределение среды: `HARNESS_REFERENCE_FRESH_DAYS` (мусор/0 — дефолт).
+pub const FRESH_DAYS_DEFAULT: u64 = 30;
+
+/// Порог свежести эталона (сутки): среда или дефолт.
+pub fn fresh_days() -> u64 {
+    match std::env::var("HARNESS_REFERENCE_FRESH_DAYS") {
+        Ok(v) => v
+            .trim()
+            .parse::<u64>()
+            .ok()
+            .filter(|d| *d > 0)
+            .unwrap_or(FRESH_DAYS_DEFAULT),
+        Err(_) => FRESH_DAYS_DEFAULT,
+    }
+}
+
+/// Возраст записи эталона в сутках (целых, вниз).
+/// `None` — отметка времени в будущем: наказывать не за что.
+pub fn age_days(ts: u64) -> Option<u64> {
+    let now = crate::core::identity::unix_now();
+    if ts > now {
+        return None;
+    }
+    Some((now - ts) / 86_400)
+}
 
 /// Агент по умолчанию, снимающий эталон (ведущий).
 pub const DEFAULT_REFERENCE_AGENT: &str = "minimax";
@@ -61,6 +92,14 @@ pub fn check_level(root: &Path, agent: &str, c_level: u8) -> LevelStatus {
         Some(format!(
             "C{}: замеров {}/{}, но записи эталона в calibration.jsonl нет",
             c_level, measurements, required
+        ))
+    } else if reference.as_ref().and_then(|r| age_days(r.ts)).unwrap_or(0) > fresh_days() {
+        // T-512: эталон собран, но устарел — оценка по старому базису нечестна.
+        let r = reference.clone().unwrap_or_else(|| unreachable!());
+        let age = age_days(r.ts).unwrap_or(0);
+        Some(format!(
+            "C{}: эталон устарел — {} сут (свежесть {} сут): пересобери              devh orch calibrate --c {}",
+            c_level, age, fresh_days(), c_level
         ))
     } else {
         None
@@ -204,6 +243,67 @@ mod tests {
         let st = check_level(&root, "minimax", 1);
         assert!(st.is_ok(), "{:?}", st.problem);
         assert!(matches!(verdict(&[st]), GuardVerdict::Ok));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn stale_reference_is_problem_with_level_and_age() {
+        let root = tmp_root("stale");
+        for i in 1..=4 {
+            crate::core::quality::append_sample(&root, &sample(&format!("T-{i}"), 1)).unwrap();
+        }
+        let mut reference = calibration::build_reference(&root, "minimax", 1).expect("эталон");
+        reference.ts = crate::core::identity::unix_now() - 40 * 86_400;
+        calibration::append_reference(&root, &reference).unwrap();
+        let st = check_level(&root, "minimax", 1);
+        assert!(!st.is_ok(), "эталон 40 сут при лимите 30 — проблема");
+        let problem = st.problem.clone().unwrap_or_default();
+        assert!(
+            problem.contains("C1"),
+            "в проблеме указан уровень: {problem}"
+        );
+        assert!(
+            problem.contains("устарел"),
+            "проблема про устаревание: {problem}"
+        );
+        assert!(
+            problem.contains("40"),
+            "проблема содержит возраст: {problem}"
+        );
+        assert!(matches!(verdict(&[st]), GuardVerdict::Problem(_)));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn fresh_env_override_rescues_recent_reference() {
+        let root = tmp_root("envfresh");
+        for i in 1..=4 {
+            crate::core::quality::append_sample(&root, &sample(&format!("T-{i}"), 1)).unwrap();
+        }
+        let mut reference = calibration::build_reference(&root, "minimax", 1).expect("эталон");
+        reference.ts = crate::core::identity::unix_now() - 40 * 86_400;
+        calibration::append_reference(&root, &reference).unwrap();
+        // По умолчанию 30 сут — устарел.
+        assert!(!check_level(&root, "minimax", 1).is_ok());
+        // Оператор поднял порог до 60 сут — пересборка не нужна.
+        std::env::set_var("HARNESS_REFERENCE_FRESH_DAYS", "60");
+        let ok = check_level(&root, "minimax", 1).is_ok();
+        std::env::remove_var("HARNESS_REFERENCE_FRESH_DAYS");
+        assert!(ok, "порог 60 сут спасает эталон 40 сут");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn future_reference_is_not_stale() {
+        let root = tmp_root("future");
+        for i in 1..=4 {
+            crate::core::quality::append_sample(&root, &sample(&format!("T-{i}"), 1)).unwrap();
+        }
+        let mut reference = calibration::build_reference(&root, "minimax", 1).expect("эталон");
+        reference.ts = crate::core::identity::unix_now() + 86_400;
+        calibration::append_reference(&root, &reference).unwrap();
+        assert!(check_level(&root, "minimax", 1).is_ok());
+        assert_eq!(age_days(crate::core::identity::unix_now() + 86_400), None);
         let _ = fs::remove_dir_all(&root);
     }
 
