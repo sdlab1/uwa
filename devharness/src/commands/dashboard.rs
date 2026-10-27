@@ -838,7 +838,12 @@ mod tests {
             assert!(html.contains(&format!("hx-get=\"/panel/{route}\"")));
         }
         assert!(html.contains("/static/htmx.min.js"));
-        assert!(html.contains("Панель управления оркестратором"));
+        // Заголовок страницы — «ПУ — панель управления оркестратором»
+        // (T-651: тест кодировал старую разметку «Панель ...» с большой буквы).
+        assert!(
+            html.contains("панель управления оркестратором"),
+            "на странице нет заголовка панели: {html}"
+        );
     }
 
     #[test]
@@ -859,8 +864,12 @@ mod tests {
             ..Default::default()
         });
         let html = fragment("active", &snap, "").unwrap_or_default();
+        // XSS-экранирование: сырой тег не выводится, вместо него — эскейп.
         assert!(!html.contains("<script>alert"));
-        assert!(html.contains("<script>"));
+        assert!(
+            html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"),
+            "экранированный текст не найден: {html}"
+        );
     }
 
     #[test]
